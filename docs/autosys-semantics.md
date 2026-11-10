@@ -1090,7 +1090,9 @@ to POSIX TZ variables. `autotimezone -l` lists it, and city entries such as
 `Vancouver City Canada/Pacific` (the docs' own excerpt) name the matching region zone. POSIX TZ
 offsets are **west-positive** (`GMT+5` = 5h west of GMT).
 The runner implements this ladder, including the no-map unique-city default and its WARN
-(DL-62, runner-design §5). It differs from the vendor's text in two deliberate ways. The
+(DL-62, runner-design §5). Names with identical zone-data bytes count as one city candidate;
+unreadable names stay separate (DL-477). Each group uses its deepest name, with ties broken by
+name order. It differs from the vendor's text in two deliberate ways. The
 50-character `a-zA-Z0-9/_-` set is the vendor's statement about *names*, while a POSIX value
 may also carry `+` and `:` (the page's own `"IST-5:30"`), and the resolver accepts those. Only
 fixed-offset POSIX forms resolve; a POSIX string with DST rules is refused, because

@@ -7,14 +7,19 @@ a Scheduler stayed there: those pin the caller, not the ladder.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
 from datetime import date, datetime, time, timedelta, timezone
+from pathlib import Path
+from struct import pack
 from zoneinfo import ZoneInfo
 
 import pytest
 
+from dsl41 import timezones
 from dsl41.timezones import (
     DstStartTimes,
     alias_table,
+    city_candidates,
     dst_change,
     dst_change_near,
     dst_windows,
@@ -76,6 +81,245 @@ def test_resolve_timezone_ambiguous_city_component_is_refused() -> None:
     names the candidates)."""
     assert resolve_timezone("x") is None
     assert resolve_timezone("X") is None
+    assert city_candidates("X") == ("A/X", "B/X")
+
+
+@pytest.mark.usefixtures("fixed_zone_names")
+def test_city_aliases_count_once_and_report_the_deepest_name() -> None:
+    """DL-477: identical zone data makes the two Indianapolis names one candidate."""
+    assert city_candidates("indianapolis") == ("America/Indiana/Indianapolis",)
+    resolved = resolve_timezone("Indianapolis")
+    assert resolved is not None
+    assert (resolved.zone, resolved.how) == ("America/Indiana/Indianapolis", "city")
+
+
+def test_city_alias_grouping_keeps_stored_tokens_and_hashes(
+    fixed_zone_names: dict[str, bytes | None],
+) -> None:
+    """DL-477: resolving either inventory leaves configuration bytes and hashes unchanged."""
+    from dsl41.ir import lower_source
+    from dsl41.runner_config import Configuration, RuntimeProfile
+    from dsl41.runner_scheduler import Scheduler
+
+    catalog = lower_source(
+        "insert_job: J\njob_type: c\ncommand: true\nmachine: localhost\n"
+        'date_conditions: 1\nstart_times: "08:00"\ntimezone: Indianapolis\n'
+    )
+    row = Configuration(catalog=catalog, profile=RuntimeProfile(default_tz="Indianapolis"))
+    before = row.to_bytes(), row.digest(), row.catalog_hash, row.runtime_hash
+    for legacy in (True, False):
+        if not legacy:
+            fixed_zone_names.pop("America/Indianapolis")
+            timezones._zone_tables.cache_clear()
+        scheduler = Scheduler(catalog, start=datetime(2026, 7, 1), default_tz="Indianapolis")
+        assert scheduler.next_occurrence() == datetime(2026, 7, 1, 12)
+        assert (row.to_bytes(), row.digest(), row.catalog_hash, row.runtime_hash) == before
+    schedule = catalog.jobs["J"].schedule
+    assert schedule is not None and schedule.timezone == "Indianapolis"
+    assert (
+        Configuration.from_bytes(row.to_bytes(), where="fixture").profile.default_tz
+        == "Indianapolis"
+    )
+
+
+@pytest.mark.parametrize("data", [b"A/X", b"", None])
+def test_city_groups_keep_unreadable_names_distinct_and_break_ties_by_name(
+    fixed_zone_names: dict[str, bytes | None], data: bytes | None
+) -> None:
+    """DL-477: even two failed reads are separate; empty bytes are a data identity."""
+    fixed_zone_names.update({"A/X": data, "B/X": data})
+    assert city_candidates("X") == (("A/X", "B/X") if data is None else ("A/X",))
+
+
+def test_city_unreadable_alias_does_not_merge_with_readable_data(
+    fixed_zone_names: dict[str, bytes | None],
+) -> None:
+    fixed_zone_names["America/Indianapolis"] = None
+    assert city_candidates("Indianapolis") == (
+        "America/Indiana/Indianapolis",
+        "America/Indianapolis",
+    )
+    assert resolve_timezone("Indianapolis") is None
+
+
+@pytest.mark.usefixtures("fixed_zone_names")
+def test_zone_tables_cache_reads_only_collisions_and_is_rebuilt_and_restored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = timezones._zone_tables()
+    reads: list[str] = []
+
+    def read(name: str) -> bytes:
+        reads.append(name)
+        return b"same zone"
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(timezones, "available_timezones", lambda: {"A/X", "B/Deep/X", "A/Y"})
+            patch.setattr(timezones, "_zone_bytes", read)
+            timezones._zone_tables.cache_clear()
+            rebuilt = timezones._zone_tables()
+            assert rebuilt[1] == {"x": ("B/Deep/X",), "y": ("A/Y",)}
+            assert timezones._zone_tables() is rebuilt
+            assert sorted(reads) == ["A/X", "B/Deep/X"]
+    finally:
+        timezones._zone_tables.cache_clear()
+    assert timezones._zone_tables() == original
+
+
+@pytest.fixture
+def zone_search_path() -> Iterator[Callable[[tuple[str, ...]], None]]:
+    original = timezones.zoneinfo.TZPATH
+    try:
+        yield lambda paths: timezones.zoneinfo.reset_tzpath(to=paths)
+    finally:
+        timezones.zoneinfo.reset_tzpath(to=original)
+
+
+def test_zone_bytes_searches_host_paths_before_the_optional_package(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    zone_search_path: Callable[[tuple[str, ...]], None],
+) -> None:
+    roots = [tmp_path / name for name in ("first", "second", "package")]
+    for root in roots:
+        (root / "Area").mkdir(parents=True)
+        (root / "Area/City").write_bytes(root.name.encode())
+    zone_search_path(tuple(str(root) for root in roots[:2]))
+    packages: list[str] = []
+
+    def package_files(package: str) -> Path:
+        packages.append(package)
+        return roots[2]
+
+    monkeypatch.setattr(timezones, "files", package_files)
+    for root in roots:
+        assert timezones._zone_bytes("Area/City") == root.name.encode()
+        (root / "Area/City").unlink()
+    assert packages == ["tzdata.zoneinfo"]
+    assert timezones._zone_bytes("Area/City") is None
+
+
+@pytest.mark.parametrize("error", [ModuleNotFoundError, OSError, ValueError])
+def test_zone_bytes_missing_or_unreadable_package_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+    error: type[Exception],
+    zone_search_path: Callable[[tuple[str, ...]], None],
+) -> None:
+    zone_search_path(())
+
+    def unavailable(package: str) -> Path:
+        raise error(package)
+
+    monkeypatch.setattr(timezones, "files", unavailable)
+    assert timezones._zone_bytes("Area/City") is None
+
+
+def test_zone_bytes_does_not_replace_an_unreadable_host_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    zone_search_path: Callable[[tuple[str, ...]], None],
+) -> None:
+    first, second = tmp_path / "first", tmp_path / "second"
+    names = {"America/Indianapolis", "America/Indiana/Indianapolis"}
+    for root in (first, second):
+        for name in names:
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"same zone")
+    zone_search_path((str(first), str(second)))
+
+    def unreadable(path: Path) -> bytes:
+        if path == first / "America/Indianapolis":
+            raise PermissionError(str(path))
+        return b"later source"
+
+    monkeypatch.setattr(Path, "read_bytes", unreadable)
+    monkeypatch.setattr(timezones, "files", lambda package: second)
+    monkeypatch.setattr(timezones, "available_timezones", lambda: names)
+    timezones._zone_tables.cache_clear()
+    try:
+        assert timezones._zone_bytes("America/Indianapolis") is None
+        assert len(city_candidates("Indianapolis")) == 2
+        assert resolve_timezone("Indianapolis") is None
+    finally:
+        timezones._zone_tables.cache_clear()
+
+
+def test_inaccessible_earlier_directory_keeps_indianapolis_resolved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    zone_search_path: Callable[[tuple[str, ...]], None],
+) -> None:
+    blocked, readable = tmp_path / "blocked", tmp_path / "readable"
+    names = {"America/Indianapolis", "America/Indiana/Indianapolis"}
+    data = b"TZif" + b"\0" * 16 + pack(">6l", 0, 0, 0, 0, 1, 4) + pack(">lbb", 0, 0, 0) + b"UTC\0"
+    for name in names:
+        path = readable / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    zone_search_path((str(blocked), str(readable)))
+    original_stat, original_read = timezones.os.stat, Path.read_bytes
+
+    def stat(path, *args, **kwargs):
+        if Path(path).is_relative_to(blocked):
+            raise PermissionError(str(path))
+        return original_stat(path, *args, **kwargs)
+
+    def read(path: Path) -> bytes:
+        if path.is_relative_to(blocked):
+            raise PermissionError(str(path))
+        return original_read(path)
+
+    monkeypatch.setattr(timezones.os, "stat", stat)
+    monkeypatch.setattr(Path, "read_bytes", read)
+    monkeypatch.setattr(timezones, "available_timezones", lambda: names)
+    monkeypatch.setattr(timezones, "ZoneInfo", ZoneInfo.no_cache)
+    timezones._zone_tables.cache_clear()
+    try:
+        assert ZoneInfo.no_cache("America/Indiana/Indianapolis").utcoffset(None) == timedelta(0)
+        resolved = resolve_timezone("Indianapolis")
+        assert resolved is not None and resolved.zone == "America/Indiana/Indianapolis"
+    finally:
+        timezones._zone_tables.cache_clear()
+
+
+def test_real_zone_database_city_groups_follow_data_identity() -> None:
+    """DL-477: each host's collisions partition by bytes, independent of its name inventory."""
+    leaves: dict[str, list[str]] = {}
+    for name in timezones.available_timezones():
+        leaf = name.rsplit("/", 1)[-1].casefold().replace("-", "_")
+        leaves.setdefault(leaf, []).append(name)
+    timezones._zone_tables.cache_clear()
+    try:
+        for leaf, names in leaves.items():
+            if len(names) < 2:
+                continue
+            data = {name: timezones._zone_bytes(name) for name in names}
+            representatives = city_candidates(leaf)
+            for name, contents in data.items():
+                group = [
+                    representative
+                    for representative in representatives
+                    if representative == name
+                    or (contents is not None and data[representative] == contents)
+                ]
+                assert len(group) == 1, (leaf, name, representatives)
+                representative = group[0]
+                assert representative.count("/") >= name.count("/")
+                if representative.count("/") == name.count("/"):
+                    assert representative <= name
+        canonical, alias = "America/Indiana/Indianapolis", "America/Indianapolis"
+        names = timezones.available_timezones()
+        canonical_data = timezones._zone_bytes(canonical)
+        if canonical in names and (
+            alias not in names
+            or (canonical_data is not None and canonical_data == timezones._zone_bytes(alias))
+        ):
+            resolved = resolve_timezone("Indianapolis")
+            assert resolved is not None and resolved.zone == "America/Indiana/Indianapolis"
+    finally:
+        timezones._zone_tables.cache_clear()
 
 
 def test_parse_timezone_map_listing_pairs_and_junk() -> None:

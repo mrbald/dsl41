@@ -73,8 +73,8 @@ def local_timezone() -> Iterator[Callable[[str], None]]:
 
 
 @pytest.fixture
-def fixed_zone_names() -> Iterator[None]:
-    """DL-62: city matches use a fixed inventory, independent of host zone links."""
+def fixed_zone_names() -> Iterator[dict[str, bytes | None]]:
+    """DL-62/DL-477: city matches use fixed names and data identities."""
     from dsl41 import timezones
 
     zones = {
@@ -87,11 +87,14 @@ def fixed_zone_names() -> Iterator[None]:
         "A/X",
         "B/X",
     }
+    data: dict[str, bytes | None] = {zone: zone.encode() for zone in zones}
+    data["America/Indianapolis"] = data["America/Indiana/Indianapolis"]
     timezones._zone_tables.cache_clear()
     try:
         with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(timezones, "available_timezones", lambda: zones.copy())
-            yield
+            patch.setattr(timezones, "available_timezones", lambda: set(data))
+            patch.setattr(timezones, "_zone_bytes", data.get)
+            yield data
     finally:
         timezones._zone_tables.cache_clear()
 

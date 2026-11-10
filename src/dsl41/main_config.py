@@ -26,7 +26,7 @@ from dsl41.reload_plan import Estate, RereadRefused, estate_settings
 from dsl41.runner_config import Configuration, RuntimeProfile, runtime_profile_from_cli
 from dsl41.runtime_policy import JobEnvironment, RuntimePolicySettings, policy_values
 from dsl41.semantics import check_overrides
-from dsl41.timezones import parse_timezone_map, resolve_timezone
+from dsl41.timezones import alias_table, parse_timezone_map, resolve_timezone
 from dsl41.status_hook import HookSettings
 
 DEFAULT_CONFIG = Path("/etc/dsl41/dsl41.toml")
@@ -417,7 +417,7 @@ def from_parts(
         for record in records:
             if record["role"] == "timezone_map":
                 try:
-                    aliases = parse_timezone_map(text_of(record))
+                    aliases = alias_table(parse_timezone_map(text_of(record)))
                 except ValueError as exc:
                     raise ValueError(f"{record['path']}: {exc}") from exc
         if resolve_timezone(config.estate.timezone, aliases) is None:

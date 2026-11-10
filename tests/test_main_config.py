@@ -856,7 +856,8 @@ def test_11_cli_modes_and_rehearsal_root(tmp_path: Path, monkeypatch: pytest.Mon
         ("Zurich", "absent", "pin it with"),
         ("Zurich", "empty", "pin it with"),
         ("Zurich", "missing-name", "not in the supplied"),
-        ("Indianapolis", "absent", "zone name or a map via"),
+        ("Indianapolis", "absent", "pin it with"),
+        ("X", "absent", "zone name or a map via"),
         ("Not/AZone", "absent", "listing in via"),
     ],
 )
@@ -895,7 +896,8 @@ def test_city_timezone_resolution(
     if command == "run" and source != "config":
         args += ["--run-root", str(tmp_path / "run")]
     if command == "rehearse":
-        args += ["--start", "2026-07-01T05:59:00", "--hours", "0.05", "--format", "json"]
+        start = "2026-07-01T11:59:00" if zone == "Indianapolis" else "2026-07-01T05:59:00"
+        args += ["--start", start, "--hours", "0.05", "--format", "json"]
 
     served = []
 
@@ -908,20 +910,24 @@ def test_city_timezone_resolution(
     assert f"{message} {map_source}" in result.output
     if source != "flags":
         assert "--timezone-map" not in result.output
-    if zone != "Zurich" or map_state == "missing-name":
+    if zone not in {"Zurich", "Indianapolis"} or map_state == "missing-name":
         assert result.exit_code == 2, result.output
         assert "preflight ERROR [timezone] A" in result.output
         assert not served
+        if zone == "X":
+            assert "ambiguous city name (A/X, B/X)" in result.output
     else:
         assert result.exit_code == 0, result.output
         assert "preflight WARN [timezone] A" in result.output
-        assert "timezone 'Zurich' assumed to be Europe/Zurich" in result.output
+        expected = "Europe/Zurich" if zone == "Zurich" else "America/Indiana/Indianapolis"
+        assert f"timezone {zone!r} assumed to be {expected}" in result.output
         assert "unique zoneinfo city match, DL-62" in result.output
         assert served == ([True] if command == "run" else [])
         if command == "rehearse":
             trace = json.loads(result.stdout)["trace"]
             starts = [row["at"] for row in trace if row["transition"].endswith("->STARTING")]
-            assert starts[0] == "2026-07-01T06:00:00"
+            expected_start = "2026-07-01T06:00:00" if zone == "Zurich" else "2026-07-01T12:00:00"
+            assert starts[0] == expected_start
 
 
 @pytest.mark.parametrize("source", ["config", "manifest"])
@@ -930,7 +936,8 @@ def test_city_timezone_resolution(
     [
         ("Zurich", False, "pin it with"),
         ("Zurich", True, "not in the supplied"),
-        ("Indianapolis", False, "zone name or a map via"),
+        ("Indianapolis", False, "pin it with"),
+        ("X", False, "zone name or a map via"),
         ("Not/AZone", False, "listing in via"),
     ],
 )
@@ -958,6 +965,55 @@ def test_reload_timezone_message_source(
     assert len(items) == 1
     assert f"{message} {map_source}" in items[0].message
     assert "--timezone-map" not in items[0].message
+    if zone == "Indianapolis":
+        assert items[0].severity == "WARN"
+        assert "assumed to be America/Indiana/Indianapolis" in items[0].message
+        assert "unique zoneinfo city match, DL-62" in items[0].message
+        result = reread(
+            tmp_path,
+            Live(estate.catalog, estate.settings, 1, {}, launch=estate.metadata.get("launch", {})),
+            tmp_path / "plans",
+            candidate=estate if source == "config" else None,
+            start=T0,
+        )
+        document = read_plan(tmp_path / "plans", result.token)
+        assert document is not None
+        warnings = [item for item in document["preflight_warnings"] if item["code"] == "timezone"]
+        assert warnings == [{"code": "timezone", "job": "A", "message": items[0].message}]
+
+
+@pytest.mark.parametrize("source", ["config", "manifest"])
+@pytest.mark.parametrize("empty_map", [False, True])
+@pytest.mark.usefixtures("fixed_zone_names")
+def test_empty_timezone_map_keeps_the_estate_city_default(
+    tmp_path: Path, source: str, empty_map: bool
+) -> None:
+    """DL-163: an empty map and no map accept the same estate zone through either loader."""
+    from dsl41 import reload_plan
+
+    (tmp_path / "a.jil").write_text(JOB + 'date_conditions: 1\nstart_times: "08:00"\n')
+    (tmp_path / "zones").write_text("")
+    setting = 'timezone = "Indianapolis"\n'
+    if empty_map:
+        setting += 'timezone_map = "zones"\n'
+    if source == "config":
+        estate = main.prepare(config_file(tmp_path, estate=setting))
+    else:
+        (tmp_path / "estate.toml").write_text('name = "synthetic"\nfiles = ["a.jil"]\n' + setting)
+        estate = reload_plan.load_estate(tmp_path)
+    assert estate.settings["timezone"] == "Indianapolis"
+    assert estate.settings["timezone_aliases"] is None
+    assert not [
+        item for item in reload_plan.preflight_items(estate, T0) if item.severity == "ERROR"
+    ]
+    result = reread(
+        tmp_path,
+        Live(estate.catalog, estate.settings, 1, {}, launch=estate.metadata.get("launch", {})),
+        tmp_path / "plans",
+        candidate=estate if source == "config" else None,
+        start=T0,
+    )
+    assert result.plan.unchanged == ("A",)
 
 
 @pytest.mark.parametrize("damage", ["relative", "path", "config", "membership"])
