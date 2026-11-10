@@ -744,6 +744,14 @@ def test_start_refused_record_carries_the_events_source() -> None:
 # --------------------------------------------------------------------- 5. resume
 
 
+def _without_cookie_scan_report(stderr: str) -> str:
+    return "".join(
+        line
+        for line in stderr.splitlines(keepends=True)
+        if not line.startswith("dsl41: cookie scan signalling: ")
+    )
+
+
 class _Wall(RealClock):
     def __init__(self, at: datetime) -> None:
         self.at = at
@@ -842,7 +850,7 @@ def test_resume_real_domain_missed_ticks_are_dropped_and_journaled(
     )
     assert genesis.journal is not None
     genesis.journal.close()
-    assert capsys.readouterr().err == ""
+    assert _without_cookie_scan_report(capsys.readouterr().err) == ""
 
     async def scenario() -> Engine:
         engine = await resume_run(
@@ -869,7 +877,7 @@ def test_resume_real_domain_missed_ticks_are_dropped_and_journaled(
     drop_records = [r for r in records if r.get("rec") == "drop"]
     assert len(drop_records) == 4
     assert all(r["kind"] == "STARTJOB" for r in drop_records)
-    assert capsys.readouterr().err == (
+    assert _without_cookie_scan_report(capsys.readouterr().err) == (
         "engine was down 2026-07-01T10:05:00 to 2026-07-01T12:05:00; "
         "4 scheduled starts were missed and will not run late\n"
         "  mts_job: 4 missed, last 2026-07-01T12:00:00\n"
@@ -951,7 +959,7 @@ def test_dl45_a_same_instant_sibling_lost_to_the_crash_is_dropped_not_forgotten(
     assert position.frontier == tick  # the frontier IS the tick
     if regressed:
         assert position.last_at == tick + timedelta(minutes=5)
-    assert capsys.readouterr().err == ""
+    assert _without_cookie_scan_report(capsys.readouterr().err) == ""
 
     async def phase2() -> Engine:
         engine = await resume_run(
@@ -981,7 +989,7 @@ def test_dl45_a_same_instant_sibling_lost_to_the_crash_is_dropped_not_forgotten(
         if r.get("rec") == "input" and r.get("source") == "scheduler"
     ]
     assert admitted == [(tick.isoformat(), "sib_a")]
-    stderr = capsys.readouterr().err
+    stderr = _without_cookie_scan_report(capsys.readouterr().err)
     if regressed:
         warning, stderr = stderr.split("\n", 1)
         assert warning.startswith("dsl41: WARNING: wall clock below admission frontier:")
@@ -1030,7 +1038,7 @@ def test_dl174_a_tick_at_a_drop_frontier_is_dropped_once_across_three_resumes(
     )
     assert genesis.journal is not None
     genesis.journal.close()
-    assert capsys.readouterr().err == ""
+    assert _without_cookie_scan_report(capsys.readouterr().err) == ""
 
     def drop_records() -> list[dict]:
         return [r for r in read_journal(run_root) if r.get("rec") == "drop"]
@@ -1053,7 +1061,7 @@ def test_dl174_a_tick_at_a_drop_frontier_is_dropped_once_across_three_resumes(
     first = asyncio.run(one_resume())
     assert len(drop_records()) == 1  # the tick's first, real adjudication
     assert [ev.at for ev, _ in first.drops] == [tick]
-    assert capsys.readouterr().err == (
+    assert _without_cookie_scan_report(capsys.readouterr().err) == (
         "engine was down 2026-07-01T11:00:00 to 2026-07-01T12:05:00; "
         "1 scheduled start was missed and will not run late\n"
         "  once_job: 1 missed, last 2026-07-01T12:00:00\n"
@@ -1062,12 +1070,12 @@ def test_dl174_a_tick_at_a_drop_frontier_is_dropped_once_across_three_resumes(
     second = asyncio.run(one_resume())
     assert len(drop_records()) == 1  # a second resume must read it, not redo it
     assert second.drops == []  # already adjudicated -- nothing new to report
-    assert capsys.readouterr().err == ""
+    assert _without_cookie_scan_report(capsys.readouterr().err) == ""
 
     third = asyncio.run(one_resume())
     assert len(drop_records()) == 1  # and a third
     assert third.drops == []
-    assert capsys.readouterr().err == ""
+    assert _without_cookie_scan_report(capsys.readouterr().err) == ""
 
     only = drop_records()[0]
     assert only["kind"] == "STARTJOB"
@@ -1115,7 +1123,7 @@ def test_missed_start_report_is_silent_or_two_lines_for_480_ticks(
     )
     assert genesis.journal is not None
     genesis.journal.close()
-    assert capsys.readouterr().err == ""
+    assert _without_cookie_scan_report(capsys.readouterr().err) == ""
 
     async def resume() -> None:
         engine = await resume_run(
@@ -1132,7 +1140,7 @@ def test_missed_start_report_is_silent_or_two_lines_for_480_ticks(
         engine.journal.close()
 
     asyncio.run(resume())
-    assert capsys.readouterr().err == (
+    assert _without_cookie_scan_report(capsys.readouterr().err) == (
         "engine was down 2026-07-01T02:01:00 to 2026-07-11T02:00:00; "
         "480 scheduled starts were missed and will not run late\n"
         "  frequent: 480 missed, last 2026-07-11T02:00:00\n"
@@ -1169,7 +1177,7 @@ def test_missed_start_from_includes_engine_records(
         genesis.journal.engine(event, clock.now())
     assert genesis.journal.position.last_at == start
     genesis.journal.close()
-    assert capsys.readouterr().err == ""
+    assert _without_cookie_scan_report(capsys.readouterr().err) == ""
 
     async def resume() -> None:
         engine = await resume_run(
@@ -1184,7 +1192,7 @@ def test_missed_start_from_includes_engine_records(
         engine.journal.close()
 
     asyncio.run(resume())
-    assert capsys.readouterr().err == (
+    assert _without_cookie_scan_report(capsys.readouterr().err) == (
         "engine was down 2026-07-02T00:00:00 to 2026-07-02T01:05:00; "
         "1 scheduled start was missed and will not run late\n"
         "  idle: 1 missed, last 2026-07-02T01:00:00\n"
@@ -1226,7 +1234,7 @@ def test_missed_start_from_uses_normal_stop_after_idle_stretch(
         assert engine.journal.store.latest_snapshot() is not None
         await engine.shutdown()
         engine.journal.close()
-        assert capsys.readouterr().err == ""
+        assert _without_cookie_scan_report(capsys.readouterr().err) == ""
 
         resumed = await resume_run(
             catalog,
@@ -1242,7 +1250,7 @@ def test_missed_start_from_uses_normal_stop_after_idle_stretch(
         resumed.journal.close()
 
     asyncio.run(scenario())
-    assert capsys.readouterr().err == (
+    assert _without_cookie_scan_report(capsys.readouterr().err) == (
         "engine was down 2026-07-02T00:00:00 to 2026-07-02T01:05:00; "
         "1 scheduled start was missed and will not run late\n"
         "  idle: 1 missed, last 2026-07-02T01:00:00\n"
@@ -1275,7 +1283,7 @@ def test_missed_start_from_falls_back_to_snapshot_with_no_tail(
     # A crash after the snapshot write and before its engine record leaves no tail.
     delete(run_root, lambda seq, kind, body: kind == "engine" and body["event"] == "snapshot")
     assert all(index <= seq for index, _ in read_records(run_root))
-    assert capsys.readouterr().err == ""
+    assert _without_cookie_scan_report(capsys.readouterr().err) == ""
 
     async def resume() -> None:
         engine = await resume_run(
@@ -1290,7 +1298,7 @@ def test_missed_start_from_falls_back_to_snapshot_with_no_tail(
         engine.journal.close()
 
     asyncio.run(resume())
-    assert capsys.readouterr().err == (
+    assert _without_cookie_scan_report(capsys.readouterr().err) == (
         "engine was down 2026-07-01T11:00:00 to 2026-07-01T13:00:00; "
         "1 scheduled start was missed and will not run late\n"
         "  snap: 1 missed, last 2026-07-01T12:00:00\n"
@@ -1340,7 +1348,7 @@ def test_missed_start_from_clamps_after_shutdown_during_startup(
     assert not [r for r in read_journal(run_root) if r.get("rec") == "drop"]
     capsys.readouterr()
     asyncio.run(resume(False))
-    assert capsys.readouterr().err == (
+    assert _without_cookie_scan_report(capsys.readouterr().err) == (
         "engine was down 2026-07-01T12:00:00 to 2026-07-01T13:05:00; "
         "1 scheduled start was missed and will not run late\n"
         "  catchup: 1 missed, last 2026-07-01T12:00:00\n"
