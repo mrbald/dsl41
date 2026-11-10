@@ -26170,3 +26170,28 @@ relitigate an entry; append a new one.
   holds it. About 78 legacy-only names such as `US/Eastern` exist only where the host's
   database has them; Debian 13 and Ubuntu 24.04 and later need `tzdata-legacy`. Names
   read from two sources on one host can differ and stay ambiguous.
+
+- DL-478 An update that finds nothing changed applies nothing
+  (2026-11-10; BUG-57; runner_update.py, runner_control.py, cli_reload.py,
+  control-protocol §4, protocol-evolution §1, docs/deploy.md)
+  THE RULE. At admission, after every existing refusal, the engine compares the prepared
+  candidate with the applied configuration at the current revision, using the comparison
+  that retains an equal row (DL-438, DL-468): catalog hash, job order, runtime profile,
+  marks and reasons, captured bytes and mapping. The candidate's profile must also equal
+  the live profile. When both hold, nothing is admitted: no intent, no revision, no
+  configuration record, nothing stopped. The answer keeps `decision: admitted` and adds
+  the optional field `unchanged: {rev, catalog_hash}`; `dsl41 update`, with or without
+  `--wait`, prints `nothing changed: catalog revision N (H)` and exits 0. An added answer
+  field needs no protocol version step (DL-217). The engine removes the equal update's
+  plan directory when it can; an `OSError` is tolerated and a directory left behind stays
+  with plan retention (BUG-48). An update that finds nothing changed leaves the reread
+  marks as they are: they describe the estate at reread time and the next reread
+  replaces them.
+  THE REASON. Every update advanced the revision, wrote a configuration record and left
+  a plan directory, even with identical inputs, so a routine update after each restart
+  grew the store and hid real changes.
+  THE LIMIT. A no-change request id is not retained; a later lookup reports not retained.
+  A comment or whitespace edit, a settings-only edit and changed lowering of unchanged
+  sources still apply (DL-468). After a restart that applied changed host settings or
+  kill signals from disk, the next update applies once. An older client prints
+  `admitted: update; stopping: none` for the same answer.

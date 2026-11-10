@@ -25,6 +25,7 @@ class UpdateReply:
     application: Application | None = None
     pending: bool = False
     request_id: str = ""
+    unchanged: Mapping[str, Any] | None = None
 
 
 class SendFailed(Exception):
@@ -110,6 +111,12 @@ def update_command(*, send: Send, wait: bool = False) -> int:
     if isinstance(reply.decision, Refused):
         _render_refusal(reply.decision)
         return 2
+    if reply.unchanged is not None:
+        typer.echo(
+            f"nothing changed: catalog revision {reply.unchanged['rev']}"
+            f" ({reply.unchanged['catalog_hash']})"
+        )
+        return 0
     typer.echo(f"admitted: update; stopping: {_names(reply.decision.stop_set)}")
     if reply.pending:
         typer.echo(f"pending: {reply.request_id}")
@@ -214,6 +221,7 @@ def update_reply_of(answer: Mapping[str, Any]) -> UpdateReply:
             decision,
             pending=bool(answer.get("pending")),
             request_id=str(answer.get("request_id", "")),
+            unchanged=answer.get("unchanged"),
         )
     application = Application(
         token=token,

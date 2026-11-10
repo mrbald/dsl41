@@ -27,6 +27,451 @@ from dsl41.runner_update import UpdateRequest
 from test_main_config import JOB, PYTHON, T0, config_file, estate_file
 
 
+@pytest.mark.usefixtures("cli_env")
+@pytest.mark.parametrize("wait", [False, True])
+@pytest.mark.parametrize("cleanup", ["ok", "missing", "permission"])
+def test_bug57_unchanged_update_cli(tmp_path, monkeypatch, wait, cleanup):
+    from dataclasses import asdict
+    from typer.testing import CliRunner
+    from dsl41.cli import app
+    from dsl41 import runner_control
+    from dsl41.reread_worker import run
+    from dsl41.runner_control import ControlServer
+
+    path = estate_file(tmp_path)
+    initial = main.prepare(path)
+    root = tmp_path / "run"
+
+    async def scenario():
+        engine = start_run(
+            initial.catalog,
+            root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        engine.launch_settings = initial.metadata["launch"]
+        server = ControlServer(engine, root / "control.sock")
+        submitted = asyncio.Event()
+        request_update = engine.request_update
+        remove = runner_update.shutil.rmtree
+
+        async def prepare(*, update):
+            live = engine.update.live()
+            return run(
+                {
+                    "source": str(path),
+                    "run_root": str(root),
+                    "update": update,
+                    "live": {**asdict(live), "catalog": live.catalog.model_dump(mode="json")},
+                }
+            )
+
+        def submit(request):
+            answer = request_update(request)
+            submitted.set()
+            return answer
+
+        def remove_plan(directory):
+            assert server._preparing_update is not None
+            if cleanup == "missing":
+                remove(directory)
+            if cleanup == "permission":
+                raise PermissionError("synthetic cleanup refusal")
+            remove(directory)
+
+        monkeypatch.setattr(server, "_prepare_reload", prepare)
+        monkeypatch.setattr(engine, "request_update", submit)
+        monkeypatch.setattr(runner_update.shutil, "rmtree", remove_plan)
+        try:
+            engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "A"}))
+            await engine.run_until_quiescent(T0)
+            before = list(engine.journal.store.read_from(0))
+            config = engine.journal.store.get_config(1)
+            for n in range(2):
+                submitted.clear()
+                request = {
+                    "v": 4,
+                    "cmd": "update",
+                    "wait": wait,
+                    "baseline_id": engine.baseline_id,
+                    "request_id": f"unchanged-{n}",
+                }
+                task = asyncio.create_task(server._update(request))
+                await submitted.wait()
+                await engine.run_until_quiescent(T0)
+                answer = await task
+                assert answer == {
+                    "ok": True,
+                    "decision": "admitted",
+                    "request_id": request["request_id"],
+                    "stop": [],
+                    "application": None,
+                    "unchanged": {
+                        "rev": 1,
+                        "catalog_hash": active_configuration(root).catalog_hash,
+                    },
+                }
+                assert engine.config_rev == engine.journal.store.current_config_rev() == 1
+                assert engine.journal.store.get_config(1) == config
+                assert list(engine.journal.store.read_from(0)) == before
+                assert len(list((root / "plans").iterdir())) == (cleanup == "permission")
+                assert engine.oracle.store.job["A"].status == "RUNNING"
+                assert server._preparing_update is None
+                assert (await server._dispatch({"cmd": "status"}))["engine"] == "RUNNING"
+
+                def roundtrip(socket, wire, *, before_send=None, **kwargs):
+                    if before_send:
+                        before_send()
+                    if wire["cmd"] == "status":
+                        return {"ok": True, "baseline_id": engine.baseline_id}
+                    assert wire["v"] == 4 and wire["wait"] is wait
+                    return {**answer, "request_id": wire["request_id"]}
+
+                monkeypatch.setattr(runner_control, "roundtrip", roundtrip)
+                result = CliRunner().invoke(
+                    app, ["update", "-S", str(server.path)] + (["--wait"] if wait else [])
+                )
+                assert result.exit_code == 0, result.output
+                assert result.stdout == (
+                    f"nothing changed: catalog revision 1 ({answer['unchanged']['catalog_hash']})\n"
+                )
+                assert result.stderr.startswith("request_id: ")
+                retry = await server._update({**request, "retry_only": True})
+                assert retry["code"] == "invalid_argument" and "not retained" in retry["error"]
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(scenario())
+
+
+def test_bug57_unchanged_update_preserves_marks_until_next_reread(tmp_path, monkeypatch):
+    from dataclasses import asdict
+    from dsl41.reread_worker import run
+    from dsl41.runner_control import ControlServer
+
+    path = estate_file(tmp_path)
+    initial = main.prepare(path)
+    root = tmp_path / "run"
+
+    async def scenario():
+        engine = start_run(
+            initial.catalog,
+            root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter()},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        engine.launch_settings = initial.metadata["launch"]
+        server = ControlServer(engine, root / "control.sock")
+
+        async def prepare(*, update):
+            live = engine.update.live()
+            return run(
+                {
+                    "source": str(path),
+                    "run_root": str(root),
+                    "update": update,
+                    "live": {**asdict(live), "catalog": live.catalog.model_dump(mode="json")},
+                }
+            )
+
+        monkeypatch.setattr(server, "_prepare_reload", prepare)
+        try:
+            await engine.run_until_quiescent(T0)
+            (tmp_path / "a.jil").write_text(JOB.replace("true", "echo changed"))
+            assert (await server._reread({"v": 4, "cmd": "reread"}))["ok"]
+            assert server._status({})["jobs"]["A"]["reread"]["change"] == "changed"
+            marks = dict(engine.reread_marks)
+            (tmp_path / "a.jil").write_text(JOB)
+            plan = reread(
+                tmp_path,
+                engine.update.live(),
+                root / "plans",
+                candidate=main.prepare(path),
+                start=T0,
+            )
+            pending = engine.request_update(
+                UpdateRequest(plan.token, 1, engine.baseline_id, "revert")
+            )
+            await engine.run_until_quiescent(T0)
+            assert pending.result().unchanged is not None
+            assert engine.reread_marks == marks
+            assert server._status({})["jobs"]["A"]["reread"] == marks["A"]
+            assert (await server._reread({"v": 4, "cmd": "reread"}))["ok"]
+            assert engine.reread_marks == {}
+            assert "reread" not in server._status({})["jobs"]["A"]
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("after", ["application", "restart"])
+def test_bug57_equal_update_after_application_or_restart(tmp_path, after):
+    path = estate_file(tmp_path)
+    initial = main.prepare(path)
+    root = tmp_path / "run"
+
+    async def scenario():
+        engine = start_run(
+            initial.catalog,
+            root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter()},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        engine.launch_settings = initial.metadata["launch"]
+        try:
+            if after == "application":
+                (tmp_path / "a.jil").write_text(JOB.replace("true", "echo changed"))
+                plan = reread(
+                    tmp_path,
+                    engine.update.live(),
+                    root / "plans",
+                    candidate=main.prepare(path),
+                    start=T0,
+                )
+                pending = engine.request_update(
+                    UpdateRequest(plan.token, 1, engine.baseline_id, "changed")
+                )
+                await engine.run_until_quiescent(T0)
+                assert pending.result().applied.result()["rev"] == 2
+            else:
+                await engine.shutdown()
+                engine.journal.close()
+                engine = await resume_run(
+                    initial.catalog,
+                    root,
+                    clock=VirtualClock(start=T0),
+                    adapters={"CMD": FakeAdapter()},
+                    declared=main.profile_of(initial),
+                    stored_sources=True,
+                )
+                await engine.run_until_quiescent(T0)
+                engine.launch_settings = initial.metadata["launch"]
+            rev = engine.config_rev
+            assert rev == (2 if after == "application" else 1)
+            before = list(engine.journal.store.read_from(0))
+            config = engine.journal.store.get_config(rev)
+            plan = reread(
+                tmp_path,
+                engine.update.live(),
+                root / "plans",
+                candidate=main.prepare(path),
+                start=T0,
+            )
+            pending = engine.request_update(
+                UpdateRequest(plan.token, rev, engine.baseline_id, "equal")
+            )
+            await engine.run_until_quiescent(T0)
+            assert pending.result().unchanged == {
+                "rev": rev,
+                "catalog_hash": active_configuration(root).catalog_hash,
+            }
+            assert engine.config_rev == engine.journal.store.current_config_rev() == rev
+            assert engine.journal.store.get_config(rev) == config
+            assert list(engine.journal.store.read_from(0)) == before
+            assert not plan.plan_dir.exists()
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "edit", ["comment", "whitespace", "job_env", "kill_signals", "interval", "lowering"]
+)
+def test_bug57_edits_still_apply(tmp_path, monkeypatch, edit):
+    path = estate_file(tmp_path)
+    initial = main.prepare(path)
+    root = tmp_path / "run"
+
+    async def scenario():
+        engine = start_run(
+            initial.catalog,
+            root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter()},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        engine.launch_settings = initial.metadata["launch"]
+        try:
+            if edit in ("comment", "whitespace"):
+                (tmp_path / "a.jil").write_text(
+                    ("# synthetic comment\n" if edit == "comment" else "\n") + JOB
+                )
+            elif edit == "lowering":
+                lower = main.lower_catalog
+
+                def changed(*args, **kwargs):
+                    catalog = lower(*args, **kwargs)
+                    job = catalog.jobs["A"]
+                    return catalog.model_copy(
+                        update={
+                            "jobs": {
+                                "A": job.model_copy(
+                                    update={
+                                        "exec_": job.exec_.model_copy(
+                                            update={"command": "echo lowered"}
+                                        ),
+                                    }
+                                )
+                            }
+                        }
+                    )
+
+                monkeypatch.setattr(main, "lower_catalog", changed)
+            else:
+                config_file(
+                    tmp_path,
+                    engine={
+                        "job_env": '[engine.job_env]\nVALUE = "changed"\n',
+                        "kill_signals": "kill_signals = [9]\n",
+                        "interval": "fw_default_interval_s = 17\n",
+                    }[edit],
+                )
+            candidate = main.prepare(path)
+            if edit == "lowering":
+                assert main.encoded_parts(candidate) == main.encoded_parts(initial)
+            plan = reread(
+                tmp_path, engine.update.live(), root / "plans", candidate=candidate, start=T0
+            )
+            assert plan.stop == ()
+            assert bool(plan.plan.changed) is (edit == "lowering")
+            pending = engine.request_update(UpdateRequest(plan.token, 1, engine.baseline_id, edit))
+            await engine.run_until_quiescent(T0)
+            answer = pending.result()
+            assert answer.unchanged is None and answer.applied.result()["rev"] == 2
+            stored = active_configuration(root)
+            assert stored.profile == main.profile_of(candidate)
+            assert stored.source_capture == main.encoded_parts(candidate)
+            if edit == "lowering":
+                assert stored.catalog.jobs["A"].exec_.command == "echo lowered"
+            assert main.pending_source_changes(candidate) == 0
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(scenario())
+
+
+def test_bug57_kill_signals_restart_revert(tmp_path):
+    path = estate_file(tmp_path)
+    initial = main.prepare(path)
+    root = tmp_path / "run"
+
+    async def scenario():
+        engine = start_run(
+            initial.catalog,
+            root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter()},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        await engine.shutdown()
+        engine.journal.close()
+        original = path.read_bytes()
+        config_file(tmp_path, engine="kill_signals = [9]\n")
+        edited = main.prepare(path)
+        engine = await resume_run(
+            initial.catalog,
+            root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter()},
+            declared=main.profile_of(edited),
+            stored_sources=True,
+        )
+        try:
+            await engine.run_until_quiescent(T0)
+            assert engine.profile.kill_signals == (9,)
+            path.write_bytes(original)
+            candidate = main.prepare(path)
+            assert main.encoded_parts(candidate) == main.encoded_parts(initial)
+            plan = reread(
+                tmp_path, engine.update.live(), root / "plans", candidate=candidate, start=T0
+            )
+            pending = engine.request_update(
+                UpdateRequest(plan.token, 1, engine.baseline_id, "revert")
+            )
+            await engine.run_until_quiescent(T0)
+            answer = pending.result()
+            assert answer.unchanged is None and answer.applied.result()["rev"] == 2
+            assert engine.profile.kill_signals == (2, 9)
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("busy", ["drain", "update"])
+def test_bug57_unchanged_update_respects_refusals(tmp_path, monkeypatch, busy):
+    from dsl41.engine_charts import DrainRequest
+
+    path = estate_file(tmp_path)
+    initial = main.prepare(path)
+    root = tmp_path / "run"
+
+    async def scenario():
+        engine = start_run(
+            initial.catalog,
+            root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        engine.launch_settings = initial.metadata["launch"]
+        try:
+            engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "A"}))
+            await engine.run_until_quiescent(T0)
+            plan = reread(
+                tmp_path, engine.update.live(), root / "plans", candidate=initial, start=T0
+            )
+            if busy == "drain":
+                monkeypatch.setattr(engine.attempts, "unsettled", lambda: ("waiting",))
+                monkeypatch.setattr(engine.attempts, "stop_all", lambda cause: None)
+                monkeypatch.setattr(engine.stops, "arm_abort_deadline", lambda deadline: None)
+                engine.lifecycle.stop_requested(DrainRequest(0, 10, 5))
+                assert engine.lifecycle.state == "DRAINING"
+            else:
+                (tmp_path / "a.jil").write_text(JOB.replace("true", "echo changed"))
+                changed = reread(
+                    tmp_path,
+                    engine.update.live(),
+                    root / "plans",
+                    candidate=main.prepare(path),
+                    start=T0,
+                )
+                monkeypatch.setattr(engine.update, "stop_attempt", lambda job, cause: None)
+                engine.update.admit(UpdateRequest(changed.token, 1, engine.baseline_id, "open"))
+                assert engine.update.stopping
+            before = list(engine.journal.store.read_from(0))
+            answer = engine.update.admit(UpdateRequest(plan.token, 1, engine.baseline_id, "equal"))
+            assert answer.unchanged is None
+            if busy == "drain":
+                assert answer.code == "engine_draining"
+            else:
+                assert isinstance(answer.decision, Refused)
+                assert answer.decision.code == "update_in_progress"
+            assert list(engine.journal.store.read_from(0)) == before
+            assert engine.config_rev == 1 and plan.plan_dir.is_dir()
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(scenario())
+
+
 def test_runtime_policy_update_reread_and_restart(tmp_path: Path) -> None:
     path = estate_file(tmp_path)
     initial = main.prepare(path)

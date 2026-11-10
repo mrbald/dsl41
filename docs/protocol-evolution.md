@@ -134,7 +134,10 @@ and job order; `catalog_hash` remains order-free.
 An interrupted update keeps an equal decoded row already at its expected
 revision, including one written by a version-1 or version-2 writer before
 `config applied`. A different row or an unexpected revision refuses before
-any write. Otherwise the update appends exactly the next revision (DL-438).
+any write. Otherwise an admitted update appends exactly the next revision (DL-438).
+An equal candidate completes before admission, removes its prepared plan directory
+when it can, and writes no revision or record (DL-478). Its successful answer adds the optional
+`unchanged: {rev, catalog_hash}` field; wire dialects and persisted formats stay unchanged.
 
 DL-463 extends DL-462 with ADM reread and tokenless update. Status adds an optional
 memory-only reread annotation. Default framing and persisted formats stay unchanged.

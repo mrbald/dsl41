@@ -84,7 +84,6 @@ In fix order. BUG-4, BUG-5 and BUG-6 go with BUG-1 as one clock pass. BUG-20, BU
 ### Unranked
 
 - **BUG-56**: When the engine or a wrapper dies on Linux, are job processes lost or left behind? macOS measured clean; Linux not measured. Not approved until its plan is accepted.
-- **BUG-57**: An update with nothing changed still creates a new estate revision (`src/dsl41/reload_update.py:372`).
 
 ## Features
 
