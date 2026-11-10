@@ -35,6 +35,7 @@ import typer
 
 from dsl41 import cli_compile, cli_control, cli_nav, cli_reload, cli_run
 from dsl41.cli_common import stops_on_statechart_error as stops
+from dsl41.ir import tool_version
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -43,10 +44,24 @@ app = typer.Typer(
 )
 
 
+def _show_version(value: bool) -> None:
+    if value:
+        typer.echo(f"dsl41 {tool_version()}")
+        raise typer.Exit()
+
+
 # The callback keeps typer in subcommand mode; without it a single command collapses into a bare
 # top-level command.
 @app.callback()
-def _root() -> None:
+def _root(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_show_version,
+        is_eager=True,
+        help="Show the installed version and exit.",
+    ),
+) -> None:
     """Migration compiler and runner for AutoSys job estates.
 
     Compile JIL into findings, graphs and a Python DSL. Run or rehearse

@@ -93,6 +93,8 @@ pip install dsl41          # the compiler and the headless runner
 pip install 'dsl41[ui]'    # adds the terminal UI and `serve`
 ```
 
+Run `dsl41 --version` to check the installed version.
+
 Python 3.12 or newer. In a checkout, run `uv sync --frozen --extra dev`,
 then `uv run dsl41 --help`.
 

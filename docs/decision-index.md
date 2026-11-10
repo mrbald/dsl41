@@ -482,3 +482,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-478 | An update that finds nothing changed applies nothing | [docs/control-protocol.md](control-protocol.md), [docs/deploy.md](deploy.md), [docs/protocol-evolution.md](protocol-evolution.md) |
 | DL-479 | The refusal for a timezone missing from a supplied map says what to add |  |
 | DL-480 | The terminal UI prints a repeated scheduler refusal once and counts the rest | [docs/runner-design.md](runner-design.md) |
+| DL-481 | The project version is 2.0.0 and `dsl41 --version` prints it |  |
