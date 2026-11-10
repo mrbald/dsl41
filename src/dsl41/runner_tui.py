@@ -104,6 +104,7 @@ import shlex
 import sys
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -193,6 +194,23 @@ _COLUMN_WIDTHS = {
 _CONSOLE_VERBS = sorted(JOB_EVENT_VERBS | {"SET_GLOBAL", "CHANGE_STATUS"})
 #: the job-verb half of that list, for the console's HELP prose
 _JOB_VERB_PROSE = ", ".join(v for v in _CONSOLE_VERBS if v not in ("SET_GLOBAL", "CHANGE_STATUS"))
+
+
+def _is_scheduler_refusal(entry: Mapping[str, Any]) -> bool:
+    """Only the oracle's scheduler-origin refusal suffix permits collapsing (DL-480)."""
+    cause = entry.get("cause")
+    return (
+        entry.get("transition") == "START_REFUSED"
+        and isinstance(cause, str)
+        and cause.endswith("(STARTJOB event (scheduler))")
+    )
+
+
+@dataclass
+class _RefusalRun:
+    cause: str
+    last_clock: str
+    repeats: int = 0
 
 
 def _cell_sig(value: Any) -> tuple[str, str]:
@@ -1259,6 +1277,7 @@ class RunnerApp(App[None]):
         self._trace_seq = 0
         self._trace_baseline: str | None = None
         self._alarms: dict[str, int] = {}
+        self._refusal_runs: dict[str, _RefusalRun] = {}
         self._log_paths: dict[str, tuple[str | None, str | None]] = {}
         self._tail_stream: int = 0  # 0 = out, 1 = err
         # (stream, path), since out and err may resolve to the same file and `o` must retitle
@@ -1347,6 +1366,9 @@ class RunnerApp(App[None]):
         """Read the trace from the start again and forget what the old cursor indexed (DL-75).
         The alarms go with the cursor: they are keyed by the sequence numbers about to be
         re-read."""
+        # DL-480: report pending repeats before forgetting the old trace's UI counts.
+        for job, run in list(self._refusal_runs.items()):
+            self._flush_refusal_run(job, run.last_clock)
         self._trace_seq = 0
         self._alarms.clear()
 
@@ -1483,6 +1505,18 @@ class RunnerApp(App[None]):
                 )
             )
 
+    def _flush_refusal_run(self, job: str, clock: str) -> None:
+        run = self._refusal_runs.pop(job, None)
+        if run is not None and run.repeats:
+            unit = "time" if run.repeats == 1 else "times"
+            self._console_write(
+                Text(
+                    f"{clock} {job} START_REFUSED repeated {run.repeats} more {unit},"
+                    f" last {run.last_clock}",
+                    style="dim",
+                )
+            )
+
     def _consume_trace(self, entries: list[dict[str, Any]]) -> None:
         for entry in entries:
             seq = entry.get("seq")
@@ -1495,9 +1529,19 @@ class RunnerApp(App[None]):
             # such as `host:local`; only an alarm counts against a job, so such a key never
             # reaches the jobs table or the problems view
             job = str(entry.get("job", ""))
+            clock = format_local_at(entry.get("at"))
+            cause = str(entry.get("cause", ""))
+            scheduler_refusal = _is_scheduler_refusal(entry)
+            run = self._refusal_runs.get(job)
+            if scheduler_refusal and run is not None and run.cause == cause:
+                run.repeats += 1
+                run.last_clock = clock
+                continue
+            self._flush_refusal_run(job, clock)
+            if scheduler_refusal:
+                self._refusal_runs[job] = _RefusalRun(cause, clock)
             if transition in _ALARM_TRANSITIONS:
                 self._alarms[job] = self._alarms.get(job, 0) + 1
-            clock = format_local_at(entry.get("at"))
             if transition in _ALARM_TRANSITIONS or transition == VIOLATION_MARKER:
                 # an older build's broken declared transition alerts like an alarm
                 style = "bold red"
@@ -1506,9 +1550,7 @@ class RunnerApp(App[None]):
                 style = "yellow"
             else:
                 style = "dim"
-            self._console_write(
-                Text(f"{clock} {job} {transition} [{entry.get('cause', '')}]", style=style)
-            )
+            self._console_write(Text(f"{clock} {job} {transition} [{cause}]", style=style))
 
     _VIEW_MODES = ("all", "problems", "active")
 

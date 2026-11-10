@@ -1183,6 +1183,15 @@ members, and the revision the request will name, frozen when the modal
 opens (DL-187). Escape cancels a console line. F1 toggles the help panel.
 A refused query is reported in the console and the subtitle, never shown
 as an empty estate.
+This is the terminal-UI part of BLK-4 (DL-480).
+The console prints the first scheduler-origin `START_REFUSED` for each job and cause.
+It counts identical repeats silently.
+Before that job's next different entry, it prints one dim summary.
+Operator refusals and unrecognised origins print every time.
+Counts belong to each UI session and flush and reset with the trace cursor and alarm tally.
+Without a later entry or a cursor reset, a job's count is never shown.
+Quitting the UI loses pending counts.
+The stored trace, `query trace` and rehearsal output still list every refusal.
 The trace cursor and alarm tally reset (DL-210) on a changed `baseline_id`
 or disagreement between the status and trace baselines, with one
 console notice and a read from zero on the next poll. A restart retains
