@@ -852,6 +852,9 @@ class ControlServer:
             "stop": list(decision.stop_set),
             "application": answer.application and _applied(answer.application),
         }
+        if answer.unchanged is not None:
+            reply["unchanged"] = dict(answer.unchanged)
+            return reply
         if wait and reply["application"] is None:
             assert answer.applied is not None  # an admission's answer carries it
             try:

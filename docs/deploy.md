@@ -598,7 +598,10 @@ Update rereads the files itself. Edits made after preview are included.
 It prints a request ID before sending. Use `--request-id ID` only to look up
 that original work after an unknown outcome. An unknown or expired ID submits
 nothing. Do not blindly submit a fresh update after a lost reply.
-With `--wait`, exit 0 means applied and 1 means still pending. Exit 2 means
+A no-change update retains no request ID; a later lookup reports not retained (DL-478).
+Both update forms print `nothing changed: catalog revision N (H)` and exit 0
+when the prepared configuration equals the applied configuration and live profile (DL-478).
+With `--wait`, exit 0 means applied or unchanged and 1 means still pending. Exit 2 means
 refusal/failure. No token or stop-consent argument is used.
 
 Affected ordinary jobs stop through TERM, grace and KILL. A retained idempotent
@@ -739,7 +742,8 @@ Do not replace engine files while the service runs.
      --socket /srv/dsl41/runs/nightbank/control.sock
    ```
 
-   Exit 0 prints `applied: catalog revision N`; status reports that applied
+   Exit 0 prints `applied: catalog revision N` or `nothing changed: catalog revision N (H)`;
+   status reports that applied
    `config_rev`, and the drift indication clears when disk inputs match it.
    Completed statuses and existing holds are kept for retained jobs whose runs
    the update does not restart. Affected running jobs follow the

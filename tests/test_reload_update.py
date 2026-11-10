@@ -1238,6 +1238,81 @@ def test_update_prints_the_decision_and_with_wait_the_application(
     ]
 
 
+@pytest.mark.usefixtures("cli_env")
+def test_bug57_unchanged_update_over_socket(short_root):
+    import asyncio
+    from typer.testing import CliRunner
+    from dsl41 import main_config as main
+    from dsl41.cli import app
+    from dsl41.runner_adapters import FakeAdapter
+    from dsl41.runner_clock import VirtualClock
+    from dsl41.runner_control import ControlServer, roundtrip
+    from dsl41.runner_startup import start_run
+    from test_main_config import T0, estate_file
+
+    path = estate_file(short_root)
+    initial = main.prepare(path)
+    root = short_root / "run"
+
+    async def scenario():
+        engine = start_run(
+            initial.catalog,
+            root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter()},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        engine.launch_settings = initial.metadata["launch"]
+        engine.reread_source = str(path)
+        server = ControlServer(engine, root / "control.sock")
+        pump = None
+
+        async def drive():
+            while True:
+                await engine._activity.wait()
+                engine._activity.clear()
+                await engine.run_until_quiescent(T0)
+
+        try:
+            await engine.run_until_quiescent(T0)
+            before = list(engine.journal.store.read_from(0))
+            config = engine.journal.store.get_config(1)
+            await server.start()
+            pump = asyncio.create_task(drive())
+            command = asyncio.create_task(
+                asyncio.to_thread(
+                    CliRunner().invoke,
+                    app,
+                    ["update", "-S", str(server.path), "--wait"],
+                )
+            )
+            await asyncio.wait((command, pump), return_when=asyncio.FIRST_COMPLETED)
+            if pump.done():
+                await pump
+            result = await command
+            assert result.exit_code == 0, result.output
+            assert result.stdout == (
+                f"nothing changed: catalog revision 1 ({catalog_hash_v2(initial.catalog)})\n"
+            )
+            assert result.stderr.startswith("request_id: ")
+            status = await asyncio.to_thread(roundtrip, server.path, {"cmd": "status"})
+            assert status["ok"] and status["engine"] == "RUNNING" and status["config_rev"] == 1
+            assert engine.journal.store.current_config_rev() == 1
+            assert engine.journal.store.get_config(1) == config
+            assert list(engine.journal.store.read_from(0)) == before
+            assert not list((root / "plans").iterdir())
+        finally:
+            if pump is not None:
+                pump.cancel()
+                await asyncio.gather(pump, return_exceptions=True)
+            await server.close()
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(scenario())
+
+
 def test_update_exits_2_with_the_refusal(tmp_path, capsys):
     refusal = Refused(TOKEN, STALE_PLAN)
     assert update_command(send=lambda *args: UpdateReply(refusal)) == 2
