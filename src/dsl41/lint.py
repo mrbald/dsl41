@@ -64,6 +64,8 @@ Graph-rule readings:
 from __future__ import annotations
 
 import re
+import shlex
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from datetime import date, datetime, time, timedelta, tzinfo
 from typing import Literal, NamedTuple
@@ -131,6 +133,37 @@ class Violation(BaseModel):
     def render(self) -> str:
         loc = f"{self.span.at}: " if self.span else ""
         return f"{loc}{self.code} {self.severity}: {self.message}"
+
+
+def lint_summary_lines(
+    violations: Iterable[Violation],
+    *,
+    blocks: Callable[[str], bool],
+    config_path: str | None = None,
+    from_applied_estate: bool = False,
+) -> list[str]:
+    """Keep errors and policy-blocked findings whole; count the rest (DL-483)."""
+    counts: Counter[tuple[str, Severity]] = Counter()
+    output = []
+    for violation in violations:
+        if violation.severity == "error" or blocks(violation.severity):
+            output.append(violation.render())
+        else:
+            counts[violation.code, violation.severity] += 1
+    for (code, severity), count in sorted(
+        counts.items(), key=lambda item: (item[0][0], -_SEVERITY_RANK[item[0][1]])
+    ):
+        output.append(f"{code} {severity}: {count} finding{'s' if count != 1 else ''}")
+    if counts:
+        label = (
+            "files on disk (may differ from applied estate until update)"
+            if from_applied_estate
+            else "full list"
+        )
+        output.append(
+            f"{label}: dsl41 lint --config {shlex.quote(config_path) if config_path else 'PATH'}"
+        )
+    return output
 
 
 class LintReport(BaseModel):

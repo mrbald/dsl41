@@ -65,7 +65,7 @@ from dsl41.engine_charts import ENGINE_STOP, AttemptOutcome, ExitRecord
 from dsl41.ir import CatalogIR, JobIR
 from dsl41.reload_diff import catalog_hash_v2
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import LIVE, Event
+from dsl41.oracle_state import LIVE, Event, JobRuntime
 from dsl41.runner import (
     Deferred,
     Engine,
@@ -799,7 +799,7 @@ async def _resume_under_lock(
         sweep_upto, missed = _missed_ticks(engine, journal.position)
         # Engine records count as durable observations too (DL-476).
         durable_at = max((record.at_utc for _, record in tail), default=last_at)
-        for line in _missed_start_lines(durable_at, sweep_upto, missed):
+        for line in _missed_start_lines(durable_at, sweep_upto, missed, engine.oracle.store.job):
             best_effort_report(line)
     engine.recovery = lambda: _record_start(engine, tail, missed)
     return engine
@@ -1524,19 +1524,26 @@ def _record_start(
 
 
 def _missed_start_lines(
-    down_from: datetime, down_to: datetime, missed: list[tuple[Event, str]]
+    down_from: datetime,
+    down_to: datetime,
+    missed: list[tuple[Event, str]],
+    runtimes: Mapping[str, JobRuntime],
 ) -> list[str]:
-    """One total and sorted job counts; bounds include every missed tick (DL-476)."""
-    if not missed:
-        return []
-    down_from = min(down_from, min(tick.at for tick, _ in missed))
+    """Leave iced and already-armed held jobs out of the report; keep E9 drops intact (DL-483)."""
     jobs: dict[str, tuple[int, datetime]] = {}
     for tick, _ in missed:
         job = tick.job()
         assert job is not None
+        runtime = runtimes[job]
+        if runtime.on_ice or (runtime.on_hold and runtime.armed):
+            continue
+        down_from = min(down_from, tick.at)
         count, last = jobs.get(job, (0, tick.at))
         jobs[job] = count + 1, max(last, tick.at)
-    starts = "1 scheduled start was" if len(missed) == 1 else f"{len(missed)} scheduled starts were"
+    total = sum(count for count, _ in jobs.values())
+    if not total:
+        return []
+    starts = "1 scheduled start was" if total == 1 else f"{total} scheduled starts were"
     return [
         f"engine was down {format_local_at(down_from)} to {format_local_at(down_to)}; "
         f"{starts} missed and will not run late",

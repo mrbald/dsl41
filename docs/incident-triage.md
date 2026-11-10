@@ -184,7 +184,9 @@ journalctl -u dsl41-engine.service --since "YYYY-MM-DD HH:MM:SS" --no-pager
 ```
 
 Engine start output reports one total and one line per affected job,
-sorted by job name (DL-476):
+sorted by job name. Jobs on ice and jobs already armed on hold at start are left out.
+Held jobs that are not armed and noexec jobs count
+(DL-476, DL-483):
 
 ```text
 engine was down 2026-07-01T09:00:00 to 2026-07-01T11:05:00; 4 scheduled starts were missed and will not run late
@@ -192,7 +194,7 @@ engine was down 2026-07-01T09:00:00 to 2026-07-01T11:05:00; 4 scheduled starts w
 ```
 
 Times use the engine host's local display (DL-473). `dsl41 run --ui` prints
-the report before the terminal UI attaches. No missed starts means no report.
+the report before the terminal UI attaches. No remaining missed starts means no report.
 See [outage bounds](deploy.md#recover-after-the-engine-or-box-dies) for what
 `from` and `to` mean after an unclean stop or a backward clock step.
 The durable `drop` evidence lives in `engine.db`; `wal/*.jsonl` resolves to
@@ -343,8 +345,9 @@ Escalate `dsl41: statechart error`, `dsl41: input quarantined`,
 A normal `engine stopped: clean_shutdown` is a stop record, not a fault.
 Keep statechart report lines whole. A job's own exit code and logs belong
 to the application. `SPEC DRIFT: estate files changed on disk` and
-`N pending source changes; run dsl41 reread -S SOCKET` report pending sources;
-[review an update](deploy.md#reload-a-changed-estate) to adopt them.
+`N pending source changes; run dsl41 reread -S SOCKET` report pending sources.
+The pending-count line prints only when N is above zero (DL-483).
+To adopt the sources, [review an update](deploy.md#reload-a-changed-estate).
 
 A crash during box update can leave the box stopped (DL-463). Before force-start,
 put all its marked non-INACTIVE members on hold, including previously finished ones.
