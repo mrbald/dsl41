@@ -1468,17 +1468,17 @@ class RunnerApp(App[None]):
         self._refresh_subtitle()
 
     def _set_drift(self, drift: bool) -> None:
-        """DL-65: the subtitle says the running catalog differs from the files; there is no
-        reload."""
+        """Report source drift (DL-65); reread previews and update adopts disk inputs (DL-463)."""
         if drift == self._spec_drift:
             return
         self._spec_drift = drift
         self._refresh_subtitle()
         if drift:
+            socket = shlex.quote(str(self.socket_path.absolute()))
             self._console_write(
                 Text(
-                    "spec drift: estate files changed on disk; the running catalog is"
-                    " the truth (cold restart into a fresh run root to adopt)",
+                    "spec drift: estate files changed on disk; run dsl41 reread"
+                    f" -S {socket} to preview, then dsl41 update --wait -S {socket} to adopt",
                     style="yellow",
                 )
             )

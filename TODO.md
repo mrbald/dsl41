@@ -7,7 +7,6 @@ Outstanding work only; history stays in Git. An item stays open until its eviden
 Found in the RPM pilot (dsl41 plus JIL files).
 
 - **BLK-2**: Make the output of `query status`, `reread` and `update` clear on first read.
-- **BLK-3**: After an RPM reinstall, the UI reports problems with the run root.
 - **BLK-4**: The UI routinely reports "START_REFUSED [already RUNNING -- concurrent or repeated start request, no effect (STARTJOB event (scheduler))]".
 - **BLK-5**: On startup the UI reports "dropped STARTJOB xxxxx @ YMDHMS: scheduler tick missed while the engine was down; not fired late".
 
@@ -87,6 +86,7 @@ In fix order. BUG-4, BUG-5 and BUG-6 go with BUG-1 as one clock pass. BUG-20, BU
 ### Unranked
 
 - **BUG-56**: When the engine or a wrapper dies on Linux, are job processes lost or left behind? macOS measured clean; Linux not measured. Not approved until its plan is accepted.
+- **BUG-57**: An update with nothing changed still creates a new estate revision (`src/dsl41/reload_update.py:372`).
 
 ## Features
 
