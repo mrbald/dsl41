@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -3421,7 +3422,114 @@ def test_reload_worker_context_output_and_findings(short_root: Path, monkeypatch
     asyncio.run(scenario())
 
 
-def test_reload_worker_deadline_and_cancellation(short_root: Path, monkeypatch):
+@pytest.fixture
+def worker_stderr_fds(monkeypatch):
+    from dsl41 import runner_control
+
+    capture = runner_control._worker_stderr
+    pipe = os.pipe
+    outcomes = []
+
+    @contextlib.asynccontextmanager
+    async def tracked_capture():
+        pairs = []
+
+        def record_pipe():
+            pair = pipe()
+            pairs.append(pair)
+            return pair
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "pipe", record_pipe)
+            try:
+                async with capture() as captured:
+                    patch.undo()
+                    yield captured
+            finally:
+                for pair in pairs:
+                    closed = []
+                    for fd in pair:
+                        try:
+                            os.fstat(fd)
+                        except OSError as exc:
+                            closed.append(exc.errno)
+                        else:
+                            closed.append(None)
+                    outcomes.append(tuple(closed))
+
+    monkeypatch.setattr(runner_control, "_worker_stderr", tracked_capture)
+    return outcomes
+
+
+def _assert_worker_stderr_closed(outcomes):
+    assert outcomes
+    for outcome in outcomes:
+        assert outcome == (errno.EBADF, errno.EBADF)
+
+
+def test_worker_stderr_callback_and_pending_tail(monkeypatch, worker_stderr_fds):
+    from dsl41 import runner_control
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        add_reader = loop.add_reader
+        callbacks = []
+
+        def register(fd, callback):
+            callbacks.append(callback)
+            add_reader(fd, callback)
+
+        monkeypatch.setattr(loop, "add_reader", register)
+        async with runner_control._worker_stderr() as (write_fd, detail):
+            assert detail() == ""
+            for _ in range(2):
+                assert os.write(write_fd, b"x" * 4096) == 4096
+                callbacks[0]()
+            assert detail() == "x" * 8192
+            assert os.write(write_fd, b"\xff") == 1
+            assert detail() == ("[stderr truncated; last 8192 bytes]\n" + "x" * 8191 + "\ufffd")
+        _assert_worker_stderr_closed(worker_stderr_fds)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("cmd", ["reread", "update"])
+def test_reload_worker_pipe_exhaustion_is_refused(short_root: Path, monkeypatch, cmd):
+    def exhausted_pipe():
+        raise OSError(errno.EMFILE, "synthetic fd exhaustion")
+
+    async def scenario():
+        engine, server, loop = await _serve(
+            short_root / "run", "insert_job: A\njob_type: c\ncommand: x\nmachine: localhost\n"
+        )
+        engine.reread_source = str(short_root / "dsl41.toml")
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(os, "pipe", exhausted_pipe)
+                answer = await _control_call(
+                    server.path,
+                    {"v": 4, "cmd": cmd}
+                    | (
+                        {"baseline_id": engine.baseline_id, "request_id": "exhausted"}
+                        if cmd == "update"
+                        else {}
+                    ),
+                )
+            assert answer["ok"] is False and answer["refused"] is True
+            assert answer["code"] == "engine_error"
+            assert answer["error"] == (
+                "preparation failed: OSError: [Errno 24] synthetic fd exhaustion"
+            )
+        finally:
+            await _teardown(engine, server, loop)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("ignore_term", [False, True])
+def test_reload_worker_deadline_and_cancellation(
+    short_root: Path, monkeypatch, ignore_term, worker_stderr_fds
+):
     """A blocked result cannot block status; deadline and cancellation kill and reap."""
     spawn, timeout = asyncio.create_subprocess_exec, asyncio.timeout
     ready = asyncio.Queue()
@@ -3437,7 +3545,9 @@ def test_reload_worker_deadline_and_cancellation(short_root: Path, monkeypatch):
         child = await spawn(
             sys.executable,
             "-c",
-            "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready',flush=True); time.sleep(60)",
+            "import signal; "
+            + ("signal.signal(signal.SIGTERM, signal.SIG_IGN); " if ignore_term else "")
+            + "print('ready',flush=True); signal.pause()",
             **kwargs,
         )
         assert await child.stdout.readline() == b"ready\n"
@@ -3452,7 +3562,7 @@ def test_reload_worker_deadline_and_cancellation(short_root: Path, monkeypatch):
             short_root / "run", "insert_job: A\njob_type: c\ncommand: x\nmachine: localhost\n"
         )
         engine.reread_source = str(short_root / "dsl41.toml")
-        server.WORKER_GRACE_S = 0.02
+        server.WORKER_GRACE_S = 0.02 if ignore_term else 30.0
         try:
             async with timeout(30):
                 task = asyncio.create_task(server._prepare_reload(update=False))
@@ -3463,7 +3573,8 @@ def test_reload_worker_deadline_and_cancellation(short_root: Path, monkeypatch):
                 deadlines[0].reschedule(asyncio.get_running_loop().time())
                 result = await task
                 assert result["code"] == "engine_error" and "TimeoutError" in result["error"]
-                assert child.returncode == -signal.SIGKILL
+                assert child.returncode == -(signal.SIGKILL if ignore_term else signal.SIGTERM)
+                _assert_worker_stderr_closed(worker_stderr_fds)
                 task = asyncio.create_task(server._prepare_reload(update=False))
                 child = await ready.get()
                 while not child.stdin.is_closing():
@@ -3472,11 +3583,223 @@ def test_reload_worker_deadline_and_cancellation(short_root: Path, monkeypatch):
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await task
-                assert child.returncode == -signal.SIGKILL
+                assert child.returncode == -(signal.SIGKILL if ignore_term else signal.SIGTERM)
+                _assert_worker_stderr_closed(worker_stderr_fds)
         finally:
             await _teardown(engine, server, loop)
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("cmd", ["reread", "update"])
+@pytest.mark.parametrize("output", ["message", "flood", "worker_exit", "early_exit"])
+def test_reload_worker_stderr_failure_detail(
+    short_root: Path, monkeypatch, cmd, output, worker_stderr_fds
+):
+    spawn = asyncio.create_subprocess_exec
+    children = []
+    message = b"synthetic failure\nsecond line: \xff\x00\n"
+    flood = b"discarded prefix\n" + b"x" * (2 * 1024 * 1024) + b"\nlast failure\n"
+
+    async def replacement(*args, **kwargs):
+        if output == "early_exit":
+            script = "import os; os.write(2, b'early import failure\\n'); os._exit(7)"
+        elif output == "worker_exit":
+            script = (
+                "import os\nfrom dsl41 import reread_worker as worker\n"
+                "def fail(request):\n os.write(2, b'worker failure detail\\n')\n os._exit(7)\n"
+                "worker.run = fail\nworker.main()\n"
+            )
+        else:
+            payload = "b'x' * (2 * 1024 * 1024)" if output == "flood" else repr(message)
+            if output == "flood":
+                payload = f"b'discarded prefix\\n' + {payload} + b'\\nlast failure\\n'"
+            script = (
+                f"import sys; sys.stdin.readline(); sys.stderr.buffer.write({payload}); "
+                "sys.stderr.buffer.flush(); raise SystemExit(7)"
+            )
+        child = await spawn(sys.executable, "-c", script, **kwargs)
+        children.append(child)
+        if output == "early_exit":
+            await child.wait()
+        return child
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", replacement)
+
+    async def scenario():
+        engine, server, loop = await _serve(
+            short_root / "run", "insert_job: A\njob_type: c\ncommand: x\nmachine: localhost\n"
+        )
+        engine.reread_source = str(short_root / "dsl41.toml")
+        try:
+            async with asyncio.timeout(30):
+                answer = await _control_call(
+                    server.path,
+                    {"v": 4, "cmd": cmd}
+                    | (
+                        {"baseline_id": engine.baseline_id, "request_id": "stderr"}
+                        if cmd == "update"
+                        else {}
+                    ),
+                )
+            assert not answer["ok"] and answer["refused"] and answer["code"] == "engine_error"
+            if output == "early_exit":
+                assert "early import failure\n" in answer["error"]
+            elif output == "flood":
+                assert answer["error"] == (
+                    "preparation worker exited 7: [stderr truncated; last 8192 bytes]\n"
+                    + flood[-8192:].decode()
+                )
+            else:
+                detail = (
+                    "worker failure detail\n"
+                    if output == "worker_exit"
+                    else message.decode("utf-8", errors="replace")
+                )
+                assert answer["error"] == "preparation worker exited 7: " + detail
+            assert all(child.returncode == 7 for child in children)
+            _assert_worker_stderr_closed(worker_stderr_fds)
+        finally:
+            await _teardown(engine, server, loop)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"ok": True, "live_rev": 1, "preview": {"added": []}},
+        {"ok": False, "code": "invalid_argument", "error": "synthetic refusal", "refused": True},
+    ],
+)
+def test_reload_worker_stderr_preserves_normal_answers(
+    short_root: Path, monkeypatch, answer, worker_stderr_fds
+):
+    spawn = asyncio.create_subprocess_exec
+
+    async def replacement(*args, **kwargs):
+        return await spawn(
+            sys.executable,
+            "-c",
+            "import sys; sys.stdin.readline(); sys.stderr.write('incidental noise\\n'); "
+            f"print({json.dumps(answer)!r})",
+            **kwargs,
+        )
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", replacement)
+
+    async def scenario():
+        engine, server, loop = await _serve(
+            short_root / "run", "insert_job: A\njob_type: c\ncommand: x\nmachine: localhost\n"
+        )
+        engine.reread_source = str(short_root / "dsl41.toml")
+        try:
+            assert await server._prepare_reload(update=False) == answer
+            _assert_worker_stderr_closed(worker_stderr_fds)
+        finally:
+            await _teardown(engine, server, loop)
+
+    asyncio.run(scenario())
+
+
+def test_reload_worker_grandchild_holds_stderr(short_root: Path, monkeypatch, worker_stderr_fds):
+    from conftest import _PRCTL
+
+    spawn = asyncio.create_subprocess_exec
+    children = []
+
+    async def scenario():
+        engine, server, loop = await _serve(
+            short_root / "run", "insert_job: A\njob_type: c\ncommand: x\nmachine: localhost\n"
+        )
+        engine.reread_source = str(short_root / "dsl41.toml")
+        if sys.platform.startswith("linux"):
+            assert _PRCTL is not None and _PRCTL(36, 1, 0, 0, 0) == 0
+        ready_r, ready_w = os.pipe()
+        release_r, release_w = os.pipe()
+        grandchild = None
+        with (
+            os.fdopen(ready_r, "rb") as ready_input,
+            os.fdopen(ready_w, "wb") as ready_output,
+            os.fdopen(release_r, "rb") as release_input,
+            os.fdopen(release_w, "wb", buffering=0) as release_output,
+        ):
+            reader = asyncio.StreamReader()
+            transport, _ = await asyncio.get_running_loop().connect_read_pipe(
+                lambda: asyncio.StreamReaderProtocol(reader), ready_input
+            )
+
+            async def replacement(*args, **kwargs):
+                script = (
+                    "import os, sys\nsys.stdin.readline()\npid = os.fork()\n"
+                    "if pid == 0:\n"
+                    " os.close(1)\n"
+                    f" os.write({ready_w}, str(os.getpid()).encode() + b'\\n')\n"
+                    f" os.read({release_r}, 1)\n"
+                    " os._exit(0)\n"
+                    "os.write(2, b'parent failure\\n')\nos._exit(7)\n"
+                )
+                child = await spawn(
+                    sys.executable, "-c", script, pass_fds=(ready_w, release_r), **kwargs
+                )
+                children.append(child)
+                ready_output.close()
+                release_input.close()
+                return child
+
+            monkeypatch.setattr(asyncio, "create_subprocess_exec", replacement)
+            task = asyncio.create_task(server._prepare_reload(update=False))
+            try:
+                async with asyncio.timeout(30):
+                    grandchild = int(await reader.readline())
+                    answer = await task
+                    assert answer["error"] == "preparation worker exited 7: parent failure\n"
+                    assert children[0].returncode == 7
+                    os.kill(grandchild, 0)
+                    _assert_worker_stderr_closed(worker_stderr_fds)
+            finally:
+                release_output.close()
+                if not task.done():
+                    task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+                if grandchild is not None:
+                    await reader.read()
+                    if sys.platform.startswith("linux"):
+                        assert (await asyncio.to_thread(os.waitpid, grandchild, 0))[1] == 0
+                transport.close()
+                await _teardown(engine, server, loop)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure", ["exit", "refused", "exception"])
+def test_reread_worker_main_keeps_stderr(failure):
+    script = (
+        "import os, sys\nfrom dsl41 import reread_worker as worker\n"
+        "def run(request):\n"
+        " os.write(1, b'incidental stdout\\n')\n"
+        " os.write(2, b'worker stderr\\n')\n"
+        + {
+            "exit": " os._exit(7)\n",
+            "refused": " raise worker.RereadRefused(['synthetic refusal'])\n",
+            "exception": " raise RuntimeError('synthetic exception')\n",
+        }[failure]
+        + "worker.run = run\nworker.main()\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script], input=b"{}\n", capture_output=True, timeout=30
+    )
+    assert result.stderr == b"worker stderr\n"
+    if failure == "exit":
+        assert result.returncode == 7 and result.stdout == b""
+    else:
+        assert result.returncode == 0 and result.stdout.count(b"\n") == 1
+        assert json.loads(result.stdout) == {
+            "ok": False,
+            "code": "invalid_argument" if failure == "refused" else "engine_error",
+            "error": "synthetic refusal" if failure == "refused" else "synthetic exception",
+        }
 
 
 def test_update_preparation_has_one_slot_and_exact_retry(short_root: Path, monkeypatch):
@@ -3536,15 +3859,21 @@ def test_update_preparation_has_one_slot_and_exact_retry(short_root: Path, monke
 
 @pytest.mark.parametrize("fault", ["exit", "shape", "spawn", "graceful", "creation_cancel"])
 def test_reload_worker_failures_are_framed_and_reaped(short_root: Path, monkeypatch, fault):
-    spawn = asyncio.create_subprocess_exec
+    spawn, timeout = asyncio.create_subprocess_exec, asyncio.timeout
     children = []
+    deadlines = []
     created, release = asyncio.Event(), asyncio.Event()
+
+    def controlled_timeout(delay):
+        deadline = timeout(None)
+        deadlines.append(deadline)
+        return deadline
 
     async def replacement(*args, **kwargs):
         if fault == "spawn":
             raise OSError("synthetic worker spawn failure")
         script = {"exit": "raise SystemExit(7)", "shape": "print('[]')"}.get(
-            fault, "import time; time.sleep(60)"
+            fault, "import signal; signal.pause()"
         )
         child = await spawn(sys.executable, "-c", script, **kwargs)
         children.append(child)
@@ -3561,9 +3890,15 @@ def test_reload_worker_failures_are_framed_and_reaped(short_root: Path, monkeypa
         )
         engine.reread_source = str(short_root / "dsl41.toml")
         if fault == "graceful":
-            server.PREPARE_TIMEOUT_S = 0.15
+            monkeypatch.setattr(asyncio, "timeout", controlled_timeout)
+            server.WORKER_GRACE_S = 30.0
         try:
             task = asyncio.create_task(server._prepare_reload(update=False))
+            if fault == "graceful":
+                await created.wait()
+                while not children[0].stdin.is_closing():
+                    await asyncio.sleep(0)
+                deadlines[0].reschedule(asyncio.get_running_loop().time())
             if fault == "creation_cancel":
                 await created.wait()
                 task.cancel()
@@ -3609,7 +3944,7 @@ def test_update_decision_timeout_and_preparation_cancellation(short_root: Path, 
 
         monkeypatch.setattr(server, "_prepare_reload", prepare)
         monkeypatch.setattr(engine, "request_update", lambda request: pending)
-        server.DECISION_TIMEOUT_S = 0.01
+        server.DECISION_TIMEOUT_S = 0
         try:
             timed_out = await server._update(request)
             assert timed_out["code"] == "decision_timeout" and "refused" not in timed_out
