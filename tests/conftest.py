@@ -73,6 +73,30 @@ def local_timezone() -> Iterator[Callable[[str], None]]:
 
 
 @pytest.fixture
+def fixed_zone_names() -> Iterator[None]:
+    """DL-62: city matches use a fixed inventory, independent of host zone links."""
+    from dsl41 import timezones
+
+    zones = {
+        "UTC",
+        "Europe/Zurich",
+        "Europe/London",
+        "America/New_York",
+        "America/Indianapolis",
+        "America/Indiana/Indianapolis",
+        "A/X",
+        "B/X",
+    }
+    timezones._zone_tables.cache_clear()
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(timezones, "available_timezones", lambda: zones.copy())
+            yield
+    finally:
+        timezones._zone_tables.cache_clear()
+
+
+@pytest.fixture
 def cli_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """A plain terminal for a CLI test: no colour and 200 columns. The help text
     and error panels of typer and rich then read the same under a terminal and in

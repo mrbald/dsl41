@@ -1440,6 +1440,7 @@ def test_sem35_the_engine_resolves_a_map_only_zone_through_its_scheduler_map() -
     assert engine.oracle.store.job["rw_map"].status == "RUNNING"  # 09:00 in New York
 
 
+@pytest.mark.usefixtures("fixed_zone_names")
 def test_sem35_a_supplied_map_outranks_the_unique_city_default() -> None:
     """The other half: the ladder's unique-city default applies only when
     the estate supplied NO map (`resolve_timezone`), so a city name a

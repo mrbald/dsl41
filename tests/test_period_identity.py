@@ -801,6 +801,7 @@ def test_a_journal_less_engine_is_untouched_by_any_of_this() -> None:
     assert live.journal is None
 
 
+@pytest.mark.usefixtures("fixed_zone_names")
 def test_serve_wires_every_adapter_window_from_the_profile_and_the_settings(
     tmp_path: Path, monkeypatch
 ) -> None:
