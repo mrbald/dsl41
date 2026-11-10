@@ -57,7 +57,7 @@ def _tree(directory: Path) -> dict[str, tuple[int, bytes | None]]:
 
 
 def _status(root: Path) -> dict:
-    return json.loads(_ok("query", "status", "--socket", str(root / "control.sock")))
+    return json.loads(_ok("query", "status", "--json", "--socket", str(root / "control.sock")))
 
 
 def _settled(root: Path, job: str) -> dict:
@@ -108,7 +108,7 @@ def restored_site(short_root: Path, tmp_path: Path, request: pytest.FixtureReque
         _ok("sendevent", "FORCE_STARTJOB", "--job", "DONE", "--socket", socket)
         deadline = time.monotonic() + 30
         while True:
-            status = json.loads(_ok("query", "status", "--socket", socket))
+            status = json.loads(_ok("query", "status", "--json", "--socket", socket))
             done = status["jobs"]["DONE"]
             if done["status"] == "SUCCESS" and "attempt" not in done:
                 break
@@ -217,7 +217,7 @@ def test_complete_restore_uses_fresh_readers_and_keeps_flags(restored_site) -> N
     shutil.copy2(business_backup, effects)
     with cli_engine(path):
         socket = str(root / "control.sock")
-        status = json.loads(_ok("query", "status", "--socket", socket))
+        status = json.loads(_ok("query", "status", "--json", "--socket", socket))
         assert status["jobs"]["DONE"]["on_hold"] is True
         assert status["jobs"]["ICED"]["on_ice"] is True
         assert status["jobs"]["DONE"]["run_number"] == 1

@@ -205,7 +205,7 @@ def test_provisioning_and_empty_lock_retry_allow_genesis(
     if empty_lock:
         (root / "leader.lock").touch()
     with running(args, root, short_root / "engine.log"):
-        answer = _cli("query", "status", "--socket", str(root / "control.sock"))
+        answer = _cli("query", "status", "--json", "--socket", str(root / "control.sock"))
         assert answer.returncode == 0
         status = json.loads(answer.stdout)
         assert status["engine"] == "RUNNING" and status["config_rev"] == 1
@@ -319,12 +319,16 @@ def test_valid_missing_lock_root_resumes_its_stored_identity(short_root: Path, f
     args = invocation(short_root, form)
     root = short_root / "run"
     with running(args, root, short_root / "seed.log"):
-        before = json.loads(_cli("query", "status", "--socket", str(root / "control.sock")).stdout)
+        before = json.loads(
+            _cli("query", "status", "--json", "--socket", str(root / "control.sock")).stdout
+        )
         answer = _cli("sendevent", "ON_HOLD", "--job", "A", "--socket", str(root / "control.sock"))
         assert answer.returncode == 0
     (root / "leader.lock").unlink()
     with running(args, root, short_root / "resumed.log"):
-        after = json.loads(_cli("query", "status", "--socket", str(root / "control.sock")).stdout)
+        after = json.loads(
+            _cli("query", "status", "--json", "--socket", str(root / "control.sock")).stdout
+        )
         assert after["baseline_id"] == before["baseline_id"]
         assert after["jobs"]["A"]["on_hold"] is True
         assert after["jobs"]["A"]["run_number"] == 0

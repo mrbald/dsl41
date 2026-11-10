@@ -1151,8 +1151,18 @@ log tail (the §6 std files), event console (sendevent verbs), job-details
 popup (the `spec` block + `deps` needs/blocks lines + a short log tail),
 and the read-only triggers view on `t` (the `timers` verb live with
 countdowns, plus one row per armed job — DL-68).
-The header clock is UTC — the engine's time basis, one time base on
-screen (DL-64). Pane geometry is keyboard-only: maximize toggle on the
+The header clock and every owned timestamp in the TUI use the host's local
+time as `YYYY-MM-DDTHH:MM:SS`, without an offset (DL-473). The repeated
+autumn hour is ambiguous on screen. Job logs and source JIL remain verbatim.
+`query status` defaults to minimal text: one `key: value` line per field,
+including nested fields. All fields are retained. `status_at`, timer dues
+and interrupted start/end times use the same local format; `--brief` uses
+it for status time. BLK-2 owns later layout work. An `ok:false` answer prints
+its error text and exits 2. `query status --json` keeps the complete UTC JSON
+and exit codes; `--json` is refused on other queries and with `--brief`.
+Engine, storage and socket timestamps stay UTC. `query trace`, `query timers`,
+`runs` and `journal` keep UTC output. No timezone switch or setting is provided.
+Pane geometry is keyboard-only: maximize toggle on the
 log tail plus fr-share nudges for both splits. Navigation at estate
 scale (DL-65): the table renders the box tree from the status response's
 box_name (fold a box with space, all with z; a folded box shows its
