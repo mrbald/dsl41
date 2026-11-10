@@ -769,6 +769,11 @@ starting with non-empty state (DL-433):
    records `shutdown_during_startup`; the next restart takes unfinished
    steps again.
 
+At the scheduler sweep, startup stderr reports missed starts as one total
+and one line per affected job (§15 E9, DL-476). This includes `dsl41 run --ui`,
+before the terminal UI attaches. A first start or a sweep with no missed
+ticks prints no missed-start report.
+
 A command attempt with a dispatch record and no directory follows the
 interruption rule, including replacement for an idempotent run (DL-428).
 An FW watch with a dispatch record and no directory is relaunched as an
@@ -1361,10 +1366,26 @@ its rule, with the entry or section that holds it.
   resume) (DL-45). Default: skip-and-report. Resume drops each missed tick
   AND records it in the store (a `drop` record), and it never fires the tick late.
   A live-but-stalled engine, in contrast, fires its backlog, stamped at the
-  tick. The downtime/live boundary is pinned to the resume-sweep instant
-  (wall-now when `resume_run` re-anchors). Ticks at or before that
+  tick. The downtime/live boundary is pinned to the resume-sweep instant,
+  at least the durable scheduler frontier after a backward clock step
+  (DL-435). Ticks at or before that
   instant are downtime (dropped). Ticks after it are live backlog, even
-  if the loop starts seconds later. Vendor behavior for an
+  if the loop starts seconds later.
+  Startup stderr prints one total, then job-name-sorted counts and each
+  job's latest missed tick (DL-476):
+
+  ```text
+  engine was down {from} to {to}; {N} scheduled starts were missed and will not run late
+    {job}: {count} missed, last {last}
+  ```
+
+  For one tick the total says `1 scheduled start was missed and will not run late`.
+  No missed ticks means no report. Times use the host-local display (§11, DL-473).
+  `from` is the largest record timestamp in the replayed tail, falling back
+  to the snapshot's `last_at` when the tail is empty, clamped to the earliest
+  missed tick. Engine records count too. `to` is the captured sweep cutoff.
+  The per-tick drop records and their reasons stay unchanged.
+  Vendor behavior for an
   event-processor outage that spans a start_times tick is unverified [?].
   A live instance decides fire-late vs skip.
 - **E10** — schedule interpretation defaults (DL-45, DL-155, DL-260). The

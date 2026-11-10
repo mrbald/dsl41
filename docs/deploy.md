@@ -359,6 +359,22 @@ The foreground run prints the same shutdown record to its terminal.
 Output and refusal handling: [run CLI](../src/dsl41/cli_run.py) and
 [shared CLI](../src/dsl41/cli_common.py).
 
+On restart, startup stderr reports scheduled starts missed while the engine
+was down (DL-476):
+
+```text
+engine was down 2026-07-01T09:00:00 to 2026-07-01T11:05:00; 4 scheduled starts were missed and will not run late
+  poll_30m: 4 missed, last 2026-07-01T11:00:00
+```
+
+One total precedes one line per affected job, sorted by job name.
+A first start or a restart with no missed starts prints no such report.
+Times use the engine host's local clock display (DL-473).
+The report appears only in engine start output, including `dsl41 run --ui`
+before the terminal UI attaches. Under systemd, read it with `journalctl`
+as above. [Recover after an outage](#recover-after-the-engine-or-box-dies)
+before choosing any manual catch-up.
+
 Job output goes to each job's `std_out_file` and `std_err_file` when set.
 Each unset path falls back to `<run_root>/logs/<job>.<run>.{out,err}`.
 For stream placeholders, output prefixes and their limits, see [Set stream paths](authoring.md#set-stream-paths).
@@ -860,6 +876,17 @@ Status remains STARTING during catch-up. The engine takes up file watches,
 owed plans, pending starts and any interrupted update before the final
 time jump. It then admits deferred dispatches and announces startup.
 A stop during catch-up leaves the remaining work for the next restart.
+
+Read the missed-start report in [engine start output](#read-the-engines-output)
+before choosing catch-up (DL-476). Its `from` is the largest durable record
+timestamp, or the snapshot's saved `last_at` when no later records exist.
+It is clamped to the earliest reported tick if that tick is earlier.
+After an unclean stop, the time of death is unknown; an idle engine's last
+record can precede its death by hours. `to` is the captured scheduler sweep
+cutoff, at least the durable scheduler frontier after a backward clock step.
+Missed ticks are recorded and never fired late. For a required manual start,
+check downstream effects and follow the
+[missed-tick intervention](incident-triage.md#the-job-has-not-started).
 
 A refused resume leaves the unit down on exit 2. Read its named refusal;
 do not erase the root to bypass it. The restart checks the lock, store

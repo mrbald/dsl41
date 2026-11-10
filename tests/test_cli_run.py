@@ -5,15 +5,18 @@ the engine; `--resume` is an accepted no-op; a missing root is created and start
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 from genesis_harness import C1_JIL, _catalog
+from typer.testing import CliRunner
 
 from dsl41 import runner_startup
+from dsl41.cli import app
 from dsl41.cli_run import _serve_run
-from dsl41.runner_clock import EngineError
+from dsl41.runner_clock import EngineError, RealClock
 from dsl41.runner_config import RuntimeProfile
 
 
@@ -192,6 +195,48 @@ def _stop_once_serving(monkeypatch: pytest.MonkeyPatch) -> None:
         return started
 
     monkeypatch.setattr(cli_run, "_await_started", await_started)
+
+
+@pytest.mark.usefixtures("cli_env", "local_timezone")
+def test_run_reports_missed_starts_on_stderr(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    import pwd
+
+    account = pwd.getpwuid(os.geteuid())
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: pwd.struct_passwd((*account[:6], "/bin/sh")))
+    text = (
+        "insert_job: daily\njob_type: c\ncommand: x\nmachine: localhost\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
+    )
+    estate = short_root / "estate.jil"
+    estate.write_text(text)
+    catalog, _ = _catalog(text, name=str(estate))
+    at = datetime(2026, 7, 1, 9)
+    monkeypatch.setattr(RealClock, "now", lambda self: at)
+    profile = RuntimeProfile()
+    wiring = runner_startup.wire_from_profile(catalog, profile, start=at)
+    run_root = short_root / "run"
+    genesis = runner_startup.start_run(
+        catalog,
+        run_root,
+        clock=RealClock(),
+        adapters=wiring.adapters,
+        scheduler=wiring.scheduler,
+        launched=profile,
+    )
+    assert genesis.journal is not None
+    genesis.journal.close()
+    at = datetime(2026, 7, 1, 10, 5)
+    _stop_once_serving(monkeypatch)
+    result = CliRunner().invoke(app, ["run", str(estate), "--run-root", str(run_root)])
+    assert result.exit_code == 0, result.output
+    assert result.stderr == (
+        "engine was down 2026-07-01T11:00:00 to 2026-07-01T12:05:00; "
+        "1 scheduled start was missed and will not run late\n"
+        "  daily: 1 missed, last 2026-07-01T12:00:00\n"
+    )
 
 
 def test_a_crash_while_draining_leaves_the_drain_for_the_restart(

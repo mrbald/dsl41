@@ -31,6 +31,7 @@ from dsl41.oracle_state import Event
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import EngineError, RealClock, VirtualClock
+from dsl41.runner_config import EngineSettings
 from dsl41.runner_journal import Position, read_journal, read_records
 from dsl41.runner_preflight import (
     _local_identity,
@@ -39,7 +40,8 @@ from dsl41.runner_preflight import (
     resolve_machine,
 )
 from dsl41.runner_scheduler import Scheduler
-from dsl41.runner_startup import resume_run, start_run
+from dsl41.runner_startup import _missed_start_lines, resume_run, start_run
+from dsl41.runner_store import Record
 from dsl41.semantics import resolve as resolve_switches
 from dsl41.timezones import parse_timezone_map
 
@@ -742,6 +744,14 @@ def test_start_refused_record_carries_the_events_source() -> None:
 # --------------------------------------------------------------------- 5. resume
 
 
+class _Wall(RealClock):
+    def __init__(self, at: datetime) -> None:
+        self.at = at
+
+    def now(self) -> datetime:
+        return self.at
+
+
 def test_resume_virtual_scheduler_ticks_never_refire(tmp_path: Path) -> None:
     """(ss7/ss5): resuming a virtual scheduled run with a FRESH Scheduler
     must not refire the tick replay already fed; running to the SAME horizon
@@ -805,7 +815,10 @@ def test_resume_virtual_scheduler_ticks_never_refire(tmp_path: Path) -> None:
     asyncio.run(phase2())
 
 
-def test_resume_real_domain_missed_ticks_are_dropped_and_journaled(tmp_path: Path) -> None:
+@pytest.mark.usefixtures("local_timezone")
+def test_resume_real_domain_missed_ticks_are_dropped_and_journaled(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     """(ss5/ss7 PENDING: E9): a real-domain journal whose last record is 2h
     in the past, over a job ticking every 30 minutes, resumes with 4 missed
     ticks -- each dropped (never fired late) and journaled as a `drop`
@@ -817,30 +830,25 @@ def test_resume_real_domain_missed_ticks_are_dropped_and_journaled(tmp_path: Pat
     catalog = lower_source(text)
     run_root = tmp_path / "run"
 
-    now = RealClock().now()
+    now = datetime(2026, 7, 1, 10, 5)
     past = now - timedelta(hours=2)
-
-    class _Then(RealClock):
-        """The real domain, read two hours ago: the genesis the engine died after."""
-
-        def now(self) -> datetime:
-            return past
 
     genesis = start_run(
         catalog,
         run_root,
-        clock=_Then(),
+        clock=_Wall(past),
         adapters={"CMD": FakeAdapter()},
         scheduler=Scheduler(catalog, start=past),
     )
     assert genesis.journal is not None
     genesis.journal.close()
+    assert capsys.readouterr().err == ""
 
     async def scenario() -> Engine:
         engine = await resume_run(
             catalog,
             run_root,
-            clock=RealClock(),
+            clock=_Wall(now),
             adapters={"CMD": FakeAdapter()},
             scheduler=Scheduler(catalog, start=past),
         )
@@ -861,10 +869,20 @@ def test_resume_real_domain_missed_ticks_are_dropped_and_journaled(tmp_path: Pat
     drop_records = [r for r in records if r.get("rec") == "drop"]
     assert len(drop_records) == 4
     assert all(r["kind"] == "STARTJOB" for r in drop_records)
+    assert capsys.readouterr().err == (
+        "engine was down 2026-07-01T10:05:00 to 2026-07-01T12:05:00; "
+        "4 scheduled starts were missed and will not run late\n"
+        "  mts_job: 4 missed, last 2026-07-01T12:00:00\n"
+    )
 
 
+@pytest.mark.usefixtures("local_timezone")
+@pytest.mark.parametrize("regressed", [False, True])
 def test_dl45_a_same_instant_sibling_lost_to_the_crash_is_dropped_not_forgotten(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    regressed: bool,
 ) -> None:
     """(ss5/ss7, DL-45): resume re-anchors INCLUSIVE of the scheduler
     frontier, and that is what saves a same-instant sibling.
@@ -878,9 +896,9 @@ def test_dl45_a_same_instant_sibling_lost_to_the_crash_is_dropped_not_forgotten(
     from store_surgery import delete, rows
 
     text = (
-        "insert_job: sib_a\njob_type: c\ncommand: x\nmachine: m1\n"
+        "insert_job: sib_a\njob_type: c\ncommand: x\nmachine: localhost\n"
         'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n\n'
-        "insert_job: sib_b\njob_type: c\ncommand: x\nmachine: m1\n"
+        "insert_job: sib_b\njob_type: c\ncommand: x\nmachine: localhost\n"
         'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
     )
     catalog = lower_source(text)
@@ -889,14 +907,29 @@ def test_dl45_a_same_instant_sibling_lost_to_the_crash_is_dropped_not_forgotten(
     run_root = tmp_path / "run"
 
     async def phase1() -> None:
+        clock = _Wall(tick) if regressed else VirtualClock(start=start)
         engine = start_run(
             catalog,
             run_root,
-            clock=VirtualClock(start=start),
+            clock=clock,
             adapters={"CMD": FakeAdapter(default=None)},
             scheduler=Scheduler(catalog, start=start),
         )
-        await engine.run_until_quiescent(tick)  # both siblings tick at 08:00
+        assert engine.journal is not None
+        append = engine.journal.append
+
+        def after_first_input(*records: Record) -> int:
+            seq = append(*records)
+            if regressed and any(
+                r.kind == "input" and (r.payload.get("payload") or {}).get("job") == "sib_a"
+                for r in records
+            ):
+                clock.at = tick + timedelta(minutes=5)
+            return seq
+
+        with monkeypatch.context() as patched:
+            patched.setattr(engine.journal, "append", after_first_input)
+            await engine.run_until_quiescent(tick + timedelta(minutes=5))
         await engine.shutdown()
         assert engine.journal is not None
         engine.journal.close()
@@ -916,12 +949,15 @@ def test_dl45_a_same_instant_sibling_lost_to_the_crash_is_dropped_not_forgotten(
     for _, record in read_records(run_root):
         position.note(record)
     assert position.frontier == tick  # the frontier IS the tick
+    if regressed:
+        assert position.last_at == tick + timedelta(minutes=5)
+    assert capsys.readouterr().err == ""
 
     async def phase2() -> Engine:
         engine = await resume_run(
             catalog,
             run_root,
-            clock=VirtualClock(start=tick),
+            clock=_Wall(tick - timedelta(minutes=5)) if regressed else VirtualClock(start=tick),
             adapters={"CMD": FakeAdapter(default=None)},
             scheduler=Scheduler(catalog, start=start),
         )
@@ -945,10 +981,21 @@ def test_dl45_a_same_instant_sibling_lost_to_the_crash_is_dropped_not_forgotten(
         if r.get("rec") == "input" and r.get("source") == "scheduler"
     ]
     assert admitted == [(tick.isoformat(), "sib_a")]
+    stderr = capsys.readouterr().err
+    if regressed:
+        warning, stderr = stderr.split("\n", 1)
+        assert warning.startswith("dsl41: WARNING: wall clock below admission frontier:")
+    to = "10:05:00" if regressed else "10:00:00"
+    assert stderr == (
+        f"engine was down 2026-07-01T10:00:00 to 2026-07-01T{to}; "
+        "1 scheduled start was missed and will not run late\n"
+        "  sib_b: 1 missed, last 2026-07-01T10:00:00\n"
+    )
 
 
+@pytest.mark.usefixtures("local_timezone")
 def test_dl174_a_tick_at_a_drop_frontier_is_dropped_once_across_three_resumes(
-    tmp_path: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """(ss5/ss7, DL-166's own deferred finding, paid here as PR-25b):
     the scheduler frontier counts `drop` records as well as `input` ones
@@ -961,10 +1008,8 @@ def test_dl174_a_tick_at_a_drop_frontier_is_dropped_once_across_three_resumes(
     with `now` past the tick, must hold exactly ONE `drop` record for it:
     the first resume adjudicates the tick, and every later resume's sweep
     has to read that adjudication off the journal rather than repeat it.
-    `Engine.drops` -- the in-memory list `cli_run.py` reports the operator-
-    facing `dropped STARTJOB ...` line from -- gets the same guard: it holds
-    the tick once, from the resume that made the verdict, and stays empty
-    on the resumes that only read it back."""
+    `Engine.drops` and the startup summary (DL-476) report the tick once,
+    from the resume that made the verdict. Later resumes report nothing."""
     text = (
         "insert_job: once_job\njob_type: c\ncommand: x\nmachine: m1\n"
         'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
@@ -985,6 +1030,7 @@ def test_dl174_a_tick_at_a_drop_frontier_is_dropped_once_across_three_resumes(
     )
     assert genesis.journal is not None
     genesis.journal.close()
+    assert capsys.readouterr().err == ""
 
     def drop_records() -> list[dict]:
         return [r for r in read_journal(run_root) if r.get("rec") == "drop"]
@@ -1007,20 +1053,298 @@ def test_dl174_a_tick_at_a_drop_frontier_is_dropped_once_across_three_resumes(
     first = asyncio.run(one_resume())
     assert len(drop_records()) == 1  # the tick's first, real adjudication
     assert [ev.at for ev, _ in first.drops] == [tick]
+    assert capsys.readouterr().err == (
+        "engine was down 2026-07-01T11:00:00 to 2026-07-01T12:05:00; "
+        "1 scheduled start was missed and will not run late\n"
+        "  once_job: 1 missed, last 2026-07-01T12:00:00\n"
+    )
 
     second = asyncio.run(one_resume())
     assert len(drop_records()) == 1  # a second resume must read it, not redo it
     assert second.drops == []  # already adjudicated -- nothing new to report
+    assert capsys.readouterr().err == ""
 
     third = asyncio.run(one_resume())
     assert len(drop_records()) == 1  # and a third
     assert third.drops == []
+    assert capsys.readouterr().err == ""
 
     only = drop_records()[0]
     assert only["kind"] == "STARTJOB"
     assert only["at"] == tick.isoformat()
     assert only["payload"]["job"] == "once_job"
     assert "missed" in only["reason"]
+
+
+@pytest.mark.usefixtures("local_timezone")
+def test_missed_start_lines_sort_jobs_and_take_the_latest_tick() -> None:
+    start = datetime(2026, 7, 1, 8)
+    ticks = [
+        Event(at=start + timedelta(hours=2), kind="STARTJOB", payload={"job": "zebra"}),
+        Event(at=start + timedelta(hours=1), kind="STARTJOB", payload={"job": "alpha"}),
+        Event(at=start, kind="STARTJOB", payload={"job": "zebra"}),
+    ]
+    assert _missed_start_lines(
+        start, start + timedelta(hours=3), [(t, "missed") for t in ticks]
+    ) == [
+        "engine was down 2026-07-01T10:00:00 to 2026-07-01T13:00:00; "
+        "3 scheduled starts were missed and will not run late",
+        "  alpha: 1 missed, last 2026-07-01T11:00:00",
+        "  zebra: 2 missed, last 2026-07-01T12:00:00",
+    ]
+
+
+@pytest.mark.usefixtures("local_timezone")
+@pytest.mark.parametrize("days", [0, 10])
+def test_missed_start_report_is_silent_or_two_lines_for_480_ticks(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], days: int
+) -> None:
+    catalog = lower_source(
+        "insert_job: frequent\njob_type: c\ncommand: x\n"
+        "date_conditions: 1\ndays_of_week: all\nstart_mins: 0,30\n"
+    )
+    start = datetime(2026, 7, 1, 0, 1)
+    now = datetime(2026, 7, 1) + timedelta(days=days)
+    run_root = tmp_path / "run"
+    genesis = start_run(
+        catalog,
+        run_root,
+        clock=VirtualClock(start=start),
+        adapters={"CMD": FakeAdapter()},
+        scheduler=Scheduler(catalog, start=start),
+    )
+    assert genesis.journal is not None
+    genesis.journal.close()
+    assert capsys.readouterr().err == ""
+
+    async def resume() -> None:
+        engine = await resume_run(
+            catalog,
+            run_root,
+            clock=VirtualClock(start=max(start, now)),
+            adapters={"CMD": FakeAdapter()},
+            scheduler=Scheduler(catalog, start=start),
+        )
+        assert len(engine.drops) == days * 48
+        await engine.run_until_quiescent(engine.clock.now())
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
+
+    asyncio.run(resume())
+    assert capsys.readouterr().err == (
+        "engine was down 2026-07-01T02:01:00 to 2026-07-11T02:00:00; "
+        "480 scheduled starts were missed and will not run late\n"
+        "  frequent: 480 missed, last 2026-07-11T02:00:00\n"
+        if days
+        else ""
+    )
+    assert len([r for r in read_journal(run_root) if r.get("rec") == "drop"]) == days * 48
+
+
+@pytest.mark.usefixtures("local_timezone")
+@pytest.mark.parametrize("event", ["clean_shutdown", "unclean_shutdown", "draining", "snapshot"])
+def test_missed_start_from_includes_engine_records(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], event: str
+) -> None:
+    catalog = lower_source(
+        "insert_job: idle\njob_type: c\ncommand: x\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "23:00"\n'
+    )
+    start = datetime(2026, 7, 1, 18)
+    clock = _Wall(start)
+    run_root = tmp_path / "run"
+    genesis = start_run(
+        catalog,
+        run_root,
+        clock=clock,
+        adapters={"CMD": FakeAdapter()},
+        scheduler=Scheduler(catalog, start=start),
+    )
+    assert genesis.journal is not None
+    clock.at = datetime(2026, 7, 1, 22)
+    if event == "snapshot":
+        genesis.take_snapshot()
+    else:
+        genesis.journal.engine(event, clock.now())
+    assert genesis.journal.position.last_at == start
+    genesis.journal.close()
+    assert capsys.readouterr().err == ""
+
+    async def resume() -> None:
+        engine = await resume_run(
+            catalog,
+            run_root,
+            clock=_Wall(datetime(2026, 7, 1, 23, 5)),
+            adapters={"CMD": FakeAdapter()},
+            scheduler=Scheduler(catalog, start=start),
+        )
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
+
+    asyncio.run(resume())
+    assert capsys.readouterr().err == (
+        "engine was down 2026-07-02T00:00:00 to 2026-07-02T01:05:00; "
+        "1 scheduled start was missed and will not run late\n"
+        "  idle: 1 missed, last 2026-07-02T01:00:00\n"
+    )
+
+
+@pytest.mark.usefixtures("local_timezone")
+def test_missed_start_from_uses_normal_stop_after_idle_stretch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    catalog = lower_source(
+        "insert_job: idle\njob_type: c\ncommand: x\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "23:00"\n'
+    )
+    start = datetime(2026, 7, 1, 18)
+    stopped_at = datetime(2026, 7, 1, 22)
+    clock = _Wall(start)
+    run_root = tmp_path / "run"
+
+    async def scenario() -> None:
+        engine = start_run(
+            catalog,
+            run_root,
+            clock=clock,
+            adapters={"CMD": FakeAdapter()},
+            scheduler=Scheduler(catalog, start=start),
+            settings=EngineSettings(),
+        )
+        engine.inject(Event(at=start, kind="STARTJOB", payload={"job": "idle"}))
+        await engine.run_until_quiescent(start)
+        clock.at = stopped_at
+        stop = engine.request_stop()
+        await engine.run_until_quiescent(stopped_at)
+        assert await stop == "STOPPED"
+        assert engine.lifecycle.state == "STOPPED"
+        assert engine.leaving_record == "clean_shutdown"
+        assert engine.journal is not None
+        assert engine.journal.position.last_at == start
+        assert engine.journal.store.latest_snapshot() is not None
+        await engine.shutdown()
+        engine.journal.close()
+        assert capsys.readouterr().err == ""
+
+        resumed = await resume_run(
+            catalog,
+            run_root,
+            clock=_Wall(datetime(2026, 7, 1, 23, 5)),
+            adapters={"CMD": FakeAdapter()},
+            scheduler=Scheduler(catalog, start=start),
+            settings=EngineSettings(),
+        )
+        await resumed.run_until_quiescent(resumed.clock.now())
+        await resumed.shutdown()
+        assert resumed.journal is not None
+        resumed.journal.close()
+
+    asyncio.run(scenario())
+    assert capsys.readouterr().err == (
+        "engine was down 2026-07-02T00:00:00 to 2026-07-02T01:05:00; "
+        "1 scheduled start was missed and will not run late\n"
+        "  idle: 1 missed, last 2026-07-02T01:00:00\n"
+    )
+
+
+@pytest.mark.usefixtures("local_timezone")
+def test_missed_start_from_falls_back_to_snapshot_with_no_tail(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from store_surgery import delete
+
+    catalog = lower_source(
+        "insert_job: snap\njob_type: c\ncommand: x\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
+    )
+    start = datetime(2026, 7, 1, 9)
+    run_root = tmp_path / "run"
+    genesis = start_run(
+        catalog,
+        run_root,
+        clock=VirtualClock(start=start),
+        adapters={"CMD": FakeAdapter()},
+        scheduler=Scheduler(catalog, start=start),
+    )
+    seq = genesis.take_snapshot()
+    assert genesis.journal is not None
+    genesis.journal.store.prune_before(seq, start + timedelta(days=1))
+    genesis.journal.close()
+    # A crash after the snapshot write and before its engine record leaves no tail.
+    delete(run_root, lambda seq, kind, body: kind == "engine" and body["event"] == "snapshot")
+    assert all(index <= seq for index, _ in read_records(run_root))
+    assert capsys.readouterr().err == ""
+
+    async def resume() -> None:
+        engine = await resume_run(
+            catalog,
+            run_root,
+            clock=VirtualClock(start=start + timedelta(hours=2)),
+            adapters={"CMD": FakeAdapter()},
+            scheduler=Scheduler(catalog, start=start),
+        )
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
+
+    asyncio.run(resume())
+    assert capsys.readouterr().err == (
+        "engine was down 2026-07-01T11:00:00 to 2026-07-01T13:00:00; "
+        "1 scheduled start was missed and will not run late\n"
+        "  snap: 1 missed, last 2026-07-01T12:00:00\n"
+    )
+
+
+@pytest.mark.usefixtures("local_timezone")
+def test_missed_start_from_clamps_after_shutdown_during_startup(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    catalog = lower_source(
+        "insert_job: catchup\njob_type: c\ncommand: x\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
+    )
+    start = datetime(2026, 7, 1, 9)
+    run_root = tmp_path / "run"
+    genesis = start_run(
+        catalog,
+        run_root,
+        clock=VirtualClock(start=start),
+        adapters={"CMD": FakeAdapter()},
+        scheduler=Scheduler(catalog, start=start),
+    )
+    assert genesis.journal is not None
+    genesis.journal.close()
+
+    async def resume(stopped: bool) -> None:
+        now = datetime(2026, 7, 1, 11, 0 if stopped else 5)
+        engine = await resume_run(
+            catalog,
+            run_root,
+            clock=VirtualClock(start=now),
+            adapters={"CMD": FakeAdapter()},
+            scheduler=Scheduler(catalog, start=start),
+        )
+        if stopped:
+            stop = engine.request_stop()
+        await engine.run_until_quiescent(now)
+        if stopped:
+            assert await stop == "STOPPED"
+            assert engine.leaving_record == "shutdown_during_startup"
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
+
+    asyncio.run(resume(True))
+    assert not [r for r in read_journal(run_root) if r.get("rec") == "drop"]
+    capsys.readouterr()
+    asyncio.run(resume(False))
+    assert capsys.readouterr().err == (
+        "engine was down 2026-07-01T12:00:00 to 2026-07-01T13:05:00; "
+        "1 scheduled start was missed and will not run late\n"
+        "  catchup: 1 missed, last 2026-07-01T12:00:00\n"
+    )
 
 
 # ------------------------------------------------------------------ 6. preflight

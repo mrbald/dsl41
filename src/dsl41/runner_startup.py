@@ -60,6 +60,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from dsl41 import runner_procid as _procid
+from dsl41.display_time import format_local_at
 from dsl41.engine_charts import ENGINE_STOP, AttemptOutcome, ExitRecord
 from dsl41.ir import CatalogIR, JobIR
 from dsl41.reload_diff import catalog_hash_v2
@@ -793,7 +794,13 @@ async def _resume_under_lock(
         engine.update.resume(journal.open.update, opened=opened_update)
     # the scheduler re-anchors now, so no tick missed while down fires late; the barrier
     # records the drops with `engine started` once the catch-up is done (§6, item 4)
-    missed = _missed_ticks(engine, journal.position)
+    missed: list[tuple[Event, str]] = []
+    if scheduler is not None and journal.position.frontier is not None:
+        sweep_upto, missed = _missed_ticks(engine, journal.position)
+        # Engine records count as durable observations too (DL-476).
+        durable_at = max((record.at_utc for _, record in tail), default=last_at)
+        for line in _missed_start_lines(durable_at, sweep_upto, missed):
+            best_effort_report(line)
     engine.recovery = lambda: _record_start(engine, tail, missed)
     return engine
 
@@ -1516,13 +1523,36 @@ def _record_start(
         engine.journal.drop(tick_ev, reason)
 
 
-def _missed_ticks(engine: Engine, position: Position) -> list[tuple[Event, str]]:
+def _missed_start_lines(
+    down_from: datetime, down_to: datetime, missed: list[tuple[Event, str]]
+) -> list[str]:
+    """One total and sorted job counts; bounds include every missed tick (DL-476)."""
+    if not missed:
+        return []
+    down_from = min(down_from, min(tick.at for tick, _ in missed))
+    jobs: dict[str, tuple[int, datetime]] = {}
+    for tick, _ in missed:
+        job = tick.job()
+        assert job is not None
+        count, last = jobs.get(job, (0, tick.at))
+        jobs[job] = count + 1, max(last, tick.at)
+    starts = "1 scheduled start was" if len(missed) == 1 else f"{len(missed)} scheduled starts were"
+    return [
+        f"engine was down {format_local_at(down_from)} to {format_local_at(down_to)}; "
+        f"{starts} missed and will not run late",
+        *(
+            f"  {job}: {count} missed, last {format_local_at(last)}"
+            for job, (count, last) in sorted(jobs.items())
+        ),
+    ]
+
+
+def _missed_ticks(engine: Engine, position: Position) -> tuple[datetime, list[tuple[Event, str]]]:
     """E9: the scheduler re-anchors at its durable frontier, inclusive, and every tick between
     it and now that the records did not adjudicate is dropped, never fired late (DL-45,
     DL-166). The drops go on `engine.drops` now and into the store at the barrier."""
     scheduler = engine.scheduler
-    if scheduler is None or position.frontier is None:
-        return []
+    assert scheduler is not None and position.frontier is not None
     # always inclusive: with several jobs at one instant, a crash between the siblings' inputs
     # leaves the frontier at the tick with a sibling unrecorded
     scheduler.reset(position.frontier)
@@ -1536,4 +1566,4 @@ def _missed_ticks(engine: Engine, position: Position) -> list[tuple[Event, str]]
         tick_ev.source = "scheduler"
         missed.append((tick_ev, reason))
     engine.drops.extend(missed)  # PENDING: E9
-    return missed
+    return sweep_upto, missed
