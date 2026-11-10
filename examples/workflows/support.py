@@ -116,7 +116,7 @@ def make_properties(
 
 
 def query_status(socket_path: Path) -> dict[str, Any]:
-    response = json.loads(cli("query", "status", "--socket", str(socket_path)).stdout)
+    response = json.loads(cli("query", "status", "--json", "--socket", str(socket_path)).stdout)
     if not response.get("ok"):
         raise RuntimeError(f"status query refused: {response}")
     return response

@@ -70,7 +70,7 @@ wait_for() { # wait_for SECONDS DESCRIPTION COMMAND...
 }
 
 # the engine's status document, or one job's row of it
-status() { cli query status --socket "$SOCK" "$@"; }
+status() { cli query status --json --socket "$SOCK" "$@"; }
 job_field() { # job_field JOB JQ_PATH -- one field of the job's row, `null` when absent
     status --job "$1" | jq -c --arg job "$1" ".jobs[\$job]$2"
 }
