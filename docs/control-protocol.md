@@ -181,6 +181,16 @@ returns `pending: true`. Application has rev, catalog_hash, added, changed,
 removed, restored and stopped choices. Public replies contain no artifact key.
 Refusals include names and the existing stale/in-progress/draining codes.
 
+An equal candidate adds `unchanged: {rev, catalog_hash}` to the successful
+answer, with `decision: admitted`, `stop: []` and `application: null` (DL-478).
+Equality requires the applied catalog hash, job order, runtime profile,
+marks and reasons, captured bytes and mapping, and the live runtime profile.
+Nothing is admitted or recorded, no revision advances, and nothing stops.
+The prepared plan directory is removed when possible; cleanup errors are tolerated.
+Wait returns at once (DL-478).
+Comments, whitespace and settings edits still apply their changed capture;
+changed lowering still applies with unchanged sources (DL-468).
+
 Ordinary stopped jobs rerun as another attempt of the same run, are held when
 marked, or get no follow-up when removed. Structural box updates stop running
 members through the ordinary TERM ladder. Their KILLJOB inputs commit before

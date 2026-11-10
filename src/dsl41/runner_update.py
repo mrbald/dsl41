@@ -38,7 +38,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import shutil
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
 from datetime import datetime
@@ -129,6 +131,8 @@ class UpdateAnswer:
     application: dict[str, Any] | None = None
     #: resolved with the application's body once the update applied; None for a refusal
     applied: asyncio.Future[dict[str, Any]] | None = field(default=None, repr=False)
+    #: Equal candidate's current revision/hash, without admission (DL-478).
+    unchanged: dict[str, Any] | None = None
 
 
 def settings_of(profile: RuntimeProfile, catalog: CatalogIR) -> dict[str, object]:
@@ -389,14 +393,26 @@ class EngineUpdate:
             return self._decide(Refused(request.token, STALE_PLAN))
         from dsl41.runner_preflight import runtime_variable_preflight
 
-        candidate_profile = profile_for(opened.estate.settings, engine.profile or RuntimeProfile())
+        candidate = configuration_of(opened, engine.profile or RuntimeProfile())
         problems = runtime_variable_preflight(
-            opened.estate.catalog, job_env=candidate_profile.job_env, startup_env=engine.startup_env
+            opened.estate.catalog, job_env=candidate.profile.job_env, startup_env=engine.startup_env
         )
         if problems:
             return UpdateAnswer(
                 code="invalid_argument",
                 error=f"preflight ERROR [runtime-variable]: {problems[0].message}",
+            )
+        applied = Configuration.from_bytes(
+            engine.journal.store.get_config(engine.config_rev),
+            where=f"configuration rev {engine.config_rev}",
+        )
+        # DL-478: only equal applied inputs and live policy complete without admission.
+        if same_configuration(applied, candidate) and candidate.profile == engine.profile:
+            with suppress(OSError):
+                shutil.rmtree(engine.run_root / PLANS / request.token)
+            return UpdateAnswer(
+                Admitted(request.token, (), frozenset()),
+                unchanged={"rev": engine.config_rev, "catalog_hash": applied.catalog_hash},
             )
         decision = admission_check(
             opened.plan,
@@ -739,17 +755,7 @@ class EngineUpdate:
         assert journal is not None  # `admit` and `resume` refuse an engine with none
         # `catalog_hash` is `catalog_hash_v2` of this catalog (`plan_application`), the hash the
         # configuration row derives
-        profile = engine.profile or RuntimeProfile()
-        if self._opened.estate.metadata:
-            # History retains the admitted plan's host profile across a restart (DL-437).
-            launch = self._opened.estate.metadata["launch"]
-            profile = with_host_settings(profile, launch["as_machine"], launch["machine_policy"])
-        configuration = Configuration(
-            catalog=application.catalog,
-            profile=profile,
-            non_idempotent=dict(self._opened.marked.reasons),
-            source_capture=_source_capture(self._opened.estate),
-        )
+        configuration = configuration_of(self._opened, engine.profile or RuntimeProfile())
         store_config(journal.store, configuration, rev)
         engine.source_capture = dict(configuration.source_capture)
         engine.reread_marks = {}
@@ -848,6 +854,31 @@ def _source_capture(estate: Estate) -> dict[str, str]:
     return encoded_parts(estate) if estate.metadata else {}
 
 
+def configuration_of(opened: OpenedPlan, base: RuntimeProfile) -> Configuration:
+    """The candidate's configuration, retaining its captured host profile (DL-437, DL-478)."""
+    profile = profile_for(opened.estate.settings, base)
+    if opened.estate.metadata:
+        launch = opened.estate.metadata["launch"]
+        profile = with_host_settings(profile, launch["as_machine"], launch["machine_policy"])
+    return Configuration(
+        catalog=opened.estate.catalog,
+        profile=profile,
+        non_idempotent=dict(opened.marked.reasons),
+        source_capture=_source_capture(opened.estate),
+    )
+
+
+def same_configuration(existing: Configuration, candidate: Configuration) -> bool:
+    """Equal definitions, order, policy, marks and captured inputs (DL-468, DL-478)."""
+    return (
+        existing.catalog_hash == candidate.catalog_hash
+        and list(existing.catalog.jobs) == list(candidate.catalog.jobs)
+        and existing.profile == candidate.profile
+        and existing.non_idempotent == candidate.non_idempotent
+        and existing.source_capture == candidate.source_capture
+    )
+
+
 def store_config(store: Store, configuration: Configuration, rev: int) -> None:
     """Append the next rev, or retain equal definitions, order and inputs (DL-438, DL-468).
 
@@ -860,13 +891,7 @@ def store_config(store: Store, configuration: Configuration, rev: int) -> None:
         return
     if current == rev and rev > 0:
         existing = Configuration.from_bytes(store.get_config(rev), where=f"configuration rev {rev}")
-        if (
-            existing.catalog_hash == configuration.catalog_hash
-            and list(existing.catalog.jobs) == list(configuration.catalog.jobs)
-            and existing.profile == configuration.profile
-            and existing.non_idempotent == configuration.non_idempotent
-            and existing.source_capture == configuration.source_capture
-        ):
+        if same_configuration(existing, configuration):
             return
     raise EngineError(
         f"the store's configuration rev {current} does not match the update's configuration rev {rev}"
