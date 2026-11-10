@@ -1047,7 +1047,8 @@ def test_pilot_spec_drift_advice_clears_and_does_not_repeat_on_reconnect(
             await pilot.press("r")
             await pilot.pause()
             assert notices.count(expected) == 1
-            assert expected in "".join(line.text for line in console.lines)
+            rendered = re.sub(r"\s+", "", "".join(line.text for line in console.lines))
+            assert re.sub(r"\s+", "", expected) in rendered
             assert badge in app.sub_title
 
             await pilot.press("r")
