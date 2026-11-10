@@ -1867,6 +1867,81 @@ def test_preflight_timezone_city_name_warns_and_runs() -> None:
     assert "Europe/Zurich" in tz_items[0].message
 
 
+@pytest.mark.usefixtures("fixed_zone_names")
+@pytest.mark.parametrize(
+    ("zone", "mapping", "detail"),
+    [
+        (
+            "Zurich",
+            "LOCAL UTC",
+            "not in the supplied --timezone-map; without a map it would be Europe/Zurich;"
+            " add the line: Zurich Europe/Zurich",
+        ),
+        (
+            "X",
+            "LOCAL UTC",
+            "not in the supplied --timezone-map; without a map it would be ambiguous (A/X, B/X);"
+            " add the line: X <zone> for the right one",
+        ),
+        (
+            "Not/AZone",
+            "LOCAL UTC",
+            "not a zoneinfo name and not in the supplied --timezone-map",
+        ),
+        (
+            "ZURICH",
+            "Zurich Not/AZone",
+            "not resolved through the supplied --timezone-map;"
+            " entry 'ZURICH' -> 'Not/AZone' does not resolve",
+        ),
+        (
+            "Local-Zone",
+            "LOCAL_ZONE Other\nOther Local-Zone",
+            "not resolved through the supplied --timezone-map;"
+            " entry 'Local-Zone' -> 'Other' does not resolve",
+        ),
+        (
+            "Local-Zone",
+            "local_zone A1\nA1 A2\nA2 A3\nA3 A4\nA4 A5\nA5 UTC",
+            "not resolved through the supplied --timezone-map;"
+            " entry 'Local-Zone' -> 'A1' does not resolve",
+        ),
+        (
+            "Local",
+            "Local Zurich",
+            "not resolved through the supplied --timezone-map;"
+            " entry 'Local' -> 'Zurich' does not resolve",
+        ),
+    ],
+    ids=[
+        "unique-city",
+        "ambiguous-city",
+        "unknown",
+        "unknown-target",
+        "cycle",
+        "chain-limit",
+        "city-target",
+    ],
+)
+def test_preflight_timezone_map_refusal_text(zone: str, mapping: str, detail: str) -> None:
+    catalog = lower_source(
+        "insert_job: tzm\njob_type: c\ncommand: x\nmachine: localhost\n"
+        f'date_conditions: 1\nstart_times: "08:00"\ntimezone: {zone}\n'
+    )
+    items = preflight(
+        catalog,
+        execution=False,
+        start=datetime(2026, 7, 1),
+        tz_aliases=parse_timezone_map(mapping),
+        timezone_map_source="--timezone-map",
+    )
+    tz_items = [item for item in items if item.code == "timezone"]
+    assert len(tz_items) == 1
+    assert tz_items[0].severity == "ERROR"
+    assert tz_items[0].job == "tzm"
+    assert tz_items[0].message == f"timezone {zone!r} is not resolvable: {detail}"
+
+
 def test_preflight_timezone_map_is_estate_truth() -> None:
     """(DL-62): a supplied listing resolves its entries silently and turns
     the city default OFF -- a name missing from it is an ERROR naming the

@@ -908,6 +908,11 @@ def test_city_timezone_resolution(
     monkeypatch.setattr(cli_run, "_serve_run", serve)
     result = CliRunner().invoke(app, args)
     assert f"{message} {map_source}" in result.output
+    if map_state == "missing-name":
+        assert (
+            f"timezone 'Zurich' is not resolvable: not in the supplied {map_source};"
+            " without a map it would be Europe/Zurich; add the line: Zurich Europe/Zurich"
+        ) in result.output
     if source != "flags":
         assert "--timezone-map" not in result.output
     if zone not in {"Zurich", "Indianapolis"} or map_state == "missing-name":
@@ -964,6 +969,11 @@ def test_reload_timezone_message_source(
     items = [item for item in reload_plan.preflight_items(estate, T0) if item.code == "timezone"]
     assert len(items) == 1
     assert f"{message} {map_source}" in items[0].message
+    if supplied_map:
+        assert items[0].message == (
+            f"timezone 'Zurich' is not resolvable: not in the supplied {map_source};"
+            " without a map it would be Europe/Zurich; add the line: Zurich Europe/Zurich"
+        )
     assert "--timezone-map" not in items[0].message
     if zone == "Indianapolis":
         assert items[0].severity == "WARN"

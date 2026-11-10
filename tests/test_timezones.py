@@ -23,6 +23,7 @@ from dsl41.timezones import (
     dst_change,
     dst_change_near,
     dst_windows,
+    map_entry,
     must_instant,
     parse_timezone_map,
     resolve_timezone,
@@ -35,6 +36,14 @@ from dsl41.timezones import (
     window_span,
     window_spans_near,
 )
+
+
+def test_map_entry_uses_the_resolver_fold_without_resolving() -> None:
+    aliases = parse_timezone_map("Local-Zone Zurich\nLoop Loop\n")
+    assert map_entry("LOCAL_zone", aliases) == "Zurich"
+    assert map_entry("loop", aliases) == "Loop"
+    assert map_entry("missing", aliases) is None
+    assert map_entry("LOCAL-zone", {}) is None
 
 
 def test_resolve_timezone_posix_offsets_are_west_positive() -> None:

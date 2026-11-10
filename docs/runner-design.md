@@ -880,6 +880,9 @@ ERROR:
   city match (a unique match resolves with a WARN, not an ERROR). The
   message names the applicable remedy (`autotimezone -l` via
   `--timezone-map`; the full zone name for an ambiguous city).
+  For a name missing from a supplied map, the message names the zone the city
+  default would pick and the line to add; for an ambiguous city it lists the
+  candidates instead.
 - `resources:` that requires a resource with no `insert_resource` in the
   set, or with no parseable `amount` — an unsized semaphore cannot be
   honored (DL-50: fail-closed, stricter than L016's warn). A

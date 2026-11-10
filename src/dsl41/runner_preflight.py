@@ -46,7 +46,7 @@ from dsl41.runner_config import MachinePolicy as _MachinePolicy
 from dsl41.oracle_state import OracleError
 from dsl41.runner_scheduler import _DAY_CODES
 from dsl41.semantics import SemanticSwitches
-from dsl41.timezones import city_candidates, resolve_timezone, to_local
+from dsl41.timezones import city_candidates, map_entry, resolve_timezone, to_local
 
 
 # ------------------------------------------------------------------ preflight (ss8)
@@ -581,7 +581,24 @@ def _timezone_preflight(
     tz_res = resolve_timezone(sched.timezone, tz_aliases)
     if tz_res is None:
         if tz_aliases is not None:
-            detail = f"not a zoneinfo name and not in the supplied {timezone_map_source}"
+            if (target := map_entry(sched.timezone, tz_aliases)) is not None:
+                detail = (
+                    f"not resolved through the supplied {timezone_map_source};"
+                    f" entry {sched.timezone!r} -> {target!r} does not resolve"
+                )
+            elif len(candidates := city_candidates(sched.timezone)) == 1:
+                detail = (
+                    f"not in the supplied {timezone_map_source}; without a map it would be"
+                    f" {candidates[0]}; add the line: {sched.timezone} {candidates[0]}"
+                )
+            elif candidates:
+                detail = (
+                    f"not in the supplied {timezone_map_source}; without a map it would be"
+                    f" ambiguous ({', '.join(candidates)}); add the line:"
+                    f" {sched.timezone} <zone> for the right one"
+                )
+            else:
+                detail = f"not a zoneinfo name and not in the supplied {timezone_map_source}"
         elif len(candidates := city_candidates(sched.timezone)) > 1:
             detail = (
                 f"ambiguous city name ({', '.join(candidates)}); use the full"

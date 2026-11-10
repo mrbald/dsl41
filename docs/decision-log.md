@@ -26195,3 +26195,19 @@ relitigate an entry; append a new one.
   sources still apply (DL-468). After a restart that applied changed host settings or
   kill signals from disk, the next update applies once. An older client prints
   `admitted: update; stopping: none` for the same answer.
+
+- DL-479 The refusal for a timezone missing from a supplied map says what to add
+  (2026-11-10; owner ruling "Case B - agree with your proposal"; runner_preflight.py,
+  timezones.py, runner-design §8)
+  THE RULE. A name that is missing from a supplied timezone map stays a preflight ERROR:
+  DL-62 stands and the city default stays off under a map. Only the detail changes. When
+  the city default would pick one zone, the detail names it and gives the line to add,
+  `NAME ZONE`. When the city would be ambiguous, it lists the candidates. A name that
+  matches no city keeps its text. A name that is in the map but whose entry does not
+  resolve gets its own detail, `entry 'NAME' -> 'TARGET' does not resolve`. Severities,
+  codes, exit statuses and what is refused do not change. `timezones.py` stays the only
+  owner of the name fold (DL-163), through the public `map_entry`.
+  THE REASON. A supplied listing is the instance's whole table, and the vendor fails a
+  name that is missing from it; falling back to the city would schedule a job the vendor
+  refuses. The old text was one sentence for two situations and false for a broken entry.
+  THE LIMIT. The refusal for the estate's own default timezone keeps its shorter text.

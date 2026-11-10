@@ -46,6 +46,11 @@ def _tz_fold(name: str) -> str:
     return name.casefold().replace("-", "_")
 
 
+def map_entry(name: str, aliases: Mapping[str, str]) -> str | None:
+    """Return the map target using the resolver's name fold (DL-163)."""
+    return aliases.get(_tz_fold(name))
+
+
 def _zone_bytes(name: str) -> bytes | None:
     """Read zone data in ZoneInfo's search order; unreadable data stays distinct (DL-477)."""
     for root in zoneinfo.TZPATH:
