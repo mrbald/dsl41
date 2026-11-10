@@ -26105,3 +26105,21 @@ relitigate an entry; append a new one.
   and gives no hand-restore recipe or blanket hold-and-release loop.
   THE BOUNDARY. Engine behavior, state and format versions, queries, subtitle badge and
   pending-source start line stay unchanged. Restart keeps the applied revision (DL-468).
+
+- DL-475 Preparation failures carry a bounded tail of the worker's error output
+  (2026-11-10; BUG-47; runner_control.py, reread_worker.py)
+  THE RULE. When the engine itself reports a failed reread or update preparation (a
+  non-zero worker exit, the deadline, an invalid result), the failure text carries the
+  last 8192 bytes of the worker's error output. A longer output is marked as cut and
+  invalid UTF-8 is replaced. A refusal the worker reports in its own answer is unchanged,
+  and so is a successful answer. No answer shape, code or exit status changes (DL-463).
+  The engine owns the pipe, reads it as the worker writes, and after reaping takes only
+  what is already in the pipe: it never waits for a descendant that still holds it. A
+  failure to create the pipe is a refused preparation. The deadline, terminate, grace,
+  kill and reap steps are unchanged.
+  THE REASON. A worker that failed left only its exit code. The engine owns the pipe
+  because on Python 3.12 waiting for a child also waits for every holder of a pipe that
+  asyncio owns, so a descendant could stall the handler.
+  THE LIMIT. The worker's descendants inherit this pipe instead of the null device. One
+  that outlives the worker and writes to it after the engine closed its end gets EPIPE
+  or SIGPIPE.

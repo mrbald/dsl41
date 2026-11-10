@@ -476,3 +476,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-472 | Reuse document owners and keep transient reports outside checkouts | [docs/writing.md](writing.md) |
 | DL-473 | Full host-local timestamps in the TUI and query status | [README.md](../README.md), [docs/deploy.md](deploy.md), [docs/runner-design.md](runner-design.md) |
 | DL-474 | Upgrade advice preserves the run root | [docs/deploy.md](deploy.md) |
+| DL-475 | Preparation failures carry a bounded tail of the worker's error output |  |
