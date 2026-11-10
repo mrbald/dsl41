@@ -860,6 +860,7 @@ def test_11_cli_modes_and_rehearsal_root(tmp_path: Path, monkeypatch: pytest.Mon
         ("Not/AZone", "absent", "listing in via"),
     ],
 )
+@pytest.mark.usefixtures("fixed_zone_names")
 def test_city_timezone_resolution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -915,6 +916,7 @@ def test_city_timezone_resolution(
         assert result.exit_code == 0, result.output
         assert "preflight WARN [timezone] A" in result.output
         assert "timezone 'Zurich' assumed to be Europe/Zurich" in result.output
+        assert "unique zoneinfo city match, DL-62" in result.output
         assert served == ([True] if command == "run" else [])
         if command == "rehearse":
             trace = json.loads(result.stdout)["trace"]
@@ -932,6 +934,7 @@ def test_city_timezone_resolution(
         ("Not/AZone", False, "listing in via"),
     ],
 )
+@pytest.mark.usefixtures("fixed_zone_names")
 def test_reload_timezone_message_source(
     tmp_path: Path, source: str, zone: str, supplied_map: bool, message: str
 ) -> None:

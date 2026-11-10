@@ -205,6 +205,7 @@ def test_dst_fall_back_ambiguous_time_fires_at_its_first_occurrence() -> None:
     assert sched.next_occurrence() == datetime(2026, 11, 1, 5, 30)
 
 
+@pytest.mark.usefixtures("fixed_zone_names")
 def test_timezone_city_name_resolves_via_the_unique_iana_match() -> None:
     """(SEM-35/DL-62): a vendor city name (`timezone: Zurich`, a
     ujo_timezones City entry) with no --timezone-map resolves to the unique
@@ -219,6 +220,7 @@ def test_timezone_city_name_resolves_via_the_unique_iana_match() -> None:
     assert sched.next_occurrence() == datetime(2026, 7, 6, 7, 0)
 
 
+@pytest.mark.usefixtures("fixed_zone_names")
 def test_timezone_names_are_case_insensitive() -> None:
     """(SEM-35, TechDocs: 'not case-sensitive'): america/new_york reads
     like America/New_York."""
@@ -1518,6 +1520,7 @@ def test_preflight_timezone_clean_for_a_real_zone_or_unset() -> None:
     assert not any(i.code == "timezone" for i in items)
 
 
+@pytest.mark.usefixtures("fixed_zone_names")
 def test_preflight_timezone_city_name_warns_and_runs() -> None:
     """(SEM-35/DL-62): with no --timezone-map a vendor city name resolves
     through the unique zoneinfo city match -- a WARN (the assumption is
