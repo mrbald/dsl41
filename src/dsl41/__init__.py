@@ -48,9 +48,10 @@ docs/runner-design.md ss14):
                replay
   runner_scheduler - the ss5 calendar scheduler, turning its ticks into UTC
                instants through the shared timezone module
-  timezones - SEM-35 name resolution and the one naive-UTC <-> local
+  timezones - SEM-35 name resolution and the one scheduling naive-UTC <-> local
                conversion; phase-free, imports nothing from dsl41 (DL-163)
   runner_preflight - the ss8 ERROR/WARN item model and its rules
+  display_time - host-local CLI/TUI timestamps; wire and engine time stay UTC (DL-473)
   runner_tui - the ss11 Textual TUI, a client of the control socket only
                (optional `dsl41[ui]` extra)
   runner_wrapper - per-run Tier-0 lifecycle recorder; STDLIB-ONLY, spawned

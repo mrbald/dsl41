@@ -76,7 +76,7 @@ def drill(dsl41: str, root: Path, config: Path, inputs: Path, night: Path, state
         return command("sudo", "-u", "dsl41", "-H", dsl41, *args)
 
     def status():
-        return json.loads(cli("query", "status", "--socket", socket))
+        return json.loads(cli("query", "status", "--json", "--socket", socket))
 
     def event(verb: str, job: str):
         cli("sendevent", verb, "--job", job, "--socket", socket)
@@ -91,7 +91,7 @@ def drill(dsl41: str, root: Path, config: Path, inputs: Path, night: Path, state
 
         def running():
             result = subprocess.run(
-                ["sudo", "-u", "dsl41", dsl41, "query", "status", "--socket", socket],
+                ["sudo", "-u", "dsl41", dsl41, "query", "status", "--json", "--socket", socket],
                 capture_output=True,
                 text=True,
                 timeout=10,

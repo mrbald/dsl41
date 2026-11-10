@@ -408,11 +408,17 @@ The hook protocol is `v=1`. Every key appears in every payload, null where it do
 apply, including both alarm flags.
 
 ```sh
-/opt/dsl41/releases/<version>/bin/dsl41 query status \
+/opt/dsl41/releases/<version>/bin/dsl41 query status --json \
   --socket /srv/dsl41/runs/nightbank/control.sock
 ```
 
-The command prints JSON. `engine` reports the engine state, including
+The command prints complete UTC JSON. Omit `--json` for text with full local
+timestamps (`YYYY-MM-DDTHH:MM:SS`). Local means the host running the CLI or
+TUI; a served TUI uses the server host, not the browser timezone. A container
+with no zone database shows UTC. Install zone data and configure the host
+timezone before relying on local display (DL-473).
+
+`engine` reports the engine state, including
 STARTING during restart catch-up and DRAINING during a stop.
 `jobs` contains job status and revisions. An unsettled command can have an
 `attempt` block; a held interruption has `interrupted` evidence.

@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import sys
 import time
 from datetime import datetime, timedelta
@@ -991,7 +992,7 @@ class _TraceReplies:
 
 
 @contextlib.asynccontextmanager
-async def _trace_poll_app(short_root: Path):
+async def _trace_poll_app(short_root: Path, *, size: tuple[int, int] = (160, 40)):
     """Mount the real widgets, with polling driven only by each test's r key."""
     replies = _TraceReplies()
     app = RunnerApp(short_root / "control.sock")
@@ -1010,7 +1011,7 @@ async def _trace_poll_app(short_root: Path):
         return timer
 
     app.set_interval = controlled_interval
-    async with app.run_test(size=(160, 40)) as pilot:
+    async with app.run_test(size=size) as pilot:
         await _wait_for_ui(pilot, lambda: app._trace_seq == 2)
         yield app, pilot, replies
 
@@ -2005,6 +2006,94 @@ def test_pilot_log_tail_open_fault_dedupes_even_while_stat_keeps_succeeding(
 # -------------------- 6. DL-68 triggers view (t: due-ordered timers + armed latch)
 
 
+def test_pilot_header_reads_all_19_characters_at_80_columns(
+    short_root: Path, monkeypatch, local_timezone
+) -> None:
+    import dsl41.runner_tui as tui
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 7, 1, 23, 30, 45, tzinfo=tz)
+
+    monkeypatch.setattr(tui, "datetime", FrozenDateTime)
+
+    async def scenario() -> None:
+        async with _trace_poll_app(short_root, size=(80, 24)) as (app, pilot, _):
+            clock = app.query_one(tui._LocalHeaderClock)
+            for width in (80, 120, 80):
+                await pilot.resize_terminal(width, 24)
+                await pilot.pause()
+                assert clock.content_size.width == 19
+                assert clock.region.right <= width
+                assert "2026-07-02T01:30:45" in clock.render_line(0).text
+
+    asyncio.run(scenario())
+
+
+def test_pilot_local_times_in_table_trace_details_and_triggers(
+    short_root: Path, local_timezone
+) -> None:
+    async def scenario() -> None:
+        async with _trace_poll_app(short_root, size=(240, 50)) as (app, pilot, replies):
+            row = {
+                "status": "SUCCESS",
+                "status_at": "2026-07-01T23:30:00",
+                "pending_timers": [{"due": "2026-01-01T23:45:00", "kind": "schedule"}],
+            }
+            replies.status["jobs"] = {"trace_job": row}
+            cause = "trace since the snapshot at 2026-07-01T23:30:00; `dsl41 runs` has the history"
+            replies.trace.update(
+                last_seq=3,
+                entries=[
+                    {"seq": 3, "at": "2026-07-01T23:30:00", "transition": "RESTART", "cause": cause}
+                ],
+            )
+            request = replies.request
+
+            async def answer(query):
+                if query["cmd"] == "spec":
+                    return {"ok": True, "text": "insert_job: trace_job\n"}
+                if query["cmd"] == "deps":
+                    return {"ok": True}
+                if query["cmd"] == "timers":
+                    return {
+                        "ok": True,
+                        "timers": [{"job": "trace_job", **row["pending_timers"][0]}],
+                    }
+                return await request(query)
+
+            app._client.request = answer
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: app._trace_seq == 3)
+            table = app.query_one("#jobs", DataTable)
+            assert table.get_cell("trace_job", "at") == "2026-07-02T01:30:00"
+            assert table.columns[next(k for k in table.columns if k.value == "at")].width == 19
+            assert table.get_cell("trace_job", "timers") == "schedule@2026-01-02T00:45:00"
+            await pilot.pause()
+            console = app.query_one("#console", RichLog)
+            rendered = re.sub(r"\s+", "", "".join(line.text for line in console.lines))
+            assert "2026-07-02T01:30:00" in rendered
+            assert re.sub(r"\s+", "", cause) in rendered
+            table.focus()
+            await pilot.press("d")
+            await _wait_for_ui(pilot, lambda: isinstance(app.screen, SpecScreen))
+            body = str(app.screen.query_one("#specbox Static", Static).content)
+            assert "at 2026-07-02T01:30:00" in body
+            assert "next: schedule @ 2026-01-02T00:45:00" in body
+            assert "  schedule @ 2026-01-02T00:45:00" in body
+            await pilot.press("escape")
+            await _wait_for_ui(pilot, lambda: not isinstance(app.screen, SpecScreen))
+            await pilot.press("t")
+            await _wait_for_ui(pilot, lambda: isinstance(app.screen, TriggersScreen))
+            triggers = app.screen.query_one("#trigbox", DataTable)
+            await _wait_for_ui(pilot, lambda: triggers.row_count == 1)
+            assert triggers.get_row_at(0)[0] == "2026-01-02T00:45:00"
+            await pilot.press("escape")
+
+    asyncio.run(scenario())
+
+
 def test_format_countdown_humanizes_each_magnitude_and_dashes_overdue() -> None:
     now = datetime(2026, 8, 9, 12, 0, 0)
     assert format_countdown(now + timedelta(seconds=42), now) == "42s"
@@ -2028,11 +2117,13 @@ def test_format_countdown_pins_exact_unit_boundaries() -> None:
     assert format_countdown(now + timedelta(hours=24), now) == "1d00h"
 
 
-def test_assemble_trigger_rows_dated_stable_then_filewatch_then_armed_sorted() -> None:
+def test_assemble_trigger_rows_dated_stable_then_filewatch_then_armed_sorted(
+    local_timezone,
+) -> None:
     """The server's due order carries through untouched; a due-less filewatch
     row renders generically below the dated rows; armed jobs (from the status
-    snapshot, not the timers verb) append last, name-sorted; today's dues are
-    time-only, tomorrow's carry the date."""
+    snapshot, not the timers verb) append last, name-sorted. Dues use full
+    host-local timestamps (DL-473)."""
     timers = [
         {"due": "2026-08-09T12:30:00", "job": "tv_sched", "kind": "schedule"},
         {"due": "2026-08-10T01:00:00", "job": "tv_late", "kind": "must_start"},
@@ -2045,8 +2136,8 @@ def test_assemble_trigger_rows_dated_stable_then_filewatch_then_armed_sorted() -
     }
     now = datetime(2026, 8, 9, 12, 0, 0)
     assert assemble_trigger_rows(timers, jobs, now) == [
-        ("12:30:00", "30m00s", "tv_sched", "schedule", ""),
-        ("2026-08-10 01:00:00", "13h00m", "tv_late", "must_start", ""),
+        ("2026-08-09T14:30:00", "30m00s", "tv_sched", "schedule", ""),
+        ("2026-08-10T03:00:00", "13h00m", "tv_late", "must_start", ""),
         ("-", "watching", "tv_watch", "filewatch", "/data/in.csv"),
         ("-", "-", "tv_a_armed", "armed", "waiting on next condition edge"),
         ("-", "-", "tv_b_armed", "armed", "waiting on next condition edge"),
@@ -2073,16 +2164,18 @@ def test_assemble_trigger_rows_preserves_input_order_for_equal_due_times() -> No
     assert [r[2] for r in rows] == ["tv_z", "tv_a"]
 
 
-def test_assemble_trigger_rows_malformed_due_string_falls_back_to_undated() -> None:
+def test_assemble_trigger_rows_malformed_due_string_is_explicit(local_timezone) -> None:
     """A `due` that fails datetime.fromisoformat (server/client version
     skew, a hand-typed test fixture) must not crash the TUI renderer -- it
-    degrades to a due-less row exactly like a missing key."""
+    names the invalid timestamp rather than hiding it (DL-473)."""
     timers = [{"due": "not-a-timestamp", "job": "tv_bad", "kind": "schedule"}]
     now = datetime(2026, 8, 9, 12, 0, 0)
-    assert assemble_trigger_rows(timers, {}, now) == [("-", "-", "tv_bad", "schedule", "")]
+    assert assemble_trigger_rows(timers, {}, now) == [
+        ("invalid timestamp: 'not-a-timestamp'", "-", "tv_bad", "schedule", "")
+    ]
 
 
-def test_assemble_detail_trigger_lines_full_story_in_spec_order() -> None:
+def test_assemble_detail_trigger_lines_full_story_in_spec_order(local_timezone) -> None:
     """DL-68 popup trigger story, pure assembly: started by, armed, a live
     watch (min_size only when set), the earliest dated timer for THIS job
     (other jobs' entries and due-less rows ignored), then one indented line
@@ -2106,10 +2199,10 @@ def test_assemble_detail_trigger_lines_full_story_in_spec_order() -> None:
         "started by: sendevent STARTJOB (operator)",
         "armed: waiting on next condition edge",
         "watching /data/in.csv every 30s, min_size 1024",
-        "next: term_run_time @ 2026-08-09 12:45:00Z",
+        "next: term_run_time @ 2026-08-09T14:45:00",
         "pending timers:",
-        "  term_run_time @ 12:45:00",
-        "  must_complete @ 12:50:00",
+        "  term_run_time @ 2026-08-09T14:45:00",
+        "  must_complete @ 2026-08-09T14:50:00",
     ]
 
 

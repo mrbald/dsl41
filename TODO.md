@@ -10,7 +10,6 @@ Found in the RPM pilot (dsl41 plus JIL files).
 - **BLK-3**: After an RPM reinstall, the UI reports problems with the run root.
 - **BLK-4**: The UI routinely reports "START_REFUSED [already RUNNING -- concurrent or repeated start request, no effect (STARTJOB event (scheduler))]".
 - **BLK-5**: On startup the UI reports "dropped STARTJOB xxxxx @ YMDHMS: scheduler tick missed while the engine was down; not fired late".
-- **BLK-6**: Show every "at" time in the UI and in `query status` as a full local timestamp, `YYYY-MM-DDTHH:MM:SS`.
 
 ## Known bugs
 

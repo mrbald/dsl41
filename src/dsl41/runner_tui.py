@@ -59,17 +59,17 @@ Contract detail for DL-46, within DL-41's frame:
   answered with the same sorted list (DL-187 item 7).
 - Triggers view (`t`, DL-68): "what fires next". It re-queries the ss10 `timers` verb (pending
   oracle timers merged with each scheduled job's next calendar tick, due-ordered by the server)
-  every 2s while open, each row with an absolute UTC due and a countdown. Armed jobs (the SEM-32
-  latch from `status`) append below every dated row with no due: the next condition edge starts
-  them. Due-less rows render generically. It is read-only: every operator verb is shadowed to the
-  bell (DL-67) and `t`/`q`/escape close. The jobs table's flags column carries `A` for the same
-  latch. An ok:false `timers` answer leaves the rows as they were, names the refusal on the
-  border title and marks the app subtitle as a status or trace refusal does (DL-187 item 6).
+  every 2s while open, each row with a full host-local due (DL-473) and a countdown. Armed jobs
+  (the SEM-32 latch from `status`) append below every dated row with no due: the next condition
+  edge starts them. Due-less rows render generically. It is read-only: every operator verb is
+  shadowed to the bell (DL-67) and `t`/`q`/escape close. The jobs table's flags column carries
+  `A` for the same latch. An ok:false `timers` answer leaves the rows as they were, names the
+  refusal on the border title and marks the app subtitle as a status or trace refusal does
+  (DL-187 item 6).
 - Job details popup (`d` or Enter on a row): the ss10 `spec` verb's preserve-rendered JIL block
   (the post-placeholder source this engine loaded), topped with the status facts, the `deps`
   verb's needs/blocks lines (the blast radius, DL-65) and a short local log tail. The header
-  clock is UTC, matching the engine's naive-UTC basis (ss9): every timestamp on screen is one
-  time base, not the viewer's local wall (DL-64).
+  clock and owned timestamps use the host's local time as YYYY-MM-DDTHH:MM:SS (DL-473).
 - Navigation at estate scale (DL-65): the jobs table renders the box tree (indent from the status
   response's box_name; space folds the selected box, `z` folds or unfolds all; a folded box shows
   its hidden descendant count and a red problem tally, so a fold never hides a FAILURE). `/` opens
@@ -129,6 +129,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover -- exercised via CLI guar
         "the dsl41 TUI needs the optional [ui] extra: pip install 'dsl41[ui]'"
     ) from exc
 
+from dsl41.display_time import format_local_at
 from dsl41.runner_admission import addressed_key
 from dsl41.runner_clock import EngineError
 from dsl41.runner_control import (
@@ -181,7 +182,7 @@ _COLUMNS = ("job", "status", "attempt", "at", "run", "exit", "flags", "timers", 
 _COLUMN_WIDTHS = {
     "status": 10,
     "attempt": ATTEMPT_NOTE_WIDTH,
-    "at": 8,
+    "at": 19,
     "run": 4,
     "exit": 4,
     "flags": 5,
@@ -270,21 +271,24 @@ class _TableSync:
             self.sigs[i] = sigs
 
 
-class _UTCHeaderClock(HeaderClock):
-    """The engine's time basis is naive UTC (runner ss9) and every timestamp on screen is UTC, so
-    the header clock is UTC, not the stock local wall time (DL-64)."""
+class _LocalHeaderClock(HeaderClock):
+    """Full host-local time, with 19 content columns even at 80 columns (DL-473)."""
+
+    DEFAULT_CSS = """
+    _LocalHeaderClock { width: 21; }
+    """
 
     def render(self) -> RenderResult:
-        return Text(datetime.now(UTC).strftime("%H:%M:%S") + " UTC")
+        return Text(format_local_at(datetime.now(UTC)))
 
 
-class _UTCHeader(Header):
-    """Stock Header with the UTC clock."""
+class _LocalHeader(Header):
+    """Stock Header with the full host-local clock (DL-473)."""
 
     def compose(self) -> ComposeResult:
         yield HeaderIcon().data_bind(Header.icon)
         yield HeaderTitle()
-        yield _UTCHeaderClock()
+        yield _LocalHeaderClock()
 
 
 #: spliced into every modal's BINDINGS (DL-187 item 7): a modal chain blocks app bindings
@@ -408,13 +412,6 @@ class ConfirmScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
-def format_due(due: datetime, now: datetime) -> str:
-    """Absolute UTC due: HH:MM:SS today, date and time otherwise (naive-UTC datetimes)."""
-    if due.date() == now.date():
-        return due.strftime("%H:%M:%S")
-    return due.strftime("%Y-%m-%d %H:%M:%S")
-
-
 def format_countdown(due: datetime, now: datetime) -> str:
     """Humanized time-to-due ("42s", "3m12s", "2h05m", "1d03h"); "-" once due or overdue."""
     total = int((due - now).total_seconds())
@@ -430,11 +427,6 @@ def format_countdown(due: datetime, now: datetime) -> str:
     if minutes:
         return f"{minutes}m{seconds:02d}s"
     return f"{seconds}s"
-
-
-def clock_of(iso: str) -> str:
-    """HH:MM:SS out of an ISO datetime string, or the string itself when too short (DL-178h)."""
-    return iso[11:19] if len(iso) >= 19 else iso
 
 
 def assemble_trigger_rows(
@@ -458,9 +450,17 @@ def assemble_trigger_rows(
             except ValueError:
                 due = None
         if due is not None:
-            dated.append((format_due(due, now), format_countdown(due, now), job, kind, detail))
+            dated.append((format_local_at(due), format_countdown(due, now), job, kind, detail))
         else:
-            undated.append(("-", "watching" if kind == "filewatch" else "-", job, kind, detail))
+            undated.append(
+                (
+                    format_local_at(entry.get("due")),
+                    "watching" if kind == "filewatch" else "-",
+                    job,
+                    kind,
+                    detail,
+                )
+            )
     armed = [
         ("-", "-", name, "armed", "waiting on next condition edge")
         for name in sorted(jobs)
@@ -490,21 +490,12 @@ def assemble_detail_trigger_lines(
     dated = [e for e in timers if e.get("job") == job and isinstance(e.get("due"), str)]
     if dated:
         first = min(dated, key=lambda e: str(e["due"]))
-        try:
-            due = datetime.fromisoformat(str(first["due"]))
-        except ValueError:
-            due = None
-        if due is not None:
-            lines.append(f"next: {first.get('kind', '?')} @ {due:%Y-%m-%d %H:%M:%S}Z")
+        lines.append(f"next: {first.get('kind', '?')} @ {format_local_at(first['due'])}")
     pending = [e for e in row.get("pending_timers") or [] if isinstance(e.get("due"), str)]
     if pending:
         lines.append("pending timers:")
         for entry in pending:
-            try:
-                at = datetime.fromisoformat(str(entry["due"]))
-            except ValueError:
-                continue
-            lines.append(f"  {entry.get('kind', '?')} @ {at:%H:%M:%S}")
+            lines.append(f"  {entry.get('kind', '?')} @ {format_local_at(entry['due'])}")
     return lines
 
 
@@ -1309,7 +1300,7 @@ class RunnerApp(App[None]):
     # ------------------------------------------------------------- layout
 
     def compose(self) -> ComposeResult:
-        yield _UTCHeader()
+        yield _LocalHeader()
         with Horizontal(id="main"):
             with Vertical(id="tablecol"):
                 yield _FilterInput(
@@ -1506,8 +1497,7 @@ class RunnerApp(App[None]):
             job = str(entry.get("job", ""))
             if transition in _ALARM_TRANSITIONS:
                 self._alarms[job] = self._alarms.get(job, 0) + 1
-            at = str(entry.get("at", ""))
-            clock = clock_of(at)
+            clock = format_local_at(entry.get("at"))
             if transition in _ALARM_TRANSITIONS or transition == VIOLATION_MARKER:
                 # an older build's broken declared transition alerts like an alarm
                 style = "bold red"
@@ -1665,7 +1655,6 @@ class RunnerApp(App[None]):
 
     def _row_cells(self, name: str, row: dict[str, Any]) -> list[Any]:
         status = str(row.get("status", ""))
-        at = str(row.get("status_at") or "")
         # IHNA order: operator flags are set states and the armed latch comes last. The payload's
         # owner holds the alphabet (DL-145), so `--brief` and this cell agree
         flags = "".join(mark for mark, flag in STATUS_FLAG_MARKS if row.get(flag))
@@ -1673,8 +1662,7 @@ class RunnerApp(App[None]):
         timer_text = ""
         if timers:
             first = timers[0]
-            due = str(first.get("due", ""))
-            clock = clock_of(due)
+            clock = format_local_at(first.get("due"))
             timer_text = f"{first.get('kind', '?')}@{clock}"
             if len(timers) > 1:
                 timer_text += f" +{len(timers) - 1}"
@@ -1684,7 +1672,7 @@ class RunnerApp(App[None]):
             name,
             Text(status + reread_note(row), style=_STATUS_STYLE.get(status, "")),
             attempt_note(row),  # DL-426: beside the status, empty for a first attempt running
-            clock_of(at),
+            format_local_at(row.get("status_at")),
             str(row.get("run_number", "")),
             "" if exit_code is None else str(exit_code),
             flags,
@@ -1874,7 +1862,7 @@ class RunnerApp(App[None]):
             body.append(
                 f"  run {row.get('run_number', 0)}"
                 f"  exit {'-' if exit_code is None else exit_code}"
-                f"  at {row.get('status_at') or '-'} UTC\n"
+                f"  at {format_local_at(row.get('status_at'))}\n"
             )
             # DL-68 trigger lines
             timer_entries = timers.get("timers", []) if timers.get("ok") else []

@@ -73,7 +73,7 @@ preserve and which checks can refuse a restart.
 
 1. Read the job's JSON:
    ```sh
-   "$DSL41" query status -S "$S" --job NAME
+   "$DSL41" query status --json -S "$S" --job NAME
    ```
 
 The engine prints full status names, not two-letter codes. Use the
@@ -83,7 +83,7 @@ live and terminal jobs. `SUCCESS` can also follow an operator's
 `CHANGE_STATUS` or a noexec bypass; it does not alone prove a command ran.
 
 The `--brief` line: `name  status  status_at  run N  exit N  rev N  FLAGS`.
-Its status label can include attempt or cleanup notes. Use JSON for evidence.
+Its status label can include attempt or cleanup notes. Use `query status --json` for evidence.
 `status_at` and `exit` use `-` when absent.
 Flags: `I` means `on_ice`, `H` `on_hold`, `N` `on_noexec`, `A` `armed`; they join without separators, and a job with none has no flags cell.
 
@@ -114,7 +114,8 @@ event as a positional argument. The supported events are listed in
 exit code. In SET_GLOBAL, `NAME` names the global to set.
 For KILLJOB, `-k LIST` selects an ordered list of numeric signals ending in 9.
 
-`query status` prints JSON; `--brief` prints one line per job. Exit 0 means
+`query status` prints every field as text with full host-local timestamps;
+`--json` keeps complete UTC JSON. `--brief` prints one line per job. Exit 0 means
 an answer, not job success. The predicates print the current status and exit
 0 on a match or 1 otherwise. `is-failed` matches FAILURE or TERMINATED.
 Queries exit 2 on an error. `runs` reads run-root files only; it needs no
@@ -237,7 +238,7 @@ use the intervention below only after correcting the application's fault.
 1. Read the job's full status, including attempt and interruption evidence:
 
    ```sh
-   "$DSL41" query status -S "$S" --job NAME
+   "$DSL41" query status --json -S "$S" --job NAME
    ```
 
 2. Read its stored run history:
@@ -279,7 +280,7 @@ For `SET_GLOBAL`, use `-G KEY=value` instead of `-J NAME`; read `REV` with `"$DS
    ```
 2. Read back the effect; for `SET_GLOBAL`, repeat the global query above instead:
    ```sh
-   "$DSL41" query status -S "$S" --job NAME
+   "$DSL41" query status --json -S "$S" --job NAME
    ```
 
 | Exit | Meaning and next action |
@@ -357,7 +358,7 @@ store, plans or spool to bypass a refusal.
 4. With the engine up, collect the job status:
 
    ```sh
-   "$DSL41" query status -S "$S" --job NAME
+   "$DSL41" query status --json -S "$S" --job NAME
    ```
 
 5. With the engine up, collect its available trace:

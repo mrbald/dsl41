@@ -26063,3 +26063,27 @@ relitigate an entry; append a new one.
   file-processing README and CONTRACT retain the worker rules and runner exercise.
   Standalone architecture reports and the historical file-processing handover stay
   outside the checkout. Old decisions stand.
+
+- DL-473 Full host-local timestamps in the TUI and query status
+  (2026-11-10; owner BLK-6 ruling; runner-design §11)
+  THE RULE. Every owned TUI timestamp and every instant in human-readable
+  query status is YYYY-MM-DDTHH:MM:SS in the host timezone, with no offset.
+  The header has all 19 characters at 80 columns. No opt-in or timezone
+  setting is provided. The owner accepts the repeated autumn hour as
+  ambiguous on screen (2026-11-10, "BLK-6 -> 1"); --json supplies exact UTC.
+  Query status defaults to minimal text, one key: value line per field,
+  retaining every field. BLK-2 owns later layout. An ok:false answer prints
+  its error text and exits 2. --json preserves the complete UTC JSON and
+  exit codes, applies only to query status, and refuses --brief.
+  THE BOUNDARY. Engine time, recorded text, trace causes, storage, scheduling
+  and socket formats remain UTC. The TUI prefixes a trace line from its at;
+  a RESTART cause retains its recorded snapshot sentence. Query trace,
+  query timers, runs and journal remain UTC. Logs and source JIL are verbatim.
+  This supersedes only DL-64 item 2's UTC-display rule; its FORCE_STARTJOB
+  footer rule remains.
+  THE OWNER. display_time.format_local_at replaces clock_of as DL-178(h)'s
+  single timestamp-display owner. It normalises through canon.naive_utc
+  (DL-178(j)), then uses replace(tzinfo=UTC).astimezone() per instant.
+  timezones.to_local requires a zone and treats None as unchanged, so it
+  does not express host-local display or historical host offsets. DL-163's
+  scheduling conversion remains there. A container without zone data shows UTC.

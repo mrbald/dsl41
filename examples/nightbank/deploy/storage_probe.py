@@ -137,7 +137,7 @@ class Engine:
         return result
 
     def status(self):
-        result = self.cli("query", "status", "--socket", str(self.socket))
+        result = self.cli("query", "status", "--json", "--socket", str(self.socket))
         assert result.returncode == 0, result.stderr
         return json.loads(result.stdout)
 
@@ -333,6 +333,7 @@ def test_frozen_unit(work: Path, unit: str, config: Path, root: Path):
                         "dsl41",
                         "query",
                         "status",
+                        "--json",
                         "--socket",
                         str(socket),
                     ],

@@ -407,7 +407,8 @@ Unset both with `unset COLUMNS LINES` before starting the TUI to use automatic s
 dsl41 run jobs.jil --run-root ./run1            # headless engine + control socket
 dsl41 run jobs.jil --run-root ./run1 --resume   # after a stop or a crash: replay, reconcile, go on
 dsl41 sendevent STARTJOB -J job_a -S ./run1/control.sock
-dsl41 query status -S ./run1/control.sock       # JSON: statuses, timers, log paths
+dsl41 query status -S ./run1/control.sock       # local-time text: every status field
+dsl41 query status --json -S ./run1/control.sock  # complete UTC JSON for scripts
 dsl41 query status --brief -S ./run1/control.sock   # one line per job, with its rev
 dsl41 query global -N GATE -S ./run1/control.sock   # a global's value and rev
 dsl41 ui -S ./run1/control.sock                 # attach the TUI; q detaches
@@ -647,7 +648,8 @@ Semantics:
   estate always schedules.
 - `src/dsl41/timezones.py`: SEM-35 name resolution (zoneinfo, the
   `--timezone-map` table, the unique-city default, POSIX offsets) and the
-  one naive-UTC to local conversion. It imports nothing from dsl41.
+  one scheduling conversion from naive UTC to local time. It imports nothing
+  from dsl41.
 - `src/dsl41/equiv.py`: the canonical form and the three equivalence tiers.
 
 Backend and DSL:
@@ -781,6 +783,7 @@ Runner:
 
 Shared cores:
 
+- `src/dsl41/display_time.py`: host-local timestamps for CLI and TUI display (DL-473).
 - `src/dsl41/canon.py`: the canonical serialization behind every digest.
 - `src/dsl41/state_machine.py`: the statechart executor of
   `docs/statechart-engine.md`: `Statechart` declarations, the `Executor`,

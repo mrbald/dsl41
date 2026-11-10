@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fcntl
 import json
 import os
 import re
 import signal
 import socket
+import struct
 import sys
+import termios
 import time
 import unicodedata
 from collections.abc import Callable
@@ -27,6 +30,7 @@ from dsl41.runner_control import ControlClient, ControlClientError
 from tui_terminal import (
     Terminal,
     TerminalAcknowledgementError,
+    painted_lines,
     selected_filter_ready,
     table_focus_ready,
 )
@@ -46,6 +50,237 @@ _UNFILTERED = "jobs 3/3"
 # opened the line. A kept filter shows its value, and the event log already names that job.
 _FILTER_OPEN = "esc clear"
 _SGR = re.compile(rb"\x1b\[[\d;:]*m")
+
+
+def _header_timestamp_ready(rendered: bytes, columns: int, rows: int) -> bool:
+    header = painted_lines(rendered, columns, rows)[0]
+    return bool(re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", header))
+
+
+@contextlib.asynccontextmanager
+async def _display_server(path: Path):
+    """Fixed UTC replies for observing every display surface in a real UI process."""
+    tasks: set[asyncio.Task] = set()
+    row = {
+        "status": "SUCCESS",
+        "status_at": "2026-07-01T23:30:00",
+        "pending_timers": [{"due": "2026-01-01T23:45:00", "kind": "schedule"}],
+    }
+
+    async def answer(reader, writer):
+        task = asyncio.current_task()
+        assert task is not None
+        tasks.add(task)
+        try:
+            while line := await reader.readline():
+                request = json.loads(line)
+                verb = request["cmd"]
+                response: dict[str, Any] = {"ok": True, "baseline_id": "display", "epoch": 1}
+                if verb == "status":
+                    response["jobs"] = {"display_job": row}
+                elif verb == "trace":
+                    response.update(
+                        last_seq=1,
+                        entries=[]
+                        if request.get("since", 0) >= 1
+                        else [{"seq": 1, "at": "2026-07-01T21:10:11", "transition": "RESTART"}],
+                    )
+                elif verb == "timers":
+                    response["timers"] = [{"job": "display_job", **row["pending_timers"][0]}]
+                elif verb == "spec":
+                    response["jil"] = "insert_job: display_job\n"
+                writer.write(json.dumps(response).encode() + b"\n")
+                await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            tasks.remove(task)
+
+    server = await asyncio.start_unix_server(answer, path=str(path))
+    try:
+        yield
+    finally:
+        server.close()
+        await server.wait_closed()
+        pending = list(tasks)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
+def _browser_display_times(engine: str, url: str, diagnostics: Path) -> None:
+    from playwright.sync_api import sync_playwright
+
+    output: list[bytes] = []
+    geometry: tuple[int, int] | None = None
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch(headless=True)
+        page = browser.new_page(viewport={"width": 2400, "height": 1000})
+
+        def socket_opened(ws: Any) -> None:
+            nonlocal geometry
+            geometry = _websocket_geometry(ws.url)
+            ws.on(
+                "framereceived",
+                lambda data: output.append(data if isinstance(data, bytes) else data.encode()),
+            )
+
+            def sent(data: str | bytes) -> None:
+                nonlocal geometry
+                frame = json.loads(data)
+                if frame[0] == "resize":
+                    geometry = frame[1]["width"], frame[1]["height"]
+
+            ws.on("framesent", sent)
+
+        page.on("websocket", socket_opened)
+        page.route("https://fonts.googleapis.com/**", lambda route: route.abort())
+
+        def until(text: str, mark: int = 0) -> None:
+            deadline = time.monotonic() + _TIMEOUT
+            while time.monotonic() < deadline:
+                if text.encode() in _sgr_free(b"".join(output[mark:])):
+                    return
+                page.wait_for_timeout(20)
+            raise AssertionError(f"{engine} did not render {text!r}; see {diagnostics}")
+
+        def header_after(mark: int) -> None:
+            deadline = time.monotonic() + _TIMEOUT
+            while time.monotonic() < deadline:
+                if geometry is not None and _header_timestamp_ready(
+                    b"".join(output[mark:]), *geometry
+                ):
+                    return
+                page.wait_for_timeout(20)
+            raise AssertionError(f"{engine} clipped the full header timestamp; see {diagnostics}")
+
+        try:
+            page.goto(url, wait_until="domcontentloaded")
+            page.locator(".xterm-helper-textarea").focus()
+            until("display_job")
+            header_after(0)
+            page.keyboard.type("}}}")
+            until("2026-07-02T01:30:00")
+            until("schedule@2026-01-02T00:45:00")
+            until("2026-07-01T23:10:11")
+            mark = len(output)
+            page.keyboard.press("d")
+            until("at 2026-07-02T01:30:00", mark)
+            until("next: schedule @ 2026-01-02T00:45:00", mark)
+            until("  schedule @ 2026-01-02T00:45:00", mark)
+            mark = len(output)
+            page.keyboard.press("q")
+            until("jobs 1/1", mark)
+            mark = len(output)
+            page.keyboard.press("t")
+            until("2026-01-02T00:45:00", mark)
+            mark = len(output)
+            page.keyboard.press("q")
+            until("jobs 1/1", mark)
+            mark = len(output)
+            page.set_viewport_size({"width": 800, "height": 600})
+            header_after(mark)
+            page.keyboard.press("q")
+            page.locator("body.-closed").wait_for(state="attached")
+        finally:
+            (diagnostics / "display.raw").write_bytes(b"".join(output))
+            browser.close()
+
+
+@pytest.mark.parametrize("lane", ["terminal", "chromium", "webkit", "firefox"])
+def test_full_local_timestamps_in_real_display_lanes(
+    lane: str, short_root: Path, tmp_path: Path, local_timezone
+) -> None:
+    if lane != "terminal" and os.environ.get("DSL41_BROWSER_TESTS") != "1":
+        pytest.skip("served TUI browser lane requires DSL41_BROWSER_TESTS=1")
+
+    async def scenario() -> None:
+        path = short_root / "display.sock"
+        async with _display_server(path):
+            if lane == "terminal":
+                terminal = Terminal(tmp_path, _TIMEOUT)
+                try:
+                    terminal.columns = 240
+                    fcntl.ioctl(
+                        terminal.slave,
+                        termios.TIOCSWINSZ,
+                        struct.pack("HHHH", terminal.rows, terminal.columns, 0, 0),
+                    )
+                    await terminal.start(_command("ui", "--socket", str(path)), _environment())
+
+                    async def until(text: str, mark: int = 0) -> None:
+                        await terminal.until(
+                            text, lambda data: text.encode() in _sgr_free(data), after=mark
+                        )
+
+                    await until("display_job")
+                    await terminal.until(
+                        "full header timestamp",
+                        lambda data: _header_timestamp_ready(data, terminal.columns, terminal.rows),
+                        after=0,
+                    )
+                    terminal.send(b"}}}")
+                    await until("2026-07-02T01:30:00")
+                    await until("schedule@2026-01-02T00:45:00")
+                    await until("2026-07-01T23:10:11")
+                    mark = terminal.send(b"d")
+                    await until("at 2026-07-02T01:30:00", mark)
+                    await until("next: schedule @ 2026-01-02T00:45:00", mark)
+                    await until("  schedule @ 2026-01-02T00:45:00", mark)
+                    mark = terminal.send(b"q")
+                    await until("jobs 1/1", mark)
+                    mark = terminal.send(b"t")
+                    await until("2026-01-02T00:45:00", mark)
+                    mark = terminal.send(b"q")
+                    await until("jobs 1/1", mark)
+                    mark = terminal.resize()
+                    await terminal.until(
+                        "full header after resize",
+                        lambda data: _header_timestamp_ready(data, terminal.columns, terminal.rows),
+                        after=mark,
+                    )
+                    terminal.send(b"q")
+                    assert terminal.process is not None
+                    assert await asyncio.wait_for(terminal.process.wait(), timeout=5) == 0
+                finally:
+                    if terminal.process is not None:
+                        await _stop(terminal.process)
+                    terminal.close()
+                return
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+            with (tmp_path / "display-serve.log").open("wb") as log:
+                process = await asyncio.create_subprocess_exec(
+                    *_command("serve", "-S", str(path), "--host", "127.0.0.1", "--port", str(port)),
+                    stdout=log,
+                    stderr=log,
+                    cwd=tmp_path,
+                    env=_environment(),
+                    start_new_session=True,
+                )
+                try:
+                    deadline = time.monotonic() + _TIMEOUT
+                    while True:
+                        assert process.returncode is None, (
+                            tmp_path / "display-serve.log"
+                        ).read_text()
+                        try:
+                            _, writer = await asyncio.open_connection("127.0.0.1", port)
+                        except OSError:
+                            assert time.monotonic() < deadline, "serve did not bind"
+                            await asyncio.sleep(0.03)
+                        else:
+                            writer.close()
+                            await writer.wait_closed()
+                            break
+                    await asyncio.to_thread(
+                        _browser_display_times, lane, f"http://127.0.0.1:{port}", tmp_path
+                    )
+                finally:
+                    await _stop(process)
+
+    asyncio.run(scenario())
 
 
 def _sgr_free(data: bytes | bytearray) -> bytes:

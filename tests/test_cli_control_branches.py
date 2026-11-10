@@ -9,6 +9,8 @@ sent past the refusal. The socket protocol itself is tested elsewhere.
 
 from __future__ import annotations
 
+import copy
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -224,6 +226,7 @@ def test_global_names_one_and_globals_names_several(monkeypatch: pytest.MonkeyPa
 
 def test_brief_status_warns_on_stderr_when_the_estate_files_drifted(
     monkeypatch: pytest.MonkeyPatch,
+    local_timezone,
 ) -> None:
     rows = {"j": {"status": "SUCCESS", "status_at": "2026-01-01T00:00:00", "state_rev": 4}}
     _engine(monkeypatch, status={"ok": True, "jobs": rows, "spec_drift": True})
@@ -238,6 +241,170 @@ def test_brief_status_warns_on_stderr_when_the_estate_files_drifted(
 
 
 # ------------------------------------------------------------------- subscribe
+
+
+@pytest.fixture
+def display_status() -> dict[str, Any]:
+    return {
+        "ok": True,
+        **_HEADER,
+        "state_rev": 8,
+        "config_rev": 2,
+        "engine": "RUNNING",
+        "spec_drift": False,
+        "update_window_s": 30,
+        "update": {"token": "update-1", "stopping": ["j"]},
+        "jobs": {
+            "j": {
+                "status": "FAILURE",
+                "status_at": "2026-07-01T23:30:00.123456",
+                "run_number": 3,
+                "exit_code": 1,
+                "state_rev": 7,
+                "on_ice": False,
+                "on_hold": True,
+                "on_noexec": False,
+                "armed": False,
+                "held": True,
+                "started_by": "STARTJOB",
+                "pending_timers": [{"due": "2026-01-01T23:30:00", "kind": "schedule"}],
+                "interrupted": {
+                    "started_at": "2026-10-25T00:30:00Z",
+                    "ended_at": "2026-10-25T01:30:00+00:00",
+                    "run_id": "j/3",
+                    "cause": "engine_stop",
+                    "signal": None,
+                },
+                "attempt": {"n": 2, "state": "STOPPING", "note": "stop in progress"},
+                "watching": {"file": "/synthetic/input", "interval": 60, "min_size": 1},
+                "log_out": "/synthetic/j.out",
+                "log_err": None,
+                "job_type": "CMD",
+                "box_name": None,
+                "reread": {"change": "changed", "action": "hold"},
+            },
+            "empty": {"status_at": None, "pending_timers": [], "extra": {}},
+        },
+    }
+
+
+def test_status_text_keeps_fields_and_local_instants(
+    monkeypatch, cli_env, local_timezone, display_status
+) -> None:
+    original = copy.deepcopy(display_status)
+    engine = _engine(monkeypatch, status=display_status)
+    result = _run("query", "status")
+    assert result.exit_code == 0, result.output
+    fields = dict(line.split(": ", 1) for line in ANSI.sub("", result.stdout).splitlines())
+    expected_times = {
+        "jobs.j.status_at": "2026-07-02T01:30:00",
+        "jobs.j.pending_timers[0].due": "2026-01-02T00:30:00",
+        "jobs.j.interrupted.started_at": "2026-10-25T02:30:00",
+        "jobs.j.interrupted.ended_at": "2026-10-25T02:30:00",
+        "jobs.empty.status_at": "-",
+    }
+
+    assert fields == {
+        **expected_times,
+        "ok": "true",
+        "baseline_id": "b-1",
+        "epoch": "3",
+        "state_rev": "8",
+        "config_rev": "2",
+        "engine": "RUNNING",
+        "spec_drift": "false",
+        "update_window_s": "30",
+        "update.token": "update-1",
+        "update.stopping[0]": "j",
+        "jobs.j.status": "FAILURE",
+        "jobs.j.run_number": "3",
+        "jobs.j.exit_code": "1",
+        "jobs.j.state_rev": "7",
+        "jobs.j.on_ice": "false",
+        "jobs.j.on_hold": "true",
+        "jobs.j.on_noexec": "false",
+        "jobs.j.armed": "false",
+        "jobs.j.held": "true",
+        "jobs.j.started_by": "STARTJOB",
+        "jobs.j.pending_timers[0].kind": "schedule",
+        "jobs.j.interrupted.run_id": "j/3",
+        "jobs.j.interrupted.cause": "engine_stop",
+        "jobs.j.interrupted.signal": "null",
+        "jobs.j.attempt.n": "2",
+        "jobs.j.attempt.state": "STOPPING",
+        "jobs.j.attempt.note": "stop in progress",
+        "jobs.j.watching.file": "/synthetic/input",
+        "jobs.j.watching.interval": "60",
+        "jobs.j.watching.min_size": "1",
+        "jobs.j.log_out": "/synthetic/j.out",
+        "jobs.j.log_err": "null",
+        "jobs.j.job_type": "CMD",
+        "jobs.j.box_name": "null",
+        "jobs.j.reread.change": "changed",
+        "jobs.j.reread.action": "hold",
+        "jobs.empty.pending_timers": "[]",
+        "jobs.empty.extra": "{}",
+    }
+    assert engine.requests == [{"cmd": "status"}]
+    assert display_status == original
+
+
+def test_status_brief_uses_full_local_time(monkeypatch, cli_env, local_timezone) -> None:
+    _engine(
+        monkeypatch,
+        status={
+            "ok": True,
+            "jobs": {"j": {"status": "SUCCESS", "status_at": "2026-07-01T23:30:00"}},
+        },
+    )
+    result = _run("query", "status", "--brief")
+    assert result.exit_code == 0
+    assert "2026-07-02T01:30:00" in ANSI.sub("", result.output)
+
+
+@pytest.mark.parametrize("ok", [True, False])
+def test_status_json_preserves_complete_answer(
+    monkeypatch, cli_env, local_timezone, display_status, ok
+) -> None:
+    response = display_status if ok else {"ok": False, "error": "unknown job", **_HEADER}
+    _engine(monkeypatch, status=response)
+    result = _run("query", "status", "--json")
+    assert result.exit_code == (0 if ok else 2)
+    assert result.stdout == json.dumps(response, sort_keys=True) + "\n"
+
+
+@pytest.mark.parametrize("brief", [False, True])
+def test_status_refusal_prints_error_text(monkeypatch, cli_env, local_timezone, brief) -> None:
+    _engine(monkeypatch, status={"ok": False, "error": "unknown job"})
+    result = _run("query", "status", *(["--brief"] if brief else []))
+    assert result.exit_code == 2
+    assert "unknown job" in ANSI.sub("", result.output)
+
+
+@pytest.mark.parametrize("verb", ["trace", "timers", "subscribe", "is-success"])
+def test_json_belongs_to_status_only(monkeypatch, cli_env, verb) -> None:
+    engine = _engine(monkeypatch)
+    result = _run("query", verb, "--json")
+    assert result.exit_code == 2
+    assert "--json applies to status only" in result.output
+    assert not engine.requests
+
+
+def test_json_refuses_brief_before_contacting_engine(monkeypatch, cli_env) -> None:
+    engine = _engine(monkeypatch)
+    result = _run("query", "status", "--json", "--brief")
+    assert result.exit_code == 2
+    assert "--json and --brief cannot be combined" in result.output
+    assert not engine.requests
+
+
+@pytest.mark.parametrize("verb", ["trace", "timers"])
+def test_other_query_output_stays_utc_json(monkeypatch, cli_env, local_timezone, verb) -> None:
+    response = {"ok": True, "entries": [{"at": "2026-01-01T23:30:00"}]}
+    _engine(monkeypatch, **{verb: response})
+    result = _run("query", verb)
+    assert result.exit_code == 0
+    assert result.stdout == json.dumps(response, sort_keys=True) + "\n"
 
 
 def _subscribe_with(monkeypatch: pytest.MonkeyPatch, lines: Any) -> Any:

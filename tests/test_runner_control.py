@@ -1603,7 +1603,7 @@ def test_cli_job_calls_its_engine_through_socket_environment(
         "    return json.loads(result.stdout)\n"
         "print(json.dumps({\n"
         "    'socket': os.environ['DSL41_SOCKET'],\n"
-        "    'status': cli('query', 'status'),\n"
+        "    'status': cli('query', 'status', '--json'),\n"
         "    'set': cli('sendevent', 'SET_GLOBAL', '--global',\n"
         "               'SOCKET_PROBE=' + os.environ['DSL41_RUN_NUMBER'])\n"
         "}))\n"

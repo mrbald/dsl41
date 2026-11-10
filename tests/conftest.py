@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -49,6 +50,26 @@ def _restore_recursion_limit():
 def clear_ambient_dsl41_socket(monkeypatch: pytest.MonkeyPatch) -> None:
     """CLI tests select their own engine, including when run inside a job (DL-459)."""
     monkeypatch.delenv("DSL41_SOCKET", raising=False)
+
+
+@pytest.fixture
+def local_timezone() -> Iterator[Callable[[str], None]]:
+    """Isolate host-local rendering in a DST zone and restore libc and TZ (DL-355)."""
+    previous = os.environ.get("TZ")
+
+    def select(zone: str) -> None:
+        os.environ["TZ"] = zone
+        time.tzset()
+
+    try:
+        select("Europe/Zurich")
+        yield select
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
 
 
 @pytest.fixture

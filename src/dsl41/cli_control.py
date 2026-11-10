@@ -23,6 +23,7 @@ from dsl41.cli_common import (
     refuse,
 )
 from dsl41.oracle_state import FAILED
+from dsl41.display_time import format_local_at
 from dsl41.runner_access import REQUIRED_TIER, Tier
 
 
@@ -58,6 +59,29 @@ def _answer_or_exit(response: dict[str, Any]) -> None:
 
     typer.echo(json_mod.dumps(response, sort_keys=True))
     raise typer.Exit(0 if response.get("ok") else 2)
+
+
+def _status_lines(value: Any, key: str = "") -> list[str]:
+    """Keep every status field; render instants only at the display boundary (DL-473)."""
+    import json
+
+    if isinstance(value, dict) and value:
+        return [
+            line
+            for field, child in value.items()
+            for line in _status_lines(child, f"{key}.{field}" if key else field)
+        ]
+    if isinstance(value, list) and value:
+        return [
+            line
+            for index, child in enumerate(value)
+            for line in _status_lines(child, f"{key}[{index}]")
+        ]
+    if key.rsplit(".", 1)[-1] in {"status_at", "due", "started_at", "ended_at"}:
+        shown = format_local_at(value)
+    else:
+        shown = value if isinstance(value, str) else json.dumps(value, sort_keys=True)
+    return [f"{key}: {shown}"]
 
 
 def _mutate(socket_path: Path, request: dict[str, Any]) -> None:
@@ -586,9 +610,11 @@ def query(
     brief: bool = typer.Option(
         False,
         "--brief",
-        help="status: one line per job (name, status, at, run, exit, flags,"
-        " rev) instead of the JSON document.",
+        help="status: one line per job (name, status, at, run, exit, flags, rev).",
     ),  # DL-66
+    json_output: bool = typer.Option(
+        False, "--json", help="status: the complete UTC JSON response instead of local-time text."
+    ),
 ) -> None:
     """Read status, traces, explanations and more from a running engine.
 
@@ -615,6 +641,10 @@ def query(
     known, predicates = _QUERY_VERBS, _QUERY_PREDICATES
     if verb not in known and verb not in predicates:
         raise typer.Exit(refuse(f"unknown query {what!r} ({'|'.join([*known, *predicates])})"))
+    if json_output and verb != "status":
+        raise typer.Exit(refuse("--json applies to status only"))
+    if json_output and brief:
+        raise typer.Exit(refuse("--json and --brief cannot be combined"))
     if verb in predicates:
         if job is None:
             raise typer.Exit(refuse(f"{verb} requires --job"))
@@ -643,6 +673,8 @@ def query(
         from dsl41.runner_control import status_label
 
         response = _control_roundtrip(socket_path, request)
+        if verb == "status" and not json_output and not response.get("ok"):
+            raise typer.Exit(refuse(str(response.get("error", "status query failed"))))
         if brief and response.get("ok"):
             # the status field is as wide as its widest label, so an attempt beside a status
             # ("STOPPING (engine_stop)") keeps the columns after it aligned (DL-426)
@@ -654,7 +686,7 @@ def query(
                 exit_code = row.get("exit_code")
                 typer.echo(
                     f"{job_name:<44} {status_label(row):<{width}}"
-                    f" {(row.get('status_at') or '-'):<26}"
+                    f" {format_local_at(row.get('status_at')):<26}"
                     f" run {row.get('run_number', 0):<4}"
                     f" exit {'-' if exit_code is None else exit_code:<4}"
                     # the skim carries the revision because --expect is honest only when it
@@ -663,6 +695,10 @@ def query(
                 )
             if response.get("spec_drift"):
                 typer.echo("SPEC DRIFT: estate files changed on disk", err=True)
+            raise typer.Exit(0)
+        if verb == "status" and not json_output:
+            for line in _status_lines(response):
+                typer.echo(line)
             raise typer.Exit(0)
         _answer_or_exit(response)
     _stream_subscribe(socket_path, request)
