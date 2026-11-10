@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from dsl41.ir import CatalogIR
+from dsl41.lint import lint_summary_lines
 from dsl41.main_config import fingerprint, policy_report, prepare
 from dsl41.reload_diff import (
     FieldDifference,
@@ -212,16 +213,28 @@ def preview(
         {name: {"change": "unchanged", "action": actions[name]} for name in sorted(unchanged)}
     )
     messages: list[str] = []
+    summary: list[str] = []
+    suffix: list[str] = []
     if candidate.metadata:
         policy, report = policy_report(candidate)
         messages = [policy.describe(), *[item.render() for item in report.violations]]
+        if include_definition_changes:
+            summary = [
+                policy.describe(),
+                *lint_summary_lines(
+                    report.violations,
+                    blocks=policy.blocks,
+                    config_path=candidate.metadata["config_path"],
+                ),
+            ]
         if live.launch != candidate.metadata["launch"]:
-            messages.append("host launch settings changed; restart before update")
-    messages.extend(
+            suffix.append("host launch settings changed; restart before update")
+    suffix.extend(
         f"preflight {item.severity} [{item.code}]"
         f"{f' {item.job}' if item.job else ''}: {item.message}"
         for item in preflight_items(candidate, None, live.path_environment)
     )
+    messages.extend(suffix)
     old = {name: job.span.file for name, job in live.catalog.jobs.items() if job.span}
     origins = candidate.metadata.get("origins", {})
     sources = [
@@ -264,6 +277,7 @@ def preview(
     }
 
     if include_definition_changes:
+        result["lint_summary"] = [*summary, *suffix]
         result["definition_changes"] = definition_changes(
             candidate,
             live,

@@ -47,7 +47,10 @@ def reread_command(
     for line in reread_lines(answer, style, apply_command):
         typer.echo(line)
     view = answer["preview"]
-    for message in [*view["lint_messages"], *view["diagnostics"]]:
+    for message in [
+        *view.get("lint_summary", view["lint_messages"]),
+        *view["diagnostics"],
+    ]:
         typer.echo(message, err=True)
     return 1 if view["stop"] else 0
 

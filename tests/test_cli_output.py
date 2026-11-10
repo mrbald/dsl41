@@ -225,6 +225,33 @@ def test_reread_cases(monkeypatch, style, changed, running, settings_only):
         assert "estate setting job_env" in result.stdout
 
 
+@pytest.mark.parametrize(
+    "summary",
+    [None, [], ["L002 info: 2 findings", "full list: dsl41 lint --config /synthetic/main.toml"]],
+)
+def test_reread_prints_summary_or_older_engine_messages_verbatim(monkeypatch, style, summary):
+    answer = candidate_answer()
+    view = answer["preview"]
+    view.pop("lint_summary", None)
+    view["lint_messages"] = [
+        "lint policy: refuse=warn; ignore=none",
+        "/tmp/a:1: L002 info: x.jil:5: L001 error: full detail",
+        "preflight ERROR [machine] A: foreign:1: L002 info: node",
+    ]
+    view["diagnostics"] = ["unmatched missing*:1: L002 info: x.jil"]
+    if summary is not None:
+        view["lint_summary"] = summary
+    original = copy.deepcopy(answer)
+    monkeypatch.setattr(cli_reload, "socket_send", lambda *a, **kw: lambda *a: answer)
+    result = invoke(["reread"], style)
+    assert result.exit_code == 0, result.output
+    assert result.stderr.splitlines() == [
+        *(view["lint_messages"] if summary is None else summary),
+        *view["diagnostics"],
+    ]
+    assert answer == original
+
+
 @pytest.mark.parametrize("running", [False, True])
 def test_reread_grouping_240_jobs(monkeypatch, style, running):
     answer = candidate_answer(size=240, running=running)
