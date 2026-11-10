@@ -38,12 +38,14 @@ list of names with the hash of each part, so moving bytes between parts changes 
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, get_args
 
 from dsl41.canon import digest, hash_over
 from dsl41.ir import CatalogIR, JobIR, unquote_jil_value
+from pydantic import BaseModel
 from dsl41.runner_clock import EngineError
 
 #: The status string a running row carries in the status map.
@@ -158,60 +160,130 @@ def _references(job: JobIR, catalog: CatalogIR) -> dict[str, dict[str, Any] | No
     return refs
 
 
-def definition_hash(job: JobIR, catalog: CatalogIR, estate_settings: Mapping[str, object]) -> str:
-    """Digest of the job's normalized effective definition within `catalog`.
+def definition_record(
+    job: JobIR, catalog: CatalogIR, estate_settings: Mapping[str, object]
+) -> dict[str, Any]:
+    """The single normalized hash/difference record (DL-447, DL-462, DL-469, DL-482)."""
+    return {
+        "job": _job_record(job),
+        "refs": _references(job, catalog),
+        "settings": {
+            key: value
+            for key, value in estate_settings.items()
+            if key not in {"job_env", "kill_signals", "fw_default_interval_s"}
+        },
+    }
 
-    `estate_settings`, except `job_env`, `kill_signals` and `fw_default_interval_s`, enters
-    the hash (DL-447, DL-462, DL-469).
-    The caller (reread) supplies the values that shape a job's behaviour outside the catalog;
-    this module fixes their shape as a mapping to canonical-encodable values.
-    """
-    return digest(
-        {
-            "job": _job_record(job),
-            "refs": _references(job, catalog),
-            "settings": {
-                key: value
-                for key, value in estate_settings.items()
-                if key not in {"job_env", "kill_signals", "fw_default_interval_s"}
-            },
-        }
-    )
+
+def definition_hash(job: JobIR, catalog: CatalogIR, estate_settings: Mapping[str, object]) -> str:
+    """Digest the normalized effective definition, excluding positional data (DL-482)."""
+    return digest(definition_record(job, catalog, estate_settings))
 
 
 _ABSENT = object()
+VALUE_LIMIT = 120
+
+
+@dataclass(frozen=True)
+class FieldDifference:
+    """One differing field; absent and null remain distinct (DL-482)."""
+
+    path: tuple[str, ...]
+    before: Any
+    after: Any
+
+
+def record_difference(
+    before: Any, after: Any, path: tuple[str, ...] = ()
+) -> tuple[FieldDifference, ...]:
+    """Compare hash records; lists and condition trees remain atomic values (DL-482)."""
+    if isinstance(before, dict) and isinstance(after, dict) and path[-1:] != ("cond",):
+        return tuple(
+            change
+            for key in sorted(before.keys() | after.keys())
+            for change in record_difference(
+                before.get(key, _ABSENT), after.get(key, _ABSENT), (*path, key)
+            )
+        )
+    if before is not _ABSENT and after is not _ABSENT:
+        if json.dumps(before, sort_keys=True) == json.dumps(after, sort_keys=True):
+            return ()
+    return (FieldDifference(path, before, after),)
+
+
+def _has_model(annotation: Any) -> bool:
+    return (isinstance(annotation, type) and issubclass(annotation, BaseModel)) or any(
+        _has_model(item) for item in get_args(annotation)
+    )
+
+
+_JOB_SUBMODELS = {
+    name for name, field in JobIR.model_fields.items() if _has_model(field.annotation)
+}
+
+
+def difference_label(path: tuple[str, ...]) -> str:
+    """Use model field names, omitting structural containers (DL-482)."""
+    if path[0] == "job":
+        parts = [part for part in path[1:-1] if part not in _JOB_SUBMODELS] + [path[-1]]
+        if parts[-1] == "cond":
+            parts.pop()
+        return ".".join(parts)
+    if path[0] == "refs":
+        kind, _, name = path[1].partition(":")
+        parts = list(path[2:])
+        if parts[:1] == ["attrs"]:
+            parts = parts[1:]
+        return f"{kind} {name}" + (": " + ".".join(parts) if parts else "")
+    return "estate setting " + ".".join(path[1:])
+
+
+def difference_view(change: FieldDifference) -> dict[str, Any]:
+    """Bound values and keep environment values out of display data (DL-482)."""
+
+    def shown(value: Any) -> str:
+        if value is _ABSENT or value is None:
+            return "(unset)"
+        text = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        if isinstance(value, str):
+            text = text[1:-1]
+        return text if len(text) <= VALUE_LIMIT else text[: VALUE_LIMIT - 5] + "[cut]"
+
+    redacted = change.path[:2] == ("settings", "job_env")
+    return {
+        "field": difference_label(change.path),
+        "scope": change.path[0],
+        "before": "" if redacted else shown(change.before),
+        "after": "" if redacted else shown(change.after),
+        "redacted": redacted,
+        "complex": isinstance(change.before, (dict, list))
+        or isinstance(change.after, (dict, list)),
+    }
 
 
 def _reason(
-    old: JobIR,
-    live: CatalogIR,
-    live_settings: Mapping[str, object],
-    new: JobIR,
-    candidate: CatalogIR,
-    candidate_settings: Mapping[str, object],
+    changes: tuple[FieldDifference, ...], before: Mapping[str, Any], after: Mapping[str, Any]
 ) -> str | None:
-    """The indirect cause when the job's own record is the same; None when the job was edited."""
-    if _job_record(old) != _job_record(new):
+    """Preserve stored reason text, viewing changed roots with main's equality (DL-482)."""
+    if any(change.path[0] == "job" and change.before != change.after for change in changes):
         return None
-    old_refs = _references(old, live)
-    new_refs = _references(new, candidate)
-    reasons: list[str] = []
-    for key in sorted(old_refs.keys() | new_refs.keys()):
+    old_refs, new_refs = before["refs"], after["refs"]
+    reasons = []
+    for key in sorted({change.path[1] for change in changes if change.path[0] == "refs"}):
         if old_refs.get(key) == new_refs.get(key):
             continue
         kind, _, name = key.partition(":")
-        if key not in new_refs:
-            verb = "no longer referenced"
-        elif key not in old_refs:
-            verb = "now referenced"
-        else:
-            verb = "changed"
+        verb = (
+            "no longer referenced"
+            if key not in new_refs
+            else "now referenced"
+            if key not in old_refs
+            else "changed"
+        )
         reasons.append(f"{kind} {name} {verb}")
-    for setting in sorted(live_settings.keys() | candidate_settings.keys()):
-        if setting in {"job_env", "kill_signals", "fw_default_interval_s"}:
-            continue  # Later starts or kills take these policies (DL-447, DL-462, DL-469).
-        if live_settings.get(setting, _ABSENT) != candidate_settings.get(setting, _ABSENT):
-            reasons.append(f"estate setting {setting} changed")
+    for key in sorted({change.path[1] for change in changes if change.path[0] == "settings"}):
+        if before["settings"].get(key, _ABSENT) != after["settings"].get(key, _ABSENT):
+            reasons.append(f"estate setting {key} changed")
     return "; ".join(reasons)
 
 
@@ -247,8 +319,10 @@ def diff(
     prior: list[tuple[str, str | None]] = [(name, live.jobs[name].box.box_name) for name in removed]
     for name in sorted((live_names & cand_names) - retyped):
         old, new = live.jobs[name], candidate.jobs[name]
-        old_hash = definition_hash(old, live, live_settings)
-        new_hash = definition_hash(new, candidate, candidate_settings)
+        old_record = definition_record(old, live, live_settings)
+        new_record = definition_record(new, candidate, candidate_settings)
+        old_hash = digest(old_record)
+        new_hash = digest(new_record)
         if old_hash == new_hash:
             unchanged.append(name)
             continue
@@ -257,7 +331,7 @@ def diff(
                 name,
                 old_hash,
                 new_hash,
-                _reason(old, live, live_settings, new, candidate, candidate_settings),
+                _reason(record_difference(old_record, new_record), old_record, new_record),
             )
         )
         prior.append((name, old.box.box_name))

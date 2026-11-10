@@ -82,20 +82,25 @@ and [generated job lifecycle](job-chart-lifecycle.md) to distinguish queued,
 live and terminal jobs. `SUCCESS` can also follow an operator's
 `CHANGE_STATUS` or a noexec bypass; it does not alone prove a command ran.
 
-The `--brief` line: `name  status  status_at  run N  exit N  rev N  FLAGS`.
+`--brief` selects the neutral table (DL-482):
+`JOB  TYPE  STATUS  SINCE  RUN  EXIT  FLAGS  BOX  REV`.
+`query status` defaults to focused groups; `--style neutral` selects that same
+table. A filtered `--brief --job NAME` prints only that job's row, without a header or summary. `query status NAME` shows one job in full.
 Its status label can include attempt or cleanup notes. Use `query status --json` for evidence.
 `status_at` and `exit` use `-` when absent.
-Flags: `I` means `on_ice`, `H` `on_hold`, `N` `on_noexec`, `A` `armed`; they join without separators, and a job with none has no flags cell.
+Flags: `I` means `on_ice`, `H` `on_hold`, `N` `on_noexec`, `A` `armed`; they join without separators, and a job with none shows `-`.
 
 Hold, ice and noexec are modes; a job on hold or on ice keeps its status, except that `ON_ICE` on a `QUE_WAIT` job dequeues it and settles it `INACTIVE` (DL-50).
 `log_out` and `log_err` name the current run's output targets for a `CMD` job, which exist once the run has written; they are null for a `BOX` or `FW` job.
+A filtered summary row is `job CMD INACTIVE - 0 - - - 1`; `REV` is last.
+
 `state_rev` is the value that `sendevent --expect` takes; the [query contract](control-protocol.md#4-query-verbs-frozen-response-shapes) defines the fields.
 
 | AutoSys habit | dsl41 command |
 | --- | --- |
-| `autorep -J job` (the default `-s` summary) | `"$DSL41" query status --brief --job NAME -S "$S"` |
+| `autorep -J job` (one summary row) | `"$DSL41" query status --brief --job NAME -S "$S"` |
 | `autorep -J job -d` | `"$DSL41" query status --job NAME -S "$S"` |
-| `autostatus -J job` | `"$DSL41" query status --brief --job NAME -S "$S"` |
+| `autostatus -J job` (one row) | `"$DSL41" query status --brief --job NAME -S "$S"` |
 | Test job success from a script | `"$DSL41" query is-success --job NAME -S "$S"` |
 | Test job failure from a script | `"$DSL41" query is-failed --job NAME -S "$S"` |
 | `autostatus -G` / `autorep -G` | `"$DSL41" query global -N GLOBAL -S "$S"` |
@@ -114,8 +119,8 @@ event as a positional argument. The supported events are listed in
 exit code. In SET_GLOBAL, `NAME` names the global to set.
 For KILLJOB, `-k LIST` selects an ordered list of numeric signals ending in 9.
 
-`query status` prints every field as text with full host-local timestamps;
-`--json` keeps complete UTC JSON. `--brief` prints one line per job. Exit 0 means
+`query status` prints focused groups with full host-local timestamps;
+`--json` keeps complete UTC JSON. `--brief` prints the neutral table. Exit 0 means
 an answer, not job success. The predicates print the current status and exit
 0 on a match or 1 otherwise. `is-failed` matches FAILURE or TERMINATED.
 Queries exit 2 on an error. `runs` reads run-root files only; it needs no

@@ -232,12 +232,12 @@ def test_brief_status_warns_on_stderr_when_the_estate_files_drifted(
     _engine(monkeypatch, status={"ok": True, "jobs": rows, "spec_drift": True})
     drifted = _run("query", "status", "--brief")
     assert drifted.exit_code == 0
-    assert "SPEC DRIFT: estate files changed on disk" in drifted.output
+    assert "estate files on disk differ from the running estate" in drifted.output
     assert "SUCCESS" in drifted.output
     _engine(monkeypatch, status={"ok": True, "jobs": rows})
     quiet = _run("query", "status", "--brief")
     assert quiet.exit_code == 0
-    assert "SPEC DRIFT" not in quiet.output
+    assert "estate files on disk differ" not in quiet.output
 
 
 # ------------------------------------------------------------------- subscribe
@@ -288,14 +288,17 @@ def display_status() -> dict[str, Any]:
     }
 
 
-def test_status_text_keeps_fields_and_local_instants(
+def test_single_job_text_keeps_fields_and_local_instants(
     monkeypatch, cli_env, local_timezone, display_status
 ) -> None:
     original = copy.deepcopy(display_status)
     engine = _engine(monkeypatch, status=display_status)
-    result = _run("query", "status")
+    result = _run("query", "status", "j")
     assert result.exit_code == 0, result.output
-    fields = dict(line.split(": ", 1) for line in ANSI.sub("", result.stdout).splitlines())
+    fields = dict(
+        line.split(": ", 1)
+        for line in ANSI.sub("", result.stdout).split("\n\n", 1)[1].strip().splitlines()
+    )
     expected_times = {
         "jobs.j.status_at": "2026-07-02T01:30:00",
         "jobs.j.pending_timers[0].due": "2026-01-02T00:30:00",
@@ -345,7 +348,7 @@ def test_status_text_keeps_fields_and_local_instants(
         "jobs.empty.pending_timers": "[]",
         "jobs.empty.extra": "{}",
     }
-    assert engine.requests == [{"cmd": "status"}]
+    assert engine.requests == [{"cmd": "status", "job": "j"}]
     assert display_status == original
 
 
@@ -699,3 +702,18 @@ def test_reload_help_has_no_legacy_route(cli_env):
         for retired in ("--stop-running", "--run-root", "--config", "TOKEN", "ESTATE"):
             assert retired not in output
         assert runner.invoke(app, [verb, "legacy", "-S", "/none"]).exit_code == 2
+
+
+@pytest.mark.parametrize(
+    "arguments,error",
+    [
+        (("query", "trace", "j"), "JOB applies to status only"),
+        (("query", "trace", "--style", "focused"), "--style applies to status only"),
+        (("query", "trace", "--style", "neutral"), "--style applies to status only"),
+    ],
+)
+def test_query_cli_refuses_job_or_style_for_other_verbs(monkeypatch, cli_env, arguments, error):
+    engine = _engine(monkeypatch)
+    result = _run(*arguments)
+    assert result.exit_code == 2 and error in result.stderr
+    assert engine.requests == []

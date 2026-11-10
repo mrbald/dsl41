@@ -1116,7 +1116,8 @@ def test_reread_and_update_over_the_control_socket(short_root: Path) -> None:
         source.write_text(JOB.replace("true", "sleep 31") + box)
         preview = runner.invoke(app, ["reread", "-S", str(sock)])
         assert preview.exit_code == 1, preview.output
-        assert "changed: A" in preview.output and "stops running: A" in preview.output
+        assert "changed 1 job" in preview.output and "1 job: A" in preview.output
+        assert "stopping 1 running job: A" in preview.output
         assert "token:" not in preview.output
         source.write_text(JOB.replace("true", "sleep 32") + box)
         result = runner.invoke(app, ["update", "-S", str(sock), "--wait"])
@@ -1153,7 +1154,7 @@ def test_reread_and_update_over_the_control_socket(short_root: Path) -> None:
             JOB.replace("true", "sleep 32") + box + JOB.replace("A", "NEW") + "box_name: BX\n"
         )
         preview = runner.invoke(app, ["reread", "-S", str(sock)])
-        assert preview.exit_code == 1 and "update C: hold" in preview.output
+        assert preview.exit_code == 1 and "C   would be ON_HOLD" in preview.output
         assert ask("status")["jobs"]["BX"]["reread"]["action"] == "restart_box"
         box_result = runner.invoke(app, ["update", "-S", str(sock), "--wait"])
         assert box_result.exit_code == 0, box_result.output
@@ -1443,7 +1444,8 @@ def test_the_update_verb_refuses_a_malformed_request_and_answers_a_slow_applicat
                 )
 
             answers["cli"] = {"code": await asyncio.to_thread(cli_retry)}
-            answers["cli"]["out"] = capsys.readouterr().out
+            captured = capsys.readouterr()
+            answers["cli"].update(out=captured.out, err=captured.err)
         finally:
             await _finish(engine, loop)
             await server.close()
@@ -1454,7 +1456,9 @@ def test_the_update_verb_refuses_a_malformed_request_and_answers_a_slow_applicat
         assert answers[field]["refused"]
         assert "token" not in answers[field]
     assert answers["status"]["update_window_s"] == 0.05
-    assert answers["cli"]["code"] == 1 and "pending: u1" in answers["cli"]["out"]
+    assert answers["cli"]["code"] == 1 and "update pending;" in answers["cli"]["out"]
+    assert "--request-id u1 --wait" in answers["cli"]["out"]
+    assert "request_id: u1" in answers["cli"]["err"]
     assert (
         answers["pending"]["ok"],
         answers["pending"]["stop"],

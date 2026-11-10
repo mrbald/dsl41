@@ -284,11 +284,10 @@ step_reload() { # reread and update with a live job and a changed definition (DL
     out=$(cli reread -S "$SOCK") || rc=$?
     printf '%s\n' "$out"
     [ "$rc" = 1 ] || fail "reread exited $rc, not 1 (a plan that stops a running job)"
-    grep -qx 'changed: DRILL_LONG_C' <<<"$out" || fail "reread does not name DRILL_LONG_C changed"
-    grep -qx 'stops running: DRILL_LONG_C' <<<"$out" || fail "reread does not stop DRILL_LONG_C"
+    status | jq -e '.jobs.DRILL_LONG_C.reread == {change: "changed", action: "rerun"}' >/dev/null ||
+        fail "reread does not forecast DRILL_LONG_C changed and rerun"
     out=$(cli update -S "$SOCK" --wait) || fail "update --wait failed: $out"
     printf '%s\n' "$out"
-    grep -q '^applied: catalog revision' <<<"$out" || fail "update printed no application"
     [ "$(status | jq .config_rev)" = $((rev + 1)) ] || fail "config_rev did not move past $rev"
     wait_for 60 "DRILL_LONG_C reran" attempt_is DRILL_LONG_C 2 RUNNING
     [ "$(job_field DRILL_LONG_C .attempt.after)" = '"update_stop"' ] ||

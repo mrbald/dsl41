@@ -1212,7 +1212,10 @@ def test_update_prints_the_decision_and_with_wait_the_application(
     send = _send(world, UpdateReply(decision))
     assert update_command(send=send) == 0
     assert send.calls == [("update", {"wait": False})]
-    assert capsys.readouterr().out == "admitted: update; stopping: OPS_HEARTBEAT_C\n"
+    assert capsys.readouterr().out.splitlines() == [
+        "stop requested for 1 running job: OPS_HEARTBEAT_C",
+        "update admitted; application not yet confirmed",
+    ]
     application = Application(
         token,
         2,
@@ -1228,13 +1231,11 @@ def test_update_prints_the_decision_and_with_wait_the_application(
     send = _send(world, UpdateReply(decision, application))
     assert update_command(send=send, wait=True) == 0
     assert capsys.readouterr().out.splitlines() == [
-        "admitted: update; stopping: OPS_HEARTBEAT_C",
+        "stop requested for 1 running job: OPS_HEARTBEAT_C",
         f"applied: catalog revision 2 (sha256:{'0' * 64})",
-        "added: ZZ_NEW_C",
-        "changed: OPS_HEARTBEAT_C",
-        "removed: none",
-        "re-added with its earlier flags: ZZ_NEW_C (ON_HOLD, ON_ICE)",
-        "stopped OPS_HEARTBEAT_C: rerun",
+        "  changed 1 job, added 1, removed 0",
+        "  OPS_HEARTBEAT_C   stopped, rerun under the new definition",
+        "  ZZ_NEW_C   re-added with its earlier flags: ON_HOLD, ON_ICE",
     ]
 
 

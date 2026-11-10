@@ -1414,7 +1414,19 @@ def test_the_estate_skim_carries_the_revision_it_is_read_before_acting(short_roo
             assert skim.returncode == 0, skim.stderr
             line = next(ln for ln in skim.stdout.splitlines() if ln.startswith("j "))
             rev = engine.oracle.store.job["j"].state_rev
-            assert f"rev {rev}" in line
+            header = next(ln for ln in skim.stdout.splitlines() if ln.startswith("JOB "))
+            assert header.split() == [
+                "JOB",
+                "TYPE",
+                "STATUS",
+                "SINCE",
+                "RUN",
+                "EXIT",
+                "FLAGS",
+                "BOX",
+                "REV",
+            ]
+            assert line.split()[-1] == str(rev)
         finally:
             await _teardown(engine, server, loop_task)
 
