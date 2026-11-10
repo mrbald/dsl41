@@ -1,0 +1,13 @@
+format_version = 1
+
+[engine]
+run_root = "/srv/synthetic-engine/run"
+as_machine = ["fixture_node"]
+
+[estate]
+include = ["/opt/synthetic-engine/cfg/*.jil"]
+timezone = "UTC"
+
+[lint]
+refuse = "error"
+ignore = []
