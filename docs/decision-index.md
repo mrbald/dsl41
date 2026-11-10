@@ -399,7 +399,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-386 | Explore name callouts avoid open details when space permits |  |
 | DL-387 | A standalone helper converts one bounded AutoSys summary table |  |
 | DL-388 | Vendor hooks are readable patches over exact prebuilt inputs |  |
-| DL-389 | Offline candidates are manufactured at their final paths |  |
+| DL-389 | Offline candidates are manufactured at their final paths | [docs/deploy.md](deploy.md) |
 | DL-390 | Maintenance is a guarded supervisor operation | [docs/authoring.md](authoring.md) |
 | DL-391 | TUI mutations retain their exact recovery envelope | [docs/cli-tui-qualification.md](cli-tui-qualification.md), [docs/incident-triage.md](incident-triage.md) |
 | DL-392 | Blocking supervisor requests have one monotonic deadline |  |
@@ -475,3 +475,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-471 | Root `TODO.md` counts as docs; superseded PR CI runs are cancelled | [docs/agent-workflow.md](agent-workflow.md), [docs/agents/coordination.md](agents/coordination.md) |
 | DL-472 | Reuse document owners and keep transient reports outside checkouts | [docs/writing.md](writing.md) |
 | DL-473 | Full host-local timestamps in the TUI and query status | [README.md](../README.md), [docs/deploy.md](deploy.md), [docs/runner-design.md](runner-design.md) |
+| DL-474 | Upgrade advice preserves the run root | [docs/deploy.md](deploy.md) |

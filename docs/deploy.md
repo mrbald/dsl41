@@ -630,6 +630,174 @@ fresh root for the main-config service. There is no root migration command.
 
 Application inputs and reviewed updates are independent of that selection.
 
+For one package that replaces the engine at the unit's fixed executable path,
+use the following variant (DL-474). It also covers a package that carries estate
+files. The unit's `ExecStart` must use `run --config`.
+Replace `ENGINE` in every command with the absolute executable named by
+the installed unit's `ExecStart`. Replace `PACKAGE.rpm` with the new package.
+The repo's reference RPM prepares a runtime without selecting it (DL-389).
+With that package, select the new runtime after installation and before starting;
+on rollback, select the old runtime again. Installing or downgrading that RPM alone
+does not select the runtime.
+
+Choose a quiet window: restart serves the stored estate until an update applies.
+Keep the release that wrote the root and a whole-root backup available.
+Do not replace engine files while the service runs.
+
+1. As root, drain and stop the service:
+
+   ```sh
+   systemctl stop dsl41-engine.service
+   ```
+
+   Check the [shutdown record](#drain-the-engine) and confirm no engine, wrapper
+   or job writer remains before copying the root.
+
+2. As root, back up the stopped root and main config. Choose unused destinations:
+
+   ```sh
+   install -d -m 0700 /srv/backups
+   cp -a /srv/dsl41/runs/nightbank /srv/backups/nightbank-before-upgrade
+   cp -a /etc/dsl41/dsl41.toml /srv/backups/nightbank-before-upgrade.toml
+   ```
+
+3. As root, install the package. Select its runtime if the package requires it:
+
+   ```sh
+   rpm -Uvh PACKAGE.rpm
+   ```
+
+   For the reference RPM's default prefix, the unit's executable must follow
+   `/opt/dsl41/.venv/bin/dsl41`. As root, replace `<version>-<release>` with
+   the installed delivery directory and use `ui` instead of `base` if the RPM
+   was built with that profile. Use the package's system Python 3.12; these
+   commands show its default path. Stop on any failure. The `.venv.next` path
+   must be unused.
+
+   ```sh
+   delivery=/opt/dsl41/delivery/<version>-<release>
+   profile=base
+   candidate="$(/usr/bin/python3.12 -I "$delivery/tools/bundle.py" candidate "$delivery" /opt/dsl41 "$profile")"
+   /usr/bin/python3.12 -I "$delivery/tools/bundle.py" verify "$delivery" "$candidate" "$profile"
+   ln -s ".venvs/$(basename "$candidate")" /opt/dsl41/.venv.next
+   mv -Tf /opt/dsl41/.venv.next /opt/dsl41/.venv
+   ```
+
+   The atomic replacement is manual: the repo has no activation command or
+   regression test for replacing an existing active link.
+   On rollback, reinstall the old RPM first: an upgrade removes its delivery
+   directory. Then repeat these commands with the old delivery and its profile.
+
+4. As root, start the service:
+
+   ```sh
+   systemctl start dsl41-engine.service
+   ```
+
+5. As the service user, repeat this query until it prints `RUNNING`.
+   It needs `jq`. A successful query can still report `STARTING` during catch-up.
+   If startup refuses, read the journal and follow the refusal guidance below.
+
+   ```sh
+   sudo -u dsl41 ENGINE query status --json \
+     --socket /srv/dsl41/runs/nightbank/control.sock | jq -r .engine
+   ```
+
+6. Only when the package changed estate files, preview them as the service user:
+
+   ```sh
+   sudo -u dsl41 ENGINE reread \
+     --socket /srv/dsl41/runs/nightbank/control.sock
+   ```
+
+   Restart keeps the applied revision. The TUI's `spec drift: estate files changed
+   on disk` line directs reread and update. Review the preview's findings and
+   affected jobs before applying it. Then run:
+
+   ```sh
+   sudo -u dsl41 ENGINE update --wait \
+     --socket /srv/dsl41/runs/nightbank/control.sock
+   ```
+
+   Exit 0 prints `applied: catalog revision N`; status reports that applied
+   `config_rev`, and the drift indication clears when disk inputs match it.
+   Completed statuses and existing holds are kept for retained jobs whose runs
+   the update does not restart. Affected running jobs follow the
+   [update interruption and box rules](#reload-a-changed-estate).
+
+A state-version refusal leaves the root unchanged. Keep it and run the release
+that wrote it. For a fixed-path replacement package, stop the unit, reinstall that
+release with `rpm -Uvh --oldpackage COMPATIBLE_PACKAGE.rpm`, select its runtime
+if required, then start and repeat the `RUNNING` check. A drain and snapshot do
+not convert state (DL-424).
+
+A unit that launches JIL files without a main config refuses a changed estate
+at start with a catalog-hash message. For any refusal that names a fresh run
+root, use the fresh-root steps below if choosing that reset.
+
+A fresh root is a deliberate reset. It loses the active engine's:
+
+- Job statuses.
+- Hold, ice and noexec flags.
+- Run and attempt identities and numbers.
+- Exit codes.
+- Timestamps.
+- History.
+- Captured invocations and log associations.
+- Configuration revisions.
+- Interruption evidence.
+- Pending updates and request IDs.
+- Globals.
+- Scheduler frontier and deduplication.
+- Armed latches.
+- Timers.
+- Capacity reservations.
+
+The archived root keeps that evidence. External job effects remain.
+Do not delete only `engine.db` or edit its version metadata.
+
+To choose a fresh root, use an unused archive path. As root:
+
+1. Keep the service stopped:
+
+   ```sh
+   systemctl stop dsl41-engine.service
+   ```
+
+2. Archive the whole root without nesting it inside an existing directory:
+
+   ```sh
+   mv -T /srv/dsl41/runs/nightbank /srv/dsl41/runs/nightbank-old
+   ```
+
+3. Create the replacement root and preserve its stop graces, snapshot interval
+   and retention settings:
+
+   ```sh
+   install -d -o dsl41 -g dsl41 -m 0700 /srv/dsl41/runs/nightbank
+   cp -a /srv/dsl41/runs/nightbank-old/engine.toml /srv/dsl41/runs/nightbank/
+   ```
+
+4. Clear any start limit and start the service:
+
+   ```sh
+   systemctl reset-failed dsl41-engine.service
+   systemctl start dsl41-engine.service
+   ```
+
+   Repeat the `RUNNING` check above. The engine starts from the current configured
+   estate with fresh state.
+
+A `CHANGE_STATUS` can start dependent jobs, including through a member's change
+to its box's derived status ([SEM-15](autosys-semantics.md#sem-15--member-status-changes-can-ripple-upward-vc)).
+Never use a blanket hold-and-release loop as a neutral status restore:
+releasing holds can start eligible jobs.
+Per-job `sendevent CHANGE_STATUS --job JOB --status STATUS --exit-code CODE`
+and `sendevent ON_HOLD --job JOB` can set a chosen status and hold flag.
+Run them as `sudo -u dsl41 ENGINE` with
+`--socket /srv/dsl41/runs/nightbank/control.sock`.
+These are new events; they do not recover history or scheduler state.
+
 ## Recover after the engine or box dies
 
 Keep the durable run root, including `engine.db`, `runs/` and `plans/`.

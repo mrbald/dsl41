@@ -27,6 +27,7 @@ import asyncio
 import contextlib
 import json
 import re
+import shlex
 import sys
 import time
 from datetime import datetime, timedelta
@@ -1014,6 +1015,72 @@ async def _trace_poll_app(short_root: Path, *, size: tuple[int, int] = (160, 40)
     async with app.run_test(size=size) as pilot:
         await _wait_for_ui(pilot, lambda: app._trace_seq == 2)
         yield app, pilot, replies
+
+
+@pytest.mark.parametrize("relative", [False, True], ids=["absolute", "relative-shell-characters"])
+def test_pilot_spec_drift_advice_clears_and_does_not_repeat_on_reconnect(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, relative: bool
+) -> None:
+    """DL-474: status alone supplies drift; the advice quotes both socket arguments."""
+    socket_root = Path("run root's $;") if relative else short_root
+
+    async def scenario() -> None:
+        async with _trace_poll_app(socket_root, size=(80, 40)) as (app, pilot, replies):
+            console = app.query_one("#console", RichLog)
+            notices: list[str] = []
+            write = app._console_write
+
+            def record(text):
+                notices.append(text.plain)
+                write(text)
+
+            monkeypatch.setattr(app, "_console_write", record)
+            socket = shlex.quote(str((socket_root / "control.sock").absolute()))
+            expected = (
+                "spec drift: estate files changed on disk; run dsl41 reread"
+                f" -S {socket} to preview, then dsl41 update --wait -S {socket} to adopt"
+            )
+            badge = "[SPEC DRIFT: estate files changed on disk]"
+            assert badge not in app.sub_title
+
+            replies.status["spec_drift"] = True
+            await pilot.press("r")
+            await pilot.pause()
+            assert notices.count(expected) == 1
+            assert expected in "".join(line.text for line in console.lines)
+            assert badge in app.sub_title
+
+            await pilot.press("r")
+            await pilot.pause()
+            assert notices.count(expected) == 1
+
+            replies.disconnected = True
+            await pilot.press("r")
+            await pilot.pause()
+            assert app._connected is False
+            replies.disconnected = False
+            await pilot.press("r")
+            await pilot.pause()
+            assert app._connected is True
+            assert notices.count(expected) == 1
+
+            for cleared in (False, None):
+                replies.status["spec_drift"] = cleared
+                await pilot.press("r")
+                await pilot.pause()
+                assert badge not in app.sub_title
+                replies.status["spec_drift"] = True
+                await pilot.press("r")
+                await pilot.pause()
+                assert badge in app.sub_title
+            assert notices.count(expected) == 3
+            assert {request["cmd"] for request in replies.requests} <= {
+                "status",
+                "trace",
+                "explain",
+            }
+
+    asyncio.run(scenario())
 
 
 def test_dl210_u1_u4_trace_baseline_change_restarts_a_longer_trace_next_poll(

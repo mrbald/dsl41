@@ -318,13 +318,23 @@ def test_a_build_that_derives_different_state_may_not_lead_this_store(tmp_path: 
     run_root = tmp_path / "run"
     _close(_start(run_root))
     _set_state_version(run_root, STATE_MACHINE_VERSION + 1)
+    before = {
+        path.relative_to(run_root): path.read_bytes()
+        for path in run_root.rglob("*")
+        if path.is_file()
+    }
     with pytest.raises(EngineError) as refused:
         asyncio.run(_resume(run_root, T0 + timedelta(minutes=1)))
     assert str(refused.value) == (
         f"{run_root / 'engine.db'}: state version {STATE_MACHINE_VERSION + 1}, this binary"
-        f" runs {STATE_MACHINE_VERSION}: drain and snapshot with the binary that wrote it, or"
-        " start a fresh run root (DL-424)"
+        f" runs {STATE_MACHINE_VERSION}: cannot resume; root unchanged. Run the release that"
+        " wrote it, or start a fresh run root. Drain and snapshot do not convert state (DL-424)"
     )
+    assert {
+        path.relative_to(run_root): path.read_bytes()
+        for path in run_root.rglob("*")
+        if path.is_file()
+    } == before
 
 
 def test_a_snapshot_another_build_wrote_is_refused_naming_both_versions(tmp_path: Path) -> None:

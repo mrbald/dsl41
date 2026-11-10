@@ -904,8 +904,9 @@ def _check_state_version(meta: Mapping[str, str], path: Path) -> None:
     found = meta.get("state_version")
     if found != str(STATE_MACHINE_VERSION):
         raise EngineError(
-            f"{path}: state version {found}, this binary runs {STATE_MACHINE_VERSION}: drain"
-            " and snapshot with the binary that wrote it, or start a fresh run root (DL-424)"
+            f"{path}: state version {found}, this binary runs {STATE_MACHINE_VERSION}: cannot"
+            " resume; root unchanged. Run the release that wrote it, or start a fresh run root."
+            " Drain and snapshot do not convert state (DL-424)"
         )
 
 
