@@ -26087,3 +26087,21 @@ relitigate an entry; append a new one.
   timezones.to_local requires a zone and treats None as unchanged, so it
   does not express host-local display or historical host offsets. DL-163's
   scheduling conversion remains there. A container without zone data shows UTC.
+
+- DL-474 Upgrade advice preserves the run root
+  (2026-11-10; owner BLK-3 ruling and accepted plan corrections; runner_tui.py,
+  runner_startup.py, docs/deploy.md)
+  THE RULE. One source-drift console line directs reread and update with the absolute,
+  shell-quoted socket path, without a launch-mode lookup (DL-65, DL-463).
+  Foreign-state refusal says the root is unchanged, directs the release that wrote it,
+  retains the fresh-root alternative, and states that drain and snapshot do not convert
+  state (DL-424). The version prefix stays fixed.
+  The deployment page covers a package replacing the unit's fixed executable path:
+  stop, whole-root backup, install, select runtime if needed, start, wait for RUNNING,
+  then preview and update only when the package changed estate files.
+  Reference RPM installation and runtime selection remain separate (DL-389).
+  A deliberate fresh root archives the old root and copies engine.toml; the page lists
+  lost state and per-job events, warns that CHANGE_STATUS can start dependants (SEM-15),
+  and gives no hand-restore recipe or blanket hold-and-release loop.
+  THE BOUNDARY. Engine behavior, state and format versions, queries, subtitle badge and
+  pending-source start line stay unchanged. Restart keeps the applied revision (DL-468).
