@@ -1,6 +1,6 @@
 [project]
 name = "dsl41"
-version = "1.13.0"
+version = "2.0.0"
 description = "AutoSys migration compiler and runner: JIL frontend, semantic IR, linter, Mermaid visualizer, equivalence validator, Python DSL."
 dynamic = ["readme"]
 requires-python = ">=3.12"
