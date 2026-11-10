@@ -197,6 +197,14 @@ def _stop_once_serving(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli_run, "_await_started", await_started)
 
 
+def _without_cookie_scan_report(stderr: str) -> str:
+    return "".join(
+        line
+        for line in stderr.splitlines(keepends=True)
+        if not line.startswith("dsl41: cookie scan signalling: ")
+    )
+
+
 @pytest.mark.usefixtures("cli_env", "local_timezone")
 def test_run_reports_missed_starts_on_stderr(
     short_root: Path, monkeypatch: pytest.MonkeyPatch
@@ -232,7 +240,7 @@ def test_run_reports_missed_starts_on_stderr(
     _stop_once_serving(monkeypatch)
     result = CliRunner().invoke(app, ["run", str(estate), "--run-root", str(run_root)])
     assert result.exit_code == 0, result.output
-    assert result.stderr == (
+    assert _without_cookie_scan_report(result.stderr) == (
         "engine was down 2026-07-01T11:00:00 to 2026-07-01T12:05:00; "
         "1 scheduled start was missed and will not run late\n"
         "  daily: 1 missed, last 2026-07-01T12:00:00\n"
