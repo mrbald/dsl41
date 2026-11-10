@@ -26275,3 +26275,39 @@ relitigate an entry; append a new one.
   keep true. `--json` on `reread` and `update`: no reader asked for it. A general sentence
   about what an update does to boxes: the answer cannot prove one. An outcome text that
   gives a cause or the job's later state: the kind describes the follow-up of one stop.
+
+- DL-483 Start and reread count lint findings; the missed-start report leaves armed holds out
+  (2026-11-10; owner rulings on the pilot trip list; lint.py, main_config.py, cli_reload.py,
+  cli_run.py, reread_worker.py, runner_startup.py, control-protocol §2)
+  THE RULE. A main-config start and `dsl41 reread` print a lint finding in full when its
+  severity is error or the policy blocks on it. Every other finding is counted: one line per
+  code and severity, `CODE SEVERITY: N findings`, then `full list: dsl41 lint --config PATH`.
+  With nothing counted neither line prints. A restart, which runs no lint, counts its
+  `known-unsupported` preflight warnings the same way; its pointer line says that the
+  command lists the files on disk, which can differ from the applied estate until an
+  update. The policy line, diagnostics and every other preflight line print as before.
+  `dsl41 lint` and `dsl41 rehearse` print every finding.
+  One function groups the finding objects; nothing reads a printed line back. The reread
+  preview gains the optional `preview.lint_summary`, the lines to print; an added field needs
+  no version step (DL-217). `lint_messages` keeps every finding, preparation for `update`
+  omits the new field, and a client prints `lint_messages` when the field is absent.
+  A main-config start prints `N pending source changes; run dsl41 reread ...` only when N is
+  above zero.
+  The missed-start report (DL-476) leaves out the ticks of a job on ice, and of a job that is
+  on hold and already armed: neither loses anything. A held job that is not armed counts,
+  because the tick would have armed it and OFF_HOLD would then have started it (SEM-21). A
+  job on noexec counts. With nothing left the report prints nothing. This narrows what
+  DL-476 prints; the per-tick `drop` records (E9) do not change.
+  THE REASON. On a 240-job estate a first start printed 458 lint lines and a restart 240
+  warnings, most of them one `known-unsupported` message with a different job name. They hid
+  `engine up` and the reread summary. A start with nothing pending told the operator to run
+  `dsl41 reread`. Held boxes on a minute schedule filled the missed-start report.
+  REJECTED. Reading rendered findings back in the client: a file name can imitate a finding,
+  and a real error was shown as a count. Shortening `lint_messages`: a client may want every
+  finding. Counting errors: an error must stay readable where it appears. Dropping the E9
+  records of left-out jobs: the journal states what the scheduler did. Leaving every held job
+  out, the owner's first ruling: an unarmed held job loses its start on release, so the owner
+  chose to hide only the armed ones.
+  THE LIMIT. `[lint] ignore` still removes a code from the report altogether. A count line
+  names no job and no attribute; `dsl41 lint` does. The summary repeats the full findings
+  already in `lint_messages`, so it adds to an unbounded reply (BUG-58).

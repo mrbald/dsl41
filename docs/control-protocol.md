@@ -179,6 +179,15 @@ counted rather than copied. This is a passive forecast, not an admission.
 or is null when unavailable; it does not establish configuration equality.
 Older clients may ignore the field; no version step is needed (DL-217).
 
+The optional `preview.lint_summary` contains the policy line, findings grouped
+from their objects, then the host-launch and preflight lines (DL-483).
+Errors and policy-blocked findings print in full. Other warnings and infos
+are counted by code and severity, followed by the full-list command when
+anything is counted. `lint_messages` keeps every finding in full.
+Reread clients print `lint_summary` when present, otherwise `lint_messages`
+verbatim. Update preparation omits `lint_summary`. No version step is needed
+(DL-217).
+
 The ADM update request is `{"v":4,"cmd":"update","baseline_id":"...",
 "request_id":"...","claimed_actor":null,"wait":false,"retry_only":false}`.
 Only the listed fields are accepted. No token, source path, consent or `expect` is accepted. The engine prepares

@@ -20,7 +20,7 @@ from dsl41.canon import canonical_bytes, decode
 from dsl41.estate_manifest import ManifestError, check_requirement, read_regular
 from dsl41.idempotence import Exceptions, IdempotenceError, parse_exceptions
 from dsl41.ir import LoweringError, lower_catalog, tool_version
-from dsl41.lint import RULE_CODES, LintReport, lint_catalog, rule_l025
+from dsl41.lint import RULE_CODES, LintReport, lint_catalog, lint_summary_lines, rule_l025
 from dsl41.placeholders import PlaceholderError, properties_from_bytes, substitute
 from dsl41.reload_plan import Estate, RereadRefused, estate_settings
 from dsl41.runner_config import Configuration, RuntimeProfile, runtime_profile_from_cli
@@ -502,13 +502,19 @@ def policy_report(estate: Estate) -> tuple[LintPolicy, LintReport]:
     return policy, report
 
 
-def emit_policy(estate: Estate, *, refuse: bool = True) -> bool:
+def emit_policy(estate: Estate, *, refuse: bool = True, summarize: bool = False) -> bool:
     policy, report = policy_report(estate)
     typer.echo(policy.describe(), err=True)
     for diagnostic in estate.metadata.get("diagnostics", []):
         typer.echo(diagnostic, err=True)
-    for violation in report.violations:
-        typer.echo(violation.render(), err=True)
+    if summarize:
+        lines = lint_summary_lines(
+            report.violations, blocks=policy.blocks, config_path=estate.metadata["config_path"]
+        )
+    else:
+        lines = [violation.render() for violation in report.violations]
+    for line in lines:
+        typer.echo(line, err=True)
     blocking = any(policy.blocks(v.severity) for v in report.violations)
     if blocking and refuse:
         raise typer.Exit(2)

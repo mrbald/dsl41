@@ -171,6 +171,7 @@ def test_shared_reference_and_setting_are_sent_once_with_bounded_values(monkeypa
     )
     update = reread_worker.preview(candidate, live, include_definition_changes=False)
     assert "definition_changes" not in update
+    assert "lint_summary" not in update
     assert len(json.dumps({"ok": True, "preview": update}).encode()) < LINE_LIMIT
 
 

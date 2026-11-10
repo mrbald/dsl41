@@ -205,6 +205,34 @@ def _without_cookie_scan_report(stderr: str) -> str:
     )
 
 
+@pytest.mark.usefixtures("cli_env")
+@pytest.mark.parametrize("changed", [False, True])
+def test_main_config_restart_reports_only_positive_pending_count(short_root, monkeypatch, changed):
+    at = datetime(2026, 7, 1, 9)
+    monkeypatch.setattr(RealClock, "now", lambda self: at)
+    estate = short_root / "estate.jil"
+    estate.write_text("insert_job: utility\njob_type: c\ncommand: true\nmachine: localhost\n")
+    config = short_root / "dsl41.toml"
+    config.write_text(
+        f'format_version = 1\n[engine]\nrun_root = "{short_root}/run"\n'
+        '[estate]\ninclude = ["estate.jil"]\n[lint]\nignore = ["L011"]\n'
+    )
+    _stop_once_serving(monkeypatch)
+    runner = CliRunner()
+    first = runner.invoke(app, ["run", "--config", str(config)])
+    assert first.exit_code == 0, first.output
+    if changed:
+        estate.write_text(estate.read_text() + "description: pending\n")
+    resumed = runner.invoke(app, ["run", "--config", str(config)])
+    assert resumed.exit_code == 0, resumed.output
+    pending = [line for line in resumed.stderr.splitlines() if "pending source changes" in line]
+    assert pending == (
+        [f"1 pending source changes; run dsl41 reread -S {short_root}/run/control.sock"]
+        if changed
+        else []
+    )
+
+
 @pytest.mark.usefixtures("cli_env", "local_timezone")
 def test_run_reports_missed_starts_on_stderr(
     short_root: Path, monkeypatch: pytest.MonkeyPatch

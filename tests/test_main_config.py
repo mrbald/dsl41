@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
 from contextlib import closing
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
@@ -513,9 +515,7 @@ def test_02_shell_tokens_stay_literal(tmp_path: Path) -> None:
     }
 
 
-def boot_and_stop(path: Path) -> str:
-    root = Path(main.load_config(path).engine.run_root)
-    resumed = (root / "engine.db").exists()
+def boot_and_stop(path: Path, *, pending: bool = False) -> str:
     log = path.parent / "boot.log"
     with (
         log.open("w") as output,
@@ -530,7 +530,7 @@ def boot_and_stop(path: Path) -> str:
             while child.poll() is None:
                 text = log.read_text()
                 ready = "engine up; control socket:" in text
-                if ready and (not resumed or "pending source changes; run dsl41 reread" in text):
+                if ready and (not pending or "pending source changes; run dsl41 reread" in text):
                     break
                 assert time.monotonic() < deadline, text
                 time.sleep(0.05)
@@ -544,6 +544,160 @@ def boot_and_stop(path: Path) -> str:
             if child.poll() is None:
                 child.kill()
                 child.wait(timeout=10)
+
+
+@pytest.mark.parametrize("findings", [False, True])
+@pytest.mark.parametrize("refuse", ["none", "error"])
+def test_start_and_reread_share_counts_without_changing_answers(
+    tmp_path, monkeypatch, capsys, findings, refuse
+):
+    from dsl41 import reread_worker
+    from dsl41.runner_preflight import PreflightItem
+
+    monkeypatch.setattr(
+        reread_worker,
+        "preflight_items",
+        lambda *args: [PreflightItem(severity="WARN", code="shell", message="synthetic preflight")],
+    )
+
+    path = estate_file(tmp_path, lint=f'refuse = "{refuse}"\n')
+    candidate = main.prepare(path)
+    candidate.metadata["diagnostics"] = ["synthetic diagnostic"]
+    report = LintReport(
+        violations=[
+            Violation(code=code, severity=severity, message=message)
+            for code, severity, message in (
+                ("known-unsupported", "warn", "first"),
+                ("L002", "info", "external setter"),
+                ("L001", "error", "blocking detail"),
+                ("L002", "warn", "first setter"),
+                ("known-unsupported", "warn", "second"),
+                ("L002", "warn", "second setter"),
+            )
+        ]
+        if findings
+        else []
+    )
+    monkeypatch.setattr(main, "lint_catalog", lambda *args, **kwargs: report)
+    policy = f"lint policy: refuse={refuse}; ignore=none"
+    expected = [policy, "synthetic diagnostic"]
+    if findings:
+        expected += [
+            "L001 error: blocking detail",
+            "L002 warn: 2 findings",
+            "L002 info: 1 finding",
+            "known-unsupported warn: 2 findings",
+            f"full list: dsl41 lint --config {shlex.quote(str(path))}",
+        ]
+    if findings and refuse == "error":
+        with pytest.raises(main.typer.Exit) as caught:
+            main.emit_policy(candidate, summarize=True)
+        assert caught.value.exit_code == 2
+    else:
+        assert not main.emit_policy(candidate, summarize=True)
+    assert capsys.readouterr().err.splitlines() == expected
+    live = Live(candidate.catalog, candidate.settings, 1, {}, launch={})
+    answer = {
+        "ok": True,
+        "live_rev": 1,
+        "source": {"path": str(path)},
+        "preview": reread_worker.preview(candidate, live),
+    }
+    preflight = "preflight WARN [shell]: synthetic preflight"
+    host = "host launch settings changed; restart before update"
+    assert answer["preview"]["lint_messages"] == [
+        policy,
+        *(v.render() for v in report.violations),
+        host,
+        preflight,
+    ]
+    assert answer["preview"]["lint_summary"] == [expected[0], *expected[2:], host, preflight]
+    update = reread_worker.preview(candidate, live, include_definition_changes=False)
+    assert "lint_summary" not in update
+    assert update["lint_messages"] == answer["preview"]["lint_messages"]
+    before = deepcopy(answer)
+    assert reread_command(send=lambda *_: answer) == 0
+    # Diagnostics follow lint output on reread (DL-483).
+    assert capsys.readouterr().err.splitlines() == [
+        expected[0],
+        *expected[2:],
+        host,
+        preflight,
+        expected[1],
+    ]
+    assert answer == before
+    result = CliRunner().invoke(app, ["lint", "--config", str(path)])
+    assert result.exit_code == int(findings and refuse == "error")
+    assert result.stderr.splitlines() == [policy, *(v.render() for v in report.violations)]
+
+
+@pytest.mark.parametrize("input_kind", ["filename", "machine", "glob"])
+def test_finding_shaped_input_text_is_verbatim_at_start_and_reread(
+    tmp_path, monkeypatch, capsys, input_kind
+):
+    import pwd
+    from dsl41 import cli_run, reread_worker, runner_preflight
+
+    monkeypatch.setattr(runner_preflight, "_local_identity", lambda *_: frozenset({"localhost"}))
+    account = pwd.struct_passwd(
+        ("synthetic", "x", os.geteuid(), os.getegid(), "", str(tmp_path), "/bin/sh")
+    )
+    monkeypatch.setattr(runner_preflight.pwd, "getpwuid", lambda *_: account)
+
+    async def serve(*args, **kwargs):
+        return 0
+
+    monkeypatch.setattr(cli_run, "_serve_run", serve)
+    name = "a:1: L002 info: x.jil" if input_kind == "filename" else "a.jil"
+    source = JOB
+    if input_kind == "filename":
+        source += "condition: s(absent)\n"
+    elif input_kind == "machine":
+        source = source.replace("machine: localhost", 'machine: "foreign:1: L002 info: node"')
+    (tmp_path / name).write_text(source)
+    include = [name]
+    if input_kind == "glob":
+        include.append("missing*:1: L002 info: x.jil")
+    path = config_file(tmp_path, include=include, lint='refuse = "warn"\nignore = ["L011"]\n')
+    candidate = main.prepare(path)
+    policy, report = main.policy_report(candidate)
+    if input_kind == "filename":
+        expected = report.by_code("L001")[0].render()
+    elif input_kind == "machine":
+        item = next(
+            item for item in reread_worker.preflight_items(candidate, T0) if item.code == "machine"
+        )
+        expected = f"preflight ERROR [machine] A: {item.message}"
+    else:
+        expected = candidate.metadata["diagnostics"][0]
+    start = CliRunner().invoke(app, ["run", "--config", str(path)])
+    assert start.exit_code == (0 if input_kind == "glob" else 2), start.output
+    footer = ["preflight: refusing to run (runner-design ss8)"] if input_kind == "machine" else []
+    assert start.stderr.splitlines() == [policy.describe(), expected, *footer]
+    view = reread_worker.preview(candidate, live_of(candidate))
+    assert (
+        reread_command(
+            send=lambda *_: {
+                "ok": True,
+                "live_rev": 1,
+                "source": {"path": str(path)},
+                "preview": view,
+            }
+        )
+        == 0
+    )
+    reread_output = capsys.readouterr().err
+    assert reread_output.splitlines() == [policy.describe(), expected]
+    assert "L002 info: 1 finding" not in start.stderr + reread_output
+    assert "full list:" not in start.stderr + reread_output
+    main.emit_policy(candidate, refuse=False)
+    raw = capsys.readouterr().err.splitlines()
+    if input_kind == "filename":
+        assert view["lint_messages"] == raw
+    elif input_kind == "machine":
+        assert view["lint_messages"] == [*raw, expected]
+    else:
+        assert view["diagnostics"] == [expected]
 
 
 @pytest.mark.parametrize("policy", ["none", "error", "warn"])
@@ -586,9 +740,13 @@ def test_known_unsupported_lint_policy(
     for command, refusal in [("lint", 1), ("run", 2)]:
         result = runner.invoke(app, [command, "--config", str(path)])
         assert result.exit_code == (refusal if blocked else 0), result.output
-        assert result.output.count("known-unsupported warn:") == warning_count
+        full = command == "lint" or blocked
+        assert result.output.count("known-unsupported warn:") == (
+            warning_count if full else int(bool(warning_count))
+        )
         for attribute in expected:
-            assert result.output.count(f"job A: {attribute}:") == int(not ignored)
+            assert result.output.count(f"job A: {attribute}:") == int(not ignored and full)
+        assert ("full list:" in result.stderr) == bool(warning_count and not full)
     assert bool(entered) is not blocked
     if entered:
         assert sum(item.code == "known-unsupported" for item in entered[0]) == warning_count
@@ -608,9 +766,11 @@ def test_known_unsupported_lint_policy(
     warnings = "\n".join(
         line for line in (output.out + output.err).splitlines() if not line.startswith("reread:")
     )
-    assert warnings.count("known-unsupported warn:") == warning_count
+    assert warnings.count("known-unsupported warn:") == (
+        warning_count if blocked else int(bool(warning_count))
+    )
     for attribute in expected:
-        assert warnings.count(f"job A: {attribute}:") == int(not ignored)
+        assert warnings.count(f"job A: {attribute}:") == int(not ignored and blocked)
     assert not (tmp_path / "run").exists()
     if blocked:
         with pytest.raises(RereadRefused, match="known-unsupported"):
@@ -650,7 +810,8 @@ def test_known_unsupported_keeps_other_reread_findings(tmp_path, capsys):
     output = capsys.readouterr()
     assert "changed 1 job" in output.out and "1 job: A" in output.out
     assert output.err.count("L001 error:") == 1
-    assert output.err.count("known-unsupported warn:") == 1
+    assert "known-unsupported warn: 1 finding" in output.err
+    assert "job A: group:" not in output.err
     assert not (tmp_path / "run").exists()
 
 
@@ -682,11 +843,17 @@ def test_known_unsupported_restart_reports_without_refusal(short_root, ignored):
 
     path = estate_file(
         short_root,
+        engine='job_shell = "/bin/sh"\n',
         lint='refuse = "warn"\nignore = '
         + json.dumps(["L011"] + (["known-unsupported"] if ignored else []))
         + "\n",
     )
-    (short_root / "a.jil").write_text(JOB + "group: captured\n")
+    (short_root / "a.jil").write_text(
+        JOB
+        + "group: captured\napplication: batch\ncondition: s(B)\n"
+        + JOB.replace("insert_job: A", "insert_job: B")
+        + "group: captured\napplication: batch\ncondition: s(A)\n"
+    )
     captured = main.prepare(path)
     root = short_root / "run"
     engine = start_run(
@@ -701,8 +868,14 @@ def test_known_unsupported_restart_reports_without_refusal(short_root, ignored):
     (short_root / "a.jil").write_text(JOB + "application: pending\n")
     output = boot_and_stop(path)
     assert "engine up; control socket:" in output
-    assert output.count("job A: group:") == int(not ignored)
+    assert output.count("known-unsupported warn: 5 findings") == int(not ignored)
+    assert output.count(
+        f"files on disk (may differ from applied estate until update): dsl41 lint --config {path}"
+    ) == int(not ignored)
+    assert "job A: group:" not in output
+    assert "job B: group:" not in output
     assert "job A: application:" not in output
+    assert "preflight WARN [skeleton-cycle]: cycle in the AND-success skeleton" in output
     warnings = [
         item
         for _, kind, body in rows(root)
@@ -710,8 +883,55 @@ def test_known_unsupported_restart_reports_without_refusal(short_root, ignored):
         for item in body["items"]
         if item["code"] == "known-unsupported"
     ]
-    assert len(warnings) == int(not ignored)
+    expected = [
+        {
+            "severity": "WARN",
+            "code": "known-unsupported",
+            "job": name,
+            "message": f"job {name}: {attribute}: known but unsupported; it has no effect in this release",
+        }
+        for name in ("A", "B")
+        for attribute in ("application", "group")
+    ] + [
+        {
+            "severity": "WARN",
+            "code": "known-unsupported",
+            "job": None,
+            "message": "engine.job_shell: known but unsupported; it has no effect in this release",
+        }
+    ]
+    assert warnings == ([] if ignored else expected)
     assert active_configuration(root).catalog == captured.catalog
+
+
+def test_restart_pointer_names_disk_findings_when_applied_warning_is_absent_on_disk(short_root):
+    from dsl41.runner_adapters import FakeAdapter
+    from dsl41.runner_clock import RealClock
+    from dsl41.runner_startup import start_run
+
+    path = estate_file(short_root, lint='ignore = ["L011"]\n')
+    source = short_root / "a.jil"
+    source.write_text(JOB + "group: captured\n")
+    applied = main.prepare(path)
+    engine = start_run(
+        applied.catalog,
+        short_root / "run",
+        clock=RealClock(),
+        adapters={"CMD": FakeAdapter()},
+        launched=main.profile_of(applied),
+        source_capture=main.encoded_parts(applied),
+    )
+    engine.journal.close()
+    source.write_text(JOB)
+    output = boot_and_stop(path, pending=True)
+    assert "known-unsupported warn: 1 finding" in output
+    assert (
+        f"files on disk (may differ from applied estate until update): dsl41 lint --config {path}"
+    ) in output
+    lint = CliRunner().invoke(app, ["lint", "--config", str(path)])
+    assert lint.exit_code == 0, lint.output
+    assert lint.stderr == "lint policy: refuse=none; ignore=L011\n"
+    assert active_configuration(short_root / "run").catalog == applied.catalog
 
 
 def test_known_unsupported_startup_and_socket_reread_process(short_root):
@@ -740,9 +960,10 @@ def test_known_unsupported_startup_and_socket_reread_process(short_root):
             while "engine up; control socket:" not in log.read_text():
                 assert child.poll() is None and time.monotonic() < deadline, log.read_text()
                 time.sleep(0.05)
+            assert f"known-unsupported warn: {len(expected) + 1} findings" in log.read_text()
             for attribute in expected:
-                assert log.read_text().count(f"job A: {attribute}:") == 1
-            assert log.read_text().count("engine.job_shell:") == 1
+                assert f"job A: {attribute}:" not in log.read_text()
+            assert "engine.job_shell:" not in log.read_text()
             jil = short_root / "a.jil"
             jil.write_text(jil.read_text().replace("group: batch", "group: pending"))
             for policy, ignored in [("none", False), ("warn", False), ("warn", True)]:
@@ -769,12 +990,13 @@ def test_known_unsupported_startup_and_socket_reread_process(short_root):
                 assert "changed 1 job" in result.stdout and "1 job: A" in result.stdout
                 assert "token:" not in result.stdout
                 assert set((root / "plans").iterdir()) == before
-                assert result.stderr.count("known-unsupported warn:") == (len(expected) + 1) * int(
-                    not ignored
+                full = policy == "warn" and not ignored
+                assert result.stderr.count("known-unsupported warn:") == (
+                    len(expected) + 1 if full else int(not ignored)
                 )
                 for attribute in expected:
-                    assert result.stderr.count(f"job A: {attribute}:") == int(not ignored)
-                assert result.stderr.count("engine.job_shell:") == int(not ignored)
+                    assert result.stderr.count(f"job A: {attribute}:") == int(full)
+                assert result.stderr.count("engine.job_shell:") == int(full)
             assert active_configuration(root).catalog.jobs["A"].passthrough["group"] == "batch"
             with closing(SqliteStore(root / "engine.db", read_only=True)) as store:
                 assert store.current_config_rev() == 1
@@ -804,7 +1026,7 @@ def test_10_restart_uses_stored_catalog_and_reports_pending(short_root: Path) ->
     before = active_configuration(tmp_path / "run")
     (tmp_path / "a.jil").write_text("malformed: deliberately\n")
     config_file(tmp_path, lint='refuse = "warn"\n')
-    output = boot_and_stop(path)
+    output = boot_and_stop(path, pending=True)
     assert "2 pending source changes; run dsl41 reread" in output
     assert active_configuration(tmp_path / "run").catalog == before.catalog
     with closing(SqliteStore(tmp_path / "run" / "engine.db", read_only=True)) as store:

@@ -27,7 +27,7 @@ from typer.testing import CliRunner
 from dsl41.cli import app
 from dsl41.ir import CatalogIR, JobIR, lower_source
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import Event
+from dsl41.oracle_state import Event, JobRuntime
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import EngineError, RealClock, VirtualClock
@@ -1093,12 +1093,137 @@ def test_missed_start_lines_sort_jobs_and_take_the_latest_tick() -> None:
         Event(at=start, kind="STARTJOB", payload={"job": "zebra"}),
     ]
     assert _missed_start_lines(
-        start, start + timedelta(hours=3), [(t, "missed") for t in ticks]
+        start,
+        start + timedelta(hours=3),
+        [(t, "missed") for t in ticks],
+        {"alpha": JobRuntime(), "zebra": JobRuntime()},
     ) == [
         "engine was down 2026-07-01T10:00:00 to 2026-07-01T13:00:00; "
         "3 scheduled starts were missed and will not run late",
         "  alpha: 1 missed, last 2026-07-01T11:00:00",
         "  zebra: 2 missed, last 2026-07-01T12:00:00",
+    ]
+
+
+@pytest.mark.parametrize("all_excluded", [False, True])
+@pytest.mark.parametrize("snapshot", [False, True])
+def test_missed_start_report_uses_recovered_flags_but_keeps_every_drop(
+    tmp_path, capsys, monkeypatch, all_excluded, snapshot
+):
+    from dsl41 import runner_startup
+
+    monkeypatch.setattr(
+        runner_startup, "format_local_at", lambda at: at.isoformat(timespec="seconds")
+    )
+    flags = {"held_armed": "ON_HOLD", "iced": "ON_ICE", "both": "ON_HOLD"}
+    if not all_excluded:
+        flags.update({"held": "ON_HOLD", "noexec": "ON_NOEXEC", "ordinary": None})
+    catalog = lower_source(
+        "".join(
+            f"insert_job: {name}\njob_type: c\ncommand: x\n"
+            'date_conditions: 1\ndays_of_week: all\nstart_times: "'
+            + ("09:00,10:00,11:00" if name == "held_armed" else "10:00,11:00")
+            + '"\n'
+            for name in flags
+        )
+    )
+    start = datetime(2026, 7, 1, 9)
+    now = start + timedelta(hours=2, minutes=5)
+    root = tmp_path / "run"
+
+    async def scenario():
+        engine = start_run(
+            catalog,
+            root,
+            clock=VirtualClock(start=start),
+            adapters={"CMD": FakeAdapter()},
+            scheduler=Scheduler(catalog, start=start),
+        )
+        for name, flag in flags.items():
+            if flag is not None:
+                engine.inject(Event(at=start, kind=flag, payload={"job": name}))
+        engine.inject(Event(at=start, kind="ON_ICE", payload={"job": "both"}))
+        await engine.run_until_quiescent(start)
+        assert engine.oracle.store.job["held_armed"].armed
+        if not all_excluded:
+            assert not engine.oracle.store.job["held"].armed
+        if snapshot:
+            engine.take_snapshot()
+        assert engine.journal is not None
+        engine.journal.close()
+        capsys.readouterr()
+        resumed = await resume_run(
+            catalog,
+            root,
+            clock=VirtualClock(start=now),
+            adapters={"CMD": FakeAdapter()},
+            scheduler=Scheduler(catalog, start=start),
+        )
+        assert len(resumed.drops) == len(flags) * 2
+        await resumed.run_until_quiescent(now)
+        await resumed.shutdown()
+        assert resumed.journal is not None
+        resumed.journal.close()
+
+    asyncio.run(scenario())
+    report = [
+        line
+        for line in capsys.readouterr().err.splitlines()
+        if line.startswith(("engine was down ", "  "))
+    ]
+    assert report == (
+        []
+        if all_excluded
+        else [
+            "engine was down 2026-07-01T09:00:00 to 2026-07-01T11:05:00; "
+            "6 scheduled starts were missed and will not run late",
+            "  held: 2 missed, last 2026-07-01T11:00:00",
+            "  noexec: 2 missed, last 2026-07-01T11:00:00",
+            "  ordinary: 2 missed, last 2026-07-01T11:00:00",
+        ]
+    )
+    drops = [record for record in read_journal(root) if record.get("rec") == "drop"]
+    assert len(drops) == len(flags) * 2
+    assert {(r["payload"]["job"], r["at"]) for r in drops} == {
+        (name, start.replace(hour=hour).isoformat()) for name in flags for hour in (10, 11)
+    }
+    assert all(
+        r["kind"] == "STARTJOB"
+        and r["reason"] == "scheduler tick missed while the engine was down; not fired late"
+        for r in drops
+    )
+
+
+@pytest.mark.parametrize(
+    "runtime",
+    [
+        JobRuntime(on_ice=True),
+        JobRuntime(on_hold=True, armed=True),
+        JobRuntime(on_ice=True, on_hold=True),
+    ],
+)
+@pytest.mark.parametrize("reported_hour", [10, 12])
+def test_missed_start_from_excludes_the_earliest_left_out_tick(monkeypatch, runtime, reported_hour):
+    from dsl41 import runner_startup
+
+    monkeypatch.setattr(
+        runner_startup, "format_local_at", lambda at: at.isoformat(timespec="seconds")
+    )
+    day = datetime(2026, 7, 1)
+    skipped = day.replace(hour=9)
+    last_record = day.replace(hour=11)
+    reported = day.replace(hour=reported_hour)
+    upto = day.replace(hour=13)
+    missed = [
+        (Event(at=skipped, kind="STARTJOB", payload={"job": "left_out"}), "missed"),
+        (Event(at=reported, kind="STARTJOB", payload={"job": "counts"}), "missed"),
+    ]
+    assert _missed_start_lines(
+        last_record, upto, missed, {"left_out": runtime, "counts": JobRuntime(on_hold=True)}
+    ) == [
+        f"engine was down {min(last_record, reported).isoformat(timespec='seconds')} "
+        "to 2026-07-01T13:00:00; 1 scheduled start was missed and will not run late",
+        f"  counts: 1 missed, last {reported.isoformat(timespec='seconds')}",
     ]
 
 

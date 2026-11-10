@@ -484,3 +484,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-480 | The terminal UI prints a repeated scheduler refusal once and counts the rest | [docs/runner-design.md](runner-design.md) |
 | DL-481 | The project version is 2.0.0 and `dsl41 --version` prints it |  |
 | DL-482 | `query status`, `reread` and `update` print focused text; neutral is the per-job view | [README.md](../README.md), [docs/cli-tui-qualification.md](cli-tui-qualification.md), [docs/control-protocol.md](control-protocol.md), [docs/deploy.md](deploy.md), [docs/incident-triage.md](incident-triage.md), [docs/runner-design.md](runner-design.md) |
+| DL-483 | Start and reread count lint findings; the missed-start report leaves armed holds out | [docs/control-protocol.md](control-protocol.md), [docs/deploy.md](deploy.md), [docs/incident-triage.md](incident-triage.md), [docs/runner-design.md](runner-design.md) |

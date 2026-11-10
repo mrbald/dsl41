@@ -161,6 +161,28 @@ def _preflight_items_or_exit(
     return items
 
 
+def _restart_preflight_items_or_exit(
+    items: "list[PreflightItem]", config_path: Path | None
+) -> None:
+    """Count main-config restart's unsupported warnings; keep other preflight whole (DL-483)."""
+    from dsl41.lint import Violation, lint_summary_lines
+
+    _preflight_items_or_exit(items, known_reported=config_path is not None)
+    if config_path is not None:
+        findings = [
+            Violation(code=item.code, severity="warn", message=item.message)
+            for item in items
+            if item.code == "known-unsupported"
+        ]
+        for line in lint_summary_lines(
+            findings,
+            blocks=LintPolicy().blocks,
+            config_path=str(config_path),
+            from_applied_estate=True,
+        ):
+            typer.echo(line, err=True)
+
+
 def _naive_utc_arg(text: str, option: str) -> "datetime":
     from datetime import datetime
 
@@ -463,7 +485,7 @@ def _run_main_config_checked(path: Path, *, ui: bool, hooks: HookSettings, raw: 
         catalog = CatalogIR() if estate is None else estate.catalog
         warns = []
         if estate is not None:
-            main_config.emit_policy(estate)
+            main_config.emit_policy(estate, summarize=True)
             warns = _preflight_or_exit(
                 catalog,
                 execution=True,
@@ -1018,12 +1040,13 @@ async def _serve_run(
                         item for item in restart_warnings if item.code != "known-unsupported"
                     ]
                 printed = {(item.code, item.job, item.message) for item in warns}
-                _preflight_items_or_exit(
+                _restart_preflight_items_or_exit(
                     [
                         item
                         for item in restart_warnings
                         if (item.code, item.job, item.message) not in printed
-                    ]
+                    ],
+                    main_config_path,
                 )
                 warns = restart_warnings
             else:
@@ -1115,10 +1138,14 @@ async def _serve_run(
                 profile=engine.profile or profile,
                 source_capture=engine.source_capture,
             )
-            typer.echo(
-                f"{pending_source_changes(main_config.decoded_parts(applied.source_capture, applied=applied))} pending source changes; run dsl41 reread -S {shlex.quote(str(server.path))}",
-                err=True,
+            pending = pending_source_changes(
+                main_config.decoded_parts(applied.source_capture, applied=applied)
             )
+            if pending > 0:
+                typer.echo(
+                    f"{pending} pending source changes; run dsl41 reread -S {shlex.quote(str(server.path))}",
+                    err=True,
+                )
         end = await _await_run_end(engine, server, loop_task, ui)
         code = await _stop_and_judge(engine, server, end)
         # the CLI wrapper reports a statechart error as exit 7

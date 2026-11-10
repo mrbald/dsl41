@@ -38,6 +38,7 @@ from dsl41.ir import (
     lower_source,
 )
 from dsl41.idempotence import Exceptions
+from dsl41.main_config import LintPolicy
 from dsl41.lint import (
     GRAPH_RULES,
     RULE_CODES,
@@ -46,6 +47,7 @@ from dsl41.lint import (
     Severity,
     Violation,
     lint_catalog,
+    lint_summary_lines,
     rule_known_unsupported,
     rule_l001,
     rule_l002,
@@ -96,6 +98,69 @@ def test_violation_render_with_span_matches_the_documented_format() -> None:
 def test_violation_render_without_span_omits_the_location_prefix() -> None:
     v = Violation(code="L004", severity="error", message="boom")
     assert v.render() == "L004 error: boom"
+
+
+@pytest.mark.parametrize("policy", ["none", "error", "warn"])
+@pytest.mark.parametrize("path", [None, "/synthetic/with space/main.toml"])
+def test_lint_summary_counts_objects_stably(policy, path) -> None:
+    findings = [
+        Violation(code=code, severity=severity, message=message)
+        for code, severity, message in [
+            ("L002", "info", "detail"),
+            ("known-unsupported", "warn", "detail"),
+            ("L002", "warn", "detail"),
+            ("L001", "error", "detail"),
+            ("L002", "warn", "another detail"),
+            ("L002", "error", "detail"),
+        ]
+    ]
+    expected_counts = (
+        (["L002 warn: 2 findings"] if policy != "warn" else [])
+        + ["L002 info: 1 finding"]
+        + (["known-unsupported warn: 1 finding"] if policy != "warn" else [])
+    )
+    full = [findings[i].render() for i in ([1, 2, 3, 4, 5] if policy == "warn" else [3, 5])]
+    pointer = "'/synthetic/with space/main.toml'" if path else "PATH"
+    tail = [*expected_counts, f"full list: dsl41 lint --config {pointer}"]
+    blocks = LintPolicy(refuse=policy).blocks
+    assert lint_summary_lines(findings, blocks=blocks, config_path=path) == [*full, *tail]
+    assert (
+        lint_summary_lines(reversed(findings), blocks=blocks, config_path=path)[-len(tail) :]
+        == tail
+    )
+
+
+@pytest.mark.parametrize("policy", ["none", "error", "warn"])
+def test_lint_summary_without_counted_findings_has_no_pointer(policy) -> None:
+    blocks = LintPolicy(refuse=policy).blocks
+    assert lint_summary_lines([], blocks=blocks) == []
+    error = Violation(code="L001", severity="error", message="full error")
+    assert lint_summary_lines([error], blocks=blocks) == [error.render()]
+    warning = Violation(code="L002", severity="warn", message="blocked warning")
+    assert lint_summary_lines([warning], blocks=LintPolicy(refuse="warn").blocks) == [
+        warning.render()
+    ]
+
+
+def test_lint_summary_uses_the_supplied_blocking_rule() -> None:
+    checked = []
+
+    def blocks(severity):
+        checked.append(severity)
+        return severity == "info"
+
+    findings = [
+        Violation(code="L001", severity="error", message="full error"),
+        Violation(code="L002", severity="warn", message="counted"),
+        Violation(code="L002", severity="info", message="full info"),
+    ]
+    assert lint_summary_lines(findings, blocks=blocks) == [
+        "L001 error: full error",
+        "L002 info: full info",
+        "L002 warn: 1 finding",
+        "full list: dsl41 lint --config PATH",
+    ]
+    assert checked == ["warn", "info"]
 
 
 def _violation(severity: Severity) -> Violation:

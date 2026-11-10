@@ -689,6 +689,13 @@ expand in sorted order. Recursive `**`, unreadable inputs, duplicate
 selections and duplicate jobs refuse. JIL and `estate()` modules compile
 as one catalog. `lint.refuse` is `none` (default), `error` or `warn` over
 unignored findings; input, lowering and preflight errors remain hard.
+First start and reread print errors and policy-blocked findings in full and count
+the rest by code and severity, followed by the full-list command. Lint and rehearse
+keep the full list; reread previews keep every finding (DL-483).
+Restart counts captured `known-unsupported` warnings. Its pointer names findings
+from files on disk, which may differ from the applied estate until an update.
+Other preflight warnings print in full. Captured ignores apply without
+lint refusal; journal warnings stay whole (DL-483).
 `estate.toml` remains a test and rehearsal input. Rehearsal and engine
 roots cannot equal or contain each other.
 
@@ -770,9 +777,11 @@ starting with non-empty state (DL-433):
    steps again.
 
 At the scheduler sweep, startup stderr reports missed starts as one total
-and one line per affected job (§15 E9, DL-476). This includes `dsl41 run --ui`,
-before the terminal UI attaches. A first start or a sweep with no missed
-ticks prints no missed-start report.
+and one line per affected job (§15 E9, DL-476, DL-483). Jobs on ice and jobs
+already armed on hold at start are left out. Held jobs that are not armed and
+noexec jobs count. This includes `dsl41 run --ui`, before
+the terminal UI attaches. A first start or a sweep with no remaining missed
+starts prints no missed-start report.
 
 A command attempt with a dispatch record and no directory follows the
 interruption rule, including replacement for an idempotent run (DL-428).
@@ -1397,7 +1406,8 @@ its rule, with the entry or section that holds it.
   instant are downtime (dropped). Ticks after it are live backlog, even
   if the loop starts seconds later.
   Startup stderr prints one total, then job-name-sorted counts and each
-  job's latest missed tick (DL-476):
+  job's latest missed tick, excluding jobs on ice and jobs already armed on hold
+  at start. Held jobs that are not armed and noexec jobs count (DL-476, DL-483):
 
   ```text
   engine was down {from} to {to}; {N} scheduled starts were missed and will not run late
@@ -1405,10 +1415,10 @@ its rule, with the entry or section that holds it.
   ```
 
   For one tick the total says `1 scheduled start was missed and will not run late`.
-  No missed ticks means no report. Times use the host-local display (§11, DL-473).
+  No remaining missed starts means no report. Times use the host-local display (§11, DL-473).
   `from` is the largest record timestamp in the replayed tail, falling back
   to the snapshot's `last_at` when the tail is empty, clamped to the earliest
-  missed tick. Engine records count too. `to` is the captured sweep cutoff.
+  reported tick. Engine records count too. `to` is the captured sweep cutoff.
   The per-tick drop records and their reasons stay unchanged.
   Vendor behavior for an
   event-processor outage that spans a start_times tick is unverified [?].

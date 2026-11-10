@@ -327,8 +327,14 @@ With the default graces, the unit allows 45 seconds for a stop.
 Check that timeout before changing either grace.
 
 The main config's `[lint]` defaults are `refuse = "none"` and `ignore = []`.
-Findings stay visible. `error` blocks unignored errors; `warn` also blocks
-warnings. Info never blocks. Only registered lint codes may be ignored.
+`error` blocks unignored errors; `warn` also blocks warnings. Info never blocks.
+First start and `reread` print errors and policy-blocked findings in full, count
+the rest by code and severity, and name the command for the full list (DL-483).
+Restart counts captured `known-unsupported` warnings. Its pointer names findings
+from files on disk, which may differ from the applied estate until an update.
+Other preflight warnings print in full. Captured `lint.ignore` still applies;
+restart does not apply lint refusal (DL-483).
+`lint` and `rehearse` print every finding. Only registered lint codes may be ignored.
 This policy cannot suppress input, lowering, exception or preflight errors.
 `dsl41 lint --config /etc/dsl41/dsl41.toml` exits 1 for blocking findings and
 2 for refused inputs. Exit 0 under `none` may include findings.
@@ -374,7 +380,9 @@ engine was down 2026-07-01T09:00:00 to 2026-07-01T11:05:00; 4 scheduled starts w
 ```
 
 One total precedes one line per affected job, sorted by job name.
-A first start or a restart with no missed starts prints no such report.
+Jobs on ice and jobs already armed on hold at start are left out.
+Held jobs that are not armed and noexec jobs count (DL-483).
+A first start or a restart with no remaining missed starts prints no such report.
 Times use the engine host's local clock display (DL-473).
 The report appears only in engine start output, including `dsl41 run --ui`
 before the terminal UI attaches. Under systemd, read it with `journalctl`
@@ -942,7 +950,7 @@ settings without applying lint refusal. It does not lower the applied v3
 capture or import Python. Captured JIL is parsed only for `spec` views; if the
 scanner rejects it, those views return `jil: null` and the engine still runs.
 After startup a synchronous source scan reports
-`N pending source changes; run dsl41 reread -S SOCKET` once, including a zero count.
+`N pending source changes; run dsl41 reread -S SOCKET` once when N is above zero (DL-483).
 That count measures source drift, not compiler behavior. After a compiler
 fix, restart keeps the applied IR. The next `reread` lists jobs whose lowered
 definitions change, even if their sources did not change. `update` applies those
