@@ -160,6 +160,24 @@ Preview has added/changed/removed names, unchanged count, stops, restored flags,
 source changes, diagnostics, lint findings and per-job effects (rerun, hold,
 remove, box restart or restart for an unchanged member restarted with its box).
 Readiness findings accompany a valid diff.
+The optional `preview.definition_changes` holds `groups`, `blocked`,
+`sources_changed`, `settings_changed` and `omitted` (DL-482).
+A group has `field`, `scope` (`job`, `refs` or `settings`), bounded display
+strings `before` and `after`, `complex`, `redacted`, and sorted `jobs`.
+Labels omit JobIR sub-model containers, identified through `model_fields`,
+and trailing `cond`. Changed references name the entity and field. References
+that only appear or disappear beside a direct job-field edit are omitted.
+Settings occur once with an empty job list. `job_env` exposes variable names
+only; its values are absent from this display field. Values over 120 characters
+end in `[cut]`. The whole field has a 1 MiB serialized byte budget, including
+reserved space for engine-state advice; `omitted` counts further differences
+not shown. Update preparation omits this field.
+`blocked` gives reasons from the shared candidate check plus draining or open
+update state observed when reread finishes. Existing diagnostic findings are
+counted rather than copied. This is a passive forecast, not an admission.
+`sources_changed` compares candidate input fingerprints with applied inputs,
+or is null when unavailable; it does not establish configuration equality.
+Older clients may ignore the field; no version step is needed (DL-217).
 
 The ADM update request is `{"v":4,"cmd":"update","baseline_id":"...",
 "request_id":"...","claimed_actor":null,"wait":false,"retry_only":false}`.

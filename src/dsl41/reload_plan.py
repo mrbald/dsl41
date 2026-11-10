@@ -432,18 +432,10 @@ def stop_set(plan: Plan, live: Live, candidate: CatalogIR | None = None) -> tupl
     )
 
 
-def reread(
-    estate_dir: Path,
-    live: Live,
-    plans_dir: Path,
-    properties: Sequence[Path] = (),
-    environment: str | None = None,
-    *,
-    start: datetime | None = None,
-    candidate: Estate | None = None,
-) -> RereadResult:
-    """Spec-reload steps 1 to 6: refuse, or store the plan and return it."""
-    estate = candidate or load_estate(estate_dir, properties, environment)
+def check_reload_candidate(
+    estate: Estate, live: Live, start: datetime | None = None
+) -> list[PreflightItem]:
+    """Apply the preparation refusals to preview and update alike (DL-482)."""
     if estate.metadata:
         from dsl41.main_config import policy_report
 
@@ -475,6 +467,23 @@ def reread(
                 for item in errors
             ]
         )
+
+    return items
+
+
+def reread(
+    estate_dir: Path,
+    live: Live,
+    plans_dir: Path,
+    properties: Sequence[Path] = (),
+    environment: str | None = None,
+    *,
+    start: datetime | None = None,
+    candidate: Estate | None = None,
+) -> RereadResult:
+    """Spec-reload steps 1 to 6: refuse, or store the plan and return it."""
+    estate = candidate or load_estate(estate_dir, properties, environment)
+    items = check_reload_candidate(estate, live, start)
     plan = diff(live.catalog, estate.catalog, live.settings, estate.settings)
     stop = stop_set(plan, live, estate.catalog)
     restored = tuple(

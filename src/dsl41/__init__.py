@@ -51,6 +51,7 @@ docs/runner-design.md ss14):
   timezones - SEM-35 name resolution and the one scheduling naive-UTC <-> local
                conversion; phase-free, imports nothing from dsl41 (DL-163)
   runner_preflight - the ss8 ERROR/WARN item model and its rules
+  cli_output - shared focused/neutral operator views (DL-482)
   display_time - host-local CLI/TUI timestamps; wire and engine time stay UTC (DL-473)
   runner_tui - the ss11 Textual TUI, a client of the control socket only
                (optional `dsl41[ui]` extra)

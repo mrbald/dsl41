@@ -23,7 +23,7 @@ from dsl41.cli_common import (
     refuse,
 )
 from dsl41.oracle_state import FAILED
-from dsl41.display_time import format_local_at
+from dsl41.cli_output import OutputStyle, status_lines
 from dsl41.runner_access import REQUIRED_TIER, Tier
 
 
@@ -59,29 +59,6 @@ def _answer_or_exit(response: dict[str, Any]) -> None:
 
     typer.echo(json_mod.dumps(response, sort_keys=True))
     raise typer.Exit(0 if response.get("ok") else 2)
-
-
-def _status_lines(value: Any, key: str = "") -> list[str]:
-    """Keep every status field; render instants only at the display boundary (DL-473)."""
-    import json
-
-    if isinstance(value, dict) and value:
-        return [
-            line
-            for field, child in value.items()
-            for line in _status_lines(child, f"{key}.{field}" if key else field)
-        ]
-    if isinstance(value, list) and value:
-        return [
-            line
-            for index, child in enumerate(value)
-            for line in _status_lines(child, f"{key}[{index}]")
-        ]
-    if key.rsplit(".", 1)[-1] in {"status_at", "due", "started_at", "ended_at"}:
-        shown = format_local_at(value)
-    else:
-        shown = value if isinstance(value, str) else json.dumps(value, sort_keys=True)
-    return [f"{key}: {shown}"]
 
 
 def _mutate(socket_path: Path, request: dict[str, Any]) -> None:
@@ -522,9 +499,9 @@ def serve(
 def _brief_flags(row: dict[str, object]) -> str:
     """The --brief flags column, I/H/N/A in the TUI's fixed order, from the same tuple (DL-68,
     DL-145)."""
-    from dsl41.runner_control import STATUS_FLAG_MARKS
+    from dsl41.runner_control import status_flags
 
-    return "".join(mark for mark, key in STATUS_FLAG_MARKS if row.get(key))
+    return status_flags(row)
 
 
 #: the read verbs this surface forwards, derived from `runner_access.REQUIRED_TIER` (DL-152); the
@@ -589,12 +566,17 @@ def _resume_hint(cursor: int | None) -> str:
 
 
 def query(
+    ctx: typer.Context,
     what: str = typer.Argument(
         ...,
         metavar="WHAT",
         help="One of " + ", ".join([*_QUERY_VERBS, *_QUERY_PREDICATES]) + ".",
     ),
+    job_arg: str | None = typer.Argument(
+        None, metavar="JOB", help="status: show this job in full."
+    ),
     socket_path: Path = SOCKET_OPT,
+    style: OutputStyle = typer.Option(OutputStyle.focused, "--style", help="status text layout."),
     job: str = typer.Option(
         None,
         "--job",
@@ -610,7 +592,7 @@ def query(
     brief: bool = typer.Option(
         False,
         "--brief",
-        help="status: one line per job (name, status, at, run, exit, flags, rev).",
+        help="status: the neutral table, including per-job revisions.",
     ),  # DL-66
     json_output: bool = typer.Option(
         False, "--json", help="status: the complete UTC JSON response instead of local-time text."
@@ -638,6 +620,22 @@ def query(
     """
     # Design: runner-design ss10, ss11, DL-65, concurrency-model ss6
     verb = what.lower()
+    source = ctx.get_parameter_source("style")
+    style_explicit = source is not None and source.name == "COMMANDLINE"
+    if job_arg is not None:
+        if verb != "status":
+            raise typer.Exit(refuse("JOB applies to status only"))
+        if job is not None and job != job_arg:
+            raise typer.Exit(refuse("JOB and --job name different jobs"))
+        job = job_arg
+    if style_explicit and verb != "status":
+        raise typer.Exit(refuse("--style applies to status only"))
+    if json_output and style_explicit:
+        raise typer.Exit(refuse("--json and --style cannot be combined"))
+    if brief and style_explicit and style is OutputStyle.focused:
+        raise typer.Exit(refuse("--brief and --style focused cannot be combined"))
+    if brief and style is OutputStyle.focused:
+        style = OutputStyle.neutral
     known, predicates = _QUERY_VERBS, _QUERY_PREDICATES
     if verb not in known and verb not in predicates:
         raise typer.Exit(refuse(f"unknown query {what!r} ({'|'.join([*known, *predicates])})"))
@@ -670,34 +668,13 @@ def query(
         # so a client wanting a single revision need not unwrap a map
         request.update({"name": name[0]} if verb == "global" else {"names": list(name)})
     if verb != "subscribe":
-        from dsl41.runner_control import status_label
-
         response = _control_roundtrip(socket_path, request)
-        if verb == "status" and not json_output and not response.get("ok"):
-            raise typer.Exit(refuse(str(response.get("error", "status query failed"))))
-        if brief and response.get("ok"):
-            # the status field is as wide as its widest label, so an attempt beside a status
-            # ("STOPPING (engine_stop)") keeps the columns after it aligned (DL-426)
-            rows = response.get("jobs", {})
-            width = max([10, *(len(status_label(row)) for row in rows.values())])
-            for job_name in sorted(rows):
-                row = rows[job_name]
-                flags = _brief_flags(row)
-                exit_code = row.get("exit_code")
-                typer.echo(
-                    f"{job_name:<44} {status_label(row):<{width}}"
-                    f" {format_local_at(row.get('status_at')):<26}"
-                    f" run {row.get('run_number', 0):<4}"
-                    f" exit {'-' if exit_code is None else exit_code:<4}"
-                    # the skim carries the revision because --expect is honest only when it
-                    # names what the operator LOOKED at
-                    f" rev {row.get('state_rev', 0):<4} {flags}".rstrip()
-                )
-            if response.get("spec_drift"):
-                typer.echo("SPEC DRIFT: estate files changed on disk", err=True)
-            raise typer.Exit(0)
         if verb == "status" and not json_output:
-            for line in _status_lines(response):
+            if not response.get("ok"):
+                raise typer.Exit(refuse(str(response.get("error", "status query failed"))))
+            for line in status_lines(
+                response, style, full=job is not None and not brief, only_row=job if brief else None
+            ):
                 typer.echo(line)
             raise typer.Exit(0)
         _answer_or_exit(response)

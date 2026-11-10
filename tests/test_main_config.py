@@ -381,11 +381,11 @@ def test_08_origins_moves_and_shared_settings(
 
     assert report(live_of(active, {"A": "RUNNING"})) == 0
     output = capsys.readouterr().out
-    assert "source moved A:" in output and "a.jil" in output and "moved.jil" in output
+    assert "source:" in output and "a.jil" in output and "moved.jil" in output and "A" in output
     (tmp_path / "moved.jil").write_text(JOB.replace("A", "B"))
     assert report(live_of(active)) == 0
     output = capsys.readouterr().out
-    assert "source added B:" in output and "source removed A:" in output
+    assert "added   1 job: B" in output and "removed   1 job: A" in output and "source:" in output
     config_file(tmp_path, estate='timezone = "Europe/Zurich"\n')
     assert report(live_of(active)) == 0
     assert "shared settings sources:" in capsys.readouterr().out
@@ -648,7 +648,7 @@ def test_known_unsupported_keeps_other_reread_findings(tmp_path, capsys):
         == 0
     )
     output = capsys.readouterr()
-    assert "changed: A" in output.out
+    assert "changed 1 job" in output.out and "1 job: A" in output.out
     assert output.err.count("L001 error:") == 1
     assert output.err.count("known-unsupported warn:") == 1
     assert not (tmp_path / "run").exists()
@@ -766,7 +766,7 @@ def test_known_unsupported_startup_and_socket_reread_process(short_root):
                     timeout=30,
                 )
                 assert result.returncode == 0, result.stdout + result.stderr
-                assert "changed: A" in result.stdout
+                assert "changed 1 job" in result.stdout and "1 job: A" in result.stdout
                 assert "token:" not in result.stdout
                 assert set((root / "plans").iterdir()) == before
                 assert result.stderr.count("known-unsupported warn:") == (len(expected) + 1) * int(

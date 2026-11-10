@@ -139,7 +139,7 @@ from dsl41.runner_control import (
     REFUSED,
     REJECTED,
     UNKNOWN,
-    STATUS_FLAG_MARKS,
+    status_flags,
     STATUSES,
     ControlClient,
     ATTEMPT_NOTE_WIDTH,
@@ -1699,7 +1699,7 @@ class RunnerApp(App[None]):
         status = str(row.get("status", ""))
         # IHNA order: operator flags are set states and the armed latch comes last. The payload's
         # owner holds the alphabet (DL-145), so `--brief` and this cell agree
-        flags = "".join(mark for mark, flag in STATUS_FLAG_MARKS if row.get(flag))
+        flags = status_flags(row)
         timers = row.get("pending_timers") or []
         timer_text = ""
         if timers:

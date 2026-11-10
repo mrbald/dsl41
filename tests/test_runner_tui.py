@@ -2643,7 +2643,8 @@ def test_both_surfaces_render_the_flags_column_from_one_alphabet(monkeypatch) ->
     exactly the drift the copies were one edit away from."""
     import itertools
 
-    from dsl41 import runner_control, runner_tui
+    from dsl41 import runner_control
+    from dsl41.cli_output import prepare_status
     from dsl41.cli_control import _brief_flags
     from dsl41.runner_control import STATUS_FLAG_MARKS
 
@@ -2653,15 +2654,16 @@ def test_both_surfaces_render_the_flags_column_from_one_alphabet(monkeypatch) ->
     for combination in itertools.product((False, True), repeat=len(keys)):
         row = {"status": "INACTIVE", **dict(zip(keys, combination, strict=True))}
         assert app._row_cells("j", row)[_FLAGS] == _brief_flags(row)
+        assert prepare_status({"jobs": {"j": row}}).rows[0][6] == (_brief_flags(row) or "-")
 
     # a FIFTH flag, added where the payload is built: both surfaces publish
     # it, and neither has a table of its own that could miss it
     moved = (*STATUS_FLAG_MARKS, ("Z", "quarantined"))
     monkeypatch.setattr(runner_control, "STATUS_FLAG_MARKS", moved)
-    monkeypatch.setattr(runner_tui, "STATUS_FLAG_MARKS", moved)
     fifth = {"status": "INACTIVE", "on_ice": True, "quarantined": True}
     assert app._row_cells("j", fifth)[_FLAGS] == "IZ"
     assert _brief_flags(fifth) == "IZ"
+    assert prepare_status({"jobs": {"j": fifth}}).rows[0][6] == "IZ"
 
 
 def test_t_binding_is_registered_with_a_footer_label() -> None:

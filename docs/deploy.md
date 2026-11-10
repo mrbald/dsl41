@@ -585,6 +585,27 @@ dsl41 reread -S /path/to/control.sock
 dsl41 update -S /path/to/control.sock --wait
 ```
 
+Both commands default to focused text. Add `--style neutral` for per-job
+rows over the same prepared data (DL-482). Reread groups identical job changes
+and changed references once, with affected job counts. Labels use model field
+names without structural containers: `machine`, `command`, `condition`.
+Shared settings have no job list. Environment edits show variable names only.
+Long values end in `[cut]`; large lists and condition trees say `changed`.
+A 1 MiB byte budget bounds the whole difference field; omitted differences
+are counted as `N more differences not shown`. The `read from:` line is capped
+at 240 characters and marks a cut.
+The footer offers `update` only when the shared candidate check passes and
+the engine is neither draining nor already preparing or stopping an update.
+Otherwise it explains the refusal while retaining the passive difference.
+When update is allowed, source-only edits say that update still applies the estate files. A header
+saying no job, setting or estate file changed reports those comparisons;
+only update's `unchanged` answer proves no application (DL-478).
+Update prints `stop requested for N running jobs: NAMES` for a nonempty
+stop set, whether pending or applied. An empty set adds no stop line.
+Per-job outcome lines come from the application answer. The answer does not
+report box outcomes; use the box rules below.
+Its applied and unchanged lines both name the catalog revision and hash.
+
 Reread only reports current launch-config and glob inputs: added, changed,
 removed and unchanged jobs, findings, and what update would stop, rerun, hold
 or remove. A running box does not refuse a preview. Broken input explains why
@@ -603,7 +624,9 @@ nothing. Do not blindly submit a fresh update after a lost reply.
 A no-change update retains no request ID; a later lookup reports not retained (DL-478).
 Both update forms print `nothing changed: catalog revision N (H)` and exit 0
 when the prepared configuration equals the applied configuration and live profile (DL-478).
-With `--wait`, exit 0 means applied or unchanged and 1 means still pending. Exit 2 means
+Without `--wait`, admission does not confirm application; use the printed
+same-ID check command. With `--wait`, exit 0 means applied or unchanged and
+1 means still pending. Exit 2 means
 refusal/failure. No token or stop-consent argument is used.
 
 Affected ordinary jobs stop through TERM, grace and KILL. A retained idempotent
@@ -744,7 +767,8 @@ Do not replace engine files while the service runs.
      --socket /srv/dsl41/runs/nightbank/control.sock
    ```
 
-   Exit 0 prints `applied: catalog revision N` or `nothing changed: catalog revision N (H)`;
+   Exit 0 prints `applied: catalog revision N (H)` or
+   `nothing changed: catalog revision N (H)`;
    status reports that applied
    `config_rev`, and the drift indication clears when disk inputs match it.
    Completed statuses and existing holds are kept for retained jobs whose runs

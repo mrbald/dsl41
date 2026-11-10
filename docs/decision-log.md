@@ -26240,3 +26240,38 @@ relitigate an entry; append a new one.
   workflow runs only from a pushed tag. The state-machine version, the stored formats and
   the wire dialects are separate and do not change. The release work listed in `TODO.md`
   (FEAT-1) stays open.
+
+- DL-482 `query status`, `reread` and `update` print focused text; neutral is the per-job view
+  (2026-11-10; owner BLK-2 rulings; cli_output.py, reload_diff.py, control-protocol §2)
+  THE RULE. The three commands print focused text by default. `--style neutral` prints
+  per-job rows from the same prepared data. `query status --brief` is the neutral table, or
+  one row with a job filter. `query status JOB` prints every field of one job. `--json` stays
+  on `query status` alone and does not change. This supersedes the `--brief` skim of DL-66
+  and the minimal text of DL-473; DL-473's time format and failure text stay.
+  STATUS. Each job is counted once: running (LIVE), queued (QUE_WAIT), failed (FAILED),
+  success, inactive or other. On hold, on ice, noexec and armed are flags, counted on their
+  own line. A STOPPING attempt keeps its status count and is listed once as attention.
+  Status gives no reload advice: its answer does not say whether the engine can reread.
+  REREAD. The answer gains the optional `preview.definition_changes`; an added field needs
+  no version step (DL-217). Update preparation omits it. One function builds the record that
+  the definition hash and the difference both read; `_reason` text and every hash are
+  unchanged. Labels are the record's own field names from `model_fields`, without
+  containers; absent prints `(unset)`. A setting is reported once with no job list, and
+  `job_env` by variable name only. A value over 120 characters is cut and marked. The field
+  has a 1 MiB budget and counts what it omits. `apply with: dsl41 update` is printed only
+  when the shared candidate check passes and the engine is neither draining nor inside
+  another update; otherwise the footer says why.
+  UPDATE. It prints only what its answer proves (owner, 2026-11-10). `nothing changed` comes
+  only from the `unchanged` field (DL-478). A non-empty stop set prints `stop requested for
+  N running jobs: NAMES`, the same words pending or applied. Each stopped job gets one of
+  four outcome texts, for complete, rerun, hold and none. No sentence describes boxes: the
+  answer does not name the boxes it restarted or held.
+  THE REASON. An operator could not tell on first read what was running, what a reread
+  found or what an update did. A hostname edit across an estate printed one line per job.
+  THE LIMIT. Exit statuses, stored formats and the wire dialect version do not change.
+  Reasons in `lint_messages` and `non_idempotent` stay unbounded and can still pass the
+  16 MiB reply limit (BUG-58). Label uniqueness is not checked (FEAT-33).
+  REJECTED. A map from record field names back to JIL attribute names: a second list to
+  keep true. `--json` on `reread` and `update`: no reader asked for it. A general sentence
+  about what an update does to boxes: the answer cannot prove one. An outcome text that
+  gives a cause or the job's later state: the kind describes the follow-up of one stop.

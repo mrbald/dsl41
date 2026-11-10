@@ -409,9 +409,9 @@ Unset both with `unset COLUMNS LINES` before starting the TUI to use automatic s
 dsl41 run jobs.jil --run-root ./run1            # headless engine + control socket
 dsl41 run jobs.jil --run-root ./run1 --resume   # after a stop or a crash: replay, reconcile, go on
 dsl41 sendevent STARTJOB -J job_a -S ./run1/control.sock
-dsl41 query status -S ./run1/control.sock       # local-time text: every status field
+dsl41 query status -S ./run1/control.sock       # focused status groups, local timestamps
 dsl41 query status --json -S ./run1/control.sock  # complete UTC JSON for scripts
-dsl41 query status --brief -S ./run1/control.sock   # one line per job, with its rev
+dsl41 query status --brief -S ./run1/control.sock   # neutral table, including REV
 dsl41 query global -N GATE -S ./run1/control.sock   # a global's value and rev
 dsl41 ui -S ./run1/control.sock                 # attach the TUI; q detaches
 dsl41 run jobs.jil --run-root ./run1 --ui       # ...or one terminal owning both; q stops it
@@ -817,12 +817,14 @@ CLI and scripts:
   options, the catalog loader, and the readings that turn an exception or a
   control answer into an exit code), `cli_compile.py`, `cli_run.py`,
   and `cli_control.py`.
+- `src/dsl41/cli_output.py`: shared prepared status and reload views; focused and neutral text (DL-482).
 - `src/dsl41/reread_worker.py`: isolated engine-owned preparation and passive forecast (DL-463).
 - `src/dsl41/cli_reload.py`: the 2.x `reread` and `update` verbs: their
   rendering and exit codes, with the engine reached through one function
   bound to the control socket's v4 `reread` and `update` verbs (DL-463).
   Both use `-S` or `DSL41_SOCKET`. Reread is passive; update prepares current inputs.
   JIL-only launches refuse reload. Status annotates the last reread forecast.
+  `--style focused|neutral` chooses the text layout; focused is the default (DL-482).
 - `src/dsl41/__main__.py`: `python -m dsl41`, which `serve` uses to spawn
   one `dsl41 ui` per browser session.
 - `src/dsl41/__init__.py`: the module map docstring. No exports.

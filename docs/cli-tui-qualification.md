@@ -34,7 +34,7 @@ They do not establish that a separately installed wheel works.
 | `sendevent` | `tests/test_runner_control.py`, `tests/test_cli_control_branches.py`; TUI recovery reconstruction in `tests/test_tui_recovery_cli.py` |
 | `off-hold-all` | `tests/test_runner_control.py`, `tests/test_cli_control_branches.py` |
 | `ui`, `serve` | `tests/test_runner_serve.py`; PTY and served sessions in `tests/test_tui_recovery_drivers.py` |
-| `reread`, `update` | `tests/test_reload_update.py`, `tests/test_main_config_update.py`: socket/env selection, passive forecast, marker, application and retry (DL-463) |
+| `reread`, `update` | `tests/test_reload_update.py`, `tests/test_main_config_update.py`: socket/env selection, passive forecast, marker, application and retry (DL-463); `tests/test_cli_output.py`, `tests/test_definition_difference.py`: both layouts, filtered brief rows, shared candidate and engine-state advice, grouped differences and 5,000-job byte bounds (DL-482) |
 | `engine stop` | `tests/test_cli_control_branches.py`: stop request, refusal, unreachable engine and `--wait` through socket removal and lock release |
 | `--manifest`, `--environment` | `tests/test_estate_manifest.py`; navigation forms in `tests/test_nav.py` |
 
