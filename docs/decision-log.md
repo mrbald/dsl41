@@ -26230,3 +26230,13 @@ relitigate an entry; append a new one.
   entry never shows its count, and quitting the UI loses pending counts. Still owed: the
   structured origin, the count in the job's details, and the rehearsal list of jobs whose
   schedule fired while they were running.
+
+- DL-481 The project version is 2.0.0 and `dsl41 --version` prints it
+  (2026-11-10; owner ruling "version 2.0"; pyproject.toml, uv.lock, cli.py)
+  THE RULE. The project version is 2.0.0. `dsl41 --version` prints `dsl41 VERSION` and
+  exits 0; it reads the version when asked, through `tool_version()`, which falls back
+  when package metadata is missing. No other invocation changes.
+  THE BOUNDARY. This sets a number. It creates no tag and publishes nothing; the release
+  workflow runs only from a pushed tag. The state-machine version, the stored formats and
+  the wire dialects are separate and do not change. The release work listed in `TODO.md`
+  (FEAT-1) stays open.
