@@ -167,7 +167,6 @@ def main() -> None:
     result_fd = os.dup(1)
     with open(os.devnull, "w") as sink:
         os.dup2(sink.fileno(), 1)
-        os.dup2(sink.fileno(), 2)
     try:
         answer = run(json.load(sys.stdin))
     except RereadRefused as exc:

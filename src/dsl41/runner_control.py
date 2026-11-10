@@ -64,12 +64,14 @@ import sys
 from dataclasses import asdict
 from contextlib import suppress
 import contextlib
+import fcntl
 import getpass
 import graphlib
 import hashlib
 import json
 import os
 import socket as socket_mod
+import termios
 import time
 import uuid
 
@@ -241,6 +243,44 @@ def _failure(code: Code, error: str, *, refused: bool = False) -> dict[str, Any]
     if refused:
         answer["refused"] = True
     return answer
+
+
+WORKER_STDERR_LIMIT = 8192
+
+
+@contextlib.asynccontextmanager
+async def _worker_stderr() -> AsyncIterator[tuple[int, Callable[[], str]]]:
+    """Drain a bounded tail independently of worker reaping (DL-475)."""
+    loop = asyncio.get_running_loop()
+    read_fd, write_fd = os.pipe()
+    tail = bytearray()
+    cut = False
+
+    def retain(chunk: bytes) -> None:
+        nonlocal cut
+        cut |= len(tail) + len(chunk) > WORKER_STDERR_LIMIT
+        tail.extend(chunk)
+        del tail[:-WORKER_STDERR_LIMIT]
+
+    def collect() -> None:
+        retain(os.read(read_fd, WORKER_STDERR_LIMIT))
+
+    def detail() -> str:
+        # DL-475: preparation must not wait for an inherited pipe after worker reap.
+        pending = int.from_bytes(fcntl.ioctl(read_fd, termios.FIONREAD, b"\0" * 4), sys.byteorder)
+        if pending:
+            retain(os.read(read_fd, pending))
+        text = tail.decode("utf-8", errors="replace")
+        return f"[stderr truncated; last {WORKER_STDERR_LIMIT} bytes]\n{text}" if cut else text
+
+    try:
+        os.set_blocking(read_fd, False)
+        loop.add_reader(read_fd, collect)
+        yield write_fd, detail
+    finally:
+        loop.remove_reader(read_fd)
+        os.close(write_fd)
+        os.close(read_fd)
 
 
 class ControlServer:
@@ -621,57 +661,64 @@ class ControlServer:
             "update": update,
             "live": {**asdict(live), "catalog": catalog_payload(live.catalog)},
         }
-        creation = asyncio.create_task(
-            asyncio.create_subprocess_exec(
-                sys.executable,
-                "-P",
-                "-m",
-                "dsl41.reread_worker",
-                cwd=self.engine.startup_cwd,
-                env=dict(self.engine.startup_env),
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-                limit=LINE_LIMIT,
-            )
-        )
-        process = None
         try:
-            async with asyncio.timeout(self.PREPARE_TIMEOUT_S):
-                process = await asyncio.shield(creation)
-                assert process.stdin is not None and process.stdout is not None
-                process.stdin.write(json.dumps(payload).encode() + b"\n")
-                await process.stdin.drain()
-                process.stdin.close()
-                raw = await process.stdout.readline()
-                code = await process.wait()
-                if code:
-                    return _failure(
-                        "engine_error", f"preparation worker exited {code}", refused=True
+            async with _worker_stderr() as (stderr, stderr_detail):
+                creation = asyncio.create_task(
+                    asyncio.create_subprocess_exec(
+                        sys.executable,
+                        "-P",
+                        "-m",
+                        "dsl41.reread_worker",
+                        cwd=self.engine.startup_cwd,
+                        env=dict(self.engine.startup_env),
+                        stdin=asyncio.subprocess.PIPE,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=stderr,
+                        limit=LINE_LIMIT,
                     )
-                answer = json.loads(raw)
-                if not isinstance(answer, dict) or "ok" not in answer:
-                    raise ValueError("invalid preparation result")
-                if not answer["ok"]:
-                    return _failure(answer["code"], answer["error"], refused=True)
-                return answer
-        except (OSError, ValueError, TimeoutError) as exc:
+                )
+                process = None
+                try:
+                    async with asyncio.timeout(self.PREPARE_TIMEOUT_S):
+                        process = await asyncio.shield(creation)
+                        assert process.stdin is not None and process.stdout is not None
+                        process.stdin.write(json.dumps(payload).encode() + b"\n")
+                        await process.stdin.drain()
+                        process.stdin.close()
+                        raw = await process.stdout.readline()
+                        code = await process.wait()
+                        if code:
+                            error = f"preparation worker exited {code}"
+                        else:
+                            answer = json.loads(raw)
+                            if not isinstance(answer, dict) or "ok" not in answer:
+                                raise ValueError("invalid preparation result")
+                            if not answer["ok"]:
+                                return _failure(answer["code"], answer["error"], refused=True)
+                            return answer
+                except (OSError, ValueError, TimeoutError) as exc:
+                    error = f"preparation failed: {type(exc).__name__}: {exc}"
+                finally:
+                    if process is None:
+                        with suppress(OSError):
+                            process = await creation
+                    if process is not None and process.returncode is None:
+                        with suppress(ProcessLookupError):
+                            process.terminate()
+                        try:
+                            await asyncio.wait_for(process.wait(), self.WORKER_GRACE_S)
+                        except TimeoutError:
+                            with suppress(ProcessLookupError):
+                                process.kill()
+                            await process.wait()
+                detail = stderr_detail()
+                if detail:
+                    error += f": {detail}"
+                return _failure("engine_error", error, refused=True)
+        except OSError as exc:
             return _failure(
                 "engine_error", f"preparation failed: {type(exc).__name__}: {exc}", refused=True
             )
-        finally:
-            if process is None:
-                with suppress(OSError):
-                    process = await creation
-            if process is not None and process.returncode is None:
-                with suppress(ProcessLookupError):
-                    process.terminate()
-                try:
-                    await asyncio.wait_for(process.wait(), self.WORKER_GRACE_S)
-                except TimeoutError:
-                    with suppress(ProcessLookupError):
-                        process.kill()
-                    await process.wait()
 
     async def _reread(self, request: dict[str, Any]) -> dict[str, Any]:
         if set(request) - {"v", "cmd", "claimed_actor"} or (

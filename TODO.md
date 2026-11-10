@@ -50,7 +50,6 @@ In fix order. BUG-4, BUG-5 and BUG-6 go with BUG-1 as one clock pass. BUG-20, BU
 - **BUG-34**: Before a stop, `engine stop --wait` reports a socket permission error when `leader.lock` is unreadable (PR #314 R3-1).
 - **BUG-39**: `dsl41 lint --timezone-map` treats an empty file as no map, untested (PR #313).
 - **BUG-46**: Unchanged members of a nested box moved out of a restarting box get no status marker (`src/dsl41/reread_worker.py:75-89`).
-- **BUG-47**: Failed preparation workers discard stderr and report only the exit code; keep bounded failure detail (`src/dsl41/runner_control.py:635-651`). Fix with BLK-2.
 - **BUG-49**: Pilot guidance does not explain known-unsupported warning volume or the effects of `lint.ignore` and `lint.refuse` (`src/dsl41/lint.py` `rule_known_unsupported`, `src/dsl41/runner_preflight.py:903-915`).
 
 #### Tests, tooling and docs
