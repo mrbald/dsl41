@@ -1060,11 +1060,6 @@ async def _serve_run(
         if hook_settings is not None and hook_settings.status_hook is not None:
             engine.status_hooks = StatusHooks(engine, hook_settings)
         load_settings(run_root)
-        # what the restart did not apply: E9's missed scheduler ticks (DL-91)
-        for ev, reason in engine.drops:
-            typer.echo(
-                f"dropped {ev.kind} {ev.job() or ''} @ {ev.at.isoformat()}: {reason}", err=True
-            )
         if warns and engine.journal is not None:
             engine.journal.preflight(warns, clock.now())
         access = None

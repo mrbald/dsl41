@@ -26123,3 +26123,29 @@ relitigate an entry; append a new one.
   THE LIMIT. The worker's descendants inherit this pipe instead of the null device. One
   that outlives the worker and writes to it after the engine closed its end gets EPIPE
   or SIGPIPE.
+
+- DL-476 A restart reports missed scheduled starts as one total and one line per job
+  (2026-11-10; owner BLK-5 ruling; runner_startup.py, cli_run.py, runner-design §7,
+  docs/deploy.md, docs/incident-triage.md)
+  THE RULE. When the restart sweep drops ticks (E9, DL-45, DL-166), the engine prints
+  `engine was down FROM to TO; N scheduled starts were missed and will not run late`,
+  or `1 scheduled start was missed` for one, then one line per job in name order,
+  `  JOB: N missed, last T`. Nothing prints when no start was missed.
+  FROM is the earlier of two instants: the largest record timestamp in the tail after
+  the snapshot (the snapshot's last stamp when the tail is empty), and the earliest
+  missed tick. TO is the sweep cutoff, the later of the admitted now and the scheduler
+  frontier. Times use the host-local display format (DL-473).
+  The lines go to the engine's start output only, through the channel the clock-step
+  warning uses (DL-435), including `dsl41 run --ui` before the terminal UI attaches.
+  This replaces the one line per tick that DL-91 item 4 described. The drop records,
+  their reasons, the E9 rule, the terminal UI, the queries, the store and the wire do
+  not change.
+  THE REASON. One line per tick grew with the outage: a job that runs every minute gave
+  480 lines after a night down. The per-job list is what an operator uses to decide what
+  to start by hand.
+  THE LIMIT. After a crash FROM is the last record written; there is no heartbeat, so on
+  an idle estate it can be hours before the engine died. A refused or interrupted start
+  writes its own record, so FROM can then come later than the real stop, but never later
+  than a reported tick. A start that does not reach the barrier reports the same ticks
+  again on the next start. In the local hour that repeats each autumn FROM can display
+  after TO (DL-473). The time of each missed tick stays in the drop records.

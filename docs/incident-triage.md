@@ -178,7 +178,18 @@ nothing fires late. Read the unit output from the incident window:
 journalctl -u dsl41-engine.service --since "YYYY-MM-DD HH:MM:SS" --no-pager
 ```
 
-The engine reports `dropped KIND JOB @ AT: REASON`.
+Engine start output reports one total and one line per affected job,
+sorted by job name (DL-476):
+
+```text
+engine was down 2026-07-01T09:00:00 to 2026-07-01T11:05:00; 4 scheduled starts were missed and will not run late
+  poll_30m: 4 missed, last 2026-07-01T11:00:00
+```
+
+Times use the engine host's local display (DL-473). `dsl41 run --ui` prints
+the report before the terminal UI attaches. No missed starts means no report.
+See [outage bounds](deploy.md#recover-after-the-engine-or-box-dies) for what
+`from` and `to` mean after an unclean stop or a backward clock step.
 The durable `drop` evidence lives in `engine.db`; `wal/*.jsonl` resolves to
 the [SQLite store rule (DL-428)](decision-log.md).
 Catch-up needs an explicit `FORCE_STARTJOB` after checking downstream effects.

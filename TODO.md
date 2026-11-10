@@ -8,7 +8,6 @@ Found in the RPM pilot (dsl41 plus JIL files).
 
 - **BLK-2**: Make the output of `query status`, `reread` and `update` clear on first read.
 - **BLK-4**: The UI routinely reports "START_REFUSED [already RUNNING -- concurrent or repeated start request, no effect (STARTJOB event (scheduler))]".
-- **BLK-5**: On startup the UI reports "dropped STARTJOB xxxxx @ YMDHMS: scheduler tick missed while the engine was down; not fired late".
 
 ## Known bugs
 
