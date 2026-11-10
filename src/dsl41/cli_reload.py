@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shlex
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,6 +12,7 @@ from typing import Any
 import typer
 
 from dsl41.cli_control import SOCKET_OPT
+from dsl41.cli_output import OutputStyle, application_lines, counted, names_text, reread_lines
 from dsl41.reload_plan import Live
 from dsl41.reload_update import Admitted, Application, Refused
 
@@ -32,54 +33,20 @@ class SendFailed(Exception):
     """A transport failure or refused request."""
 
 
-def _names(names: Sequence[str]) -> str:
-    return ", ".join(names) if names else "none"
-
-
-def reread_command(*, send: Send) -> int:
+def reread_command(
+    *,
+    send: Send,
+    style: OutputStyle = OutputStyle.focused,
+    apply_command: str = "dsl41 update",
+) -> int:
     answer = send("reread", {})
     if not isinstance(answer, Mapping):
         raise TypeError("reread did not answer a preview")
     if not answer.get("ok"):
         raise SendFailed(f"reread: no diff available: {answer.get('error')}")
+    for line in reread_lines(answer, style, apply_command):
+        typer.echo(line)
     view = answer["preview"]
-    typer.echo(f"source: {answer['source']['path']}")
-    typer.echo(f"plan against catalog revision {answer['live_rev']}")
-    typer.echo(f"added: {_names(view['added'])}")
-    for item in view["restored"]:
-        typer.echo(f"re-added with its earlier flags: {item['name']} ({', '.join(item['flags'])})")
-    changes = [
-        item["name"] if not item.get("reason") else f"{item['name']} ({item['reason']})"
-        for item in view["changed"]
-    ]
-    typer.echo(f"changed: {_names(changes)}")
-    typer.echo(f"removed: {_names(view['removed'])}")
-    changed = {item["name"] for item in view["changed"]}
-    for item in view["source_changes"]:
-        name, before, after = item["job"], item["before"], item["after"]
-        kind = (
-            "added"
-            if name in view["added"]
-            else "removed"
-            if name in view["removed"]
-            else "changed"
-            if name in changed
-            else "moved"
-        )
-        origin = (
-            f"{before} -> {after}"
-            if before and after and before != after
-            else after or before or "unknown"
-        )
-        typer.echo(f"source {kind} {name}: {origin}")
-    if view["settings_sources"]:
-        typer.echo(f"shared settings sources: {', '.join(view['settings_sources'])}")
-    typer.echo(f"unchanged: {view['unchanged']} jobs")
-    typer.echo(f"stops running: {_names(view['stop'])}")
-    for effect in view["effects"]:
-        typer.echo(f"update {effect['job']}: {effect['action']}")
-    for item in view["non_idempotent"]:
-        typer.echo(f"marked non-idempotent: {item['job']} ({item['reason']})")
     for message in [*view["lint_messages"], *view["diagnostics"]]:
         typer.echo(message, err=True)
     return 1 if view["stop"] else 0
@@ -93,18 +60,13 @@ def _render_refusal(refusal: Refused) -> None:
     )
 
 
-def _render_application(application: Application) -> None:
-    typer.echo(f"applied: catalog revision {application.rev} ({application.digest})")
-    typer.echo(f"added: {_names(application.added)}")
-    typer.echo(f"changed: {_names(application.changed)}")
-    typer.echo(f"removed: {_names(application.removed)}")
-    for name, flags in application.restored:
-        typer.echo(f"re-added with its earlier flags: {name} ({', '.join(flags)})")
-    for job, choice in application.stopped:
-        typer.echo(f"stopped {job}: {choice}")
-
-
-def update_command(*, send: Send, wait: bool = False) -> int:
+def update_command(
+    *,
+    send: Send,
+    wait: bool = False,
+    style: OutputStyle = OutputStyle.focused,
+    check_command: str = "dsl41 update",
+) -> int:
     reply = send("update", {"wait": wait})
     if not isinstance(reply, UpdateReply):
         raise TypeError("update did not answer an UpdateReply")
@@ -117,14 +79,23 @@ def update_command(*, send: Send, wait: bool = False) -> int:
             f" ({reply.unchanged['catalog_hash']})"
         )
         return 0
-    typer.echo(f"admitted: update; stopping: {_names(reply.decision.stop_set)}")
-    if reply.pending:
-        typer.echo(f"pending: {reply.request_id}")
-        typer.echo("update: admitted; its stops are not done yet", err=True)
-        return 1
+    stops = reply.decision.stop_set
+    if stops:
+        typer.echo(f"stop requested for {counted(len(stops), 'running job')}: {names_text(stops)}")
     if reply.application is not None:
-        _render_application(reply.application)
-    return 0
+        for line in application_lines(reply.application, style):
+            typer.echo(line)
+    else:
+        typer.echo(
+            "update pending; application has not finished"
+            if reply.pending
+            else "update admitted; application not yet confirmed"
+        )
+        if reply.request_id:
+            typer.echo(
+                f"check with: {check_command} --request-id {shlex.quote(reply.request_id)} --wait"
+            )
+    return 1 if reply.pending else 0
 
 
 def socket_send(socket_path: Path, *, request_id: str | None = None, timeout: float = 10.0) -> Send:
@@ -236,7 +207,7 @@ def update_reply_of(answer: Mapping[str, Any]) -> UpdateReply:
         restored=tuple((name, tuple(flags)) for name, flags in body["restored"]),
         stopped=tuple((job, choice) for job, choice in body["stopped"]),
     )
-    return UpdateReply(decision, application)
+    return UpdateReply(decision, application, request_id=str(answer.get("request_id", "")))
 
 
 _CHART_CODES = frozenset({"stale_plan", "update_in_progress"})
@@ -251,15 +222,18 @@ def _run(command: Callable[[], int]) -> None:
     raise typer.Exit(code)
 
 
-def reread(socket_path: Path = SOCKET_OPT) -> None:
+def reread(
+    socket_path: Path = SOCKET_OPT,
+    style: OutputStyle = typer.Option(OutputStyle.focused, "--style", help="Text layout."),
+) -> None:
     """Report current launch-config and JIL changes without applying them."""
-
-    def command() -> int:
-        code = reread_command(send=socket_send(socket_path))
-        typer.echo(f"next: dsl41 update -S {shlex.quote(str(socket_path))}")
-        return code
-
-    _run(command)
+    _run(
+        lambda: reread_command(
+            send=socket_send(socket_path),
+            style=style,
+            apply_command=f"dsl41 update -S {shlex.quote(str(socket_path))}",
+        )
+    )
 
 
 def update(
@@ -268,6 +242,14 @@ def update(
     request_id: str | None = typer.Option(
         None, "--request-id", help="Look up an update whose outcome is unknown."
     ),
+    style: OutputStyle = typer.Option(OutputStyle.focused, "--style", help="Text layout."),
 ) -> None:
     """Reread current inputs and apply, stopping and restarting affected jobs."""
-    _run(lambda: update_command(send=socket_send(socket_path, request_id=request_id), wait=wait))
+    _run(
+        lambda: update_command(
+            send=socket_send(socket_path, request_id=request_id),
+            wait=wait,
+            style=style,
+            check_command=f"dsl41 update -S {shlex.quote(str(socket_path))}",
+        )
+    )

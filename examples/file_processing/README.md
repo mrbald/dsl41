@@ -486,10 +486,13 @@ echo $! >"$work/engine.pid"
 
 *Repeat* until the engine answers:
 
+`--brief -J NAME` prints one neutral row, without a header:
+`JOB  TYPE  STATUS  SINCE  RUN  EXIT  FLAGS  BOX  REV`.
+
 <!-- exercise: started repeat -->
 ```sh
 dsl41 query status --brief -J INBOX_FW -S "$S"
-# INBOX_FW … INACTIVE … run 0 …
+# INBOX_FW … FW … INACTIVE … 0 …
 ```
 
 Publish the signal and start the watcher. The `sending:` line holds the values a
@@ -511,9 +514,9 @@ the hold, and the watch is down until REARM runs after it.
 ls "$root/output"
 # e2655ccff9fd0788f8676a41e9f7cb78cd1122fca579a099e8b340b4b702687f.json
 dsl41 query status --brief -J PROCESSOR -S "$S"
-# PROCESSOR … RUNNING … run 1 …
+# PROCESSOR … CMD … RUNNING … 1 …
 dsl41 query status --brief -J INBOX_FW -S "$S"
-# INBOX_FW … SUCCESS … run 1 …
+# INBOX_FW … FW … SUCCESS … 1 …
 ```
 
 ### 3. Stop the engine
@@ -567,9 +570,9 @@ processor's run has succeeded and REARM has started the second watch:
 <!-- exercise: resumed repeat -->
 ```sh
 dsl41 query status --brief -J PROCESSOR -S "$S"
-# PROCESSOR … SUCCESS … run 1 … exit 0 …
+# PROCESSOR … CMD … SUCCESS … 1 … 0 …
 dsl41 query status --brief -J INBOX_FW -S "$S"
-# INBOX_FW … RUNNING … run 2 …
+# INBOX_FW … FW … RUNNING … 2 …
 ```
 
 The reconciler found the first output and recorded it as the completion: rows
@@ -612,9 +615,9 @@ echo ready >"$root/ready.signal"
 <!-- exercise: second-cycle-done repeat -->
 ```sh
 dsl41 query status --brief -J PROCESSOR -S "$S"
-# PROCESSOR … FAILURE … run 2 … exit 1 …
+# PROCESSOR … CMD … FAILURE … 2 … 1 …
 dsl41 query status --brief -J REARM -S "$S"
-# REARM … SUCCESS … run 2 …
+# REARM … CMD … SUCCESS … 2 …
 ```
 
 The run stopped at the toxic item, and the fourth waits behind it. REARM saw the
@@ -627,7 +630,7 @@ cat "$RUN_ROOT/logs/PROCESSOR.2.out"
 python -m examples.file_processing.operate --root "$root" list
 # […"reason": "ValueError: sample JSON input must be a records array"…"name": "003-bad.json"…"state": "UNKNOWN", "todo": true, "work_key": "…"}, {"attempt": 0, …"name": "004-c.txt"…"state": "READY", "todo": true…}]
 dsl41 query status --brief -J INBOX_FW -S "$S"
-# INBOX_FW … RUNNING … run 3 …
+# INBOX_FW … FW … RUNNING … 3 …
 ```
 
 ### 6. Reject the toxic delivery and drain the queue
@@ -657,7 +660,7 @@ dsl41 sendevent FORCE_STARTJOB -J PROCESSOR -S "$S"
 <!-- exercise: drained repeat -->
 ```sh
 dsl41 query status --brief -J PROCESSOR -S "$S"
-# PROCESSOR … SUCCESS … run 3 … exit 0 …
+# PROCESSOR … CMD … SUCCESS … 3 … 0 …
 ```
 
 Every row is terminal, the handler ran once per row, and the inbox and the TODO

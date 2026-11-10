@@ -440,3 +440,32 @@ def test_dl417_a_stale_claim_the_processor_cannot_reach_starts_no_second_cycle(
     (row,) = list_work(root, PROCESSOR_ID)
     assert (row.state, row.attempt) == ("RUNNING", 1)
     assert (run_root / "logs" / "PROCESSOR.1.err").read_text().count("fp_missing") >= 1
+
+
+def test_filtered_brief_is_one_row_matching_the_documented_columns(
+    monkeypatch, cli_env, local_timezone
+):
+    from typer.testing import CliRunner
+    from dsl41.cli import app
+    from dsl41 import cli_control
+
+    row = {
+        "status": "INACTIVE",
+        "job_type": "FW",
+        "run_number": 0,
+        "state_rev": 7,
+        "status_at": None,
+        "exit_code": None,
+        "box_name": None,
+    }
+    monkeypatch.setattr(
+        cli_control, "_control_roundtrip", lambda *a: {"ok": True, "jobs": {"INBOX_FW": row}}
+    )
+    result = CliRunner().invoke(
+        app, ["query", "status", "--brief", "-J", "INBOX_FW", "-S", "/synthetic/control.sock"]
+    )
+    assert result.exit_code == 0, result.output
+    assert len(result.stdout.splitlines()) == 1
+    assert result.stdout.split() == ["INBOX_FW", "FW", "INACTIVE", "-", "0", "-", "-", "-", "7"]
+    command = Command("query status --brief -J INBOX_FW", ("INBOX_FW … FW … INACTIVE … 0 …",))
+    assert mismatches(command, 0, result.stdout) == []

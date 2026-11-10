@@ -1,19 +1,38 @@
 # TODO
 
 Outstanding work only; history stays in Git. An item stays open until its evidence and independent acceptance are recorded.
+A `Next:` line under a blocker or a High item names its first step.
 
 ## Blockers (step 0)
 
 Found in the RPM pilot (dsl41 plus JIL files).
 
-- **BLK-2**: Make the output of `query status`, `reread` and `update` clear on first read.
 - **BLK-4**: The UI routinely reports "START_REFUSED [already RUNNING -- concurrent or repeated start request, no effect (STARTJOB event (scheduler))]".
+  The terminal UI prints a repeated scheduler refusal once and counts the rest (DL-480). Still owed: an origin the oracle stamps on the record, the count in the job's details, and a rehearsal list of the jobs whose schedule fired while they were running.
+  Next: build the owed parts from the reviewed plan. The oracle change is semantic.
+
+## High
+
+State handled outside a state machine and duplicated logic make the whole system fragile, so they rank here, not under maintenance (owner, 2026-11-10).
+
+- **FEAT-27**: "n_retrys is a high-trending-critical gap." Today `n_retrys` has no effect: a failed job stays failed (DL-469). First "the analysis on why n_retrys is such a complex task to do, if because our state machines leak state then we first do FEAT-10 & co and resume".
+  Next: after BLK-4 merges, one read-only engineer analysis that names each place a retry needs state the job chart does not hold.
+- **FEAT-10**: Declare box stop, apply, hold and restart in the UPDATE chart and decide its recovery window (`src/dsl41/runner.py:803-818`, `src/dsl41/reload_update.py:8-13`).
+  Next: a `chart-simplify` review of the UPDATE chart, then an engineer plan.
+- **FEAT-9**: Share one pure per-job effect calculation between reread forecasts and update execution (`src/dsl41/reread_worker.py:25-133`, `src/dsl41/runner_update.py:437-687`).
+  Next: an engineer plan, after FEAT-10's.
+- **FEAT-16**: Emit known-unsupported findings from one pipeline instead of filtering duplicates at consumers (`src/dsl41/runner_preflight.py:903-915`, `src/dsl41/reload_plan.py:292`).
+  Next: an engineer plan. BUG-49 reports the volume this causes at start.
+- **FEAT-28**: Give Engine ownership of update cancellation/reaping and share common live/resume update setup ([update](src/dsl41/runner_update.py)); preserve distinct live/recovery selection and existing ordering.
+  Next: an engineer plan with FEAT-10, which touches the same code.
+- **FEAT-29**: Derive the [runtime-policy field inventory](src/dsl41/runtime_policy.py) from `RuntimePolicySettings`; preserve normalization, defaults, serialized values/order, hashes and missing-setting compatibility.
+  Next: a careful-builder brief; the design is settled.
+- **FEAT-30**: Establish ownership of the unintegrated [process preparation](src/dsl41/runner_adapters.py) before deletion or activation. If activation is authorized, share path resolution and trace a real dispatch through it.
+  Next: an owner ruling: delete the path or activate it.
+- **BUG-1**: Nothing bounds a backward gap: a store stamped far ahead holds every tick and timer until wall time catches up, with one warning (DL-435 N2).
+  Next: one clock pass with BUG-4, BUG-5 and BUG-6.
 
 ## Known bugs
-
-### High
-
-- **BUG-1**: Nothing bounds a backward gap: a store stamped far ahead holds every tick and timer until wall time catches up, with one warning (DL-435 N2).
 
 ### Medium
 
@@ -35,6 +54,7 @@ In fix order. BUG-4, BUG-5 and BUG-6 go with BUG-1 as one clock pass. BUG-20, BU
 - **BUG-2**: `runs` refuses the whole report when an older open attempt pins pruning over an expired completed run whose revision is missing (DL-432).
 - **BUG-3**: `config applied.stopped` reports `none` and `update --wait` misreports a stop-set job that an earlier committed plan reran under its new definition. No unplanned job runs (DL-432).
 - **BUG-8**: A run root started by the legacy unit cannot resume under the main-config unit; no migration path is documented (DL-437).
+- **BUG-58**: A reread or update reply can exceed the engine's 16 MiB one-line limit: the reasons in `lint_messages` and `non_idempotent` are unbounded (`src/dsl41/reread_worker.py`). The DL-482 budget covers the definition differences only.
 
 ### Low
 
@@ -49,7 +69,8 @@ In fix order. BUG-4, BUG-5 and BUG-6 go with BUG-1 as one clock pass. BUG-20, BU
 - **BUG-34**: Before a stop, `engine stop --wait` reports a socket permission error when `leader.lock` is unreadable (PR #314 R3-1).
 - **BUG-39**: `dsl41 lint --timezone-map` treats an empty file as no map, untested (PR #313).
 - **BUG-46**: Unchanged members of a nested box moved out of a restarting box get no status marker (`src/dsl41/reread_worker.py:75-89`).
-- **BUG-49**: Pilot guidance does not explain known-unsupported warning volume or the effects of `lint.ignore` and `lint.refuse` (`src/dsl41/lint.py` `rule_known_unsupported`, `src/dsl41/runner_preflight.py:903-915`).
+- **BUG-49**: Pilot guidance does not explain known-unsupported warning volume or the effects of `lint.ignore` and `lint.refuse` (`src/dsl41/lint.py` `rule_known_unsupported`, `src/dsl41/runner_preflight.py:903-915`). Every start also prints one preflight line per finding before `engine up`, which hides that line on a large estate.
+- **BUG-59**: Every main-config start prints `0 pending source changes; run dsl41 reread ...` when nothing is pending (`src/dsl41/cli_run.py`). Print the advice only for a count above zero.
 
 #### Tests, tooling and docs
 
@@ -78,12 +99,16 @@ In fix order. BUG-4, BUG-5 and BUG-6 go with BUG-1 as one clock pass. BUG-20, BU
 - **BUG-51**: Fix commits and replacement PRs require fresh train records (`scripts/merge_train.py:469-528`).
 - **BUG-52**: A closed PR blocks reuse of its branch name with `pr-head-stale` (`scripts/merge_train.py:710-740,764`).
 - **BUG-53**: An open PR on a queued non-head branch stops the train with `other-queued-pr` (`scripts/merge_train.py:806-812`).
-- **BUG-54**: A GitHub API connection failure stops the train; reads have no bounded retry (`scripts/merge_train.py:201-233`).
+- **BUG-54**: A GitHub API connection failure stops the train; reads have no bounded retry (`scripts/merge_train.py:201-233`). It recurs: three stops on one day.
 - **BUG-55**: The local train pytest budget exceeds 1800 s under machine load; cause undiagnosed (`scripts/merge_train.py:1065`).
+- **BUG-61**: `tests/test_kill_signals.py::test_non_killjob_stops_keep_term[drain]` failed once in a full run: it reads the signal log before the child has written it.
+- **BUG-62**: The Ubuntu service drill's storage row failed once: `test_frozen_unit` compares a run root that a live engine is writing (`examples/nightbank/deploy/storage_probe.py:271`).
+- **BUG-63**: `test_kill_signals_update_affects_later_kills_only` left its ten child processes running after three runs on one day; cause unknown (`tests/test_main_config_update.py:1054`).
 
 ### Unranked
 
 - **BUG-56**: When the engine or a wrapper dies on Linux, are job processes lost or left behind? macOS measured clean; Linux not measured. Not approved until its plan is accepted.
+- **BUG-60**: The missed-start report counts the scheduled starts of jobs that were on hold (DL-476). Needs an owner ruling: count them or leave them out.
 
 ## Features
 
@@ -99,6 +124,11 @@ In fix order. BUG-4, BUG-5 and BUG-6 go with BUG-1 as one clock pass. BUG-20, BU
 - **FEAT-5**: Support `update NAME...` for partial apply.
 - **BUG-1**, the High backward-gap bug.
 
+### Unranked
+
+- **FEAT-31**: The update answer names the boxes it restarted and the boxes and members it held. `dsl41 update` prints only what its answer proves, so today it names neither (DL-482).
+- **FEAT-32**: Qualify EL7 x86_64. The single-package example checked the engine and the scriptlet order there; the service lifecycle under systemd 219 and kernel 3.10 are unchecked ([single package](examples/single-package/README.md)).
+
 ### After shipping
 
 #### Reliability
@@ -112,8 +142,6 @@ In fix order. BUG-4, BUG-5 and BUG-6 go with BUG-1 as one clock pass. BUG-20, BU
 
 #### Maintenance
 
-- **FEAT-9**: Share one pure per-job effect calculation between reread forecasts and update execution (`src/dsl41/reread_worker.py:25-133`, `src/dsl41/runner_update.py:437-687`).
-- **FEAT-10**: Declare box stop, apply, hold and restart in the UPDATE chart and decide its recovery window (`src/dsl41/runner.py:803-818`, `src/dsl41/reload_update.py:8-13`).
 - **FEAT-11**: Close the G-correction and G-wargame gaps ([integration test inventory](docs/integration-testing-inventory.md)).
 - **FEAT-12**: Arrange acceptance of the main 071c312 architecture review and its advisory findings; `scripts/arch_check.py` reports the current count.
   The proposed follow-ups are unimplemented; no new runtime bug is demonstrated.
@@ -122,16 +150,13 @@ In fix order. BUG-4, BUG-5 and BUG-6 go with BUG-1 as one clock pass. BUG-20, BU
   - Trace one job consequence through the [chart](src/dsl41/job_chart.py), [cascade](src/dsl41/oracle_cascade.py), [writers](src/dsl41/oracle_writers.py) and [intents](src/dsl41/oracle_intents.py). Preserve lazy reads and event/write/effect order; refactor only for a demonstrated reduction in required context.
   - **Proposed alert requirements**: Agree job and engine/host conditions, independent detectors, deadlines, delivery owners, receipt evidence and allowed loss, including an engine hang or unavailable host helper. Define these before designing durable delivery. Current [best-effort delivery](docs/runner-design.md#4-engine-loop--single-writer) stays unchanged.
   - **Parked**: Prove replay representation savings without duplicating validation ([journal](src/dsl41/runner_journal.py)). Package moves also wait for a proven ownership seam and navigation gain.
-  - Derive the [runtime-policy field inventory](src/dsl41/runtime_policy.py) from `RuntimePolicySettings`; preserve normalization, defaults, serialized values/order, hashes and missing-setting compatibility.
-  - Give Engine ownership of update cancellation/reaping and share common live/resume update setup ([update](src/dsl41/runner_update.py)); preserve distinct live/recovery selection and existing ordering.
-  - Establish ownership of the unintegrated [process preparation](src/dsl41/runner_adapters.py) before deletion or activation. If activation is authorized, share path resolution and trace a real dispatch through it.
   - Improve the existing document routes for [admission](docs/blocks/admission.md) between current authority, component explanation and how-to, without copying contracts.
 
 - **FEAT-13**: Complete the 20 due spec reviews at main 071c312 (`scripts/arch_check.py --spec-status`).
 - **FEAT-14**: Remove UpdateTier's unused production settle default; engine callers pass false and settle externally (`src/dsl41/reload_update.py:476`, `src/dsl41/runner_update.py:413`).
 - **FEAT-15**: Replace placeholder update identities and client replies with types that need no fake token, revision or catalog (`src/dsl41/runner_control.py:724-732`, `src/dsl41/cli_reload.py:193-231`).
-- **FEAT-16**: Emit known-unsupported findings from one pipeline instead of filtering duplicates at consumers (`src/dsl41/runner_preflight.py:903-915`, `src/dsl41/reload_plan.py:292`).
 - **FEAT-17**: Remove the dead client `PLANS` and move `live_of_answer` to test support (`src/dsl41/cli_reload.py:18,166`).
+- **FEAT-33**: Check that a difference label is unique within a job record. Labels such as `passthrough.description` and `kind` are unclear (DL-482).
 - **FEAT-18**: Cap concurrent container slices at two.
 - **FEAT-19**: Triage Dependabot updates in one batch.
 - **FEAT-20**: Collect hosted evidence for a code PR, a docs-only PR, each workflow dispatch and the first nightly runs with notification; then activate `workflow-examples-required` with owner approval.
@@ -140,7 +165,7 @@ In fix order. BUG-4, BUG-5 and BUG-6 go with BUG-1 as one clock pass. BUG-20, BU
 - **FEAT-23**: Show drain, deadline and interruption evidence in control and TUI views. The TUI subtitle already shows the plan token and the jobs still stopping. Until then use `dsl41 query status` and the `dsl41 engine stop` exit status.
 - **FEAT-24**: Shorten `docs/runner-design.md`, `docs/control-protocol.md` and `docs/access-model.md`: remove history, keep rules.
 - **FEAT-25**: Improve `dsl41 decompile` output for import, configuration, execution and maintenance as a JIL migration starting point, with a migration guide on synthetic estates. Keep canonical equivalence, explicit conditions and the closed fold registry. Start with [file processing](examples/file_processing/README.md).
-- **FEAT-26**: Decide whether main-config restart applies pending estate edits: review, stop consent, running boxes, interruption decisions and audit records. Today restart restores the stored catalog and socket `update` applies edits (DL-437, DL-463).
+- **FEAT-26**: Apply pending estate edits at engine start. Deferred: "defer now, until we have cleaned up state machines, then reassess" (owner, 2026-11-10). It was sized at eleven source files and 700 to 1,000 lines and needs FEAT-10 first. Today restart restores the stored catalog and socket `update` applies edits (DL-437, DL-463, DL-468).
 
 ## Known limits
 
@@ -152,7 +177,7 @@ In fix order. BUG-4, BUG-5 and BUG-6 go with BUG-1 as one clock pass. BUG-20, BU
 - `job_class` is refused: concurrency limits come from AutoSys agent configuration, not JIL; a site setting is deferred.
 - `heartbeat_interval > 0` is refused: AutoSys documents no exact heartbeat producer or re-arm contract; process liveness is not a heartbeat.
 - `notification_template` and `notification_alarm_types` are refused: their lookup and filter grammar and defaults are undocumented; `send_notification` adds no per-job delivery.
-- `n_retrys` has no effect on CMD, BOX or FW jobs: a failed job stays failed. 1–20 warns as known-unsupported at startup and reread, zero is quiet, other values are refused (DL-469).
+- `n_retrys` has no effect on CMD, BOX or FW jobs: a failed job stays failed. 1–20 warns as known-unsupported at startup and reread, zero is quiet, other values are refused (DL-469; FEAT-27).
 - Live CMD dispatch uses `/bin/sh -c` (`src/dsl41/runner_wrapper.py:480`). Startup validates configured/passwd-shell selection: it rejects an invalid configured shell and warns on passwd fallback (`src/dsl41/runner_preflight.py:697-705`, `src/dsl41/runtime_policy.py:120`). Configured `engine.job_shell` also produces a `known-unsupported` warning. Only the parked process preparation path would execute the selected shell (`src/dsl41/runner_adapters.py:323`). Per-job JIL `shell` is refused.
 - `profile` and `std_*` files on FW jobs are refused: file watchers launch no job process to consume them.
 - AutoSys command syntax has no shim; job scripts must call `dsl41` commands.

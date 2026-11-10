@@ -150,6 +150,12 @@ STATUS_FLAG_MARKS: tuple[tuple[str, str], ...] = (
     ("A", "armed"),
 )
 
+
+def status_flags(row: Mapping[str, Any]) -> str:
+    """One flag join for CLI tables, the TUI and DL-145 checks (DL-482)."""
+    return "".join(mark for mark, key in STATUS_FLAG_MARKS if row.get(key))
+
+
 #: ss5's subscriber budget (DL-267): the encoded bytes one subscription may hold queued.
 #: One command appends its input record (at most three times its request line, since the
 #: stream escapes non-ASCII), then its decision, budgeted at one request line. The
@@ -660,6 +666,7 @@ class ControlServer:
             "run_root": str(self.engine.run_root),
             "update": update,
             "live": {**asdict(live), "catalog": catalog_payload(live.catalog)},
+            "source_fingerprint": self.estate_fingerprint,
         }
         try:
             async with _worker_stderr() as (stderr, stderr_detail):
@@ -728,6 +735,16 @@ class ControlServer:
             return _failure("invalid_argument", "reread accepts only claimed_actor", refused=True)
         answer = await self._prepare_reload(update=False)
         self.engine.reread_marks = answer.get("preview", {}).pop("marks", {})
+        details = answer.get("preview", {}).get("definition_changes")
+        if details is not None:
+            if self.engine.draining:
+                details["blocked"].append(
+                    "the engine is draining; it takes no update until it restarts"
+                )
+            if self.engine.update.token is not None or self._preparing_update is not None:
+                details["blocked"].append(
+                    "another update is open or preparing; wait for it to finish"
+                )
         return answer
 
     def _catalog(self, *, authority: Tier = Tier.ADM) -> dict[str, Any]:

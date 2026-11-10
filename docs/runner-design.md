@@ -1162,12 +1162,25 @@ countdowns, plus one row per armed job — DL-68).
 The header clock and every owned timestamp in the TUI use the host's local
 time as `YYYY-MM-DDTHH:MM:SS`, without an offset (DL-473). The repeated
 autumn hour is ambiguous on screen. Job logs and source JIL remain verbatim.
-`query status` defaults to minimal text: one `key: value` line per field,
-including nested fields. All fields are retained. `status_at`, timer dues
-and interrupted start/end times use the same local format; `--brief` uses
-it for status time. BLK-2 owns later layout work. An `ok:false` answer prints
-its error text and exits 2. `query status --json` keeps the complete UTC JSON
-and exit codes; `--json` is refused on other queries and with `--brief`.
+`query status` defaults to focused text (DL-482). `--style neutral` gives the
+complete jobs table; `--brief` selects that same table, including `REV`.
+With a job filter, `--brief` prints only that job's row. Explicit
+`--brief --style focused` refuses.
+`query status JOB` or `--job JOB` retains every response field as labelled
+text. A different positional JOB and `--job` refuses; equal names are accepted.
+LIVE statuses count as running, FAILED as failed, QUE_WAIT as queued;
+SUCCESS and INACTIVE have their own counts. Other statuses count as other.
+These counts partition all returned jobs. On-hold, on-ice, noexec and armed
+are counted separately as flags. STOPPING keeps its committed status count
+and appears once under stopping or interrupted work in focused output.
+Focused reread forecasts group names by change and action, with a count and
+three names followed by the remaining count. Status labels, reread annotations
+and the flag join use the shared control helpers.
+All text values escape line breaks. `status_at`, timer dues and interrupted
+start/end times use the same local format. An `ok:false` answer prints its
+error text and exits 2. `query status --json` keeps the complete UTC JSON and
+exit codes; it refuses `--brief` and explicit `--style`. Status has no reload
+capability field, so its source-drift sentence gives no reload advice.
 Engine, storage and socket timestamps stay UTC. `query trace`, `query timers`,
 `runs` and `journal` keep UTC output. No timezone switch or setting is provided.
 Pane geometry is keyboard-only: maximize toggle on the
