@@ -26149,3 +26149,24 @@ relitigate an entry; append a new one.
   than a reported tick. A start that does not reach the barrier reports the same ticks
   again on the next start. In the local hour that repeats each autumn FROM can display
   after TO (DL-473). The time of each missed tick stays in the drop records.
+
+- DL-477 Two names for one zone count as one city candidate
+  (2026-11-10; owner request for coherent city-name resolution; timezones.py,
+  main_config.py, reload_plan.py, autosys-semantics SEM-35, docs/deploy.md)
+  THE RULE. The city default of DL-62 takes a final name component only when it names one
+  zone. Candidate names are grouped by the bytes of the file `ZoneInfo` would load: the
+  first regular file on its search path, else the optional `tzdata` package. Names with
+  identical data are one zone and count once; different data stays ambiguous. A group is
+  shown by its deepest name, then by name order. A name whose data cannot be read is its
+  own group. Files are read only for components with more than one name, once. An empty
+  timezone map is no map for the estate zone too (DL-163).
+  This narrows DL-62: `Indianapolis` is no longer ambiguous. The refusal for a name that
+  is missing from a supplied map, and every message text, stay as they are.
+  THE REASON. A host with legacy alias names had two names for one zone, so the same JIL
+  was refused there and accepted on a host without them. Five real zone databases agree:
+  22 collisions are aliases and merge, 5 are different zones (US against Canada) and stay.
+  THE LIMIT. The name shown is a representative, not always the canonical one (`Istanbul`
+  shows as `Asia/Istanbul`); it appears only in the warning. No stored value or hash
+  holds it. About 78 legacy-only names such as `US/Eastern` exist only where the host's
+  database has them; Debian 13 and Ubuntu 24.04 and later need `tzdata-legacy`. Names
+  read from two sources on one host can differ and stay ambiguous.

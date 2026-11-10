@@ -244,7 +244,7 @@ def load_estate(
     aliases = None
     if tz_map:
         try:
-            aliases = parse_timezone_map(by_name[tz_map[0][0]].decode("utf-8"))
+            aliases = alias_table(parse_timezone_map(by_name[tz_map[0][0]].decode("utf-8")))
         except ValueError as exc:
             raise RereadRefused([f"{tz_map[0][1]}: {exc}"]) from exc
     if inputs.timezone is not None and resolve_timezone(inputs.timezone, aliases) is None:

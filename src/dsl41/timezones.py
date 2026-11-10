@@ -20,9 +20,13 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import os
 import re
+import zoneinfo
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, time, timedelta, timezone, tzinfo
+from importlib.resources import files
+from pathlib import Path
 from typing import Literal, NamedTuple
 from zoneinfo import ZoneInfo, available_timezones
 
@@ -42,19 +46,42 @@ def _tz_fold(name: str) -> str:
     return name.casefold().replace("-", "_")
 
 
+def _zone_bytes(name: str) -> bytes | None:
+    """Read zone data in ZoneInfo's search order; unreadable data stays distinct (DL-477)."""
+    for root in zoneinfo.TZPATH:
+        path = Path(root) / name
+        if os.path.isfile(path):
+            try:
+                return path.read_bytes()
+            except OSError:
+                return None
+    with contextlib.suppress(ImportError, OSError, ValueError):
+        return files("tzdata.zoneinfo").joinpath(*name.split("/")).read_bytes()
+    return None
+
+
 @functools.lru_cache(maxsize=1)
 def _zone_tables() -> tuple[dict[str, str], dict[str, tuple[str, ...]]]:
-    """Folded full name -> canonical key, and folded final component -> candidate keys."""
+    """Folded full names and city candidates, grouped by identical zone data (DL-477)."""
     full: dict[str, str] = {}
     leaf: dict[str, list[str]] = {}
     for zone in sorted(available_timezones()):
         full.setdefault(_tz_fold(zone), zone)
         leaf.setdefault(_tz_fold(zone.rsplit("/", 1)[-1]), []).append(zone)
-    return full, {component: tuple(zones) for component, zones in leaf.items()}
+    cities: dict[str, tuple[str, ...]] = {}
+    for component, zones in leaf.items():
+        if len(zones) > 1:
+            groups: dict[bytes | str, str] = {}
+            for zone in sorted(zones, key=lambda name: (-name.count("/"), name)):
+                data = _zone_bytes(zone)
+                groups.setdefault(zone if data is None else data, zone)
+            zones = list(groups.values())
+        cities[component] = tuple(sorted(zones))
+    return full, cities
 
 
 def city_candidates(name: str) -> tuple[str, ...]:
-    """Zoneinfo keys whose final path component is `name` (folded).
+    """One key per zone-data group whose final component is `name` (folded; DL-477).
 
     Preflight reads it to tell an ambiguous city from an unknown name (DL-163)."""
     return _zone_tables()[1].get(_tz_fold(name), ())
