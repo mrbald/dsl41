@@ -480,3 +480,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-476 | A restart reports missed scheduled starts as one total and one line per job | [docs/deploy.md](deploy.md), [docs/incident-triage.md](incident-triage.md), [docs/runner-design.md](runner-design.md) |
 | DL-477 | Two names for one zone count as one city candidate | [docs/autosys-semantics.md](autosys-semantics.md), [docs/deploy.md](deploy.md) |
 | DL-478 | An update that finds nothing changed applies nothing | [docs/control-protocol.md](control-protocol.md), [docs/deploy.md](deploy.md), [docs/protocol-evolution.md](protocol-evolution.md) |
+| DL-479 | The refusal for a timezone missing from a supplied map says what to add |  |
