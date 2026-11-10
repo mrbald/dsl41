@@ -61,6 +61,7 @@ def test_resolve_timezone_chain_limit_and_cycles_stay_unresolved() -> None:
     assert resolve_timezone("loop", {"loop": "pool", "pool": "loop"}) is None
 
 
+@pytest.mark.usefixtures("fixed_zone_names")
 def test_resolve_timezone_map_suppresses_the_city_default() -> None:
     """(DL-62): a supplied listing is complete estate truth -- a city name
     missing from it does NOT fall back to the zoneinfo city match."""
@@ -68,20 +69,13 @@ def test_resolve_timezone_map_suppresses_the_city_default() -> None:
     assert resolve_timezone("Zurich", {"dallas": "US/Central"}) is None
 
 
+@pytest.mark.usefixtures("fixed_zone_names")
 def test_resolve_timezone_ambiguous_city_component_is_refused() -> None:
     """(DL-62): the city default requires a UNIQUE match; multiple zones
     sharing a final path component resolve to none (the preflight ERROR
     names the candidates)."""
-    from dsl41 import timezones as tz_mod
-
-    monkey = {"x": ("A/X", "B/X")}
-    original = tz_mod._zone_tables
-    tz_mod._zone_tables = lambda: ({}, monkey)  # type: ignore[assignment]
-    try:
-        assert resolve_timezone("x") is None
-        assert resolve_timezone("X") is None
-    finally:
-        tz_mod._zone_tables = original
+    assert resolve_timezone("x") is None
+    assert resolve_timezone("X") is None
 
 
 def test_parse_timezone_map_listing_pairs_and_junk() -> None:
@@ -183,6 +177,7 @@ def test_alias_table_reads_an_empty_table_as_no_table_and_copies() -> None:
     assert supplied == {"hq": "Europe/Zurich"}
 
 
+@pytest.mark.usefixtures("fixed_zone_names")
 def test_alias_table_is_the_switch_between_the_city_default_and_the_map() -> None:
     """The rule stated end to end, because `alias_table`'s answer is what
     `resolve_timezone` reads: an absent table lets the unique-city default
