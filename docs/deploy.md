@@ -6,6 +6,8 @@ covers incidents and worked estates. This page leaves application authoring
 to the [job author guide](authoring.md) and site qualification to the
 [qualification items](../TODO.md#qualification).
 A Packager uses the install steps as the reference implementation (DL-439).
+For one RPM carrying the engine and JIL, use the
+[packager recipe and templates](../examples/single-package/README.md).
 
 ## Install the package and unit
 

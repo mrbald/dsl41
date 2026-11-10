@@ -1,0 +1,25 @@
+[Unit]
+Description=Synthetic dsl41 engine
+RequiresMountsFor=/srv/synthetic-engine/run /opt/synthetic-engine /etc/synthetic-engine
+Wants=time-sync.target
+After=time-sync.target
+
+[Service]
+Type=simple
+User=synthetic-engine
+Group=synthetic-engine
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/synthetic-engine/runtime/bin/dsl41 run --config /etc/synthetic-engine/dsl41.toml
+ExecStop=/opt/synthetic-engine/runtime/bin/dsl41 engine stop --wait --socket /srv/synthetic-engine/run/control.sock
+TimeoutStopSec=45
+Restart=always
+RestartSec=5
+RestartPreventExitStatus=2 6 7
+# systemd 219 spells the interval this way and keeps it in Service (DL-439).
+StartLimitInterval=300
+StartLimitBurst=5
+KillMode=control-group
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
