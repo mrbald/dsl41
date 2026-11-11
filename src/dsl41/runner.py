@@ -970,9 +970,19 @@ class Engine:
         Each keeps its open attempt, which the restart resumes from `watch.jsonl`."""
         for job, live in list(self._live.items()):
             if live.attempt not in self._facts:
-                del self._live[job]
-                live.task.cancel()
-                self._reaping.append(live.task)
+                self.cancel_and_reap(job, live.attempt)
+
+    def cancel_and_reap(self, job: str, attempt: str | None) -> int | None:
+        """Cancel a matching task and queue its collection by `_settle` (spec-wiring 2b).
+        The caller must ensure the task is outside the attempt tier.
+        Return its run number, or None when no matching task is live."""
+        live = self._live.get(job)
+        if live is None or live.attempt != attempt:
+            return None
+        del self._live[job]
+        live.task.cancel()
+        self._reaping.append(live.task)
+        return live.run_number
 
     def record_outcome(self, attempt: str, outcome: AttemptOutcome) -> None:
         """An observed attempt ended: journal its outcome and the interruption rule's plan in

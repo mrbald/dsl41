@@ -12,11 +12,9 @@ None open.
 State handled outside a state machine and duplicated logic make the whole system fragile, so they rank here, not under maintenance (owner, 2026-11-10).
 
 - **FEAT-10**: Declare box stop, apply, hold and restart in the UPDATE chart and decide its recovery window (`src/dsl41/runner.py:803-818`, `src/dsl41/reload_update.py:8-13`).
-  Next: a `chart-simplify` review of the UPDATE chart, then an engineer plan.
+  Next: the review is ruled (only the box stop is a state; the window stays): chart slices S1 and S2, then BUG-67.
 - **FEAT-9**: Share one pure per-job effect calculation between reread forecasts and update execution (`src/dsl41/reread_worker.py:25-133`, `src/dsl41/runner_update.py:437-687`).
   Next: an engineer plan, after FEAT-10's.
-- **FEAT-28**: Give Engine ownership of update cancellation/reaping and share common live/resume update setup ([update](src/dsl41/runner_update.py)); preserve distinct live/recovery selection and existing ordering.
-  Next: an engineer plan with FEAT-10, which touches the same code.
 - **FEAT-30**: Establish ownership of the unintegrated [process preparation](src/dsl41/runner_adapters.py) before deletion or activation. If activation is authorized, share path resolution and trace a real dispatch through it.
   Next: keep the path and activate it with tests; not pressing (owner, 2026-11-10).
 - **BUG-1**: Nothing bounds a backward gap: a store stamped far ahead holds every tick and timer until wall time catches up, with one warning (DL-435 N2).

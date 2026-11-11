@@ -1110,3 +1110,278 @@ def test_a_run_keeps_the_rev_it_opened_under_when_its_replacement_runs_under_the
     assert labels == [one, one]
     second = [d for d in _kinds(tmp_path, "dispatch") if d["job"] == "j" and d["ordinal"] == 2]
     assert [d["rev"] for d in second] == [2]
+
+
+@pytest.mark.parametrize("caller", ["drain", "update"])
+@pytest.mark.parametrize("attempt", [None, "watch-attempt"])
+def test_task_cancellation_reports_down_before_cleanup_and_reaps_after_it(
+    monkeypatch: pytest.MonkeyPatch, caller: str, attempt: str | None
+) -> None:
+    """A watch is down at cancellation; its cleanup and collection follow (spec-wiring 2b)."""
+    from contextlib import suppress
+
+    from dsl41.ir import lower_source
+    from dsl41.reload_update import UpdateTier
+    from dsl41.runner import _LiveRun
+    from dsl41.runner_clock import RealClock
+
+    async def scenario() -> None:
+        engine = Engine(lower_source(ANCHOR), clock=RealClock(), adapters={})
+        order: list[str] = []
+        cleaning, release = asyncio.Event(), asyncio.Event()
+
+        async def watch() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                order.append("cleanup")
+                cleaning.set()
+                await release.wait()
+                raise
+
+        class WatchTask(asyncio.Task[None]):
+            def cancel(self, msg: str | None = None) -> bool:
+                assert "anchor" not in engine.live_jobs() and self not in engine._reaping
+                order.append("cancel")
+                return super().cancel(msg)
+
+        task = WatchTask(watch())
+        engine._live["anchor"] = _LiveRun(7, task, attempt)
+        monkeypatch.setattr(engine, "_task_done", lambda one: order.append("reap"))
+        await asyncio.sleep(0)  # enter the watch before cancelling it
+        try:
+            if caller == "update":
+                update = engine.update
+                update._attempts = {"anchor": attempt}
+                tier = update.tier = UpdateTier(update, update._prepare)
+                admitted = Admitted("token", ("anchor",), frozenset({"anchor"}))
+                tier.resume(admitted, ("anchor",), settle=False)
+                exit_recorded = tier.exit_recorded
+
+                def report(job: str, *, settle: bool = True) -> None:
+                    assert task in engine._reaping and task.cancelling() == 1 and not task.done()
+                    assert update._cancelled == [("anchor", 7, attempt)]
+                    order.append("report")
+                    exit_recorded(job, settle=settle)
+
+                monkeypatch.setattr(tier, "exit_recorded", report)
+                update.stop_attempt("anchor", "update_stop")
+                assert tier.open == frozenset() and tier.state == "STOPPING"
+            else:
+                engine.cancel_unobserved()
+            before_cleanup = ["cancel", "report"] if caller == "update" else ["cancel"]
+            assert order == before_cleanup and engine._reaping == [task]
+            await engine._settle()
+            assert order == before_cleanup and engine._reaping == [task]
+            await cleaning.wait()
+            await engine._settle()
+            assert order == [*before_cleanup, "cleanup"] and engine._reaping == [task]
+            release.set()
+            with suppress(asyncio.CancelledError):
+                await task
+            await engine._settle()
+            assert order == [*before_cleanup, "cleanup", "reap"] and engine._reaping == []
+        finally:
+            release.set()
+            await engine.shutdown()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("live_attempt", [None, "replacement"])
+def test_an_update_does_not_cancel_a_different_attempt(
+    live_attempt: str | None,
+) -> None:
+    from dsl41.ir import lower_source
+    from dsl41.reload_update import UpdateTier
+    from dsl41.runner import _LiveRun
+    from dsl41.runner_clock import RealClock
+
+    async def scenario() -> None:
+        engine = Engine(lower_source(ANCHOR), clock=RealClock(), adapters={})
+        task = asyncio.create_task(asyncio.sleep(0))
+        engine._live["anchor"] = _LiveRun(8, task, live_attempt)
+        update = engine.update
+        update._attempts = {"anchor": "selected"}
+        tier = update.tier = UpdateTier(update, update._prepare)
+        tier.resume(Admitted("token", ("anchor",), frozenset()), ("anchor",), settle=False)
+        try:
+            update.stop_attempt("anchor", "update_stop")
+            assert task.cancelling() == 0 and engine.live_jobs() == {"anchor"}
+            assert engine._reaping == [] and update._cancelled == [] and tier.open == frozenset()
+        finally:
+            await engine.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_live_update_selects_the_attempt_of_each_admitted_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dsl41.runner_update import open_plan
+
+    async def scenario() -> None:
+        engine = _engine(tmp_path, _jil({"a": "x", "b": "x"}))
+        try:
+            _estate(tmp_path, _jil({"a": "y", "b": "y"}), {"b": "marked"})
+            token = _plan(engine, tmp_path)
+            opened = open_plan(tmp_path / "run", token)
+            selected: list[tuple[str, int]] = []
+
+            def select(job: str, run: int) -> str | None:
+                selected.append((job, run))
+                return "a-attempt" if (job, run) == ("a", 3) else None
+
+            monkeypatch.setattr(engine, "attempt_of_run", select)
+            admitted = Admitted(token, ("a", "b"), frozenset({"a", "b"}), (("a", 3), ("b", 5)))
+            update = engine.update
+            update._begin(UpdateRequest(token, 1, engine.baseline_id, "u"), opened, admitted)
+            assert selected == [("a", 3), ("b", 5)]
+            assert update._attempts == {"a": "a-attempt", "b": None}
+            assert update._cleaning == {} and update._moved == {"b"}
+            assert update._held == {"a", "b"} and update._admitted == admitted
+            assert update.tier is not None and update.tier.state == "IDLE"
+        finally:
+            await engine.shutdown()
+            _close(engine)
+
+    asyncio.run(scenario())
+
+
+def test_resumed_update_selects_intent_attempts_and_waits_only_for_open_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dsl41.runner_journal import OpenAttempt
+    from dsl41.runner_update import open_plan
+
+    async def scenario() -> None:
+        text = _jil({job: "x" for job in ("a", "b", "c", "d")})
+        text += "insert_job: w\njob_type: f\nwatch_file: /synthetic/never\n"
+        candidate = prepare_estate(_estate(tmp_path, text))
+        engine = start_run(
+            candidate.catalog,
+            tmp_path / "run",
+            source_capture=main.encoded_parts(candidate),
+            launched=main.profile_of(candidate),
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None), "FW": FakeAdapter(default=None)},
+        )
+        try:
+            _estate(tmp_path, text.replace("command: x", "command: y"), {"b": "marked"})
+            token = _plan(engine, tmp_path)
+            opened = open_plan(tmp_path / "run", token)
+            assert engine.journal is not None
+            table = engine.journal.open.attempts
+            for job in ("a", "b", "w"):
+                attempt = f"intent-{job}"
+                table[attempt] = OpenAttempt(
+                    attempt, job, 3, 1, None, 1, T0.isoformat(), closing=job in ("b", "w")
+                )
+
+            def no_live_selection(*_args: object) -> None:
+                pytest.fail("resume must select the intent's attempts")
+
+            monkeypatch.setattr(engine, "attempt_of_run", no_live_selection)
+            intent = {
+                "token": token,
+                "filter": ["a", "b", "c", "d", "w"],
+                "stop": [
+                    {"job": job, "run_number": 3, "attempt": f"intent-{job}"}
+                    for job in ("a", "b", "c", "w")
+                ]
+                + [{"job": "d", "run_number": 3}],
+                "request_id": "u",
+            }
+            before = list(engine.journal.store.read_from(0))
+            update = engine.update
+            update.resume(intent, opened=opened)
+            assert update._attempts == {
+                "a": "intent-a",
+                "b": "intent-b",
+                "c": "intent-c",
+                "w": "intent-w",
+                "d": None,
+            }
+            assert update.tier is not None and update.tier.open == {"a", "b"}
+            assert update.tier.state == "STOPPING" and update.holds("w")
+            assert update._cleaning == {"intent-b": "b"} and update._moved == {"b"}
+            assert list(engine.journal.store.read_from(0)) == before
+            assert update._answer is not None and not update._answer.applied.done()
+        finally:
+            await engine.shutdown()
+            _close(engine)
+
+    asyncio.run(scenario())
+
+
+def test_update_finish_keeps_the_order_of_outcomes_tasks_starts_listeners_and_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dsl41.engine_charts import AttemptOutcome
+    from dsl41.ir import lower_source
+    from dsl41.runner_attempts import FollowUp
+    from dsl41.runner_update import UpdateAnswer
+
+    async def scenario() -> None:
+        engine = Engine(lower_source(ANCHOR), clock=VirtualClock(start=T0), adapters={})
+        update = engine.update
+        order: list[tuple[str, str]] = []
+        update._attempts = {"b": "rb", "a": "ra", "c": None}
+        update._others = {"ry": "z", "rz": "y"}
+        update._kept = {one: AttemptOutcome("stopped") for one in ("rz", "rb", "ry", "ra")}
+        update._chosen = {one: FollowUp("none") for one in update._kept}
+        update._cancelled = [("w2", 2, "rw2"), ("w1", 1, "rw1")]
+        update._takes_up = {"w2": True, "w1": False}
+        update._held = frozenset({"h2", "h1"})
+        update._opened = object()
+        update._body = {"rev": 2}
+
+        def commit(attempt: str, outcome: AttemptOutcome, chosen: FollowUp) -> None:
+            assert outcome.kind == "stopped" and chosen.kind == "none"
+            order.append(("outcome", attempt))
+
+        def resume(job: str, run: int, attempt: str, *, take_up: bool) -> None:
+            assert (run, attempt, take_up) == (
+                (2, "rw2", True) if job == "w2" else (1, "rw1", False)
+            )
+            order.append(("task", job))
+
+        def listen(name: str, opened: object) -> None:
+            assert opened is update._opened
+            order.append(("listener", name))
+
+        class Answer(asyncio.Future[dict[str, Any]]):
+            def set_result(self, body: dict[str, Any]) -> None:
+                assert body == {"rev": 2} and body is not update._body
+                order.append(("answer", ""))
+                super().set_result(body)
+
+        monkeypatch.setattr(engine, "commit_outcome", commit)
+        monkeypatch.setattr(engine, "resume_cancelled", resume)
+        monkeypatch.setattr(engine, "_release", lambda job: order.append(("start", job)))
+        update.listeners = [
+            lambda opened: listen("second", opened),
+            lambda opened: listen("first", opened),
+        ]
+        answer = Answer()
+        update._answer = UpdateAnswer(applied=answer)
+        try:
+            update.finish()
+            assert order == [
+                ("outcome", "ra"),
+                ("outcome", "rb"),
+                ("outcome", "rz"),
+                ("outcome", "ry"),
+                ("task", "w2"),
+                ("task", "w1"),
+                ("start", "h1"),
+                ("start", "h2"),
+                ("listener", "second"),
+                ("listener", "first"),
+                ("answer", ""),
+            ]
+            assert answer.done() and update._answer is None
+        finally:
+            await engine.shutdown()
+
+    asyncio.run(scenario())
