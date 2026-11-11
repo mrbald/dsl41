@@ -1387,7 +1387,7 @@ the materialization horizon does not exist for it. Only cycle-bound calendars tr
 | `date_conditions` + time cluster | scheduling (§4) |
 | `max_exit_success`, `success_codes`, `fail_codes` | success-boundary shift (SEM-09); `fail_codes` decides alone, else `success_codes` replaces the rule, else the threshold |
 | `term_run_time` | auto-terminate after n minutes → TERMINATED **[V]**: 0 means no limit, the vendor default (DL-241). New source input accepts 0..527040; stored catalogs remain readable, while reread refuses out-of-range sources until edited (DL-469). |
-| `n_retrys` | auto-restart on FAILURE only, for application failures (the vendor's examples: "cannot find a file or a command, permissions are not properly set"). A TERMINATED job "does not restart". "It does not apply to system or network failures" (TechDocs 12.0.01 n_retrys); those restart under the scheduler's `MaxRestartTrys` config parameter instead (12.1 MaxRestartTrys page: "governs retries due to system or network problems ... different from the n_retrys job definition attribute") **[V]** (Q4, DL-53). Neither the oracle nor the runner models retries; preflight WARNs on `n_retrys > 0` |
+| `n_retrys` | auto-restart on FAILURE only, for application failures (the vendor's examples: "cannot find a file or a command, permissions are not properly set"). A TERMINATED job "does not restart". "It does not apply to system or network failures" (TechDocs 12.0.01 n_retrys); those restart under the scheduler's `MaxRestartTrys` config parameter instead (12.1 MaxRestartTrys page: "governs retries due to system or network problems ... different from the n_retrys job definition attribute") **[V]** (Q4, DL-53). Live CMD jobs retry inside their live run (DL-485); play and rehearse do not retry; positive BOX/FW counts warn |
 | `auto_hold` | box member enters ON_HOLD automatically when box starts **[C/?]** |
 | `auto_delete` | definition lifecycle, not runtime; carried in IR-F `JobIR.passthrough` |
 | `status` (on insert) | definition-time out-of-band state (SEM-24) **[V]**. Support limit: the vendor allows seven values; dsl41 models INACTIVE, ON_HOLD, ON_ICE and ON_NOEXEC, and lowering refuses SUCCESS, FAILURE and TERMINATED |
@@ -1651,8 +1651,8 @@ each open question.
   - **Q3d** (DL-69): does ON_ICE discard a latched tick? The pin is that a pre-existing arm
     survives ice (`# PENDING: Q3d`, oracle_writers.py). The runbook's discriminator decides it.
 - Q4 (§5 `n_retrys`): closed (DL-53). `n_retrys` restarts a job after an application
-  FAILURE only (§5). Neither the oracle nor the runner models retries; preflight WARNs on
-  `n_retrys > 0`.
+  FAILURE only (§5). Live CMD jobs retry inside their live run (DL-485).
+  Play and rehearse do not retry; positive BOX/FW counts still warn.
 - Q5 (do queued events survive a scheduler restart): closed (DL-53). Yes. No TechDocs
   sentence states it; the answer is an inference from three quoted premises. `ujo_event`
   "Records events that the scheduler has not yet processed" (Events reference, 12.1). "The

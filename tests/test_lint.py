@@ -710,7 +710,7 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
     counts = Counter(v.code for v in report.violations)
     assert counts == Counter(
         {
-            "known-unsupported": 9,  # DL-469: tags, retry, pool fields and xinst.
+            "known-unsupported": 8,  # DL-485: CMD retries are supported; tags, pool and xinst warn.
             "L001": 6,
             # +2 at DL-192: viz_locks.jil's lk_x3/lk_x4 hold a resource and
             # nothing else -- a requirement is not wiring
@@ -748,7 +748,6 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
 @pytest.mark.parametrize(
     "attribute,active,neutral",
     [
-        ("n_retrys", "2", "0"),
         ("ulimit", 'c="0,0"', '""'),
         ("min_run_alarm", "2", "0"),
         ("send_notification", "1", "0"),

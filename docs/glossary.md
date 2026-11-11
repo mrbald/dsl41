@@ -100,7 +100,7 @@ Supervisor incarnation resolves to [DL-424](decision-log.md); [baseline_id](#bas
 The rule for an attempt ended by engine death or a requested stop.
 An idempotent job gets a replacement attempt of the same logical run and
 invocation; a named non-idempotent job is held with failure evidence.
-Application failure is not retried.
+CMD failing exits retry within the live run when `n_retrys` allows (DL-485).
 See [DL-424 and DL-433](decision-log.md).
 
 ### lease

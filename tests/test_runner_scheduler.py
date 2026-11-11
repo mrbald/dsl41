@@ -2101,10 +2101,10 @@ def test_preflight_timezone_posix_offset_warns_about_the_sign() -> None:
     assert "UTC+05:30" in tz_items[0].message
 
 
-def test_preflight_n_retrys_warns() -> None:
+def test_preflight_cmd_n_retrys_is_supported() -> None:
     text = "insert_job: nr\njob_type: c\ncommand: x\nmachine: localhost\nn_retrys: 3\n"
     items = preflight(lower_source(text))
-    assert any(
+    assert not any(
         i.code == "known-unsupported" and i.severity == "WARN" and i.job == "nr" for i in items
     )
 

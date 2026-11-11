@@ -209,7 +209,7 @@ are separate from these JIL inputs.
 | Job | `elevated` | True value. |
 | Job | `interactive` | True value. |
 | Job | `avg_runtime` | Positive integer. |
-| Job | `n_retrys` | CMD, BOX or FW job with a count from 1 through 20 (DL-469). |
+| Job | `n_retrys` | BOX or FW job with a count from 1 through 20 (DL-469, DL-485). |
 | Job | `ulimit` | CMD job with nonempty limits, including zero limits. |
 | Job | `job_load` | Nonzero load on a job assigned to a pool machine. |
 | Machine | Other payload attributes | Nonempty values, except `description`, `node_name` and non-pool `max_load`. |
@@ -769,7 +769,7 @@ A stop already recorded remains an interruption even if the command catches a si
 It does not become a successful completion that releases successors.
 A command that ended naturally before the stop follows its real outcome through
 [SEM-09](autosys-semantics.md#sem-09--max_exit_success-shifts-successfailure-boundary-v).
-A spawn failure is FAILURE; an ordinary application failure gets no automatic retry.
+A spawn failure is FAILURE; a live CMD job retries failing exits when `n_retrys` allows (DL-485).
 
 The [attempt outcome contract](control-protocol.md#5-streaming-verb-subscribe)
 and [recovery contract](runner-design.md#7-journal-and-recovery-e1-prod-grade)
@@ -830,10 +830,13 @@ OFF_HOLD clears the hold; the job starts at once if its starting conditions alre
 ([SEM-21](autosys-semantics.md#sem-21--on_hold-v)).
 An operator's deliberate new run can repeat business work too; its invocation key is different.
 
-The engine does not implement `n_retrys` application retries
-([attribute inventory](autosys-semantics.md#5-attributes-with-control-flow-teeth-quick-inventory),
-[Q4](autosys-semantics.md#9-open-questions-and-their-pinned-defaults)).
-That limit does not prevent interruption replacements within one run.
+For CMD jobs, `n_retrys` permits failing-exit retries inside the same live run;
+only the last try's result reaches conditions, boxes and failure hooks (DL-485).
+The applied count when the plan is chosen decides; interrupted tries consume the
+same ordinal, and a run never exceeds 25 attempts.
+Changing `n_retrys` stops the running try like any definition change; lowering
+it holds the job if that try's number is at least `5 +` the new count (DL-485).
+BOX and FW retries, play and rehearse remain unimplemented.
 Start times missed during downtime are skipped and reported (DL-45).
 A backward wall-clock step keeps admission time at the recorded frontier;
 it does not refuse operator inputs or startup (DL-435).

@@ -616,7 +616,7 @@ class OpenAttempt:
     seq: int
     started_at: str
     env: dict[str, str] = field(default_factory=dict)
-    #: the cause of the stop this attempt replaced, None for a run's first attempt
+    #: the replaced stop cause or `exit N` for a retried failure, None first (DL-485)
     after: str | None = None
     #: the cause of the stop this attempt was taking when the engine left it unsettled
     #: (`engine_stop`, `update_stop`, `oracle_kill`), from the drain's and the shutdown's
@@ -1352,7 +1352,7 @@ def dispatch_record(
     refused, as a freehand id would split the one key. `attempt` is the run id, the attempt's
     durable identity; `ordinal` names its spool directory and its display. `rev` is the
     configuration rev it is dispatched under, the attempt's own (DL-427). `after` is the cause of
-    the stop a replacement follows (DL-426)."""
+    the stop a replacement follows, or `exit N` for a retry (DL-426, DL-485)."""
     if not is_valid_run_id(attempt):
         raise EngineError(
             f"dispatch {job}.{run_number}: run_id {attempt!r} is outside the ss11a uuid4"
