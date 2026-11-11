@@ -55,7 +55,7 @@ from dsl41.reload_update import (
     Refused,
     UpdateRecord,
     UpdateTier,
-    admission_check,
+    admission_data,
     apply_application,
     live_of,
     plan_application,
@@ -404,7 +404,7 @@ class World:
     scheduler: Scheduler
     rev: int = 1
     at: datetime = datetime(2026, 1, 6, 1, 0)
-    #: the last admitted update, and its token while it stops (`admission_check`'s `open_update`)
+    #: the last admitted update, and its token while it stops
     last: UpdateTier | None = None
     last_token: str | None = None
 
@@ -454,12 +454,12 @@ class World:
         self.rev = application.rev
 
     def update(self, document: dict[str, Any], candidate: CatalogIR) -> tuple[UpdateTier, Effects]:
-        decision = admission_check(
-            document,
-            live=self.live(),
-            candidate=candidate,
-            open_update=self.open_update,
-        )
+        if self.open_update is not None:
+            decision = Refused(document["token"], UPDATE_IN_PROGRESS, (self.open_update,))
+        elif document["live_rev"] != self.rev:
+            decision = Refused(document["token"], STALE_PLAN)
+        else:
+            decision = admission_data(document, live=self.live(), candidate=candidate)
         effects = Effects(then=self.apply)
 
         def prepare(_admitted: Admitted) -> Application:
@@ -1282,8 +1282,7 @@ def test_update_prints_the_decision_and_with_wait_the_application(
     _command_change(world, "OPS_HEARTBEAT_C")
     _, document, candidate = world.reread()
     token = document["token"]
-    decision = admission_check(document, live=world.live(), candidate=candidate, open_update=None)
-    assert isinstance(decision, Admitted)
+    decision = admission_data(document, live=world.live(), candidate=candidate)
     send = _send(world, UpdateReply(decision))
     assert update_command(send=send) == 0
     assert send.calls == [("update", {"wait": False})]
