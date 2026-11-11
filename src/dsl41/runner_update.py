@@ -41,7 +41,7 @@ import asyncio
 import shutil
 from collections.abc import Callable, Mapping
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from datetime import datetime
 from pathlib import Path
@@ -67,6 +67,7 @@ from dsl41.reload_update import (
     UPDATE_IN_PROGRESS,
     Admitted,
     Application,
+    OnStop,
     Refused,
     UpdateTier,
     admission_check,
@@ -309,7 +310,6 @@ class EngineUpdate:
         live = live_of(
             engine.oracle, settings_of(profile, engine.oracle.catalog), engine.config_rev
         )
-        from dataclasses import replace
         from dsl41.runner_environment import path_environment
 
         live = replace(live, path_environment=path_environment(engine.startup_env))
@@ -686,19 +686,13 @@ class EngineUpdate:
         ]
         return [("ON_HOLD", name) for name in held] + [("FORCE_STARTJOB", box) for box in starts]
 
-    def _prepare(self, admitted: Admitted) -> Application:
+    def _prepare(self, _admitted: Admitted) -> Application:
         """The application, computed from the oracle as the stops left it, under the settings
         the engine itself read from the plan's bytes."""
         opened = self._opened
         assert opened is not None
         plan = {**opened.plan, "settings": dict(opened.estate.settings)}
-        return plan_application(
-            self.engine.oracle,
-            opened.estate.catalog,
-            plan,
-            opened.marked.names,
-            dict(admitted.stop_runs),
-        )
+        return plan_application(self.engine.oracle, opened.estate.catalog, plan)
 
     def apply(self, application: Application) -> None:
         """Swap the catalog, the settings, the plans, the marked set and the profile."""
@@ -722,25 +716,21 @@ class EngineUpdate:
         engine.refit_adapters()
         engine.config_rev = application.rev
 
-    def journal_applied(self, rev: int, catalog_hash: str) -> None:
+    def journal_applied(self, application: Application) -> Application:
         """The new configuration row and its `config applied` record."""
         engine = self.engine
-        tier = self.tier
-        assert tier is not None and tier.application is not None and self._opened is not None
-        application = tier.application
+        assert self._opened is not None
         journal = engine.journal
         assert journal is not None  # `admit` and `resume` refuse an engine with none
-        # `catalog_hash` is `catalog_hash_v2` of this catalog (`plan_application`), the hash the
-        # configuration row derives
         configuration = configuration_of(self._opened, engine.profile or RuntimeProfile())
-        store_config(journal.store, configuration, rev)
+        store_config(journal.store, configuration, application.rev)
         engine.source_capture = dict(configuration.source_capture)
         engine.reread_marks = {}
-        stopped = self._choose_follow_ups()
+        application = replace(application, stopped=self._choose_follow_ups())
         at = engine.now_admitted()
         body = {
             "event": "applied",
-            "rev": rev,
+            "rev": application.rev,
             "at": at.isoformat(),
             "catalog_hash": configuration.catalog_hash,
             "runtime_hash": configuration.runtime_hash,
@@ -748,14 +738,14 @@ class EngineUpdate:
             "baseline_id": journal.baseline_id,
             "clock_domain": journal.clock_domain,
             **application_body(application),
-            "stopped": stopped,
         }
         journal.append(Record(at, "config", None, None, body))
         # the trace says where the rev moved, as a replay of the record does
-        engine.oracle.mark(at, CONFIG_MARKER, config_marker(rev))
+        engine.oracle.mark(at, CONFIG_MARKER, config_marker(application.rev))
         self._body = body
+        return application
 
-    def _choose_follow_ups(self) -> list[list[str]]:
+    def _choose_follow_ups(self) -> tuple[tuple[str, OnStop], ...]:
         """What follows each stop of the update, chosen once, under the applied catalog and
         marked set, before the record that names them (spec-wiring 2b, the interruption rule's
         step 1): a kept outcome's plan (`complete`, `rerun`, `hold` or `none`), which `finish`
@@ -767,20 +757,20 @@ class EngineUpdate:
         cancelled = {job: run for job, run, _ in self._cancelled}
         self._chosen = {}
         self._takes_up = {}
-        stopped: list[list[str]] = []
+        stopped: list[tuple[str, OnStop]] = []
         for job in self._admitted.stop_set:
             attempt = self._attempts.get(job)
             if attempt is not None and attempt in self._kept:
                 plan = self._chosen[attempt] = engine.plan_for(attempt, self._kept[attempt])
-                stopped.append([job, plan.kind])
+                stopped.append((job, plan.kind))
             elif job in cancelled:
                 again = self._takes_up[job] = engine.takes_up(job, cancelled[job])
-                stopped.append([job, "rerun" if again else "none"])
+                stopped.append((job, "rerun" if again else "none"))
             else:
-                stopped.append([job, "none"])
+                stopped.append((job, "none"))
         for attempt in self._others:
             self._chosen[attempt] = engine.plan_for(attempt, self._kept[attempt])
-        return stopped
+        return tuple(stopped)
 
     # ---- after the application
 

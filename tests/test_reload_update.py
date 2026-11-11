@@ -27,7 +27,6 @@ import statechart_completeness as sc
 
 from dsl41.cli_reload import UpdateReply, reread_command, update_command
 from dsl41.engine_charts import UPDATE_STOP, Intent
-from dsl41.idempotence import load_exceptions
 from dsl41.ir import CatalogIR, ExecSpec, lower_source
 from dsl41.oracle import Oracle
 from dsl41.canon import canonical_bytes, decode
@@ -196,8 +195,9 @@ class Effects:
         if self.then is not None:
             self.then(application)
 
-    def journal_applied(self, rev: int, digest: str) -> None:
-        self.log.append((JOURNAL_APPLIED, rev, digest))
+    def journal_applied(self, application: Application) -> Application:
+        self.log.append((JOURNAL_APPLIED, application.rev, application.digest))
+        return application
 
 
 def _look(tier: UpdateTier) -> None:
@@ -460,13 +460,10 @@ class World:
             candidate=candidate,
             open_update=self.open_update,
         )
-        marked = load_exceptions(self.estate).names
         effects = Effects(then=self.apply)
 
-        def prepare(admitted: Admitted) -> Application:
-            return plan_application(
-                self.oracle, candidate, document, marked, dict(admitted.stop_runs)
-            )
+        def prepare(_admitted: Admitted) -> Application:
+            return plan_application(self.oracle, candidate, document)
 
         tier = UpdateTier(effects, prepare)
         tier.admit(decision)
@@ -593,7 +590,6 @@ def test_two_running_jobs_are_stopped_and_eighteen_untouched_with_consent(tmp_pa
     assert [entry[0] for entry in effects.log[3:]] == [APPLY, JOURNAL_APPLIED]
     assert effects.log[-1] == (JOURNAL_APPLIED, 2, catalog_hash_v2(candidate))
     assert tier.application is not None
-    assert tier.application.stopped == tuple((job, "rerun") for job in touched)
     assert tier.application.changed == tuple(touched)
     # every row, the touched ones included, is the row it was: the oracle was told nothing
     assert {name: world.row(name) for name in world.oracle.store.job} == before
@@ -754,25 +750,9 @@ def test_a_removed_running_job_is_stopped_not_rerun_and_its_spent_units_stay_spe
     tier.exit_recorded("OPS_SPOOL_C")
     _look(tier)
     assert tier.application is not None
-    assert tier.application.stopped == (("OPS_SPOOL_C", "none"),)
     tombstone = world.oracle.store.tombstones["OPS_SPOOL_C"]
     assert (tombstone.status, tombstone.reservations) == ("RUNNING", ())
     assert dict(world.oracle.store.consumed) == {"r:TOKENS": 2}
-
-
-def test_a_marked_stopped_job_is_held_by_the_interruption_rule(tmp_path: Path) -> None:
-    world = _world(tmp_path)
-    world.feed("FORCE_STARTJOB", job="OPS_HEARTBEAT_C")
-    _command_change(world, "OPS_HEARTBEAT_C")
-    (world.estate / "non-idempotent.toml").write_text(
-        '[jobs]\n"OPS_HEARTBEAT_C" = "pages the operator twice"\n'
-    )
-    _, document, candidate = world.reread()
-    tier, _ = world.update(document, candidate)
-    tier.exit_recorded("OPS_HEARTBEAT_C")
-    _look(tier)
-    assert tier.application is not None
-    assert tier.application.stopped == (("OPS_HEARTBEAT_C", "hold"),)
 
 
 def test_an_application_refuses_a_live_catalog_it_was_not_computed_for(tmp_path: Path) -> None:
@@ -781,8 +761,9 @@ def test_an_application_refuses_a_live_catalog_it_was_not_computed_for(tmp_path:
     _, document, candidate = world.reread()
     other = {**document, "removed": []}
     with pytest.raises(ValueError, match="does not describe the live catalog"):
-        plan_application(world.oracle, candidate, other, (), {})
-    application = plan_application(world.oracle, candidate, document, (), {})
+        plan_application(world.oracle, candidate, other)
+    application = plan_application(world.oracle, candidate, document)
+    assert application.stopped == ()
     with pytest.raises(ValueError, match="the engine is at revision 2"):
         apply_application(world.oracle, application, revision=2)
     assert "OPS_FAIL_ALERT_C" in world.oracle.catalog.jobs
@@ -870,39 +851,6 @@ def test_one_update_is_in_flight_at_a_time(tmp_path: Path) -> None:
     assert tier.state == "STOPPING" and tier.dispatch_filter == {"OPS_HEARTBEAT_C"}
 
 
-def test_a_stopped_job_the_oracle_ended_meanwhile_is_answered_none(tmp_path: Path) -> None:
-    world = _world(tmp_path)
-    for job in ("OPS_HEARTBEAT_C", "OPS_SPOOL_C"):
-        world.feed("FORCE_STARTJOB", job=job)
-        _command_change(world, job)
-    _, document, candidate = world.reread()
-    tier, _ = world.update(document, candidate)
-    world.feed("STATUS", job="OPS_SPOOL_C", exit_code=0)  # a natural end beat the stop
-    world.feed("FORCE_STARTJOB", job="OPS_FAIL_ALERT_C")  # not in the stop set
-    tier.exit_recorded("OPS_SPOOL_C")
-    _look(tier)
-    tier.exit_recorded("OPS_HEARTBEAT_C")
-    _look(tier)
-    assert tier.application is not None
-    assert tier.application.stopped == (("OPS_HEARTBEAT_C", "rerun"), ("OPS_SPOOL_C", "none"))
-
-
-def test_a_stopped_run_the_oracle_replaced_meanwhile_is_answered_none(tmp_path: Path) -> None:
-    world = _world(tmp_path)
-    world.feed("FORCE_STARTJOB", job="OPS_HEARTBEAT_C")
-    _command_change(world, "OPS_HEARTBEAT_C")
-    _, document, candidate = world.reread()
-    tier, _ = world.update(document, candidate)
-    world.feed("KILLJOB", job="OPS_HEARTBEAT_C")
-    world.feed("FORCE_STARTJOB", job="OPS_HEARTBEAT_C")
-    row = world.row("OPS_HEARTBEAT_C")
-    assert (row.status, row.run_number) == ("RUNNING", 2)
-    tier.exit_recorded("OPS_HEARTBEAT_C")
-    _look(tier)
-    assert tier.application is not None
-    assert tier.application.stopped == (("OPS_HEARTBEAT_C", "none"),)
-
-
 def test_a_dropped_depletable_keeps_its_type_so_its_spent_units_stay_spent(
     tmp_path: Path,
 ) -> None:
@@ -972,7 +920,6 @@ def test_a_running_job_whose_type_changes_is_stopped_retired_and_admitted(
     tier.exit_recorded("OPS_HEARTBEAT_C")
     _look(tier)
     assert tier.application is not None
-    assert tier.application.stopped == (("OPS_HEARTBEAT_C", "none"),)
     row = world.row("OPS_HEARTBEAT_C")
     assert (row.status, row.run_number) == ("INACTIVE", 1)
     assert world.oracle.store.revision("job:OPS_HEARTBEAT_C") == seen + 1
