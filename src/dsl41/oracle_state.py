@@ -165,6 +165,9 @@ class TraceEntry(BaseModel):
     job: str
     transition: str  # "OLD->NEW" or an out-of-band marker like "ON_ICE"
     cause: str
+    start_source: str | None = None
+    run_number: int | None = None
+    refused_status: JobStatus | None = None
 
 
 #: DL-50's three release policies: `CapacityReservation` stores one, `capacity.py` derives it.

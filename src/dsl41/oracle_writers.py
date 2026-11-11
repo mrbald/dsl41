@@ -228,7 +228,14 @@ class OracleWriters(OracleCascade):
         # a refused attempt is an input's own: `start_verdict` ignores a wake's or a retry's
         # where an input's is refused (DL-81)
         reason = attempt.refusal or f"{self._refusal(job, attempt)} ({attempt.cause})"
-        self._record(job, "START_REFUSED", reason)
+        self._record(
+            job,
+            "START_REFUSED",
+            reason,
+            start_source=attempt.source,
+            run_number=self._runtime(job).run_number,
+            refused_status=self._runtime(job).status,
+        )
 
     def _w_start_ignored(self, job: str, outcome: Outcome) -> None:
         """job.180: a gate holds the attempt silently; a scan continuation resumes; outside the

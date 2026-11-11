@@ -1018,7 +1018,13 @@ def test_cli_check_cadence_format_json_carries_legacy_shape_and_cadence_check(
     )
     assert result.exit_code == 3, result.output
     doc = json.loads(result.output)
-    assert set(doc) == {"trace", "jobs", "cadence_check"}
+    assert set(doc) == {
+        "trace",
+        "jobs",
+        "cadence_check",
+        "schedule_fired_while_running",
+        "schedule_fired_while_queued",
+    }
     assert doc["jobs"]["cs_a"] == {"runs": 2, "final_status": "SUCCESS"}  # legacy shape, unchanged
     cc = doc["cadence_check"]
     assert cc["schema_version"] == 1
@@ -1089,6 +1095,313 @@ def test_cli_plain_rehearse_output_is_unchanged_by_the_cadence_check_refactor(
 
 
 # --------------------------------------------------------------- failure_exit
+
+
+@pytest.mark.parametrize("start", ["2026-11-11T09:50:00", "2026-11-10T23:00:00"])
+@pytest.mark.parametrize("fmt", ["text", "json"])
+def test_cli_deferred_scheduler_refusal_has_no_origin_and_is_not_listed(
+    tmp_path: Path, start: str, fmt: str
+) -> None:
+    stamp = datetime.fromisoformat(start)
+    opening = datetime(2026, 11, 11, 10)
+    jil = tmp_path / "window.jil"
+    jil.write_text(
+        "insert_job: window\njob_type: c\ncommand: x\nmachine: m1\n"
+        f'date_conditions: 1\ndays_of_week: all\nstart_times: "{stamp:%H:%M}"\n'
+        'run_window: "10:00-11:00"\n'
+    )
+    scenario = tmp_path / "scenario.json"
+    scenario.write_text(
+        json.dumps(
+            {
+                "events": [
+                    {
+                        "at": "2026-11-11T09:55:00" if stamp.hour == 9 else "2026-11-11T09:00:00",
+                        "kind": "STATUS",
+                        "payload": {"job": "window", "status": "RUNNING"},
+                    }
+                ],
+            }
+        )
+    )
+    result = cli_runner.invoke(
+        app,
+        [
+            "rehearse",
+            str(jil),
+            "--start",
+            start,
+            "--hours",
+            str((opening - stamp).total_seconds() / 3600),
+            "--scenario",
+            str(scenario),
+            "--format",
+            fmt,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    cause = (
+        "already RUNNING -- concurrent or repeated start request, no effect "
+        "(run_window-deferred STARTJOB event (scheduler))"
+    )
+    if fmt == "json":
+        doc = json.loads(result.output)
+        [refused] = [t for t in doc["trace"] if t["transition"] == "START_REFUSED"]
+        assert "start_source" not in refused
+        assert (refused["run_number"], refused["refused_status"]) == (0, "RUNNING")
+        assert refused["cause"] == cause
+        assert doc["schedule_fired_while_running"] == {}
+        assert doc["schedule_fired_while_queued"] == {}
+    else:
+        assert f"2026-11-11T10:00:00 window START_REFUSED [{cause}]" in result.output
+        assert "-- schedule fired while running --" not in result.output
+        assert "-- schedule fired while queued --" not in result.output
+
+
+def test_cli_box_member_tick_and_operator_force_keep_their_own_origins(tmp_path: Path) -> None:
+    jil = tmp_path / "member.jil"
+    jil.write_text(
+        'insert_job: bx\njob_type: b\ndate_conditions: 1\ndays_of_week: all\nstart_times: "00:00"\n\n'
+        "insert_job: member\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bx\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "00:00,00:01"\n'
+    )
+    scenario = tmp_path / "scenario.json"
+    scenario.write_text(
+        json.dumps(
+            {
+                "adapter": {"default": [600, 0]},
+                "events": [
+                    {
+                        "at": "2026-11-11T00:00:30",
+                        "kind": "FORCE_STARTJOB",
+                        "payload": {"job": "member"},
+                    }
+                ],
+            }
+        )
+    )
+    result = cli_runner.invoke(
+        app,
+        [
+            "rehearse",
+            str(jil),
+            "--start",
+            "2026-11-11T00:00:00",
+            "--hours",
+            "0.02",
+            "--scenario",
+            str(scenario),
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    doc = json.loads(result.output)
+    refusals = [t for t in doc["trace"] if t["transition"] == "START_REFUSED"]
+    assert [(t["start_source"], t["run_number"], t["refused_status"]) for t in refusals] == [
+        ("control", 1, "RUNNING"),
+        ("scheduler", 1, "RUNNING"),
+    ]
+    assert "FORCE_STARTJOB event (control)" in refusals[0]["cause"]
+    assert doc["schedule_fired_while_running"] == {"member": 1}
+
+
+@pytest.mark.parametrize("source", ["scheduler", "control", None])
+def test_relayed_start_facts_keep_source(source: str | None) -> None:
+    from dsl41.oracle import Oracle
+    from dsl41.oracle_facts import StartFacts
+
+    catalog = lower_source("insert_job: relay\njob_type: c\ncommand: x\nmachine: m1\n")
+    oracle = Oracle(catalog)
+    facts = StartFacts(oracle, "relay", catalog.jobs["relay"], source=source)
+    relayed = facts.relayed(force=True)
+    assert relayed.source == source
+    assert relayed.force and relayed.explicit and relayed.scheduled
+    assert relayed._again(force=False).source == source
+
+
+def test_cli_bounded_loop_refusal_has_no_start_facts_and_is_not_counted(tmp_path: Path) -> None:
+    jil = tmp_path / "loop.jil"
+    jil.write_text(
+        'insert_job: tick\njob_type: b\ndate_conditions: 1\ndays_of_week: all\nstart_times: "00:00"\n\n'
+        "insert_job: lp\njob_type: b\ncondition: s(tick) | s(lp)\n"
+    )
+    result = cli_runner.invoke(
+        app,
+        [
+            "rehearse",
+            str(jil),
+            "--start",
+            "2026-11-11T00:00:00",
+            "--hours",
+            "0.01",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    doc = json.loads(result.output)
+    [refused] = [t for t in doc["trace"] if t["transition"] == "START_REFUSED"]
+    assert refused["job"] == "lp" and refused["cause"].startswith(
+        "re-trigger loop inside one instant"
+    )
+    assert set(refused) == {"at", "job", "transition", "cause"}
+    assert doc["schedule_fired_while_running"] == doc["schedule_fired_while_queued"] == {}
+
+
+def test_scheduler_refusal_counter_requires_origin_and_run_facts() -> None:
+    from dsl41.start_refusals import scheduler_refusal_counts
+
+    base = {
+        "job": "a",
+        "transition": "START_REFUSED",
+        "start_source": "scheduler",
+        "run_number": 1,
+        "refused_status": "RUNNING",
+    }
+    assert scheduler_refusal_counts([]) == {}
+    assert scheduler_refusal_counts(
+        [
+            base,
+            {**base, "refused_status": "STARTING"},
+            {**base, "run_number": 2},
+            {**base, "refused_status": "QUE_WAIT"},
+            {**base, "refused_status": "INACTIVE"},
+            {**base, "job": "b"},
+            {**base, "transition": "RUNNING->SUCCESS"},
+            {**base, "start_source": "control"},
+            {**base, "job": None},
+            {**base, "run_number": None},
+            {**base, "run_number": True},
+            {**base, "refused_status": None},
+            {},
+        ]
+    ) == {
+        ("a", 1, "RUNNING"): 2,
+        ("a", 2, "RUNNING"): 1,
+        ("a", 1, "QUE_WAIT"): 1,
+        ("a", 1, "INACTIVE"): 1,
+        ("b", 1, "RUNNING"): 1,
+    }
+
+
+@pytest.mark.parametrize("fmt", ["text", "summary", "json"])
+@pytest.mark.parametrize("case", ["empty", "mixed", "queued"])
+@pytest.mark.parametrize("cadence", [False, True])
+def test_cli_rehearsal_schedule_refusal_lists(
+    tmp_path: Path, fmt: str, case: str, cadence: bool
+) -> None:
+    jil = tmp_path / "scheduled.jil"
+    resources = "resources: (SLOT, QUANTITY=1)\n" if case == "queued" else ""
+    text = "insert_resource: SLOT\nres_type: R\namount: 1\n\n" if resources else ""
+    text += (
+        "insert_job: a\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "00:00,00:01,00:02"\n'
+    )
+    if case != "empty":
+        text += "\ninsert_job: b\njob_type: c\ncommand: x\nmachine: m1\n" + resources
+        text += 'date_conditions: 1\ndays_of_week: all\nstart_times: "00:00,00:01,00:02"\n'
+    if resources:
+        text = text.replace("date_conditions: 1", resources + "date_conditions: 1", 1)
+    jil.write_text(text)
+    scenario = tmp_path / "scenario.json"
+    scenario.write_text(json.dumps({"adapter": {"default": [1 if case == "empty" else 600, 0]}}))
+    args = [
+        "rehearse",
+        str(jil),
+        "--start",
+        "2026-09-01T00:00:00",
+        "--hours",
+        "0.05",
+        "--scenario",
+        str(scenario),
+        "--format",
+        fmt,
+    ]
+    if cadence:
+        args.append("--check-cadence")
+    result = cli_runner.invoke(app, args)
+    assert result.exit_code == 0, result.output
+    running = {} if case == "empty" else {"a": 2}
+    queued = {"b": 2} if case == "queued" else {}
+    if case == "mixed":
+        running["b"] = 2
+    if fmt == "json":
+        doc = json.loads(result.output)
+        assert doc["schedule_fired_while_running"] == running
+        assert doc["schedule_fired_while_queued"] == queued
+        refusals = [t for t in doc["trace"] if t["transition"] == "START_REFUSED"]
+        assert len(refusals) == sum(running.values()) + sum(queued.values())
+        for entry in doc["trace"]:
+            assert None not in entry.values()
+            if entry["transition"] == "START_REFUSED":
+                assert entry["start_source"] == "scheduler"
+                assert entry["run_number"] == (0 if entry["job"] in queued else 1)
+        if cadence:
+            for job in doc["cadence_check"]["jobs"].values():
+                assert job["deviation"] is False
+    else:
+        for title, counts in (("running", running), ("queued", queued)):
+            heading = f"-- schedule fired while {title} --"
+            if counts:
+                section = (
+                    heading
+                    + "\n"
+                    + "\n".join(f"{job} count={count}" for job, count in counts.items())
+                )
+                assert section in result.output
+                if cadence:
+                    assert result.output.index(heading) > result.output.index("cadence check")
+            else:
+                assert heading not in result.output
+
+
+@pytest.mark.parametrize(
+    "at, legacy_at",
+    [
+        ("2026-11-11T04:00:00+00:00", "2026-11-11T04:00:00Z"),
+        ("2026-11-11T04:00:00+05:30", "2026-11-11T04:00:00+05:30"),
+        ("2026-11-11T04:00:00.123456", "2026-11-11T04:00:00.123456"),
+    ],
+)
+def test_rehearsal_trace_without_facts_preserves_legacy_json_bytes(at: str, legacy_at: str) -> None:
+    from dsl41.cli_run import _rehearsal_doc
+    from dsl41.oracle_state import TraceEntry
+
+    entry = TraceEntry(
+        at=datetime.fromisoformat(at), job="a", transition="START_REFUSED", cause="opaque"
+    )
+    [actual] = _rehearsal_doc([entry], ["a"])["trace"]
+    expected = {"at": legacy_at, "job": "a", "transition": "START_REFUSED", "cause": "opaque"}
+    assert json.dumps(actual).encode() == json.dumps(expected).encode()
+    assert list(actual) == ["at", "job", "transition", "cause"]
+
+
+def test_rehearsal_report_excludes_operator_and_non_live_scheduler_refusals() -> None:
+    from dsl41.cli_run import _rehearsal_doc
+    from dsl41.oracle_state import TraceEntry
+
+    base = TraceEntry(
+        at=START,
+        job="a",
+        transition="START_REFUSED",
+        cause="opaque",
+        start_source="scheduler",
+        run_number=0,
+        refused_status="INACTIVE",
+    )
+    doc = _rehearsal_doc(
+        [
+            base,
+            base.model_copy(update={"start_source": "control", "refused_status": "RUNNING"}),
+            base.model_copy(
+                update={"start_source": None, "run_number": None, "refused_status": None}
+            ),
+        ],
+        ["a"],
+    )
+    assert doc["schedule_fired_while_running"] == doc["schedule_fired_while_queued"] == {}
+    assert set(doc["trace"][-1]) == {"at", "job", "transition", "cause"}
 
 
 def test_failure_exit_plain_job_is_one() -> None:

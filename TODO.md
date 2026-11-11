@@ -5,11 +5,7 @@ A `Next:` line under a blocker or a High item names its first step.
 
 ## Blockers (step 0)
 
-Found in the RPM pilot (dsl41 plus JIL files).
-
-- **BLK-4**: The UI routinely reports "START_REFUSED [already RUNNING -- concurrent or repeated start request, no effect (STARTJOB event (scheduler))]".
-  The terminal UI prints a repeated scheduler refusal once and counts the rest (DL-480). Still owed: an origin the oracle stamps on the record, the count in the job's details, and a rehearsal list of the jobs whose schedule fired while they were running.
-  Next: build the owed parts from the reviewed plan. The oracle change is semantic.
+None open.
 
 ## High
 
@@ -103,6 +99,8 @@ In fix order. BUG-4, BUG-5 and BUG-6 go with BUG-1 as one clock pass. BUG-20, BU
 - **BUG-61**: `tests/test_kill_signals.py::test_non_killjob_stops_keep_term[drain]` failed once in a full run: it reads the signal log before the child has written it.
 - **BUG-62**: The Ubuntu service drill's storage row failed once: `test_frozen_unit` compares a run root that a live engine is writing (`examples/nightbank/deploy/storage_probe.py:271`).
 - **BUG-63**: `test_kill_signals_update_affects_later_kills_only` left its ten child processes running after three runs on one day; cause unknown (`tests/test_main_config_update.py:1054`).
+- **BUG-64**: After an engine restart whose new trace is already longer than the terminal UI's cursor, the UI does not see the restart: it skips the earlier entries, and a job's count of scheduler refusals can include entries twice (`src/dsl41/runner_tui.py`, the cursor check; DL-484).
+- **BUG-65**: A start that a run window postponed carries no origin when it is refused at the opening, so it prints every time and `rehearse` does not list it. The timer would have to carry the source, which changes derived state: do it with the next state-machine version step (DL-484).
 
 ### Unranked
 

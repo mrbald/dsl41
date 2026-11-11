@@ -131,6 +131,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover -- exercised via CLI guar
     ) from exc
 
 from dsl41.display_time import format_local_at
+from dsl41.start_refusals import RefusalKey, scheduler_refusal_counts
 from dsl41.runner_admission import addressed_key
 from dsl41.runner_clock import EngineError
 from dsl41.runner_control import (
@@ -197,13 +198,8 @@ _JOB_VERB_PROSE = ", ".join(v for v in _CONSOLE_VERBS if v not in ("SET_GLOBAL",
 
 
 def _is_scheduler_refusal(entry: Mapping[str, Any]) -> bool:
-    """Only the oracle's scheduler-origin refusal suffix permits collapsing (DL-480)."""
-    cause = entry.get("cause")
-    return (
-        entry.get("transition") == "START_REFUSED"
-        and isinstance(cause, str)
-        and cause.endswith("(STARTJOB event (scheduler))")
-    )
+    """Only an explicit scheduler origin permits collapsing (DL-480)."""
+    return entry.get("transition") == "START_REFUSED" and entry.get("start_source") == "scheduler"
 
 
 @dataclass
@@ -1277,6 +1273,8 @@ class RunnerApp(App[None]):
         self._trace_seq = 0
         self._trace_baseline: str | None = None
         self._alarms: dict[str, int] = {}
+        self._scheduler_refusals: dict[RefusalKey, int] = {}
+        self._trace_from_snapshot = False
         self._refusal_runs: dict[str, _RefusalRun] = {}
         self._log_paths: dict[str, tuple[str | None, str | None]] = {}
         self._tail_stream: int = 0  # 0 = out, 1 = err
@@ -1371,6 +1369,8 @@ class RunnerApp(App[None]):
             self._flush_refusal_run(job, run.last_clock)
         self._trace_seq = 0
         self._alarms.clear()
+        self._scheduler_refusals.clear()
+        self._trace_from_snapshot = False
 
     async def _refresh(self) -> None:
         """Re-query status, trace and explain. Refreshes triggered while one is in flight fold
@@ -1525,6 +1525,10 @@ class RunnerApp(App[None]):
                     continue  # idempotent consumption: never render twice
                 self._trace_seq = seq
             transition = str(entry.get("transition", ""))
+            if transition == "RESTART":
+                self._trace_from_snapshot = True
+            for key, count in scheduler_refusal_counts([entry]).items():
+                self._scheduler_refusals[key] = self._scheduler_refusals.get(key, 0) + count
             # the subject is a job, or for an older build's TRANSITION_VIOLATION a namespaced key
             # such as `host:local`; only an alarm counts against a job, so such a key never
             # reaches the jobs table or the problems view
@@ -1917,6 +1921,18 @@ class RunnerApp(App[None]):
                     body.append(line + "\n", style="bold")
                 else:
                     body.append(line + "\n")
+            run_number = row.get("run_number", 0)
+            count = sum(
+                count
+                for (name, run, status_class), count in self._scheduler_refusals.items()
+                if name == job
+                and run == run_number
+                and (status_class == "QUE_WAIT") == (state == "QUE_WAIT")
+            )
+            if count:
+                scope = " since snapshot" if self._trace_from_snapshot else ""
+                run_label = "queued" if state == "QUE_WAIT" else f"run {run_number}"
+                body.append(f"scheduler refusals: {count} ({run_label}){scope}\n")
             for label, key in (("log out", "log_out"), ("log err", "log_err")):
                 if row.get(key):
                     body.append(f"{label}: {row[key]}\n", style="dim")

@@ -26311,3 +26311,38 @@ relitigate an entry; append a new one.
   THE LIMIT. `[lint] ignore` still removes a code from the report altogether. A count line
   names no job and no attribute; `dsl41 lint` does. The summary repeats the full findings
   already in `lint_messages`, so it adds to an unbounded reply (BUG-58).
+
+- DL-484 The oracle stamps a refused start's origin; details and rehearsal count them
+  (2026-11-11; owner BLK-4 ruling, the owed parts; oracle_state.py, oracle_facts.py,
+  oracle_writers.py, runner_control.py, runner_tui.py, start_refusals.py, cli_run.py,
+  control-protocol §4, runner-design §§9 and 11)
+  THE RULE. A `START_REFUSED` trace entry of an input's own start carries three optional
+  facts: `start_source`, the source of the refused input; `run_number`; and
+  `refused_status`, the job's status when it was refused. The `trace` answer carries each
+  only when it is set; an added answer field needs no version step (DL-217). Its four
+  existing keys keep their bytes and order.
+  The terminal UI reads the origin from `start_source`; nothing reads the cause text for
+  it any more. What the console prints is DL-480's rule, unchanged. A job's details show
+  `scheduler refusals: N (run K)` for a live run, or `(queued)` for refusals while its
+  start waits in the queue. The count is taken from the entries the trace serves and is
+  cleared where the trace cursor resets. There is no line at zero and no durable total.
+  `rehearse` lists each job whose schedule fired while it was STARTING or RUNNING, with
+  the count, and apart from it the fires refused while a start was queued. Text prints a
+  section only when it is not empty (DL-184); JSON always has
+  `schedule_fired_while_running` and `schedule_fired_while_queued`.
+  One function counts for both, keyed by job, run number and status class.
+  Scheduling, the refusal rule (DL-64), stored formats and the state-machine version do
+  not change.
+  THE REASON. DL-480 told a scheduler refusal from an operator's by matching the cause
+  text. Text another function wrote is not an origin, and rehearsal had nothing to count.
+  REJECTED. Carrying the source on the deferred-start timer: the build then derives
+  different state from an identical log (31 goldens changed), which needs a state-machine
+  version step and makes existing run roots refuse to restart. A durable total: the owner
+  needs none. Stamping the bounded-loop refusal (L010): it refuses a wake inside a
+  cascade, not an input's own start.
+  THE LIMIT. A start that a run window deferred carries no origin when it is refused at
+  the opening: it prints every time and is not counted (BUG-65). The L010 refusal
+  likewise. After an engine restart whose new trace is already
+  longer than the UI's cursor the UI does not see the restart, so a count can include
+  entries twice (BUG-64). An engine of an older build serves no origin, and this UI then
+  prints every refusal.

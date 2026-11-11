@@ -1277,9 +1277,36 @@ def _rehearsal_doc(trace: "list[TraceEntry]", catalog_jobs: Iterable[str]) -> di
     """The --format json document: the full trace plus the rollup rows, built only on the json
     path."""
     return {
-        "trace": [t.model_dump(mode="json") for t in trace],
+        "trace": [t.model_dump(mode="json", exclude_none=True) for t in trace],
         "jobs": _rollup(trace, catalog_jobs),
+        **_schedule_refusals(trace),
     }
+
+
+def _schedule_refusals(trace: list[TraceEntry]) -> dict[str, dict[str, int]]:
+    """The schedule fires refused during an active run or a queued start, across all runs."""
+    from dsl41.start_refusals import scheduler_refusal_counts
+
+    running: dict[str, int] = {}
+    queued: dict[str, int] = {}
+    counts = scheduler_refusal_counts(t.model_dump() for t in trace)
+    for (job, _run, status_class), count in counts.items():
+        if status_class == "RUNNING":
+            running[job] = running.get(job, 0) + count
+        elif status_class == "QUE_WAIT":
+            queued[job] = queued.get(job, 0) + count
+    return {
+        "schedule_fired_while_running": dict(sorted(running.items())),
+        "schedule_fired_while_queued": dict(sorted(queued.items())),
+    }
+
+
+def _emit_schedule_refusals(trace: list[TraceEntry]) -> None:
+    for key, counts in _schedule_refusals(trace).items():
+        if counts:
+            typer.echo(f"-- {key.replace('_', ' ')} --")
+            for job, count in counts.items():
+                typer.echo(f"{job} count={count}")
 
 
 def _emit_rehearsal(
@@ -1298,6 +1325,7 @@ def _emit_rehearsal(
         typer.echo("-- summary: runs per job --")
         for name, row in _rollup(trace, catalog_jobs).items():
             typer.echo(f"{name} runs={row['runs']} final={row['final_status'] or '-'}")
+    _emit_schedule_refusals(trace)
 
 
 def _emit_cadence_check(
@@ -1431,6 +1459,7 @@ def _emit_cadence_check(
                 typer.echo(_trace_line(t))
         for line in render_text(check):
             typer.echo(line)
+        _emit_schedule_refusals(trace)
     if check.findings:
         raise typer.Exit(3)
 
@@ -1508,9 +1537,11 @@ def rehearse(
         "--format",
         metavar="FORMAT",
         help="text: trace lines. summary: trace plus per-job run counts and"
-        " final statuses. json: one document with both. With"
+        " final statuses. Both append non-empty schedule-refusal lists."
+        " json: one document with trace, jobs and both refusal counts. With"
         " --check-cadence, text is the comparison table, summary is trace"
-        " plus table, and json gains a cadence_check block.",
+        " plus table; both append non-empty refusal lists."
+        " json gains a cadence_check block.",
     ),
     check_cadence: bool = typer.Option(
         False,

@@ -652,7 +652,9 @@ class Oracle(OracleWriters):
             deferred = ev.payload.get(DEFERRED_TIMER_KEY)
             if isinstance(deferred, str):
                 cause = f"run_window-deferred {deferred}"
-            self._attempt_root(job, RUN_WINDOW if kind == "TIMER" else kind, cause)
+            self._attempt_root(
+                job, RUN_WINDOW if kind == "TIMER" else kind, cause, source=ev.source
+            )
         elif kind == "SET_GLOBAL":
             name = ev.payload.get("name")
             if not isinstance(name, str):
@@ -722,13 +724,15 @@ class Oracle(OracleWriters):
         self._cascade_idle()
         self._reached = set()
 
-    def _attempt_root(self, job: str, relay: str, cause: str) -> None:
+    def _attempt_root(self, job: str, relay: str, cause: str, *, source: str | None = None) -> None:
         """An attempt outside any macrostep: an input's own, relayed through `relay`, or
         SET_GLOBAL's (`start` itself). A job with neither a catalog entry nor a row does nothing."""
         job_ir = self.catalog.jobs.get(job)
         if job_ir is None and job not in self.store.job:
             return
-        self._root(job, ChartEvent(relay, StartFacts(self, job, job_ir, cause=cause)), cause)
+        self._root(
+            job, ChartEvent(relay, StartFacts(self, job, job_ir, cause=cause, source=source)), cause
+        )
 
     def _handle_status(self, ev: Event) -> None:
         job = self._required_job(ev)
@@ -787,6 +791,7 @@ class Oracle(OracleWriters):
             job,
             self.catalog.jobs.get(job),
             cause=deferred,
+            source=ev.source,
             stale=stale is not None or superseded,
             rescan=rescan,
             refusal=why,
