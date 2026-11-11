@@ -18,6 +18,7 @@ from dsl41.runner_config import Configuration, RuntimeProfile, runtime_hash
 from dsl41.runner_update import profile_for, settings_of
 from dsl41.runtime_policy import (
     ATTRIBUTE_NAMES,
+    POLICY_FIELDS,
     JobRuntimePolicy,
     PolicyRefused,
     RuntimePolicySettings,
@@ -29,6 +30,16 @@ from dsl41.runtime_policy import (
 )
 from store_surgery import rows
 from test_main_config import JOB, estate_file
+
+
+def test_runtime_policy_fields_preserve_declaration_order():
+    assert POLICY_FIELDS == (
+        "job_profile",
+        "job_shell",
+        "std_file_mode",
+        "kill_signals",
+        "set_job_attribute_environmentals",
+    )
 
 
 @pytest.fixture(autouse=True)

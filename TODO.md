@@ -19,8 +19,6 @@ State handled outside a state machine and duplicated logic make the whole system
   Next: an engineer plan.
 - **FEAT-28**: Give Engine ownership of update cancellation/reaping and share common live/resume update setup ([update](src/dsl41/runner_update.py)); preserve distinct live/recovery selection and existing ordering.
   Next: an engineer plan with FEAT-10, which touches the same code.
-- **FEAT-29**: Derive the [runtime-policy field inventory](src/dsl41/runtime_policy.py) from `RuntimePolicySettings`; preserve normalization, defaults, serialized values/order, hashes and missing-setting compatibility.
-  Next: a careful-builder brief; the design is settled.
 - **FEAT-30**: Establish ownership of the unintegrated [process preparation](src/dsl41/runner_adapters.py) before deletion or activation. If activation is authorized, share path resolution and trace a real dispatch through it.
   Next: keep the path and activate it with tests; not pressing (owner, 2026-11-10).
 - **BUG-1**: Nothing bounds a backward gap: a store stamped far ahead holds every tick and timer until wall time catches up, with one warning (DL-435 N2).
