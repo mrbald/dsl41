@@ -395,6 +395,8 @@ def test_two_running_jobs_are_stopped_and_eighteen_untouched_with_the_engine_run
         ["j03", "j07"],
         [["j03", "rerun"], ["j07", "rerun"]],
     )
+    [recorded] = [c for c in _configs(run_root) if c["event"] == "applied" and "token" in c]
+    assert recorded == body
     # the stops' outcomes are committed after the application, each with its rerun plan
     order = [(k, b.get("event"), b.get("job")) for _, k, b in rows(run_root)]
     applied_at = order.index(("config", "applied", None))

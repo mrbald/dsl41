@@ -92,6 +92,7 @@ In fix order. BUG-4, BUG-5 and BUG-6 go with BUG-1 as one clock pass. BUG-20, BU
 - **BUG-64**: After an engine restart whose new trace is already longer than the terminal UI's cursor, the UI does not see the restart: it skips the earlier entries, and a job's count of scheduler refusals can include entries twice (`src/dsl41/runner_tui.py`, the cursor check; DL-484).
 - **BUG-65**: A start that a run window postponed carries no origin when it is refused at the opening, so it prints every time and `rehearse` does not list it. The timer would have to carry the source, which changes derived state: do it with the next state-machine version step (DL-484).
 - **BUG-66**: Three tests pin a start's whole stderr and take out only the pidfd notice (`tests/test_main_config.py`, `without_cookie_scan_notice`). On a Linux without pidfd, such as EL7's kernel 3.10, the notice reads `os.kill (start-token check)` and the tests fail there.
+- **BUG-68**: `reread` forecasts a member that an update changes in place inside a running box it restarts as `rerun`, but the member restarts with the box as a new run (`src/dsl41/reread_worker.py`, `preview`'s unchanged-member set). The update reply's `none` for box members reads "no rerun or hold follows from this stop" even for a marked member that ends ON_HOLD (`src/dsl41/cli_output.py`). Fixing either changes `reread` or reply text.
 
 ### Unranked
 
