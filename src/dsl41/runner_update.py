@@ -412,6 +412,18 @@ class EngineUpdate:
         raise AssertionError(f"a refused update {admitted.token} reached its application")
 
     def _begin(self, request: UpdateRequest, opened: OpenedPlan, admitted: Admitted) -> None:
+        attempts = {job: self.engine.attempt_of_run(job, run) for job, run in admitted.stop_runs}
+        self._install(request, opened, admitted, attempts, {})
+
+    def _install(
+        self,
+        request: UpdateRequest,
+        opened: OpenedPlan,
+        admitted: Admitted,
+        attempts: dict[str, str | None],
+        cleaning: dict[str, str],
+    ) -> None:
+        """Install the update and its selected attempts before creating its tier (DL-432)."""
         engine = self.engine
         self._request, self._opened = request, opened
         self._kept, self._cancelled, self._cleaning, self._others = {}, [], {}, {}
@@ -419,7 +431,8 @@ class EngineUpdate:
         self._held = admitted.dispatch_filter
         self._admitted = admitted
         self._set_box_scope(opened)
-        self._attempts = {job: engine.attempt_of_run(job, run) for job, run in admitted.stop_runs}
+        self._attempts = attempts
+        self._cleaning = cleaning
         self.tier = UpdateTier(self, self._prepare)
 
     def _set_box_scope(self, opened: OpenedPlan) -> None:
@@ -492,32 +505,24 @@ class EngineUpdate:
                     catalog=engine.oracle.catalog, profile=engine.profile or RuntimeProfile()
                 ),
             )
-        self._request = UpdateRequest(
+        request = UpdateRequest(
             admitted.token,
             int(intent.get("live_rev", engine.config_rev)),
             engine.baseline_id,
             str(intent.get("request_id", "")),
         )
-        self._opened = opened
-        self._kept, self._cancelled, self._cleaning, self._others = {}, [], {}, {}
-        self._moved = frozenset(engine.marked ^ set(opened.marked.names))
-        self._held = admitted.dispatch_filter
-        self._admitted = admitted
-        self._set_box_scope(opened)
-        self._attempts = {
-            str(entry["job"]): entry.get("attempt") for entry in intent.get("stop") or ()
-        }
+        attempts = {str(entry["job"]): entry.get("attempt") for entry in intent.get("stop") or ()}
         table = engine.journal.open.attempts
         catalog = engine.oracle.catalog.jobs
         still = {
             job: run_id
-            for job, run_id in self._attempts.items()
+            for job, run_id in attempts.items()
             if run_id in table and catalog[job].job_type != "FW"  # the fold takes a watch up
         }
         # an attempt whose outcome is in while its cleanup was cut short is down once the
         # catch-up's cleanup step has finished it (`cleaned`)
-        self._cleaning = {run_id: job for job, run_id in still.items() if table[run_id].closing}
-        self.tier = UpdateTier(self, self._prepare)
+        cleaning = {run_id: job for job, run_id in still.items() if table[run_id].closing}
+        self._install(request, opened, admitted, attempts, cleaning)
         # the request's own answer: a retry under its id while it still stops waits on it
         self._answer = UpdateAnswer(admitted)
         self._answer.applied = asyncio.get_running_loop().create_future()
@@ -623,12 +628,8 @@ class EngineUpdate:
             # ended before the update, its cleanup still running: down once that is finished
             self._cleaning[run_id] = job
             return
-        live = engine._live.get(job)
-        if not known and live is not None and live.attempt == run_id:
-            del engine._live[job]
-            live.task.cancel()
-            engine._reaping.append(live.task)
-            self._cancelled.append((job, live.run_number, run_id))
+        if not known and (run := engine.cancel_and_reap(job, run_id)) is not None:
+            self._cancelled.append((job, run, run_id))
         assert self.tier is not None
         self.tier.exit_recorded(job, settle=False)
 
