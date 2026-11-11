@@ -5,12 +5,9 @@ An update applies the captured candidate prepared for that request (DL-463).
 It is durable, so it is a declared machine (DL-424): a crash between the journaled intent and the
 application resumes it.
 
-```text
-STOPPING = IDLE + update_admitted [admitted]   // journal the intent; stop each job in the set
-REFUSED  = IDLE + update_admitted [refused]    // the refusal is the reply
-APPLIED  = STOPPING + all_stopped_or_none      // apply, then journal the application
-STOPPING = STOPPING + exit_recorded            // one more down
-```
+STOPPING contains WAITING for the stop set and ENDING_BOXES for the committed box KILLJOBs
+(DL-487). The generated lifecycle is in docs/chart-lifecycles.md; the diagram and rows are in
+docs/state-machines.md#update.
 
 The admission runs before the event is posted, in the engine's single writer, and its answer is
 the event's payload: `Admitted` or `Refused`. The guards read only which one it is. The spec's
@@ -66,8 +63,10 @@ UPDATE_KEY: Final = "update"
 
 #: The admission's answer. The payload is `Admitted` or `Refused`.
 UPDATE_ADMITTED: Final = "update_admitted"
-#: The stop set is empty: at once after an admission with none, or when the last one ended.
-ALL_STOPPED_OR_NONE: Final = "all_stopped_or_none"
+#: Look at the stop set after one update step (DL-487).
+LOOK: Final = "look"
+#: Every old box run's KILLJOB has committed (DL-487).
+BOXES_ENDED: Final = "boxes_ended"
 #: One job of the stop set ended. The payload is the job's name.
 EXIT_RECORDED: Final = "exit_recorded"
 
@@ -77,6 +76,8 @@ EXIT_RECORDED: Final = "exit_recorded"
 JOURNAL_INTENT: Final = "journal_intent"
 #: Stop one job's attempt with cause `update_stop`. The detail is the job.
 STOP_ATTEMPT: Final = "stop_attempt"
+#: End the old box runs before application. The detail is the token (DL-487).
+END_BOXES: Final = "end_boxes"
 #: Apply the plan in memory. The detail is the token.
 APPLY: Final = "apply"
 #: Journal the application. The detail is the token.
@@ -87,7 +88,7 @@ JOURNAL_APPLIED: Final = "journal_applied"
 STALE_PLAN: Final = "stale_plan"
 UPDATE_IN_PROGRESS: Final = "update_in_progress"
 
-#: The states of the chart's one region.
+#: The states of the chart's outer phase region.
 UPDATE_STATES: Final = ("IDLE", "STOPPING", "APPLIED", "REFUSED")
 
 #: What the interruption rule chooses for a stopped job (spec-wiring 2b, the follow-up kinds).
@@ -179,6 +180,14 @@ def _refused(ctx: Context) -> bool:
     return isinstance(ctx.event.payload, Refused)
 
 
+def _none_open(ctx: Context) -> bool:
+    return not ctx.data.open
+
+
+def _some_open(ctx: Context) -> bool:
+    return not _none_open(ctx)
+
+
 def _begin_stopping(ctx: Context) -> Effects:
     """Keep the token and the stop set; journal the intent, then stop each job in the set."""
     record: UpdateRecord = ctx.data
@@ -209,8 +218,13 @@ def _one_down(ctx: Context) -> Effects:
     return Effects()
 
 
+def _end_boxes(ctx: Context) -> Effects:
+    """End each old box run, boxes first, before applying the plan (DL-487)."""
+    return Effects(intents=(Intent(END_BOXES, ctx.data.token),))
+
+
 def _apply(ctx: Context) -> Effects:
-    """Every job of the stop set ended: apply the plan, then journal the application."""
+    """The old box runs ended: apply the plan, then journal the application (DL-487)."""
     record: UpdateRecord = ctx.data
     return Effects(intents=(Intent(APPLY, record.token), Intent(JOURNAL_APPLIED, record.token)))
 
@@ -226,7 +240,12 @@ UPDATE: Final = Statechart(
                 "IDLE",
                 (
                     State("IDLE"),
-                    State("STOPPING"),
+                    State(
+                        "STOPPING",
+                        regions=(
+                            Region("stop", "WAITING", (State("WAITING"), State("ENDING_BOXES"))),
+                        ),
+                    ),
                     State("APPLIED", final=True),
                     State("REFUSED", final=True),
                 ),
@@ -243,21 +262,33 @@ UPDATE: Final = Statechart(
             action="begin_stopping",
         ),
         Row("update.02", "IDLE", UPDATE_ADMITTED, "REFUSED", guard="refused", action="refuse"),
-        Row("update.03", "STOPPING", ALL_STOPPED_OR_NONE, "APPLIED", action="apply"),
-        Row("update.04", "STOPPING", EXIT_RECORDED, kind="internal", action="one_down"),
+        Row("update.03", "ENDING_BOXES", BOXES_ENDED, "APPLIED", action="apply"),
+        Row("update.04", "WAITING", EXIT_RECORDED, kind="internal", action="one_down"),
+        Row("update.05", "WAITING", LOOK, "ENDING_BOXES", guard="none_open", action="end_boxes"),
+        Row("update.06", "WAITING", LOOK, kind="internal", guard="some_open"),
     ),
-    guards={"admitted": _admitted, "refused": _refused},
+    guards={
+        "admitted": _admitted,
+        "refused": _refused,
+        "none_open": _none_open,
+        "some_open": _some_open,
+    },
     actions={
         "begin_stopping": _begin_stopping,
         "refuse": _refuse,
         "one_down": _one_down,
+        "end_boxes": _end_boxes,
         "apply": _apply,
     },
     clock="logical",
     exclusions=(
-        Exclusion("IDLE", ALL_STOPPED_OR_NONE, "the tier posts it only after an admission"),
+        Exclusion("IDLE", LOOK, "the engine looks only after an admission"),
         Exclusion("IDLE", EXIT_RECORDED, "the tier posts it only while the update stops"),
+        Exclusion("IDLE", BOXES_ENDED, "the engine replies only to a box stop"),
         Exclusion("STOPPING", UPDATE_ADMITTED, "the tier admits its one request once"),
+        Exclusion("WAITING", BOXES_ENDED, "the engine replies only to a box stop"),
+        Exclusion("ENDING_BOXES", EXIT_RECORDED, "no job is open once the boxes end"),
+        Exclusion("ENDING_BOXES", LOOK, "the box stop and its reply are one step"),
     ),
 )
 
@@ -418,6 +449,8 @@ class UpdateIntents(Protocol):
 
     def stop_attempt(self, job: str, cause: str) -> None: ...
 
+    def box_ends(self) -> Sequence[str]: ...
+
     def apply(self, application: Application) -> None: ...
 
     def journal_applied(self, rev: int, digest: str) -> None: ...
@@ -429,8 +462,8 @@ class UpdateTier:
 
     `prepare` computes the application from the admitted decision when the chart reaches
     APPLIED, so it reads the oracle as it is after the stops. `exit_recorded` takes the end of
-    any attempt and posts only for a job still in the open set; when the set empties it posts
-    `all_stopped_or_none` itself, as `admit` does at once for an empty stop set.
+    any attempt and posts only for a job still in the open set. The engine posts one `look`
+    after each update step, awaits the returned box KILLJOBs, then posts `boxes_ended` (DL-487).
 
     A raise from `prepare` or from an intent propagates out of the call that posted the event.
     It is a crash, not a state: the engine dies, and startup step 4 resumes the update from its
@@ -473,7 +506,7 @@ class UpdateTier:
         update stops, none otherwise."""
         return self._filter if self.state == "STOPPING" else frozenset()
 
-    def admit(self, decision: Admitted | Refused, *, settle: bool = True) -> Admitted | Refused:
+    def admit(self, decision: Admitted | Refused) -> Admitted | Refused:
         """Post the admission's answer and answer it. A tier that already took one answers
         `update_in_progress` naming its own token instead, and changes nothing. The dispatch
         filter is installed once the chart is in STOPPING, before any stop is performed."""
@@ -484,41 +517,39 @@ class UpdateTier:
             self._admitted = decision
             self._filter = decision.dispatch_filter
         self._perform_all(outcomes)
-        if settle:
-            self._settle()
         return decision
 
-    def resume(
-        self, admitted: Admitted, still_open: Collection[str], *, settle: bool = True
-    ) -> None:
+    def resume(self, admitted: Admitted, still_open: Collection[str]) -> None:
         """Restore an update whose intent is journaled and whose application is not (spec-crash
-        step 4): STOPPING with the jobs whose attempt has not ended yet. With `settle` false,
-        an empty set is left for the caller's `settle`, which applies where the caller
-        chooses."""
+        step 4): STOPPING at WAITING with the jobs whose attempt has not ended yet. The
+        caller's look drives the box stop and application in the loop (DL-487)."""
         self._admitted = admitted
         self._record.token = admitted.token
         self._record.open = set(still_open)
         self._filter = admitted.dispatch_filter
         self._executor = Executor()
-        self._executor.restore(UPDATE_KEY, UPDATE, {"update", "STOPPING"}, self._record)
-        if settle:
-            self._settle()
+        self._executor.restore(UPDATE_KEY, UPDATE, {"update", "STOPPING", "WAITING"}, self._record)
 
-    def settle(self) -> None:
-        """Apply once no job of the stop set is still open: `all_stopped_or_none`."""
-        self._settle()
+    def look(self) -> tuple[Intent, ...] | None:
+        """Return the box KILLJOBs when the look enters ENDING_BOXES, else None (DL-487).
 
-    def exit_recorded(self, job: str, *, settle: bool = True) -> None:
+        An empty tuple still needs the engine's `boxes_ended` reply before application.
+        """
+        for outcome in self._executor.dispatch(UPDATE_KEY, Event(LOOK)):
+            for intent in outcome.intents:
+                assert intent.name == END_BOXES
+                return tuple(Intent("KILLJOB", job) for job in self._intents.box_ends())
+        return None
+
+    def boxes_ended(self) -> None:
+        """The engine committed every returned KILLJOB: application may proceed (DL-487)."""
+        self._send(BOXES_ENDED)
+
+    def exit_recorded(self, job: str) -> None:
         """An attempt of `job` ended."""
         if self.state != "STOPPING" or job not in self._record.open:
             return
         self._send(EXIT_RECORDED, job)
-        if settle:
-            self._settle()
-
-    def _settle(self) -> None:
-        if self.state == "STOPPING" and not self._record.open:
-            self._send(ALL_STOPPED_OR_NONE)
 
     def _send(self, name: str, payload: object = None) -> None:
         self._perform_all(self._executor.dispatch(UPDATE_KEY, Event(name, payload)))
@@ -544,11 +575,13 @@ class UpdateTier:
 
 
 __all__ = [
-    "ALL_STOPPED_OR_NONE",
     "APPLY",
+    "BOXES_ENDED",
+    "END_BOXES",
     "EXIT_RECORDED",
     "JOURNAL_APPLIED",
     "JOURNAL_INTENT",
+    "LOOK",
     "STALE_PLAN",
     "STOP_ATTEMPT",
     "UPDATE_IN_PROGRESS",
