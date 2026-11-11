@@ -1,10 +1,12 @@
 """`reread` as a module (spec-reload steps 1 to 6): load, lint, diff, store the plan.
 
-The nightbank small estate is the large case; a tiny estate written in the test is the box case.
-`Live` is built from the files on disk through `load_estate`, so an unedited estate is unchanged.
+The nightbank small estate is the large case; a main config written in the test is the box case.
+`Live` is built from the files on disk through main-config preparation, so an unedited estate is unchanged.
 """
 
 from __future__ import annotations
+
+from reload_fixtures import prepare_estate, write_config
 
 import hashlib
 import os
@@ -19,7 +21,7 @@ import pytest
 
 from dsl41 import reload_plan
 from dsl41.canon import canonical_bytes, decode
-from dsl41.reload_plan import Live, RereadRefused, RereadResult, load_estate, read_plan, reread
+from dsl41.reload_plan import Live, RereadRefused, RereadResult, read_plan, reread
 
 SMALL = Path(__file__).resolve().parent.parent / "examples" / "nightbank" / "estate" / "small"
 
@@ -38,13 +40,17 @@ HB_WINDOW=00:05-01:35
 
 
 def _nightbank(tmp_path: Path) -> Path:
-    """A writable copy of the small estate, its manifest unchanged. The site layer
-    `night.properties` sits beside it, as `run -p` takes it, not inside it."""
+    """The small estate under a main config with a captured external properties layer."""
     target = tmp_path / "estate"
     target.mkdir()
     for path in SMALL.glob("*.jil"):
         shutil.copy(path, target)
-    shutil.copy(SMALL / "estate.toml", target)
+    write_config(
+        target,
+        properties=[str(tmp_path / "night.properties")],
+        estate='timezone = "UTC"\n',
+        lint='refuse = "error"\n',
+    )
     profile = tmp_path / "profile.env"
     profile.write_text("export SYNTHETIC=1\n")
     owner = pwd.getpwuid(os.geteuid()).pw_name
@@ -54,18 +60,15 @@ def _nightbank(tmp_path: Path) -> Path:
     return target
 
 
-def _site(estate: Path) -> dict[str, Any]:
-    props = estate.parent / "night.properties"
-    return {"properties": [props], "environment": "sandbox"} if props.exists() else {}
-
-
 def _live(estate: Path, revision: int = 1, status: dict[str, str] | None = None) -> Live:
-    loaded = load_estate(estate, **_site(estate))
-    return Live(loaded.catalog, loaded.settings, revision, status or {})
+    loaded = prepare_estate(estate)
+    return Live(
+        loaded.catalog, loaded.settings, revision, status or {}, launch=loaded.metadata["launch"]
+    )
 
 
 def _reread(estate: Path, live: Live, plans: Path) -> RereadResult:
-    return reread(estate, live, plans, start=START, **_site(estate))
+    return reread(live, plans, start=START, candidate=prepare_estate(estate))
 
 
 def _edit(estate_dir: Path, name: str, old: str, new: str) -> None:
@@ -79,7 +82,7 @@ def _tiny(tmp_path: Path, jil: str, extra: str = "") -> Path:
     target = tmp_path / "tiny"
     target.mkdir()
     (target / "a.jil").write_text("insert_machine: m1\ntype: a\nnode_name: localhost\n\n" + jil)
-    (target / "estate.toml").write_text(f'name = "tiny"\nfiles = ["a.jil"]\n{extra}')
+    write_config(target, estate=extra, lint='refuse = "error"\n')
     return target
 
 
@@ -104,27 +107,12 @@ def test_unedited_estate_is_unchanged_and_the_token_is_stable(tmp_path: Path) ->
     assert len(first.plan.unchanged) == len(live.catalog.jobs) > 20
     assert first.stop == ()
     assert first.plan_dir == plans / first.token
-    sources = {p.name for p in estate.iterdir()}
-    stored = {
+    candidate = prepare_estate(estate)
+    assert {
         p.relative_to(first.plan_dir).as_posix() for p in first.plan_dir.rglob("*") if p.is_file()
-    }
-    assert stored == {
-        *sources,
-        "site/night.properties",
-        "non-idempotent.toml",
-        "invocation.json",
-        "plan.json",
-    }
-    for path in first.files:
-        name = path.relative_to(first.plan_dir)
-        if name.name == "night.properties":
-            assert path.read_bytes() == (tmp_path / "night.properties").read_bytes()
-        elif name.name not in ("non-idempotent.toml", "invocation.json"):
-            assert path.read_bytes() == (estate / name).read_bytes()
-    assert (first.plan_dir / "non-idempotent.toml").read_bytes() == b""
-    invocation = decode((first.plan_dir / "invocation.json").read_bytes())
-    props = str((tmp_path / "night.properties").absolute())
-    assert invocation == {"environment": "sandbox", "properties": [props]}
+    } == {"plan.json", *(name for name, _ in candidate.parts)}
+    for name, data in candidate.parts:
+        assert (first.plan_dir / name).read_bytes() == data
 
 
 def test_a_changed_job_and_an_added_job(tmp_path: Path) -> None:
@@ -217,11 +205,16 @@ def test_the_token_changes_when_only_the_marked_set_changes(tmp_path: Path) -> N
     live = _live(estate)
     plans = tmp_path / "plans"
     bare = _reread(estate, live, plans)
-    (estate / "non-idempotent.toml").write_text('jobs = ["OPS_SPOOL_C"]\n')
+    (estate / "non-idempotent.toml").write_text('[jobs]\nOPS_SPOOL_C = "synthetic exception"\n')
     marked = _reread(estate, live, plans)
     assert marked.token != bare.token
     assert marked.plan == bare.plan
-    assert (marked.plan_dir / "non-idempotent.toml").read_text() == 'jobs = ["OPS_SPOOL_C"]\n'
+    record = next(
+        r for r in prepare_estate(estate).metadata["records"] if r["role"] == "exceptions"
+    )
+    assert (marked.plan_dir / record["name"]).read_bytes() == (
+        b'[jobs]\nOPS_SPOOL_C = "synthetic exception"\n'
+    )
 
 
 def test_the_token_changes_when_the_live_revision_moves(tmp_path: Path) -> None:
@@ -246,7 +239,7 @@ def test_a_formatting_only_edit_is_unchanged(tmp_path: Path) -> None:
 def test_an_estate_setting_change_marks_every_job_changed(tmp_path: Path) -> None:
     estate = _nightbank(tmp_path)
     live = _live(estate)
-    _edit(estate, "estate.toml", 'timezone = "UTC"', 'timezone = "Europe/Zurich"')
+    _edit(estate, "dsl41.toml", 'timezone = "UTC"', 'timezone = "Europe/Zurich"')
     result = _reread(estate, live, tmp_path / "plans")
     assert len(result.plan.changed) == len(live.catalog.jobs)
     assert {change.reason for change in result.plan.changed} == {"estate setting timezone changed"}
@@ -267,9 +260,9 @@ def test_plan_json_round_trips_through_canon(tmp_path: Path) -> None:
     assert document["settings"]["timezone"] == "UTC"
     assert document["unchanged"] == list(result.plan.unchanged)
     names = [part["name"] for part in document["parts"]]
-    assert names[0] == "estate.toml"
-    assert names[-2:] == ["non-idempotent.toml", "invocation.json"]
-    assert document["environment"] == "sandbox"
+    assert names[-1] == "main-inputs.json"
+    assert document["plan_format_version"] == 2
+    assert document["environment"] is None
     assert document["properties"] == [str((tmp_path / "night.properties").absolute())]
     assert document["restored"] == []
     for part in document["parts"]:
@@ -303,7 +296,7 @@ def test_a_crash_before_plan_json_leaves_no_complete_plan(
     with pytest.raises(OSError, match="power cut"):
         _reread(estate, live, plans)
     (token_dir,) = plans.iterdir()
-    assert (token_dir / "estate.toml").exists()
+    assert (token_dir / "main-inputs.json").exists()
     assert not (token_dir / "plan.json").exists()
     assert read_plan(plans, token_dir.name) is None
     monkeypatch.setattr(reload_plan, "durable_write", real)
@@ -316,9 +309,13 @@ def test_a_plan_with_a_damaged_file_is_not_complete(tmp_path: Path) -> None:
     estate = _nightbank(tmp_path)
     result = _reread(estate, _live(estate), tmp_path / "plans")
     assert read_plan(tmp_path / "plans", result.token) is not None
-    (result.plan_dir / "amer.jil").write_bytes(b"cut")
+    record = next(
+        r for r in prepare_estate(estate).metadata["records"] if r["path"].endswith("/amer.jil")
+    )
+    part = result.plan_dir / record["name"]
+    part.write_bytes(b"cut")
     assert read_plan(tmp_path / "plans", result.token) is None
-    (result.plan_dir / "amer.jil").unlink()
+    part.unlink()
     assert read_plan(tmp_path / "plans", result.token) is None
 
 
@@ -329,46 +326,17 @@ def test_a_lint_warning_refuses_under_strict(tmp_path: Path) -> None:
         (estate / "a.jil").read_text()
         + f"insert_job: LONE\njob_type: c\ncommand: true\nmachine: m1\nowner: {pwd.getpwuid(os.geteuid()).pw_name}\n"
     )
+    config = estate / "dsl41.toml"
+    config.write_text(config.read_text().replace('refuse = "error"', 'refuse = "warn"'))
     with pytest.raises(RereadRefused) as refused:
         _reread(estate, live, tmp_path / "plans")
     assert any("L011" in finding for finding in refused.value.findings)
 
 
-@pytest.mark.parametrize(
-    ("manifest", "needle"),
-    [
-        ('name = "t"\nfiles = ["missing.jil"]\n', "missing.jil"),
-        (
-            'name = "t"\nfiles = ["a.jil"]\n[environments.x]\nproperties = ["a.jil"]\n',
-            "environment",
-        ),
-        ('name = "t"\nfiles = ["a.jil"]\nbogus = 1\n', "bogus"),
-        ('name = "t"\nfiles = ["a.jil"]\ntimezone = "Not/AZone"\n', "timezone"),
-    ],
-)
-def test_a_manifest_that_cannot_declare_an_estate_is_refused(
-    tmp_path: Path, manifest: str, needle: str
-) -> None:
-    estate = _tiny(tmp_path, _BOX + _member("M1"))
-    (estate / "estate.toml").write_text(manifest)
-    with pytest.raises(RereadRefused, match=needle):
-        load_estate(estate)
-
-
 def test_a_jil_error_is_refused_with_its_finding(tmp_path: Path) -> None:
     estate = _tiny(tmp_path, "insert_job: J\njob_type: c\nbogus_attr: 1\n")
     with pytest.raises(RereadRefused, match="bogus_attr"):
-        load_estate(estate)
-
-
-def test_the_real_manifest_needs_an_environment_as_run_does(tmp_path: Path) -> None:
-    estate = _nightbank(tmp_path)
-    props = [tmp_path / "night.properties"]
-    with pytest.raises(RereadRefused, match="choose an environment"):
-        load_estate(estate, props)
-    with pytest.raises(RereadRefused, match="no environment 'nope'"):
-        load_estate(estate, props, "nope")
-    assert load_estate(estate, props, "wargame").catalog.jobs
+        prepare_estate(estate)
 
 
 def test_the_site_layer_is_a_part_and_moves_the_token(tmp_path: Path) -> None:
@@ -380,13 +348,10 @@ def test_the_site_layer_is_a_part_and_moves_the_token(tmp_path: Path) -> None:
     two = _reread(estate, live, tmp_path / "plans")
     assert two.token != one.token
     assert len(two.plan.changed) > 0
-    assert (two.plan_dir / "site" / "night.properties").exists()
-
-
-def test_the_estate_without_its_site_layer_is_refused(tmp_path: Path) -> None:
-    estate = _nightbank(tmp_path)
-    with pytest.raises(RereadRefused, match="EOD_AMER"):
-        load_estate(estate, (), "sandbox")
+    record = next(
+        r for r in prepare_estate(estate).metadata["records"] if r["role"] == "properties"
+    )
+    assert (two.plan_dir / record["name"]).read_bytes() == properties.read_bytes()
 
 
 def test_a_calendar_only_change_puts_a_running_job_in_the_stop_set(tmp_path: Path) -> None:
@@ -423,7 +388,10 @@ def test_the_token_changes_when_only_the_timezone_map_changes(tmp_path: Path) ->
     two = _reread(estate, live, tmp_path / "plans")
     assert two.token != one.token
     assert len(two.plan.changed) == len(live.catalog.jobs)
-    assert (two.plan_dir / "tz-aliases").exists()
+    record = next(
+        r for r in prepare_estate(estate).metadata["records"] if r["role"] == "timezone_map"
+    )
+    assert (two.plan_dir / record["name"]).read_bytes() == (estate / "tz-aliases").read_bytes()
 
 
 def test_an_input_that_changes_while_loading_is_refused(
@@ -431,32 +399,18 @@ def test_an_input_that_changes_while_loading_is_refused(
 ) -> None:
     estate = _nightbank(tmp_path)
     live = _live(estate)
-    real = reload_plan.lower_catalog
+    from dsl41 import main_config
+
+    real = main_config.lower_catalog
 
     def edit_then_lower(*args: Any, **kwargs: Any) -> Any:
-        _edit(estate, "estate.toml", 'timezone = "UTC"', 'timezone = "Asia/Tokyo"')
+        _edit(estate, "dsl41.toml", 'timezone = "UTC"', 'timezone = "Asia/Tokyo"')
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(reload_plan, "lower_catalog", edit_then_lower)
-    with pytest.raises(RereadRefused, match="changed while it was being read"):
+    monkeypatch.setattr(main_config, "lower_catalog", edit_then_lower)
+    with pytest.raises(RereadRefused, match="changed during preparation"):
         _reread(estate, live, tmp_path / "plans")
     assert not (tmp_path / "plans").exists()
-
-
-def test_the_manifest_is_parsed_from_the_bytes_that_are_stored(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    estate = _nightbank(tmp_path)
-    real = reload_plan.resolve_manifest
-
-    def edit_after_parse(*args: Any, **kwargs: Any) -> Any:
-        inputs = real(*args, **kwargs)
-        _edit(estate, "estate.toml", 'timezone = "UTC"', 'timezone = "Asia/Tokyo"')
-        return inputs
-
-    monkeypatch.setattr(reload_plan, "resolve_manifest", edit_after_parse)
-    with pytest.raises(RereadRefused, match="changed while it was being read"):
-        load_estate(estate, [tmp_path / "night.properties"], "sandbox")
 
 
 def test_a_symlinked_jil_file_is_followed_as_run_follows_it(tmp_path: Path) -> None:
@@ -464,26 +418,7 @@ def test_a_symlinked_jil_file_is_followed_as_run_follows_it(tmp_path: Path) -> N
     real = tmp_path / "shared.jil"
     (estate / "a.jil").rename(real)
     (estate / "a.jil").symlink_to(real)
-    assert "M1" in load_estate(estate).catalog.jobs
-
-
-def test_a_reserved_name_is_refused_whatever_its_case(tmp_path: Path) -> None:
-    estate = _tiny(tmp_path, _BOX + _member("M1"))
-    (estate / "Plan.JSON").write_bytes((estate / "a.jil").read_bytes())
-    (estate / "estate.toml").write_text('name = "t"\nfiles = ["a.jil", "Plan.JSON"]\n')
-    with pytest.raises(RereadRefused, match="reserved"):
-        load_estate(estate)
-
-
-def test_two_names_that_differ_only_in_case_are_refused(tmp_path: Path) -> None:
-    estate = _tiny(tmp_path, _BOX + _member("M1"))
-    site_a = tmp_path / "x" / "Site.properties"
-    site_b = tmp_path / "y" / "site.properties"
-    for path in (site_a, site_b):
-        path.parent.mkdir()
-        path.write_text("K=v\n")
-    with pytest.raises(RereadRefused, match="one name"):
-        load_estate(estate, [site_a, site_b])
+    assert "M1" in prepare_estate(estate).catalog.jobs
 
 
 def test_read_plan_refuses_a_plan_whose_token_does_not_match_its_parts(tmp_path: Path) -> None:
@@ -526,32 +461,11 @@ def test_a_preflight_warning_goes_into_plan_json(tmp_path: Path) -> None:
     from dsl41.runtime_policy import resolve_job_shell
 
     _, shell_warning = resolve_job_shell(None)
-    assert document["preflight_warnings"] == [
-        {
-            "code": "known-unsupported",
-            "job": "M1",
-            "message": "job M1: group: known but unsupported; it has no effect in this release",
-        },
-        *(
-            []
-            if shell_warning is None
-            else [
-                {"code": "shell", "job": None, "message": shell_warning},
-            ]
-        ),
-    ]
-
-
-def test_legacy_known_unsupported_does_not_exempt_other_lint_warnings(tmp_path: Path) -> None:
-    estate = _tiny(tmp_path, _BOX + _member("M1"))
-    live = _live(estate)
-    _edit(estate, "a.jil", "job_type: c\n", 'job_type: c\ngroup: batch\nstart_times: "08:00"\n')
-    with pytest.raises(RereadRefused) as refused:
-        _reread(estate, live, tmp_path / "plans")
-    assert len(refused.value.findings) == 1
-    assert "L005 warn:" in refused.value.findings[0]
-    assert "known-unsupported" not in refused.value.findings[0]
-    assert not (tmp_path / "plans").exists()
+    assert not any(w["code"] == "known-unsupported" for w in document["preflight_warnings"])
+    assert any(v["code"] == "known-unsupported" for v in document["lint_findings"])
+    assert document["preflight_warnings"] == (
+        [] if shell_warning is None else [{"code": "shell", "job": None, "message": shell_warning}]
+    )
 
 
 def test_a_job_with_envvars_that_run_refuses_is_refused(tmp_path: Path) -> None:
@@ -569,33 +483,14 @@ def test_a_job_with_envvars_that_run_refuses_is_refused(tmp_path: Path) -> None:
     assert not (tmp_path / "plans").exists()
 
 
-def test_the_environment_and_the_site_layers_are_bound_into_the_token(tmp_path: Path) -> None:
-    estate = _nightbank(tmp_path)
-    live = _live(estate)
-    plans = tmp_path / "plans"
-    sandbox = _reread(estate, live, plans)
-    props = tmp_path / "night.properties"
-    wargame = reread(estate, live, plans, [props], "wargame", start=START)
-    assert wargame.plan == sandbox.plan
-    assert wargame.token != sandbox.token
-    document = read_plan(plans, wargame.token)
-    assert document is not None
-    assert (document["environment"], document["properties"]) == ("wargame", [str(props)])
-    moved = tmp_path / "elsewhere"
-    moved.mkdir()
-    shutil.copy(props, moved / "night.properties")
-    elsewhere = reread(estate, live, plans, [moved / "night.properties"], "sandbox", start=START)
-    assert elsewhere.token not in (sandbox.token, wargame.token)
-
-
 def test_a_re_added_name_shows_the_flags_its_tombstone_kept(tmp_path: Path) -> None:
     estate = _nightbank(tmp_path)
-    loaded = load_estate(estate, **_site(estate))
+    loaded = prepare_estate(estate)
     text = (estate / "global.jil").read_text()
     found = re.search(r"insert_job: OPS_FAIL_ALERT_C\n.*?(?=/\*)", text, flags=re.S)
     assert found is not None
     (estate / "global.jil").write_text(text.replace(found.group(0), "", 1))
-    without = load_estate(estate, **_site(estate)).catalog
+    without = prepare_estate(estate).catalog
     (estate / "global.jil").write_text(text)
     live = Live(
         without,
@@ -603,6 +498,7 @@ def test_a_re_added_name_shows_the_flags_its_tombstone_kept(tmp_path: Path) -> N
         2,
         {},
         {"OPS_FAIL_ALERT_C": ("ON_HOLD",), "GONE_C": ("ON_ICE",)},
+        launch=loaded.metadata["launch"],
     )
     result = _reread(estate, live, tmp_path / "plans")
     assert result.plan.added == ("OPS_FAIL_ALERT_C",)

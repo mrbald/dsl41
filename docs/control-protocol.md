@@ -151,7 +151,8 @@ window answers `decision_timeout`.
 **Reread and update (DL-463, extending DL-462).**
 
 The ADM request `{"v":4,"cmd":"reread","claimed_actor":null}` reports current
-inputs from the config the engine was last started with. It runs preparation
+inputs from the main config the engine was last started with (DL-486).
+Engines without a main config refuse reread and update (DL-463). It runs preparation
 in an owned worker; it admits no engine mutation and publishes no retained plan.
 Runtime state never refuses a diff. Broken input returns `invalid_argument`
 with the reason no diff is available; worker failures return `engine_error`.

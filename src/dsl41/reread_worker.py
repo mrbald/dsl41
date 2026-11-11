@@ -115,7 +115,7 @@ def definition_changes(
             "blocked": reasons,
             "settings_changed": bool(settings),
             "sources_changed": fingerprint(candidate) != source_fingerprint
-            if source_fingerprint and candidate.metadata
+            if source_fingerprint
             else None,
         }
     )
@@ -151,7 +151,7 @@ def preview(
     plan = diff(live.catalog, candidate.catalog, live.settings, candidate.settings)
     roots = restart_boxes(plan, live, candidate.catalog)
     members = box_members(live.catalog, roots) | box_members(candidate.catalog, roots)
-    marked = candidate.metadata.get("non_idempotent", {})
+    marked = candidate.metadata["non_idempotent"]
     boxes = {
         name
         for name in set(roots) | members
@@ -215,20 +215,19 @@ def preview(
     messages: list[str] = []
     summary: list[str] = []
     suffix: list[str] = []
-    if candidate.metadata:
-        policy, report = policy_report(candidate)
-        messages = [policy.describe(), *[item.render() for item in report.violations]]
-        if include_definition_changes:
-            summary = [
-                policy.describe(),
-                *lint_summary_lines(
-                    report.violations,
-                    blocks=policy.blocks,
-                    config_path=candidate.metadata["config_path"],
-                ),
-            ]
-        if live.launch != candidate.metadata["launch"]:
-            suffix.append("host launch settings changed; restart before update")
+    policy, report = policy_report(candidate)
+    messages = [policy.describe(), *[item.render() for item in report.violations]]
+    if include_definition_changes:
+        summary = [
+            policy.describe(),
+            *lint_summary_lines(
+                report.violations,
+                blocks=policy.blocks,
+                config_path=candidate.metadata["config_path"],
+            ),
+        ]
+    if live.launch != candidate.metadata["launch"]:
+        suffix.append("host launch settings changed; restart before update")
     suffix.extend(
         f"preflight {item.severity} [{item.code}]"
         f"{f' {item.job}' if item.job else ''}: {item.message}"
@@ -236,7 +235,7 @@ def preview(
     )
     messages.extend(suffix)
     old = {name: job.span.file for name, job in live.catalog.jobs.items() if job.span}
-    origins = candidate.metadata.get("origins", {})
+    origins = candidate.metadata["origins"]
     sources = [
         {"job": name, "before": old.get(name), "after": origins.get(name)}
         for name in dict.fromkeys(
@@ -265,12 +264,12 @@ def preview(
             {"job": name, "reason": marked[name]} for name in stops if name in marked
         ],
         "lint_messages": messages,
-        "diagnostics": candidate.metadata.get("diagnostics", []),
+        "diagnostics": candidate.metadata["diagnostics"],
         "source_changes": sources,
         "settings_sources": list(
             dict.fromkeys(
                 record["path"]
-                for record in candidate.metadata.get("records", [])
+                for record in candidate.metadata["records"]
                 if live.settings != candidate.settings
             )
         ),
@@ -306,9 +305,7 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
     if request["update"]:
         from dsl41.runner_update import open_plan
 
-        prepared = reread(
-            path.parent, live, Path(request["run_root"]) / "plans", candidate=candidate
-        )
+        prepared = reread(live, Path(request["run_root"]) / "plans", candidate=candidate)
         open_plan(Path(request["run_root"]), prepared.token)
         result["token"] = prepared.token
     return result

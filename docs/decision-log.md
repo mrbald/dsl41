@@ -26384,3 +26384,22 @@ relitigate an entry; append a new one.
   definition change, and holds the job when its attempt number is at or above 5 plus the
   new count. What AutoSys shows dependents between tries, and whether its `term_run_time`
   counts per try, is not documented [?].
+
+- DL-486 Reread and update read only a main config; reload plan version 1 is retired
+  (2026-11-11; owner ruling; reload_plan.py, runner_update.py, protocol-evolution §§1
+  and 6, runner-design, control-protocol)
+  THE RULE. A reread or update candidate is always a main config. The reload gate,
+  preflight and the plan store have no branch for an estate without one. Every stored
+  plan is `plan_format_version` 2. A plan that names version 1, or names no version, is
+  refused by name as retired, citing this entry, at update and at restart, before any
+  write or signal. Legacy `run`, restart of a legacy root and `rehearse` are unchanged.
+  This narrows DL-466 (legacy reread's strict gate and `preflight_warnings` routing) and
+  the version 1 plan row of DL-437; DL-463 already closed the socket to engines without
+  a main config.
+  THE REASON. Since DL-463 production reaches no legacy reread: the socket refuses it and
+  the reread worker passes a main-config candidate. Only tests reached the branch.
+  THE GATE. Retirement needs actual absence (protocol-evolution §3). A restart requires
+  the store's exact state version (DL-424). Every release that wrote a version 1 plan has
+  state version 24 or below; this build has 28. Main builds between the version 28 step
+  and DL-463 could write one; the owner keeps no run root from them.
+  THE LIMIT. A run root from such a build that holds an open update refuses to restart.
