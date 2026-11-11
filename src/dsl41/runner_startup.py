@@ -105,6 +105,7 @@ from dsl41.runner_journal import (
     pending_record,
     replay_inputs,
     restore_oracle,
+    update_box_roots,
     wire_record,
 )
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, LeaderLock, acquire_run_root
@@ -738,6 +739,18 @@ async def _resume_under_lock(
         opened_update = reopen_plan(
             run_root, str(journal.open.update["token"]), configuration=configuration
         )
+    if journal.open.update is not None:
+        assert opened_update is not None
+        for name in update_box_roots(journal.open.update) or ():
+            applied_job = configuration.catalog.jobs.get(name)
+            candidate_job = opened_update.estate.catalog.jobs.get(name)
+            if (applied_job is None or applied_job.job_type != "BOX") and (
+                candidate_job is None or candidate_job.job_type != "BOX"
+            ):
+                raise EngineError(
+                    f"config intent restart_boxes names {name!r}, not a BOX of the applied or"
+                    " candidate catalog (DL-489)"
+                )
     if opened_update is not None:
         from dsl41.runner_update import profile_for
 

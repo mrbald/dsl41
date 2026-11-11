@@ -226,8 +226,11 @@ application so kept outcomes cannot dispatch old-run replacements. After the
 swap, marked non-INACTIVE members, including previously finished members, get
 ON_HOLD before outermost retained boxes get FORCE_STARTJOB. Removed boxes stay
 stopped. Normal box starts open new runs and successors can see old-run ends.
-A crash can leave a box stopped: before force-starting it, hold its marked
-non-INACTIVE members. No additional box-restart recovery is promised.
+The stored intent's `restart_boxes` keeps the admitted roots through a crash
+before `config applied`; only an absent key recomputes them (DL-489). After
+`config applied`, a crash can leave a box stopped: before force-starting it,
+hold its marked non-INACTIVE members. No automatic completion after that record
+is promised (DL-463, DL-489).
 
 An edit only to `job_env` advances the configuration revision without
 changing job-definition hashes or stopping jobs, including while boxes run
