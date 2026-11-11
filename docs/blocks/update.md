@@ -22,6 +22,8 @@ Its intent and its application are store records, so a crash between them resume
 
 One update request's states are [update](../state-machines.md#update): IDLE, STOPPING, APPLIED and REFUSED, with the token and the stop set as the instance's data.
 STOPPING contains WAITING for the stop set and ENDING_BOXES while the old box runs' KILLJOBs commit (DL-487).
+The apply row orders the application, journal, time advance, marked-member holds, box starts
+and finish; the update step awaits the intents the synchronous tier hands back (DL-488).
 The anchor holds the generated diagram and transition table.
 The [chart lifecycles](../chart-lifecycles.md) view lists each target state with the ways into it.
 

@@ -260,8 +260,6 @@ class EngineUpdate:
         self._box_members: set[str] = set()
         #: the jobs the dispatch filter held while the update stopped, released after it
         self._held: frozenset[str] = frozenset()
-        #: set by an application inside a step, which the step finishes (`finish`)
-        self.applied = False
         #: called with each applied plan once the update applied live (the control server's
         #: `spec` texts and `spec_drift` baseline)
         self.listeners: list[Callable[[OpenedPlan], None]] = []
@@ -724,7 +722,6 @@ class EngineUpdate:
         tier = self.tier
         assert tier is not None and tier.application is not None and self._opened is not None
         application = tier.application
-        self.applied = True
         journal = engine.journal
         assert journal is not None  # `admit` and `resume` refuse an engine with none
         # `catalog_hash` is `catalog_hash_v2` of this catalog (`plan_application`), the hash the
@@ -786,7 +783,6 @@ class EngineUpdate:
         kept back are committed with their plans under the applied catalog, the cancelled tasks
         are taken up or closed, the held starts are released, and the request is answered."""
         engine = self.engine
-        self.applied = False
         kept, self._kept = self._kept, {}
         # in the stop set's order, by job, whatever order the attempts ended in
         chosen, self._chosen = self._chosen, {}

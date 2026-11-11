@@ -895,4 +895,4 @@ stateDiagram-v2
 | refuse | action | Keep the refusal, the reply is the tier's. |
 | one_down | action | One job of the stop set ended: it leaves the open set. |
 | end_boxes | action | End each old box run, boxes first, before applying the plan (DL-487). |
-| apply | action | The old box runs ended: apply the plan, then journal the application (DL-487). |
+| apply | action | Apply, journal, advance time, hold marked members, start boxes, then finish (DL-488). |
