@@ -26426,3 +26426,25 @@ relitigate an entry; append a new one.
   finish) stay in the update step until the next slice. The recovery window stays
   `config intent` to `config applied` (DL-463). A crash between a box's KILLJOB and a
   member's is BUG-67.
+
+- DL-488 The UPDATE chart's apply row names the whole sequence after the box stop
+  (2026-11-11; operator ruling on the FEAT-10 chart review; reload_update.py, runner.py,
+  runner_update.py, blocks/update.md)
+  THE RULE. update.03's action lists, in order: apply the plan, journal the application,
+  advance time, hold the marked members, start the boxes, finish. The tier stays
+  synchronous: it hands the awaited intents to the update step, which carries them out in
+  the row's order. The `applied` flag and the engine's second block after the
+  application are gone. No state, row, event or guard is added; APPLIED stays final.
+  THE REASON. The chart ended before the update did: the steps after the application had
+  no row and were carried by a flag (FEAT-10). Each row now names what it sends (DL-487,
+  chart-simplify §5).
+  UNCHANGED. The order of every step and cascade, golden traces, journal records,
+  snapshots, `status.update`, the wire, stored forms and `STATE_MACHINE_VERSION`. The
+  recovery window stays `config intent` to `config applied` (DL-463): a crash after the
+  application can leave the boxes stopped, as DL-463 states. A crash between a box's
+  KILLJOB and a member's, before the application, is BUG-67.
+  THE LIMIT. On the virtual clock, an engine loop cancelled during an awaited step after
+  APPLIED leaves that update unfinished on the same engine; a restart takes the update as
+  applied and leaves its boxes stopped for the operator, as DL-463 states. Neither clock
+  yields there in production, and nothing reuses an engine
+  after such a cancel.

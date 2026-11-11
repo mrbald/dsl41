@@ -118,7 +118,7 @@ from datetime import datetime, timedelta
 from enum import Enum, auto
 from pathlib import Path
 import os
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from dsl41.engine_charts import QUARANTINED, UPDATE_STOP, AttemptOutcome, DrainRequest
 from dsl41.ir import CatalogIR, FwSpec, JobIR
@@ -827,15 +827,33 @@ class Engine:
                         source="reconcile",
                     )
                     await self._admit_and_apply(_Pending(at=ev.at, request_id=None, ev=ev))
-                update.tier.boxes_ended()
-        if update.applied:
-            await self._admit_and_apply(_Pending(at=self.now_admitted(), request_id=None))
-            for kind, job in update.box_starts():
-                ev = Event(
-                    at=self.now_admitted(), kind=kind, payload={"job": job}, source="reconcile"
-                )
-                await self._admit_and_apply(_Pending(at=ev.at, request_id=None, ev=ev))
-            update.finish()
+                from dsl41.reload_update import ADVANCE_TIME, FINISH, HOLD_MARKED, START_BOXES
+
+                for intent in update.tier.boxes_ended():
+                    if intent.name == ADVANCE_TIME:
+                        await self._admit_and_apply(
+                            _Pending(at=self.now_admitted(), request_id=None)
+                        )
+                        # DL-488: select holds and starts once, after the time advance.
+                        box_starts = update.box_starts()
+                    elif intent.name in (HOLD_MARKED, START_BOXES):
+                        kind: Literal["ON_HOLD", "FORCE_STARTJOB"] = (
+                            "ON_HOLD" if intent.name == HOLD_MARKED else "FORCE_STARTJOB"
+                        )
+                        for event_kind, job in box_starts:
+                            if event_kind == kind:
+                                ev = Event(
+                                    at=self.now_admitted(),
+                                    kind=kind,
+                                    payload={"job": job},
+                                    source="reconcile",
+                                )
+                                await self._admit_and_apply(
+                                    _Pending(at=ev.at, request_id=None, ev=ev)
+                                )
+                    else:
+                        assert intent.name == FINISH
+                        update.finish()
 
     def refit_adapters(self) -> None:
         """Refit future FW launches to the applied profile, then check its switches

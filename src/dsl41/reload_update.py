@@ -8,6 +8,9 @@ application resumes it.
 STOPPING contains WAITING for the stop set and ENDING_BOXES for the committed box KILLJOBs
 (DL-487). The generated lifecycle is in docs/chart-lifecycles.md; the diagram and rows are in
 docs/state-machines.md#update.
+The apply row names the ordered application, journal, time advance, marked-member holds, box
+starts and finish. The tier hands its remaining intents to the update step after the journal
+(DL-488).
 
 The admission runs before the event is posted, in the engine's single writer, and its answer is
 the event's payload: `Admitted` or `Refused`. The guards read only which one it is. The spec's
@@ -82,6 +85,14 @@ END_BOXES: Final = "end_boxes"
 APPLY: Final = "apply"
 #: Journal the application. The detail is the token.
 JOURNAL_APPLIED: Final = "journal_applied"
+#: Advance time after the application so its owed queue scan runs first (DL-488).
+ADVANCE_TIME: Final = "advance_time"
+#: Hold the marked non-INACTIVE box members before starting the boxes (DL-488).
+HOLD_MARKED: Final = "hold_marked"
+#: Start the retained unmarked outermost boxes (DL-488).
+START_BOXES: Final = "start_boxes"
+#: Commit kept outcomes, release held starts, notify listeners and answer (DL-488).
+FINISH: Final = "finish"
 
 # -- refusal codes (the wiring adds them to docs/control-protocol.md ss2)
 
@@ -224,9 +235,14 @@ def _end_boxes(ctx: Context) -> Effects:
 
 
 def _apply(ctx: Context) -> Effects:
-    """The old box runs ended: apply the plan, then journal the application (DL-487)."""
+    """Apply, journal, advance time, hold marked members, start boxes, then finish (DL-488)."""
     record: UpdateRecord = ctx.data
-    return Effects(intents=(Intent(APPLY, record.token), Intent(JOURNAL_APPLIED, record.token)))
+    return Effects(
+        intents=tuple(
+            Intent(name, record.token)
+            for name in (APPLY, JOURNAL_APPLIED, ADVANCE_TIME, HOLD_MARKED, START_BOXES, FINISH)
+        )
+    )
 
 
 #: One update request, from its admission to its application or its refusal.
@@ -464,6 +480,8 @@ class UpdateTier:
     APPLIED, so it reads the oracle as it is after the stops. `exit_recorded` takes the end of
     any attempt and posts only for a job still in the open set. The engine posts one `look`
     after each update step, awaits the returned box KILLJOBs, then posts `boxes_ended` (DL-487).
+    After applying and journaling, the tier returns the row's remaining intents for that step
+    to perform in order (DL-488).
 
     A raise from `prepare` or from an intent propagates out of the call that posted the event.
     It is a crash, not a state: the engine dies, and startup step 4 resumes the update from its
@@ -516,7 +534,8 @@ class UpdateTier:
         if isinstance(decision, Admitted):
             self._admitted = decision
             self._filter = decision.dispatch_filter
-        self._perform_all(outcomes)
+        pending = self._perform_all(outcomes)
+        assert not pending, "admit cannot hand back intents"
         return decision
 
     def resume(self, admitted: Admitted, still_open: Collection[str]) -> None:
@@ -541,9 +560,9 @@ class UpdateTier:
                 return tuple(Intent("KILLJOB", job) for job in self._intents.box_ends())
         return None
 
-    def boxes_ended(self) -> None:
-        """The engine committed every returned KILLJOB: application may proceed (DL-487)."""
-        self._send(BOXES_ENDED)
+    def boxes_ended(self) -> tuple[Intent, ...]:
+        """Apply and journal after the KILLJOBs; return the remaining row intents (DL-488)."""
+        return self._perform_all(self._executor.dispatch(UPDATE_KEY, Event(BOXES_ENDED)))
 
     def exit_recorded(self, job: str) -> None:
         """An attempt of `job` ended."""
@@ -552,12 +571,19 @@ class UpdateTier:
         self._send(EXIT_RECORDED, job)
 
     def _send(self, name: str, payload: object = None) -> None:
-        self._perform_all(self._executor.dispatch(UPDATE_KEY, Event(name, payload)))
+        pending = self._perform_all(self._executor.dispatch(UPDATE_KEY, Event(name, payload)))
+        assert not pending, "_send cannot hand back intents"
 
-    def _perform_all(self, outcomes: Sequence[Outcome]) -> None:
+    def _perform_all(self, outcomes: Sequence[Outcome]) -> tuple[Intent, ...]:
+        pending: list[Intent] = []
         for outcome in outcomes:
             for intent in outcome.intents:
-                self._perform(intent)
+                if intent.name in (ADVANCE_TIME, HOLD_MARKED, START_BOXES, FINISH):
+                    pending.append(intent)
+                else:
+                    assert not pending  # DL-488: the handed-back intents follow the journal
+                    self._perform(intent)
+        return tuple(pending)
 
     def _perform(self, intent: Intent) -> None:
         if intent.name == JOURNAL_INTENT:
@@ -575,14 +601,18 @@ class UpdateTier:
 
 
 __all__ = [
+    "ADVANCE_TIME",
     "APPLY",
     "BOXES_ENDED",
     "END_BOXES",
     "EXIT_RECORDED",
+    "FINISH",
+    "HOLD_MARKED",
     "JOURNAL_APPLIED",
     "JOURNAL_INTENT",
     "LOOK",
     "STALE_PLAN",
+    "START_BOXES",
     "STOP_ATTEMPT",
     "UPDATE_IN_PROGRESS",
     "UPDATE",

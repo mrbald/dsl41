@@ -34,14 +34,18 @@ from dsl41.canon import canonical_bytes, decode
 from dsl41.oracle_state import CarriedRows, Event, JobRuntime, OracleError
 from dsl41.reload_plan import Live, RereadResult, read_plan, reread
 from dsl41.reload_update import (
+    ADVANCE_TIME,
     APPLY,
     BOXES_ENDED,
     END_BOXES,
     EXIT_RECORDED,
+    FINISH,
+    HOLD_MARKED,
     JOURNAL_APPLIED,
     JOURNAL_INTENT,
     LOOK,
     STOP_ATTEMPT,
+    START_BOXES,
     UPDATE,
     UPDATE_ADMITTED,
     UPDATE_IN_PROGRESS,
@@ -350,10 +354,25 @@ def test_box_kills_keep_the_filter_until_the_callers_reply(
     assert tier.look() == (Intent("KILLJOB", "BX"), Intent("KILLJOB", "member"))
     assert reads == ["boxes"] and tier.application is None
     assert tier.state == "STOPPING" and tier.dispatch_filter == {"C"}
-    tier.boxes_ended()
+    pending = tier.boxes_ended()
     assert tier.state == "APPLIED" and tier.dispatch_filter == frozenset()
     assert [entry[0] for entry in effects.log[-2:]] == [APPLY, JOURNAL_APPLIED]
+    assert pending == tuple(
+        Intent(name, TOKEN) for name in (ADVANCE_TIME, HOLD_MARKED, START_BOXES, FINISH)
+    )
     assert tier.look() is None and reads == ["boxes"]
+    assert tier.boxes_ended() == ()
+
+
+def test_the_apply_row_names_the_whole_sequence_in_order() -> None:
+    executor = _executor("ENDING_BOXES")
+    (outcome,) = executor.dispatch("u", ChartEvent(BOXES_ENDED))
+    assert outcome.rows == ("update.03",)
+    assert outcome.intents == tuple(
+        Intent(name, TOKEN)
+        for name in (APPLY, JOURNAL_APPLIED, ADVANCE_TIME, HOLD_MARKED, START_BOXES, FINISH)
+    )
+    assert executor.active("u") == {"update", "APPLIED"}
 
 
 def test_a_look_with_an_open_stop_does_not_compute_box_kills(

@@ -1557,12 +1557,17 @@ def test_a_client_that_gave_up_on_the_decision_leaves_the_loop_running(tmp_path:
         )
         estate.write(_jil({"a": "y"}))
         request = _request(engine, _plan(engine, estate))
+
+        def finished(_opened: object) -> None:
+            seen["finished"] = True
+
+        engine.update.listeners.append(finished)
         future = engine.request_update(request)
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(future, 0)
         seen["cancelled"] = future.cancelled()
         await engine.run_until_quiescent(clock.now())
-        seen["rev"], seen["applied"] = engine.config_rev, engine.update.applied
+        seen["rev"] = engine.config_rev
         retry = engine.request_update(request)  # the client's retry under the same id
         await engine.run_until_quiescent(clock.now())
         assert retry.result().application is not None
@@ -1577,7 +1582,7 @@ def test_a_client_that_gave_up_on_the_decision_leaves_the_loop_running(tmp_path:
     assert seen == {
         "cancelled": True,
         "rev": 2,
-        "applied": False,
+        "finished": True,
         "retried": 2,
         "status": "SUCCESS",
     }
