@@ -419,11 +419,9 @@ can. Preparation is not rolled back if the other stream fails.
 Whether the engine
 unescapes `\:` inside command/std_* values is the DL-39 [?]. Verbatim
 carry applies here too. There is no timeout logic (term_run_time is the
-oracle's timer). **No retry logic**: n_retrys is FAILURE-only (Q4,
-DL-53), and retry modeling is deliberately unimplemented. This is a
-recorded scope decision, not an open question. A shell-side
-retry forks semantics from the oracle and breaks bisimulation. Preflight
-warns instead (§8).
+oracle's timer). A live CMD job retries failing natural exits up to `n_retrys`,
+inside the same live run (DL-485). Intermediate failures feed nothing to the
+oracle. Signal deaths and spawn failures do not retry. Play and rehearse do not retry.
 
 **FileWatcherAdapter** (FW): polls every `watch_interval` seconds until a file meets
 `watch_file_min_size` (unset or zero means existence). An omitted interval uses revisioned
@@ -615,26 +613,33 @@ mark with its effect. Exact request-id retries read the retained decision;
 pruning its record ends that retry horizon.
 
 **Runs and attempts.** A run is the oracle's `(job, run_number)`.
-An interrupted run can have several command attempts (DL-424, DL-426,
-DL-429). Each attempt has its own uuid4 `run_id`, ordinal and spool:
+A run can have several command attempts through interruption or a failing
+exit retry (DL-424, DL-426, DL-429, DL-485). Each attempt has its own uuid4 `run_id`, ordinal and spool:
 `runs/<job>.<run_number>/<ordinal>/`. The invocation variables
 `DSL41_JOB`, `DSL41_RUN_NUMBER` and `DSL41_SCHEDULED_AT` remain stable across
 replacement attempts. `DSL41_ATTEMPT` and `DSL41_COOKIE` identify the attempt.
-Application failures are never retried (§6, Q4, DL-53).
+A CMD's own SEM-09 verdict decides which natural exits fail (§6, DL-485).
+Run history uses the first retained attempt's readable spool start and the
+latest attempt's spool end; without the first spool, both times use the latest.
+A row on journal times starts at the run's first dispatch.
 
 The interruption rule chooses one plan from the committed outcome:
 
-- `complete`: feed a natural completion or spawn failure to the oracle.
+- `complete`: feed a natural completion with no retry due, or a spawn failure, to the oracle.
 - `none`: preserve the oracle's own end, including an oracle kill; also
   applies when the job left the catalog or the current run is different.
 - `hold`: feed FAILURE `interrupted` with ON_HOLD in the same transition
   for a job marked in `non-idempotent.toml`, a quarantined attempt, or the
-  fifth interrupted attempt (`MAX_ATTEMPTS_PER_RUN = 5`). Evidence names
+  interrupted attempt numbered at least `5 + n_retrys` (DL-485). Evidence names
   the reason and any signal, exit code or limit. FORCE_STARTJOB clears
   the hold (DL-243).
 - `rerun`: dispatch the next attempt of the same live run. The oracle
-  receives no completion, so interruption alone triggers no condition or
+  receives no completion, so interruption or a retried failure triggers no condition or
   box failure.
+
+The applied catalog when the plan is chosen supplies `n_retrys`; no maximum
+is remembered. A run has at most `5 + max n_retrys applied` attempts, never
+more than 25, including across updates (DL-485).
 
 A job's next dispatch waits until its previous attempt settles: its plan
 is done and cleanup is finished. A natural outcome stands while the leak
@@ -933,7 +938,7 @@ WARN:
   principle: the name was guessed, and the remedy is `--timezone-map`.
 - `known-unsupported`: an attribute requests behavior this release does not apply
   (DL-466; [lint codes](ir-design.md#9-linter-architecture-findings-not-treatments)).
-  This includes positive CMD, BOX and FW retries (Q4, DL-53, DL-469) and pool `job_load`/`max_load`
+  This includes positive BOX and FW retries (DL-469, DL-485) and pool `job_load`/`max_load`
   (DL-50, PENDING Qr3). Pool resource semaphores still apply.
   The check also runs during rehearse. Restart reports active captured warnings
   without lint refusal. Existing preflight errors remain hard.
@@ -1269,8 +1274,8 @@ Also the refused extended-calendar residue (standard calendars are honored,
 DL-56; the SEM-36..39 extended-calendar freeze is interpreted, DL-57; open
 composition corners run on pinned defaults, DL-59; only doc-defective
 tokens stay materialize-on-a-live-instance).
-Also retry semantics (Q4, DL-53: kept deliberately unmodeled by scope
-decision). Also non-child orphan adoption (E4).
+Also retries in play and rehearse, and BOX/FW retries (DL-485).
+Also non-child orphan adoption (E4).
 The supervisor reattachment rule is retired (DL-424).
 Mail and pager integrations remain site-owned. The optional best-effort status
 hook is §4's notification boundary (DL-446); delivery guarantees and durable
@@ -1494,8 +1499,8 @@ its rule, with the entry or section that holds it.
 - **E23** — state-version changes require drain and a fresh root; no
   snapshot migration is provided (DL-424; protocol-evolution §1).
 - Inherited from the oracle: Q3 (SEM-32 arm-and-wait, DL-58; the Q3c
-  box-arm-scope residue is oracle-side) and Q4 (n_retrys, DL-53, kept
-  deliberately unmodeled by scope decision). The runner implements the
+  box-arm-scope residue is oracle-side). Q4 retries remain unmodeled in
+  play and rehearse (DL-485). The runner implements the
   documented oracle defaults and adds no new switch. The §10 status
   response carries the `armed` latch per job (DL-54).
 - Inherited from the dossier (DL-57, DL-58): Q8b/Q8c/Q8d, the remaining

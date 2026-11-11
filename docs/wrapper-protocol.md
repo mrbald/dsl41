@@ -182,7 +182,7 @@ DL-424, DL-429):
 
 | Evidence | Attempt outcome | Consumer action |
 | --- | --- | --- |
-| `exited`, before a stop | `natural{exit_code}` | Feed the raw code through SEM-09. |
+| `exited`, before a stop | `natural{exit_code}` | Feed the raw code through SEM-09; a failing code of a CMD job whose run is still STARTING or RUNNING and that has an `n_retrys` try left dispatches the next attempt instead, and nothing is fed (DL-485). |
 | `signaled`, before a stop | `natural{signal}` | Feed TERMINATED (E8). |
 | Exit or signal during the attempt's stop | `stopped{cause}` | Apply the interruption rule. |
 | `terminated`, `parent lost` | `stopped{lifeline}` | Apply the interruption rule. |

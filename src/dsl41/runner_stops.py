@@ -82,8 +82,8 @@ SETTLE_POLL_S: Final = 0.05
 @dataclass
 class AttemptFacts:
     """What the engine knows of one observed attempt: the run it belongs to, its ordinal, its
-    spool and invocation, the cause of the stop it replaced (`after`), the adapter's hold on its
-    wrapper, and the note `query` shows beside its state (DL-426)."""
+    spool and invocation, the replaced stop cause or failing exit (`after`, DL-485), the
+    adapter's hold on its wrapper, and the note `query` shows beside its state (DL-426)."""
 
     run_id: str
     job: str
