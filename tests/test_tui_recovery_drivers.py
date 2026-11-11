@@ -63,6 +63,7 @@ async def _display_server(path: Path):
     tasks: set[asyncio.Task] = set()
     row = {
         "status": "SUCCESS",
+        "run_number": 1,
         "status_at": "2026-07-01T23:30:00",
         "pending_timers": [{"due": "2026-01-01T23:45:00", "kind": "schedule"}],
     }
@@ -79,11 +80,25 @@ async def _display_server(path: Path):
                 if verb == "status":
                     response["jobs"] = {"display_job": row}
                 elif verb == "trace":
+                    entries = [
+                        {"seq": 1, "at": "2026-07-01T21:10:11", "transition": "RESTART"},
+                        *[
+                            {
+                                "seq": seq,
+                                "at": "2026-07-01T21:11:00",
+                                "job": "display_job",
+                                "transition": "START_REFUSED",
+                                "cause": "opaque schedule fire",
+                                "start_source": "scheduler",
+                                "run_number": 1,
+                                "refused_status": status,
+                            }
+                            for seq, status in ((2, "STARTING"), (3, "RUNNING"))
+                        ],
+                    ]
                     response.update(
-                        last_seq=1,
-                        entries=[]
-                        if request.get("since", 0) >= 1
-                        else [{"seq": 1, "at": "2026-07-01T21:10:11", "transition": "RESTART"}],
+                        last_seq=3,
+                        entries=[e for e in entries if e["seq"] > request.get("since", 0)],
                     )
                 elif verb == "timers":
                     response["timers"] = [{"job": "display_job", **row["pending_timers"][0]}]
@@ -166,6 +181,7 @@ def _browser_display_times(engine: str, url: str, diagnostics: Path) -> None:
             mark = len(output)
             page.keyboard.press("d")
             until("at 2026-07-02T01:30:00", mark)
+            until("scheduler refusals: 2 (run 1) since snapshot", mark)
             until("next: schedule @ 2026-01-02T00:45:00", mark)
             until("  schedule @ 2026-01-02T00:45:00", mark)
             mark = len(output)
@@ -225,6 +241,7 @@ def test_full_local_timestamps_in_real_display_lanes(
                     await until("2026-07-01T23:10:11")
                     mark = terminal.send(b"d")
                     await until("at 2026-07-02T01:30:00", mark)
+                    await until("scheduler refusals: 2 (run 1) since snapshot", mark)
                     await until("next: schedule @ 2026-01-02T00:45:00", mark)
                     await until("  schedule @ 2026-01-02T00:45:00", mark)
                     mark = terminal.send(b"q")

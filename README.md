@@ -636,6 +636,8 @@ Semantics:
 - `src/dsl41/oracle_facts.py`: the payloads the oracle gives the `job`
   chart, each oracle fact computed on its first read, and a job instance's
   data.
+- `src/dsl41/start_refusals.py`: pure trace counts by job, run and refused-status class,
+  shared by the terminal UI and rehearsal reports.
 - `src/dsl41/oracle_intents.py`: the cascade's payloads, the moments'
   steps, the queue scan's record, and the intents a row's action reports
   for the hook.

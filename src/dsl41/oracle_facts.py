@@ -62,6 +62,7 @@ class StartFacts:
         "decided",
         "dated",
         "cause",
+        "source",
         "refusal",
         "units",
         "_oracle",
@@ -77,6 +78,7 @@ class StartFacts:
         job_ir: JobIR | None,
         *,
         cause: str = "",
+        source: str | None = None,
         force: bool = False,
         explicit: bool = False,
         scheduled: bool = False,
@@ -94,6 +96,7 @@ class StartFacts:
         self.decided = decided
         self.dated = job_ir is not None and job_ir.schedule is not None
         self.cause = cause
+        self.source = source
         self.refusal = refusal
         self.units = RowUnits(oracle, job)
         self._oracle = oracle
@@ -108,6 +111,7 @@ class StartFacts:
     def _again(self, **changes: Any) -> StartFacts:
         fields: dict[str, Any] = {
             "cause": self.cause,
+            "source": self.source,
             "force": self.force,
             "explicit": self.explicit,
             "scheduled": self.scheduled,

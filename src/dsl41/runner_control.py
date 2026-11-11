@@ -1191,6 +1191,15 @@ class ControlServer:
                     "job": entry.job,
                     "transition": entry.transition,
                     "cause": entry.cause,
+                    **{
+                        key: value
+                        for key, value in (
+                            ("start_source", entry.start_source),
+                            ("run_number", entry.run_number),
+                            ("refused_status", entry.refused_status),
+                        )
+                        if value is not None
+                    },
                 }
                 for seq, entry in enumerate(entries, start=max(since, 0) + 1)
             ],

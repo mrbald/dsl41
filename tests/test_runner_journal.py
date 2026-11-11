@@ -626,7 +626,7 @@ def test_replay_reproduces_source_tagged_causes_and_started_by(tmp_path: Path) -
     engine recorded -- provenance survives a resume."""
     text = "insert_job: j1\njob_type: c\ncommand: x\nmachine: m1\n"
     adapter = FakeAdapter({("j1", 1): (5.0, 0)})
-    script = [ev("STARTJOB", 0, job="j1")]
+    script = [ev("STARTJOB", 0, job="j1"), ev("STARTJOB", 0.01, job="j1")]
 
     async def scenario() -> Engine:
         return await _run_virtual(
@@ -635,6 +635,12 @@ def test_replay_reproduces_source_tagged_causes_and_started_by(tmp_path: Path) -
 
     engine = asyncio.run(scenario())
     assert engine.oracle.store.job["j1"].started_by == "STARTJOB event (control)"
+    [refused] = [t for t in engine.oracle.trace() if t.transition == "START_REFUSED"]
+    assert (refused.start_source, refused.run_number, refused.refused_status) == (
+        "control",
+        1,
+        "RUNNING",
+    )
 
     records = read_journal(tmp_path / "run")
     fresh = Oracle(lower_source(text))

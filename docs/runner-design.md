@@ -1097,6 +1097,17 @@ and clock-domain checks still apply.
   recovered dynamically). The expectation side lives in
   `rehearse_check.py`.
 
+Rehearsal reports schedule fires refused while a job was STARTING or RUNNING
+under `-- schedule fired while running --`, followed by sorted `JOB count=N`
+rows, except a start a run window postponed (§11). Fires refused in QUE_WAIT have a
+separate section,
+`-- schedule fired while queued --`. Each text section appears only when
+non-empty, after the trace, summary or cadence table. Every refusal stays
+in the trace. JSON always includes `schedule_fired_while_running` and
+`schedule_fired_while_queued`, each a job-to-count object, empty when none.
+Trace entries omit unset provenance fields. Cadence verdicts use run counts
+as above, independently of these refusal lists.
+
 ## 10. Control plane
 
 The control plane is a Unix domain socket in the run directory, mode 0600
@@ -1205,14 +1216,28 @@ members, and the revision the request will name, frozen when the modal
 opens (DL-187). Escape cancels a console line. F1 toggles the help panel.
 A refused query is reported in the console and the subtitle, never shown
 as an empty estate.
-This is the terminal-UI part of BLK-4 (DL-480).
 The console prints the first scheduler-origin `START_REFUSED` for each job and cause.
 It counts identical repeats silently.
 Before that job's next different entry, it prints one dim summary.
 Operator refusals and unrecognised origins print every time.
-Counts belong to each UI session and flush and reset with the trace cursor and alarm tally.
-Without a later entry or a cursor reset, a job's count is never shown.
-Quitting the UI loses pending counts.
+Origin comes from the trace entry's `start_source`, never from its cause text.
+An input's start that a run window postponed and that is refused at the opening
+has no origin. It prints every time and is not counted in details or rehearsal.
+The L010 bounded-loop refusal is an internal wake, not an input's start.
+It carries none of the three refusal facts, prints every time, and is not counted.
+Console repeat counts belong to each UI session and flush and reset with
+the trace cursor and alarm tally (DL-480). Without a later entry or a cursor
+reset, the console shows no repeat summary. Quitting loses pending counts.
+Below the trigger lines, job details show `scheduler refusals: N (run K)`
+when N is non-zero. This count includes the first refusal and uses only the
+entries the trace serves for that job's current run. QUE_WAIT refusals count
+separately from refusals of the preceding run; queued details show
+`scheduler refusals: N (queued)`. Completion retains the run's count;
+a new run starts at zero.
+These counts reset with the trace cursor and alarms. A trace opened by
+RESTART labels the details count `since snapshot`. Counts are not stored.
+If a restarted engine's new trace is already longer than the UI's cursor,
+the cursor does not detect the restart. Counts can then include entries twice.
 The stored trace, `query trace` and rehearsal output still list every refusal.
 The trace cursor and alarm tally reset (DL-210) on a changed `baseline_id`
 or disagreement between the status and trace baselines, with one

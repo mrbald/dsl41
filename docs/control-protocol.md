@@ -701,6 +701,12 @@ Redaction removes values; it never substitutes empty strings.
 cause}]}`. `seq` is a 1-based position in the oracle's trace; `since` is
 exclusive.
 
+Refusals may also carry `start_source` (the input's source), `run_number`
+(the job's run when refused), and `refused_status` (its status when refused).
+Unset fields are omitted. These are optional answer fields for v3 and v4
+under DL-217. Missing provenance means an unknown origin; clients must not
+infer it from `cause`.
+
 Under DL-432, the `trace`
 answer may hold lines that name no job (`"job": ""`) and move no state.
 `RESTART` opens the trace of an engine restarted from a snapshot (the trace

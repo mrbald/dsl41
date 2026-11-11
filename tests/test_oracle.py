@@ -804,6 +804,33 @@ def test_explicit_startjob_against_a_live_job_leaves_a_trace_record() -> None:
     assert [t.job for t in refusals(o)] == ["solo81", "solo81"]  # down81 never appears
 
 
+@pytest.mark.parametrize("source", ["scheduler", "control", None])
+@pytest.mark.parametrize("status", ["STARTING", "RUNNING"])
+def test_sem10_refusal_stamps_source_run_and_status_through_start_relay(
+    source: str | None, status: str
+) -> None:
+    o = oracle("insert_job: origin\njob_type: c\ncommand: x\nmachine: m1\n")
+    o.feed(Event(at=T0, kind="STARTJOB", payload={"job": "origin"}, source=source))
+    o.feed(ev("STATUS", 1, job="origin", status=status))
+    o.feed(
+        Event(
+            at=T0 + timedelta(minutes=2),
+            kind="STARTJOB",
+            payload={"job": "origin"},
+            source=source,
+        )
+    )
+    [refused] = [t for t in o.trace() if t.transition == "START_REFUSED"]
+    # The bisimulation harness injects every scripted event with source=None (DL-68).
+    expected_source = None if isinstance(o, EngineHarness) else source
+    assert (refused.start_source, refused.run_number, refused.refused_status) == (
+        expected_source,
+        1,
+        status,
+    )
+    assert all(t.run_number is None for t in o.trace() if t.transition != "START_REFUSED")
+
+
 def test_sem10c_explicit_startjob_refused_at_a_sem10_gate_leaves_a_trace_record() -> None:
     """DL-64: an operator's plain STARTJOB dying at either SEM-10 gate used
     to be fully silent -- no transition, no record, untrainable. Both gates

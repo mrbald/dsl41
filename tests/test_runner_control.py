@@ -39,7 +39,7 @@ from typer.testing import CliRunner
 from dsl41.cli import app
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import INJECTABLE_STATUSES, Event, EventKind, JobStatus
+from dsl41.oracle_state import INJECTABLE_STATUSES, Event, EventKind, JobStatus, TraceEntry
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import PROTOCOL_VERSION, addressed_key
@@ -742,9 +742,91 @@ def test_trace_query_since_filtering(short_root: Path) -> None:
             assert full["ok"] is True
             assert len(full["entries"]) == full["last_seq"]
             assert [e["seq"] for e in full["entries"]] == list(range(1, full["last_seq"] + 1))
+            assert all(
+                set(e) == {"seq", "at", "job", "transition", "cause"} for e in full["entries"]
+            )
 
             partial = await _control_call(server.path, {"cmd": "trace", "since": 1})
             assert [e["seq"] for e in partial["entries"]] == list(range(2, full["last_seq"] + 1))
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("at", ["2026-11-11T04:00:00+00:00", "2026-11-11T04:00:00+05:30"])
+@pytest.mark.parametrize(
+    "facts",
+    [
+        {},
+        {"start_source": "scheduler"},
+        {"run_number": 0},
+        {"refused_status": "QUE_WAIT"},
+        {"start_source": "scheduler", "run_number": 1, "refused_status": "RUNNING"},
+    ],
+)
+def test_trace_answer_preserves_legacy_bytes_and_adds_only_set_facts(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, at: str, facts: dict
+) -> None:
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(
+            short_root / "run", "insert_job: origin\njob_type: c\ncommand: x\nmachine: m1\n"
+        )
+        try:
+            entry = TraceEntry(
+                at=datetime.fromisoformat(at),
+                job="origin",
+                transition="START_REFUSED",
+                cause="opaque",
+                **facts,
+            )
+            monkeypatch.setattr(engine.oracle, "trace_since", lambda since: (1, [entry]))
+            answer = await _control_call(server.path, {"cmd": "trace"})
+            [actual] = answer["entries"]
+            expected = {
+                "seq": 1,
+                "at": at,
+                "job": "origin",
+                "transition": "START_REFUSED",
+                "cause": "opaque",
+                **facts,
+            }
+            assert actual["at"].encode() == at.encode()
+            assert json.dumps(actual).encode() == json.dumps(expected, sort_keys=True).encode()
+            built = server._trace({"since": 0})["entries"][0]
+            assert list(built) == ["seq", "at", "job", "transition", "cause", *facts]
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_trace_answer_includes_refusal_facts_only_when_set(short_root: Path) -> None:
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)
+        engine, server, loop_task = await _serve(
+            short_root / "run",
+            "insert_job: origin\njob_type: c\ncommand: x\nmachine: m1\n",
+            adapter=adapter,
+        )
+        try:
+            assert (await _sendevent(server.path, "STARTJOB", job="origin"))["ok"]
+            assert (await _sendevent(server.path, "STARTJOB", job="origin"))["ok"]
+            answer = await _control_call(server.path, {"cmd": "trace"})
+            [refused] = [e for e in answer["entries"] if e["transition"] == "START_REFUSED"]
+            assert refused["start_source"] == "control"
+            assert refused["run_number"] == 1
+            assert refused["refused_status"] in ("STARTING", "RUNNING")
+            assert set(refused) == {
+                "seq",
+                "at",
+                "job",
+                "transition",
+                "cause",
+                "start_source",
+                "run_number",
+                "refused_status",
+            }
         finally:
             await _teardown(engine, server, loop_task)
 
