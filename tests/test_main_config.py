@@ -944,7 +944,7 @@ def test_known_unsupported_startup_and_socket_reread_process(short_root):
         + "insert_machine: M\ntype: v\nmachine: localhost\n"
         + "insert_machine: localhost\ntype: a\nnode_name: localhost\n"
     )
-    expected = ["n_retrys", "group", "elevated", "interactive", "avg_runtime", "job_load"]
+    expected = ["group", "elevated", "interactive", "avg_runtime", "job_load"]
     root = short_root / "run"
     log = short_root / "process.log"
     with (

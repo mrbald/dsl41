@@ -903,11 +903,11 @@ or takes no action
 when the run already ended or the job left the catalog.
 The [attempt limit](../src/dsl41/runner_attempts.py#L79) is:
 
-5 attempts per run.
+5 plus the CMD job's applied `n_retrys` count; never more than 25 attempts per run (DL-485).
 
 An interruption at that limit or above holds even an unmarked job.
-Its `interrupted` evidence carries `limit: 5`, as set by the
-[interruption rule](../src/dsl41/runner_attempts.py#L349).
+Its `interrupted` evidence carries that applied limit, as set by the
+[interruption rule](../src/dsl41/runner_attempts.py#L368).
 See the [job author's interruption contract](authoring.md#62-write-every-job-to-survive-interruption) before
 deciding which jobs may rerun.
 Unreadable or mismatched attempt records hold affected jobs with evidence.

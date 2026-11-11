@@ -1015,8 +1015,9 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             surface="job_attr",
             member="n_retrys",
             klass=PASSTHROUGH,
-            cite="DL-53",
-            effect="the job runs without retries; known-unsupported warns for a positive count (DL-466)",
+            cite="DL-485",
+            effect="live CMD jobs retry failing exits inside their live run; play and rehearse"
+            " do not retry; CMD counts do not warn",
             trigger=_job("insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", n_retrys="2"),
         ),
         *(
@@ -3623,8 +3624,8 @@ ADAPTER_ROWS: tuple[Row, ...] = (
         surface="adapter_policy",
         member="no-retry",
         klass=PASSTHROUGH,
-        cite="DL-53",
-        effect="the adapter never retries; n_retrys is carried and not applied",
+        cite="DL-485",
+        effect="adapters and simulation never retry; the live engine retries CMD failing exits",
         trigger="Failed",
         quiet="int",
     ),
@@ -4065,7 +4066,7 @@ PREFLIGHT_CODE_ROWS: tuple[Row, ...] = (
         klass=SUPPORTED,
         cite="lint.rule_known_unsupported, DL-53, DL-466",
         effect="requested inert attributes warn once per record and attribute; neutral values stay quiet",
-        trigger=_job(n_retrys="2"),
+        trigger=_job(n_retrys="2", job_type="b", command=None),
     ),
     _row(
         surface="preflight_code",

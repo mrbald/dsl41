@@ -26346,3 +26346,41 @@ relitigate an entry; append a new one.
   longer than the UI's cursor the UI does not see the restart, so a count can include
   entries twice (BUG-64). An engine of an older build serves no origin, and this UI then
   prints every refusal.
+
+- DL-485 A command job's `n_retrys` reruns a failed try inside the same run
+  (2026-11-11; owner ruling on FEAT-27; runner_attempts.py, runner.py, runner_history.py,
+  lint.py, wrapper-protocol §3, control-protocol §4, runner-design §§6 and 7)
+  THE RULE. A retry means what a retry loop in a shell script around the command would
+  mean. When a CMD job's command exits with a code that the job's own verdict (SEM-09)
+  calls a failure, the job is in the catalog, the oracle's row is this run in STARTING or
+  RUNNING, and the attempt number is at most `n_retrys`, the engine starts the next
+  attempt of the same run and feeds the oracle nothing. The job keeps its live status
+  from the first try to the last: no status change, dependent wake, box fold, alarm or
+  hook between tries. Only the last result is fed.
+  It is the existing `rerun` plan, chosen by `follow_up_plan`. There is no new state,
+  record key, chart or version step. The count read is the applied catalog's when the
+  plan is chosen. An interrupted attempt is held at attempt `5 + n_retrys` or above, so an
+  interruption uses up one retry and a run never has more than 25 attempts.
+  Not retried: a signal death, a failed spawn, a stopped or unobservable attempt, a
+  KILLJOB or `term_run_time`, a BOX or FW job. `term_run_time` and the other timers keep
+  the first try's start. `>` output is truncated on each try. A job marked non-idempotent
+  is retried: its author asked for it. A retry's `after` reads `exit N`. Run history shows
+  a run's start from its first attempt, where that attempt's spool reads or on journal
+  times, and its end from the latest.
+  A CMD job no longer warns `known-unsupported` for `n_retrys`; BOX and FW still do.
+  This replaces the `n_retrys` scope of DL-41 (1), DL-53 and DL-469 for CMD jobs.
+  THE REASON. A failed job stayed failed whatever `n_retrys` said (FEAT-27). The engine
+  already started the next attempt of a run after an interruption; a failing exit with
+  tries left is one more reason for the same plan.
+  REJECTED. A loop in the shell around the command: after SIGINT to its group a plain
+  loop starts the command again when the command handles INT and exits non-zero; with a
+  trap a kill is recorded as an exit; the engine would not see the tries; the verdict
+  rule would be written twice. A loop in the wrapper: its input and spool are a frozen
+  contract. A retry counter on the dispatch record, or a declared chart: the attempt
+  number already says it. Showing FAILURE between tries: the vendor documents no such
+  thing, and hiding it is the safer default.
+  THE LIMIT. `play` and `rehearse` do not retry; rehearse marks such a producer
+  `inconclusive_retries`. An update that changes `n_retrys` stops the running try like any
+  definition change, and holds the job when its attempt number is at or above 5 plus the
+  new count. What AutoSys shows dependents between tries, and whether its `term_run_time`
+  counts per try, is not documented [?].

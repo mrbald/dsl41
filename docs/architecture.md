@@ -187,7 +187,7 @@ Before catch-up, restart scans the root's cookies once and TERMs what it
 finds of interrupted attempts; the loop runs their grace and KILL cleanup
 (DL-433, DL-436). It does not wait for a previous wrapper.
 Interrupted idempotent work gets a new attempt of the same run and invocation. Named non-idempotent jobs are
-held with failure evidence. Application failure is not retried.
+held with failure evidence. CMD failing exits retry within the live run when `n_retrys` allows (DL-485).
 [DL-424 and DL-433](decision-log.md) rule these distinctions.
 
 Where runner §7's record list differs, DL-428 and DL-433 govern the store

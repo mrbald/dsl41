@@ -55,7 +55,7 @@ The [chart lifecycles](../chart-lifecycles.md) view lists each target state with
 - `wrapper_gone` is posted only when the command is dead or was never named. A wrapper that died while its command lives gets a stop with cause `wrapper_lost`. `engine_died` is a restart's only. It ends an attempt with no record from SPAWNING, RUNNING or STOPPING as `unobservable`, with the cause of the stop it took first, else `engine_death`. It runs no ladder and arms no timer; what is left of the command is cleanup, as at any record.
 - An attempt is settled only once it ended and the wiring calls `plan_done` for its follow-up plan. The engine tier posts `all_attempts_settled` only in DRAINING, when no attempt is unsettled.
 - An interrupted attempt of an idempotent job reruns the same run under the next ordinal, with a run id the plan names before it can run and the same `DSL41_JOB`, `DSL41_RUN_NUMBER` and `DSL41_SCHEDULED_AT`. While the engine drains, the rerun waits for the restart. One of a job named in `non-idempotent.toml` is one oracle transition: a FAILURE with cause `interrupted` that holds the job before its own start or a dependent's is evaluated, with the evidence. A removed job, or a run the oracle ended, gets nothing ([DL-424](../decision-log.md)).
-- The engine replaces an interrupted attempt at most four times: attempt `MAX_ATTEMPTS_PER_RUN`, 5, is held like a marked job's, and its evidence names the limit.
+- An interrupted attempt numbered at least `MAX_ATTEMPTS_PER_RUN + n_retrys`, 5 plus the applied CMD retry count, is held like a marked job's; its evidence names that limit. A run never exceeds 25 attempts (DL-485).
 
 ## Failure and recovery
 

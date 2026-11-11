@@ -6,7 +6,7 @@ Adapter contract (ss6): ``async run(job_ir, run_number, ctx) -> AdapterResult``.
 RAW exit code (SEM-09/DL-33 classification stays oracle-side), ``Terminated`` reports a kill the
 wrapper observed (-> STATUS TERMINATED), and ``Failed`` reports a completion with no raw exit code
 (-> STATUS FAILURE with its cause). The file watcher and the fakes keep this contract. Adapters never retry
-(n_retrys is unmodeled, DL-53 scope: a shell-side retry would fork semantics from the simulator)
+(the live engine's attempt plan owns CMD retries, DL-485)
 and never time out (term_run_time is the oracle's timer). Under VirtualClock an adapter blocks ONLY
 through ctx.clock.sleep_until, which makes quiescence decidable (Engine._settle counts live tasks
 against pending sleeps). Real adapters run under RealClock, where the loop blocks on real IO and
@@ -459,8 +459,8 @@ def _prepare_output_files(job_ir: JobIR, spec: Mapping[str, Any]) -> None:
 
 class LocalCommandAdapter:
     """ss6 CMD adapter, an `ObservedAdapter`: spawn the ss6a Tier-0 wrapper, await it, report
-    spawn.json and status.json, the sole outcome channel. No retries (n_retrys unmodeled, DL-53
-    scope), no timeouts (term_run_time is the oracle's timer), no classification.
+    spawn.json and status.json, the sole outcome channel. No retries (the engine's attempt
+    plan owns them, DL-485), no timeouts (term_run_time is the oracle's timer), no classification.
 
     stdout/stderr append unless the source path starts with >, which prepares a truncated
     regular file before launch; >> explicitly appends (DL-460). Unset outputs append to

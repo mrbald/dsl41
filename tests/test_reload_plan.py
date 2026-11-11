@@ -518,7 +518,7 @@ def test_a_preflight_warning_goes_into_plan_json(tmp_path: Path) -> None:
         estate,
         "a.jil",
         "insert_job: M1\njob_type: c\n",
-        "insert_job: M1\njob_type: c\nn_retrys: 2\n",
+        "insert_job: M1\njob_type: c\ngroup: batch\n",
     )
     result = _reread(estate, live, tmp_path / "plans")
     document = read_plan(tmp_path / "plans", result.token)
@@ -526,9 +526,9 @@ def test_a_preflight_warning_goes_into_plan_json(tmp_path: Path) -> None:
     from dsl41.runtime_policy import resolve_job_shell
 
     warnings = document["preflight_warnings"]
-    retry_warnings = [item for item in warnings if item["code"] == "known-unsupported"]
-    assert len(retry_warnings) == 1
-    assert retry_warnings[0]["job"] == "M1"
+    unsupported_warnings = [item for item in warnings if item["code"] == "known-unsupported"]
+    assert len(unsupported_warnings) == 1
+    assert unsupported_warnings[0]["job"] == "M1"
     _, shell_warning = resolve_job_shell(None)
     assert sum(item["code"] == "shell" for item in warnings) == (shell_warning is not None)
     assert len(warnings) == 1 + (shell_warning is not None)

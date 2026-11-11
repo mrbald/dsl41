@@ -574,6 +574,7 @@ class _LeafIndex:
     `_emit_leaf_rows` reads, keyed as `_index_leaves` fills them."""
 
     dispatch_by_key: dict[tuple[str, int], dict[str, Any]]
+    first_dispatch_by_key: dict[tuple[str, int], dict[str, Any]]
     order: list[tuple[str, int]]
     completion_by_key: dict[tuple[str, int], dict[str, Any]]
     undecided_keys: set[tuple[str, int]]
@@ -598,6 +599,7 @@ def _index_leaves(
     `decided` are the caller's, computed before this walk: a decision is a later record than the
     attempt it answers, so one pass here would store a completion it cannot yet judge."""
     dispatch_by_key: dict[tuple[str, int], dict[str, Any]] = {}
+    first_dispatch_by_key: dict[tuple[str, int], dict[str, Any]] = {}
     order: list[tuple[str, int]] = []
     last_run_number: dict[str, int] = {}
     completion_by_key: dict[tuple[str, int], dict[str, Any]] = {}
@@ -610,6 +612,7 @@ def _index_leaves(
             key = (d_job, d_run)
             if key not in dispatch_by_key:
                 order.append(key)
+                first_dispatch_by_key[key] = record
             dispatch_by_key[key] = record
             last_run_number[d_job] = d_run
         elif rec == "input" and record.get("kind") == "STATUS":
@@ -654,6 +657,7 @@ def _index_leaves(
 
     return _LeafIndex(
         dispatch_by_key=dispatch_by_key,
+        first_dispatch_by_key=first_dispatch_by_key,
         order=order,
         completion_by_key=completion_by_key,
         undecided_keys=undecided_keys,
@@ -682,7 +686,8 @@ def _emit_leaf_rows(
         completion = index.completion_by_key.get(key)
         anchored = run_number <= anchor_runs.get(job, 0)
 
-        journal_started = _parse_timestamp(str(dispatch["started_at"]))
+        # Journal fallback keeps the run's first dispatch, on the journal clock (DL-485).
+        journal_started = _parse_timestamp(str(index.first_dispatch_by_key[key]["started_at"]))
         journal_ended = _journal_ended_at(completion)
         status: str
         if completion is not None:
@@ -856,9 +861,11 @@ def read_spool(
 
 
 def _read_all_spool(records: list[dict[str, Any]]) -> dict[tuple[str, int], SpoolRead]:
-    """Each run's spool, read from its latest attempt's directory, which its `dispatch` record
-    names, held to the id that record bound (DL-118)."""
+    """A run starts at its first retained attempt's readable spool and ends at its latest
+    attempt's spool (DL-485). Each read is bound to its dispatch's identity (DL-118).
+    Without the first spool, the latest attempt supplies both times."""
     spool: dict[tuple[str, int], SpoolRead] = {}
+    first: dict[tuple[str, int], SpoolRead | None] = {}
     for record in records:
         if record.get("rec") != "dispatch":
             continue
@@ -867,8 +874,11 @@ def _read_all_spool(records: list[dict[str, Any]]) -> dict[tuple[str, int], Spoo
         if not isinstance(run_dir, str):
             continue
         found = read_spool(Path(run_dir), job, run_number, str(record["run_id"]))
+        initial = first.setdefault((job, run_number), found)
         if found is not None:
-            spool[(job, run_number)] = found
+            spool[(job, run_number)] = SpoolRead(
+                initial.started_at if initial is not None else found.started_at, found.ended_at
+            )
         else:
             spool.pop((job, run_number), None)
     return spool

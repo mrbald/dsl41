@@ -596,8 +596,8 @@ while the job's current run has an attempt that has not settled, or
 while an attempt of the job keeps its starts back (DL-426). `run_id` is
 the attempt's identity, `n` its ordinal within its run, `state` one of
 `SPAWNING`, `RUNNING`, `STOPPING`, or `ENDED` for one whose outcome is
-in, `after` the cause of the stop the attempt replaced (null for a run's
-first attempt), `cause` the cause of the stop it is taking, and `note`
+in, `after` the replaced attempt's stop cause or `exit N` for its retried failing
+code N (DL-485; null for a run's first attempt), `cause` the cause of the stop it is taking, and `note`
 why a stop could not be carried out (`ladder failed: …`, `command
 survived its KILL`). A job's next dispatch goes only when no attempt of
 the job is unsettled. An attempt settles once its plan is done, which
@@ -843,7 +843,8 @@ does not read them keeps working (§2):
 
 - `dispatch` carries `after` on a replacement attempt: the cause of the
   stop the attempt it replaces took (`engine_stop`, `lifeline`,
-  `unobservable`, …). A run's first attempt has none.
+  `unobservable`, …), or `exit N` for a retried failing code N (DL-485).
+  A run's first attempt has none.
 - An `unobservable` outcome (DL-433) carries
   cause `engine_death` when the engine that ran the attempt died and no
   record came, and the attempt took no stop first; a replacement of it

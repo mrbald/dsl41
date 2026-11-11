@@ -1653,8 +1653,10 @@ def test_known_unsupported_register_coverage(row) -> None:
         "xinst_attr:*": "xmachine",
     }.get(row.id, row.member)
     expected = (
-        row.klass is Klass.PASSTHROUGH or row.id == "machine_attr:max_load#pool"
-    ) and attribute != "description"
+        (row.klass is Klass.PASSTHROUGH or row.id == "machine_attr:max_load#pool")
+        and attribute != "description"
+        and row.id != "job_attr:n_retrys"
+    )
     for source, warns in ((row.trigger, expected), (quiet_of(row), False)):
         matching = [
             v

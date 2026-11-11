@@ -179,7 +179,7 @@ nothing.
 | job_attr:must_start_times#dst | supported | SEM-34, DL-253, oracle_schedule._must_instant | - |  |  |  | none | an absolute must time in a spring change's missing hour is due in the first minute of the next hour (2:05 is 3:00:05); in a fall change's repeated hour it takes the first pass, or the second when the start is in that hour too; other change shapes keep the fold=0 conversion |
 | job_attr:must_start_times#start-mins | supported | SEM-34, DL-248, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - |  |  |  | none | a single relative offset counts against start_mins and broadcasts to every start_mins tick; the vendor refuses an absolute form there, a list of offsets there is not specified and stays open, and lowering refuses both |
 | job_attr:must_start_times#unmatched-slot | provisional | SEM-34, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - |  |  |  | none | an instant matching no start time uses the first offset, and an absolute form arms nothing there; no label was opened for the corner |
-| job_attr:n_retrys | passthrough | DL-53 | - |  |  |  | generic | the job runs without retries; known-unsupported warns for a positive count (DL-466) |
+| job_attr:n_retrys | passthrough | DL-485 | - |  |  |  | generic | live CMD jobs retry failing exits inside their live run; play and rehearse do not retry; CMD counts do not warn |
 | job_attr:n_retrys#box | passthrough | DL-469 | - |  |  |  | none | counts 1..20 warn without retrying; zero stays quiet |
 | job_attr:n_retrys#fw | passthrough | DL-469 | - |  |  |  | none | counts 1..20 warn without retrying; zero stays quiet |
 | job_attr:notification_alarm_types | refused | runtime_policy.job_policy | - |  |  |  | generic | nonempty alarm filters refuse: grammar is unqualified |
@@ -817,7 +817,7 @@ nothing.
 
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| adapter_policy:no-retry | passthrough | DL-53 | - |  |  |  | none | the adapter never retries; n_retrys is carried and not applied |
+| adapter_policy:no-retry | passthrough | DL-485 | - |  |  |  | none | adapters and simulation never retry; the live engine retries CMD failing exits |
 | adapter_policy:no-timeout | supported | runner_adapters.LocalCommandAdapter | - |  |  |  | none | the adapter imposes no timeout of its own; term_run_time is the oracle's timer |
 | adapter_policy:unscripted-completion | supported | runner_adapters.FakeAdapter | - |  |  |  | none | a rehearsed run with no script entry completes instantly with exit code 0 |
 

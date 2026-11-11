@@ -1649,7 +1649,7 @@ def rule_known_unsupported(
                 attributes.add("avg_runtime")
         except ValueError:
             pass
-        if 0 < job.sem.n_retrys <= 20:
+        if job.job_type != "CMD" and 0 < job.sem.n_retrys <= 20:
             attributes.add("n_retrys")
         if job.job_type == "CMD":
             if raw.get("ulimit"):

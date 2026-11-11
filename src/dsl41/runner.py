@@ -147,6 +147,7 @@ from dsl41.runner_attempts import (
     FollowUpStep,
     Replacement,
     follow_up_plan,
+    oracle_input_for,
 )
 from dsl41.runner_admission import (
     ENGINE_REQUEST_ID_PREFIX,
@@ -991,6 +992,7 @@ class Engine:
         facts = self._facts[attempt]
         job, run = facts.job, facts.run_number
         row = self.oracle.store.job.get(job)
+        job_ir = self.oracle.catalog.jobs.get(job)
         return follow_up_plan(
             outcome,
             job=job,
@@ -1001,6 +1003,7 @@ class Engine:
             marked=job in self.marked,
             run_id=attempt,
             quarantined=outcome.note if outcome.cause == QUARANTINED else None,
+            cmd_semantics=job_ir.sem if job_ir is not None and job_ir.job_type == "CMD" else None,
         )
 
     def commit_outcome(
@@ -1059,6 +1062,13 @@ class Engine:
                 "payload": {"job": job, "run_number": run, **held, "hold": True},
             }
         replacement: Replacement = step.detail
+        # A retry's label names the interpreted exit; interruption labels keep their cause
+        # (DL-485). A natural dispatch plan can only replace an integer exit.
+        after = (
+            f"exit {oracle_input_for(outcome)}"
+            if outcome.kind == "natural"
+            else outcome.cause or outcome.kind
+        )
         return {
             "step": "dispatch",
             "attempt": replacement.run_id,
@@ -1068,7 +1078,7 @@ class Engine:
                 **{k: v for k, v in facts.env.items() if k != COOKIE_ENV},
                 ENV_ATTEMPT: str(replacement.ordinal),
             },
-            "after": outcome.cause or outcome.kind,
+            "after": after,
         }
 
     def perform_owed_plans(self) -> None:
@@ -1311,8 +1321,9 @@ class Engine:
 
     def attempt_view(self, job: str) -> dict[str, Any] | None:
         """The attempt `query` shows beside the job's status: its ordinal, its state, the cause
-        of the stop it replaced, and why a stop could not be carried out (DL-426). An attempt
-        that keeps the job's starts back (`blocked`) is shown with `held` whatever its state,
+        of the stop or failing exit it replaced, and why a stop could not be carried out
+        (DL-426, DL-485). An attempt that keeps the job's starts back (`blocked`) is shown with
+        `held` whatever its state,
         when its group is held, it belongs to an earlier run than the row's, or it ended and
         its ladder still runs (a leak being stopped). Else None when the job's current run has
         no unsettled observed attempt."""

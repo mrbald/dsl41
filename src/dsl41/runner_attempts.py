@@ -64,6 +64,7 @@ from dsl41.engine_charts import (
     Lifecycle,
 )
 from dsl41.runner_adapters import AdapterResult, Failed, outcome_from_status
+from dsl41.ir import Semantics
 from dsl41.runner_procid import verify_alive
 from dsl41.state_machine import Event, Executor, Outcome
 
@@ -75,8 +76,7 @@ SPAWN_RECORD_FAILED: Final = "spawn record write failed"
 #: The oracle statuses that count as a live run for the interruption rule: a box member can be
 #: dispatched while its row is still STARTING.
 LIVE_STATUSES: Final = frozenset({"STARTING", "RUNNING"})
-#: The most attempts one run gets: an interrupted attempt numbered this or above is held, not
-#: replaced, so the engine replaces an interrupted attempt at most four times (DL-424).
+#: The interruption allowance before a CMD job's configured retries (DL-424, DL-485).
 MAX_ATTEMPTS_PER_RUN: Final = 5
 #: The cause of a stop the oracle decided: a KILLJOB, a `term_run_time`, a run the oracle ended.
 #: Its outcome gets plan `none`: the oracle has ended the run (DL-424).
@@ -223,10 +223,12 @@ def command_group(spawn: Mapping[str, Any] | None) -> tuple[int, str] | None:
 def oracle_input_for(outcome: AttemptOutcome) -> AdapterResult | None:
     """What an outcome feeds the oracle, through the adapter's own table.
 
-    natural feeds what `outcome_from_status` maps the wrapper's record to: the raw exit code,
-    which the oracle classifies (DL-41), or TERMINATED for a signal death. spawn_failed feeds
+    A completing natural outcome feeds what `outcome_from_status` maps the wrapper's record
+    to: the raw exit code, which the oracle classifies (DL-41), or TERMINATED for a signal death.
+    spawn_failed feeds
     FAILURE with cause `wrapper_spawn_failed`; the outcome keeps the error as evidence. stopped
-    and unobservable feed nothing: the interruption rule decides (DL-424).
+    and unobservable feed nothing: the interruption rule decides (DL-424). A retried natural
+    exit feeds nothing (DL-485).
     """
     if outcome.kind == "natural":
         if outcome.record is None:
@@ -316,6 +318,7 @@ def follow_up_plan(
     run_id: str | None = None,
     mint: Callable[[], str] = lambda: str(uuid.uuid4()),
     quarantined: str | None = None,
+    cmd_semantics: Semantics | None = None,
 ) -> FollowUp:
     """The interruption rule (DL-424), as a plan for the outcome of attempt `attempt` of run
     `run_number` of `job`.
@@ -324,28 +327,46 @@ def follow_up_plan(
     its `non-idempotent.toml`. An update in STOPPING is applied before any plan is chosen.
     `live_run` is the oracle's current (run number, status) for the job, or None.
 
-    natural: `complete`, feed the completion. spawn_failed: `complete`, feed its FAILURE.
+    A catalog CMD's failing natural exit reruns while its current run is live and its ordinal
+    is at most `n_retrys`; nothing is fed to the oracle (DL-485). `cmd_semantics` is that CMD's
+    applied semantics, None for other job types. Other natural outcomes and spawn failures
+    complete. Only `oracle_input_for` interprets a natural outcome's record.
     stopped or unobservable: `none` when the job left the catalog, when the stop was the
     oracle's own kill (`oracle_kill`), or when the oracle's current run is not this run in
     STARTING or RUNNING, because the oracle's own end stands. Else `hold` for a marked job, and
-    for attempt `MAX_ATTEMPTS_PER_RUN` or above: one step, a FAILURE with cause `interrupted`
-    that holds the job in the same transition, with the evidence, which names the limit in the
-    second case. Else `rerun`: one dispatch of the next attempt of the same run, under a run id `mint`
-    gives. `run_id` is the interrupted attempt's own, which the evidence carries.
+    for attempt `MAX_ATTEMPTS_PER_RUN + n_retrys` or above: one step, a FAILURE with cause
+    `interrupted` that holds the job in the same transition, with the evidence, which names
+    the limit in the second case. Else `rerun`: one dispatch of the next attempt of the same
+    run, under a run id `mint` gives. `run_id` is the interrupted attempt's own, which the
+    evidence carries.
 
     `quarantined` is the reason a restart could not read the attempt: it forces `hold` wherever
     the job would rerun, whatever its marking, and the evidence carries the reason (spec-restart
     §7, DL-433). The oracle's own end still stands.
     """
+    n_retrys = 0 if cmd_semantics is None else cmd_semantics.n_retrys
+    live = live_run is not None and live_run[0] == run_number and live_run[1] in LIVE_STATUSES
     if outcome.kind in ("natural", "spawn_failed"):
-        return FollowUp("complete", (FollowUpStep(FEED_STATUS, oracle_input_for(outcome)),))
+        result = oracle_input_for(outcome)
+        if (
+            outcome.kind == "natural"
+            and in_catalog
+            and live
+            and cmd_semantics is not None
+            and attempt <= n_retrys
+            and type(result) is int
+            and not cmd_semantics.exit_is_success(result)
+        ):
+            return FollowUp("rerun", (FollowUpStep(DISPATCH, Replacement(mint(), attempt + 1)),))
+        return FollowUp("complete", (FollowUpStep(FEED_STATUS, result),))
     if not in_catalog or outcome.cause == ORACLE_KILL:
         # the oracle ended the run itself; nothing follows, whatever its row says now
         return FollowUp("none")
-    if live_run is None or live_run[0] != run_number or live_run[1] not in LIVE_STATUSES:
+    if not live:
         return FollowUp("none")
     this = attempt_id(job, run_number, attempt)
-    limited = attempt >= MAX_ATTEMPTS_PER_RUN
+    limit = MAX_ATTEMPTS_PER_RUN + n_retrys
+    limited = attempt >= limit
     # PENDING: E7 -- an unobservable attempt takes this rule; the FAILURE it feeds is a marked
     # job's `interrupted`, never `exit_status_unobservable` (DL-424 narrows E7)
     if marked or limited or quarantined is not None:
@@ -363,7 +384,7 @@ def follow_up_plan(
             record.ended_at,
             sig,
             code,
-            MAX_ATTEMPTS_PER_RUN if limited else None,
+            limit if limited else None,
             run_id,
             quarantined,
         )

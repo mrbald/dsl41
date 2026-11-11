@@ -404,8 +404,8 @@ can leave backlog that only a later invocation drains. The oracle test
 demonstrates that overlap, then invokes the processor explicitly to drain the
 backlog. Closing this edge belongs to the activation the estate author chooses.
 The worker reconciles uncertain effects; it does not blindly retry them.
-The engine can replace interrupted command attempts, but does not retry ordinary
-application failures or implement `n_retrys`.
+The engine can replace interrupted command attempts and retry failing CMD exits
+when `n_retrys` allows; intermediate failures keep the run live (DL-485).
 
 Focused tests interrupt one archival with an abrupt subprocess exit after each
 durable boundary: object staged, object published, receipt and work committed,

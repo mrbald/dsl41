@@ -139,7 +139,8 @@ Interpreter decisions (each has a trace test; PENDING items keep switches):
   checked lazily as the clock advances.
 - n_retrys: Q4 resolved (DL-53). The trigger set is FAILURE-only application failures
   (TERMINATED does not restart; system failures restart via the scheduler's MaxRestartTrys).
-  Retry modeling is out of scope v1 as a recorded DL-53 decision. auto_hold: a member enters
+  The live engine retries inside the live run; play and rehearse do not retry (DL-485).
+  auto_hold: a member enters
   ON_HOLD when its box starts (dossier ss5 [C]).
 - Undefined jobs in conditions evaluate FALSE forever (SEM-06). Cross-instance atoms (SEM-07)
   evaluate against instance-qualified pseudo-job entries in the status store, settable only by

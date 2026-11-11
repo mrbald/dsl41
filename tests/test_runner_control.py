@@ -1529,7 +1529,7 @@ def test_cli_rehearse_format_json_keeps_stdout_one_document_under_warns(tmp_path
     json the WARN lines go to stderr; stdout parses whole."""
     jil = tmp_path / "estate.jil"
     jil.write_text(
-        "insert_job: warned_job\njob_type: c\ncommand: x\nmachine: m1\nn_retrys: 2\n",
+        "insert_job: warned_job\njob_type: c\ncommand: x\nmachine: m1\ngroup: batch\n",
         encoding="utf-8",
     )
     result = cli_runner.invoke(

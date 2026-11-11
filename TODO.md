@@ -11,8 +11,6 @@ None open.
 
 State handled outside a state machine and duplicated logic make the whole system fragile, so they rank here, not under maintenance (owner, 2026-11-10).
 
-- **FEAT-27**: "n_retrys is a high-trending-critical gap." Today `n_retrys` has no effect: a failed job stays failed (DL-469). First "the analysis on why n_retrys is such a complex task to do, if because our state machines leak state then we first do FEAT-10 & co and resume".
-  Next: a quick re-analysis of its build complexity, with a challenge if it is not trivial: "it is almost like a launch policy" (owner, 2026-11-10).
 - **FEAT-10**: Declare box stop, apply, hold and restart in the UPDATE chart and decide its recovery window (`src/dsl41/runner.py:803-818`, `src/dsl41/reload_update.py:8-13`).
   Next: a `chart-simplify` review of the UPDATE chart, then an engineer plan.
 - **FEAT-9**: Share one pure per-job effect calculation between reread forecasts and update execution (`src/dsl41/reread_worker.py:25-133`, `src/dsl41/runner_update.py:437-687`).
@@ -175,7 +173,7 @@ In fix order. BUG-4, BUG-5 and BUG-6 go with BUG-1 as one clock pass. BUG-20, BU
 - `job_class` is refused: concurrency limits come from AutoSys agent configuration, not JIL; a site setting is deferred.
 - `heartbeat_interval > 0` is refused: AutoSys documents no exact heartbeat producer or re-arm contract; process liveness is not a heartbeat.
 - `notification_template` and `notification_alarm_types` are refused: their lookup and filter grammar and defaults are undocumented; `send_notification` adds no per-job delivery.
-- `n_retrys` has no effect on CMD, BOX or FW jobs: a failed job stays failed. 1–20 warns as known-unsupported at startup and reread, zero is quiet, other values are refused (DL-469; FEAT-27).
+- `n_retrys` has no effect on BOX or FW jobs: 1–20 warns as known-unsupported at startup and reread, zero is quiet, other values are refused (DL-469). A CMD job retries in the live engine only: `play` and `rehearse` do not retry, and rehearse marks such a producer `inconclusive_retries` (DL-485).
 - Live CMD dispatch uses `/bin/sh -c` (`src/dsl41/runner_wrapper.py:480`). Startup validates configured/passwd-shell selection: it rejects an invalid configured shell and warns on passwd fallback (`src/dsl41/runner_preflight.py:697-705`, `src/dsl41/runtime_policy.py:120`). Configured `engine.job_shell` also produces a `known-unsupported` warning. Only the parked process preparation path would execute the selected shell (`src/dsl41/runner_adapters.py:323`). Per-job JIL `shell` is refused.
 - `profile` and `std_*` files on FW jobs are refused: file watchers launch no job process to consume them.
 - AutoSys command syntax has no shim; job scripts must call `dsl41` commands.
