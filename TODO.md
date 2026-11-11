@@ -11,8 +11,6 @@ None open.
 
 State handled outside a state machine and duplicated logic make the whole system fragile, so they rank here, not under maintenance (owner, 2026-11-10).
 
-- **FEAT-10**: Declare apply, hold and restart in the UPDATE chart (`src/dsl41/runner.py:798-840`, the `applied` block of `_update_step`). The box stop is a state (DL-487) and the recovery window stays (DL-463).
-  Next: chart slice S2, the apply row's ordered intents; then BUG-67.
 - **FEAT-9**: Share one pure per-job effect calculation between reread forecasts and update execution (`src/dsl41/reread_worker.py:25-133`, `src/dsl41/runner_update.py:437-687`).
   Next: an engineer plan, after FEAT-10's.
 - **FEAT-30**: Establish ownership of the unintegrated [process preparation](src/dsl41/runner_adapters.py) before deletion or activation. If activation is authorized, share path resolution and trace a real dispatch through it.

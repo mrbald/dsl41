@@ -1267,10 +1267,17 @@ def test_socket_reload_preview_update_retry_and_marker(short_root: Path) -> None
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("crash", [None, "before_kill", "after_apply"])
+@pytest.mark.parametrize(
+    "crash", [None, "before_kill", "after_apply", "cancel_time", "cancel_hold", "cancel_start"]
+)
 def test_box_restart_commits_kills_and_holds_finished_marked_members(
     short_root: Path, monkeypatch, crash
 ) -> None:
+    """Pin crash and virtual-clock cancellation recovery through shutdown and restart.
+
+    The cancellation cases cover restart and operator completion under DL-463.
+    Same-engine reuse after cancellation can leave the update unfinished (DL-488).
+    """
     from dsl41.runner_update import settings_of
 
     path = config_file(short_root, estate='non_idempotent = "non-idempotent.toml"\n')
@@ -1319,20 +1326,49 @@ def test_box_restart_commits_kills_and_holds_finished_marked_members(
                 UpdateRequest(plan.token, engine.config_rev, engine.baseline_id, "box-update")
             )
             if crash:
+                if crash.startswith("cancel_"):
+                    # DL-488: cancellation after APPLIED does not extend DL-463's window.
+                    wait_until = clock.wait_until
+                    waits = 0
+                    cut_at = {"cancel_time": 1, "cancel_hold": 2, "cancel_start": 4}[crash]
+                    listeners = []
+                    engine.update.listeners.append(listeners.append)
 
-                def cut():
-                    raise EngineError("cut during box restart")
+                    async def cut_wait(at, interrupt=None):
+                        nonlocal waits
+                        if engine.config_rev == 2:
+                            waits += 1
+                            if waits == cut_at:
+                                raise asyncio.CancelledError
+                        await wait_until(at, interrupt)
 
-                monkeypatch.setattr(
-                    engine.update, "box_ends" if crash == "before_kill" else "box_starts", cut
-                )
-                with pytest.raises(EngineError, match="cut during box restart"):
-                    await engine.run_until_quiescent(T0)
+                    with monkeypatch.context() as patch:
+                        patch.setattr(clock, "wait_until", cut_wait)
+                        with pytest.raises(asyncio.CancelledError):
+                            await engine.run_until_quiescent(T0)
+                    assert waits == cut_at
+                    assert engine.update.tier.state == "APPLIED" and engine.update.view() is None
+                    assert not answer.result().applied.done() and listeners == []
+                    assert [
+                        record.payload["kind"]
+                        for _, record in engine.journal.store.read_from(0)
+                        if record.kind == "input" and record.payload.get("kind") == "ON_HOLD"
+                    ] == (["ON_HOLD", "ON_HOLD"] if crash == "cancel_start" else [])
+                else:
+
+                    def cut():
+                        raise EngineError("cut during box restart")
+
+                    monkeypatch.setattr(
+                        engine.update, "box_ends" if crash == "before_kill" else "box_starts", cut
+                    )
+                    with pytest.raises(EngineError, match="cut during box restart"):
+                        await engine.run_until_quiescent(T0)
                 assert engine.config_rev == (1 if crash == "before_kill" else 2)
                 assert engine.oracle.store.job["BX"].status == (
                     "RUNNING" if crash == "before_kill" else "TERMINATED"
                 )
-                assert not engine.oracle.store.job["DONE"].on_hold
+                assert engine.oracle.store.job["DONE"].on_hold == (crash == "cancel_start")
                 await engine.shutdown()
                 engine.journal.close()
                 stored = active_configuration(short_root / "run")
@@ -1345,7 +1381,8 @@ def test_box_restart_commits_kills_and_holds_finished_marked_members(
                     stored_sources=True,
                 )
                 await engine.run_until_quiescent(T0)
-                if crash == "after_apply":
+                if crash != "before_kill":
+                    assert engine.update.tier is None
                     assert engine.oracle.store.job["BX"].status == "TERMINATED"
                     # Documented operator completion: hold marked members before force-start.
                     for name in ("DONE", "HELD"):
