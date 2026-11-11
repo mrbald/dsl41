@@ -42,6 +42,7 @@ from dsl41.oracle_state import (
     Event,
     EventKind,
     JobRuntime,
+    JobStatus,
     OracleError,
     RuntimeState,
     StatusObservation,
@@ -233,9 +234,28 @@ class OracleReads:
                 )
             )
 
-    def _record(self, job: str, transition: str, cause: str) -> None:
+    def _record(
+        self,
+        job: str,
+        transition: str,
+        cause: str,
+        *,
+        start_source: str | None = None,
+        run_number: int | None = None,
+        refused_status: JobStatus | None = None,
+    ) -> None:
         assert self._now is not None
-        self._trace.append(TraceEntry(at=self._now, job=job, transition=transition, cause=cause))
+        self._trace.append(
+            TraceEntry(
+                at=self._now,
+                job=job,
+                transition=transition,
+                cause=cause,
+                start_source=start_source,
+                run_number=run_number,
+                refused_status=refused_status,
+            )
+        )
 
     def _runtime(self, job: str) -> JobRuntime:
         return self.store.runtime(job)  # DL-82: the store owns creation too

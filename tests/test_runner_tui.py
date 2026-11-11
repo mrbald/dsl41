@@ -988,6 +988,8 @@ class _TraceReplies:
                     entry for entry in self.trace["entries"] if entry["seq"] > request["since"]
                 ],
             }
+        if request["cmd"] in ("spec", "deps", "timers"):
+            return {"ok": True}
         assert request["cmd"] == "explain"
         return {"ok": True, "condition": None}
 
@@ -1134,13 +1136,23 @@ def _line_style(line: Any) -> str:
 _SCHEDULER_REFUSAL = "already RUNNING -- concurrent or repeated start request, no effect (STARTJOB event (scheduler))"
 
 
-def _start_refusal(seq: int, job: str = "trace_job", cause: str = _SCHEDULER_REFUSAL) -> dict:
+def _start_refusal(
+    seq: int,
+    job: str = "trace_job",
+    cause: str = _SCHEDULER_REFUSAL,
+    source: str | None = "scheduler",
+) -> dict:
     return {
         "seq": seq,
         "at": f"2026-07-01T23:30:{seq:02}",
         "job": job,
         "transition": "START_REFUSED",
         "cause": cause,
+        **(
+            {"start_source": source, "run_number": 1, "refused_status": "RUNNING"}
+            if source is not None
+            else {}
+        ),
     }
 
 
@@ -1308,16 +1320,27 @@ def test_pilot_interleaved_jobs_keep_separate_refusal_runs(
 
 
 @pytest.mark.parametrize(
-    "cause",
+    "cause, source",
     [
-        _SCHEDULER_REFUSAL.replace("scheduler", "control"),
-        "unknown refusal origin",
-        _SCHEDULER_REFUSAL + " extra text",
+        (_SCHEDULER_REFUSAL.replace("scheduler", "control"), "control"),
+        ("unknown refusal origin", None),
+        (
+            "re-trigger loop inside one instant: started twice in one nested cascade; refused (L010)",
+            None,
+        ),
+        (_SCHEDULER_REFUSAL, None),
+        (_SCHEDULER_REFUSAL, "control"),
     ],
-    ids=["operator", "unknown", "unrecognised-suffix"],
+    ids=[
+        "operator",
+        "unknown",
+        "bounded-loop",
+        "legacy-scheduler-text",
+        "misleading-scheduler-text",
+    ],
 )
 def test_pilot_operator_and_unknown_refusals_print_every_time(
-    short_root: Path, local_timezone, cause: str
+    short_root: Path, local_timezone, cause: str, source: str | None
 ) -> None:
     async def scenario() -> None:
         async with _trace_poll_app(short_root) as (app, pilot, replies):
@@ -1327,8 +1350,8 @@ def test_pilot_operator_and_unknown_refusals_print_every_time(
                 entries=[
                     _start_refusal(3),
                     _start_refusal(4),
-                    _start_refusal(5, cause=cause),
-                    _start_refusal(6, cause=cause),
+                    _start_refusal(5, cause=cause, source=source),
+                    _start_refusal(6, cause=cause, source=source),
                 ],
             )
             await pilot.press("r")
@@ -1341,9 +1364,12 @@ def test_pilot_operator_and_unknown_refusals_print_every_time(
             )
             first_operator = f"2026-07-02T01:30:05 trace_job START_REFUSED [{cause}]"
             assert re.sub(r"\s+", "", summary + first_operator) in rendered
-            assert rendered.count(re.sub(r"\s+", "", f"[{cause}]")) == 2
+            assert rendered.count(re.sub(r"\s+", "", f"[{cause}]")) == (
+                3 if cause == _SCHEDULER_REFUSAL else 2
+            )
             assert rendered.count("repeated1moretime,") == 1
             assert app._refusal_runs == {}
+            assert app._scheduler_refusals == {("trace_job", 1, "RUNNING"): 2}
 
     asyncio.run(scenario())
 
@@ -1364,7 +1390,8 @@ def test_pilot_reconnect_preserves_refusal_summary_without_recounting(
             replies.disconnected = False
             # A new cause flushes the run; the already consumed prefix is still present.
             replies.trace.update(
-                last_seq=6, entries=[*entries, _start_refusal(6, cause="operator")]
+                last_seq=6,
+                entries=[*entries, _start_refusal(6, cause="operator", source="control")],
             )
             replies.requests.clear()
             await pilot.press("r")
@@ -1375,6 +1402,7 @@ def test_pilot_reconnect_preserves_refusal_summary_without_recounting(
             rendered = _console_text(console)
             assert rendered.count("repeated2moretimes") == 1
             assert rendered.count("START_REFUSED") == 3
+            assert app._scheduler_refusals == {("trace_job", 1, "RUNNING"): 3}
 
     asyncio.run(scenario())
 
@@ -1389,6 +1417,7 @@ def test_pilot_trace_reset_flushes_old_refusals_and_starts_fresh_counts(
             replies.trace.update(last_seq=5, entries=[_start_refusal(seq) for seq in (3, 4, 5)])
             await pilot.press("r")
             await _wait_for_ui(pilot, lambda: app._trace_seq == 5)
+            assert app._scheduler_refusals == {("trace_job", 1, "RUNNING"): 3}
             replies.requests.clear()
             new_entries = [
                 {
@@ -1408,12 +1437,15 @@ def test_pilot_trace_reset_flushes_old_refusals_and_starts_fresh_counts(
             if reset != "restart":
                 await _wait_for_ui(pilot, lambda: app._trace_seq == 0)
                 assert app._refusal_runs == {} and app._alarms == {}
+                assert app._scheduler_refusals == {}
                 replies.trace["baseline_id"] = "period-b"
                 await pilot.press("r")
                 if reset == "mixed-baselines":
                     await pilot.pause()
                     await pilot.press("r")
             await _wait_for_ui(pilot, lambda: app._trace_seq == 3)
+            assert app._scheduler_refusals == {("trace_job", 1, "RUNNING"): 2}
+            assert app._trace_from_snapshot
             replies.trace.update(
                 last_seq=4,
                 entries=[
@@ -1447,6 +1479,62 @@ def test_pilot_trace_reset_flushes_old_refusals_and_starts_fresh_counts(
             assert rendered.index("repeated2moretimes") < rendered.index("RESTART")
             assert "repeated3moretimes" not in rendered
             assert app._refusal_runs == {} and app._alarms == {}
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("job_type", ["CMD", "BOX"])
+def test_pilot_details_count_current_run_and_keep_queued_refusals_apart(
+    short_root: Path, job_type: str
+) -> None:
+    async def scenario() -> None:
+        async with _trace_poll_app(short_root) as (app, pilot, replies):
+            row = replies.status["jobs"]["trace_job"]
+            row.update(status="RUNNING", run_number=1, job_type=job_type, started_by="schedule")
+
+            async def details(expected: str | None) -> None:
+                app.query_one("#jobs", DataTable).focus()
+                await pilot.press("d")
+                await _wait_for_ui(pilot, lambda: isinstance(app.screen, SpecScreen))
+                body = str(app.screen.query_one("#specbox Static", Static).content)
+                if expected is None:
+                    assert "scheduler refusals:" not in body
+                else:
+                    assert expected in body
+                    assert body.index("started by:") < body.index("scheduler refusals:")
+                await pilot.press("escape")
+
+            await pilot.press("r")
+            await details(None)
+            entries = [
+                _start_refusal(3, cause="opaque cause"),
+                {**_start_refusal(4), "refused_status": "STARTING"},
+                {**_start_refusal(5), "refused_status": "QUE_WAIT"},
+                _start_refusal(6, job="another_job"),
+                _start_refusal(7, source="control"),
+            ]
+            replies.trace.update(last_seq=7, entries=entries)
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: app._trace_seq == 7)
+            await details("scheduler refusals: 2 (run 1)")
+            row["status"] = "QUE_WAIT"
+            await details("scheduler refusals: 1 (queued)")
+            row["status"] = "SUCCESS"
+            await details("scheduler refusals: 2 (run 1)")
+            row.update(status="RUNNING", run_number=2)
+            await details(None)
+            replies.trace.update(
+                last_seq=8, entries=[*entries, {**_start_refusal(8), "run_number": 2}]
+            )
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: app._trace_seq == 8)
+            await details("scheduler refusals: 1 (run 2)")
+            app._trace_from_snapshot = True
+            await details("scheduler refusals: 1 (run 2) since snapshot")
+            app._reset_trace_cursor()
+            assert app._alarms == {} and app._scheduler_refusals == {}
+            assert not app._trace_from_snapshot
+            await details(None)
 
     asyncio.run(scenario())
 

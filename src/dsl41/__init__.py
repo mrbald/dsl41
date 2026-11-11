@@ -55,6 +55,7 @@ docs/runner-design.md ss14):
   display_time - host-local CLI/TUI timestamps; wire and engine time stay UTC (DL-473)
   runner_tui - the ss11 Textual TUI, a client of the control socket only
                (optional `dsl41[ui]` extra)
+  start_refusals - pure scheduler-refusal counts shared by the TUI and rehearse
   runner_wrapper - per-run Tier-0 lifecycle recorder; STDLIB-ONLY, spawned
                by file path (DL-42 boundary)
   runner_procid - durable records + process identity used by the wrapper;
