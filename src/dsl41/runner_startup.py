@@ -305,12 +305,23 @@ def check_restart_preflight(
     *,
     revision: int,
     hook_configured: bool = False,
+    lint_ignore: Iterable[str] = (),
 ) -> list[PreflightItem]:
-    """Validate execution of active and pending catalogs before recovery effects."""
+    """Validate execution of active and pending catalogs before recovery effects. A restart
+    reports active warnings without applying lint refusal policy (DL-466)."""
     from dsl41.runner_preflight import preflight
+    from dsl41.lint import LintReport, rule_known_unsupported
 
     if clock.virtual:
         return []
+    known = LintReport(
+        violations=rule_known_unsupported(
+            catalog,
+            job_shell=profile.job_shell,
+            job_profile=profile.job_profile,
+            std_file_mode=profile.std_file_mode,
+        )
+    ).suppress(lint_ignore)
     items = preflight(
         catalog,
         as_machine=frozenset(profile.as_machine),
@@ -325,6 +336,7 @@ def check_restart_preflight(
         std_file_mode=profile.std_file_mode,
         hook_configured=hook_configured,
         set_job_attribute_environmentals=profile.set_job_attribute_environmentals,
+        known_unsupported=known.violations,
     )
     errors = [item for item in items if item.severity == "ERROR"]
     if errors:
@@ -562,6 +574,7 @@ async def resume_run(
     stored_sources: bool = False,
     hook_configured: bool = False,
     preflight_warnings: list[PreflightItem] | None = None,
+    lint_ignore: Iterable[str] = (),
 ) -> Engine:
     """Restart (module docstring). `grace_seconds`, when given, is the live ladder's TERM grace
     for this incarnation over the settings' `grace_term_s`. Returns an Engine with the catch-up's steps queued; the
@@ -596,6 +609,7 @@ async def resume_run(
             stored_sources=stored_sources,
             hook_configured=hook_configured,
             preflight_warnings=preflight_warnings,
+            lint_ignore=lint_ignore,
             inspections=inspections,
         )
     except BaseException:
@@ -635,6 +649,7 @@ async def _resume_under_lock(
     validate_only: bool = False,
     hook_configured: bool = False,
     preflight_warnings: list[PreflightItem] | None = None,
+    lint_ignore: Iterable[str] = (),
 ) -> Engine:
     """DL-433: validate a private copy; activate only under the canonical lock."""
     refuse_old_root(run_root)
@@ -710,7 +725,12 @@ async def _resume_under_lock(
         catalog = configuration.catalog
     _check_clock_domain(meta, clock)
     active_warnings = check_restart_preflight(
-        configuration.catalog, profile, clock, revision=rev, hook_configured=hook_configured
+        configuration.catalog,
+        profile,
+        clock,
+        revision=rev,
+        hook_configured=hook_configured,
+        lint_ignore=lint_ignore,
     )
     if journal.open.update is not None and opened_update is None:
         from dsl41.runner_update import reopen_plan

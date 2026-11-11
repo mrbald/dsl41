@@ -502,7 +502,9 @@ def policy_report(estate: Estate) -> tuple[LintPolicy, LintReport]:
     return policy, report
 
 
-def emit_policy(estate: Estate, *, refuse: bool = True, summarize: bool = False) -> bool:
+def emit_policy(
+    estate: Estate, *, refuse: bool = True, summarize: bool = False
+) -> tuple[bool, LintReport]:
     policy, report = policy_report(estate)
     typer.echo(policy.describe(), err=True)
     for diagnostic in estate.metadata.get("diagnostics", []):
@@ -518,7 +520,7 @@ def emit_policy(estate: Estate, *, refuse: bool = True, summarize: bool = False)
     blocking = any(policy.blocks(v.severity) for v in report.violations)
     if blocking and refuse:
         raise typer.Exit(2)
-    return blocking
+    return blocking, report
 
 
 def profile_of(estate: Estate) -> RuntimeProfile:
