@@ -4,7 +4,7 @@ the engine's store, its attempt tier, its oracle and its scheduler.
 An update request is one step of the engine's single writer (`Engine.request_update`). Its
 admission reads the version 2 plan `reread` stored under `plans/<token>/`, loads its captured
 main-config inputs (DL-486), and re-checks the runtime
-preconditions against the engine's state now (`reload_update.admission_check`). A refusal is the
+preconditions against the engine's state now (`EngineUpdate.admit`). A refusal is the
 reply and writes nothing. An admission appends `config intent` (the token, the stop set with the
 attempt each stop interrupts, the dispatch filter, the admitted box roots (DL-489), and the
 request's id and fingerprint), then
@@ -70,7 +70,7 @@ from dsl41.reload_update import (
     OnStop,
     Refused,
     UpdateTier,
-    admission_check,
+    admission_data,
     apply_application,
     live_of,
     plan_application,
@@ -356,8 +356,10 @@ class EngineUpdate:
                 code="stale_plan",
                 error=f"plan {request.token} predates this engine: run update again",
             )
-        if request.expect != engine.config_rev or opened.plan.get("live_digest") != (
-            catalog_hash_v2(engine.oracle.catalog)
+        if (
+            request.expect != engine.config_rev
+            or opened.plan.get("live_rev") != engine.config_rev
+            or opened.plan.get("live_digest") != catalog_hash_v2(engine.oracle.catalog)
         ):
             # the precondition names the rev the caller read; the plan names the rev and the
             # catalog reread saw, checked before anything is written, so the application's own
@@ -386,14 +388,11 @@ class EngineUpdate:
                 Admitted(request.token, (), frozenset()),
                 unchanged={"rev": engine.config_rev, "catalog_hash": applied.catalog_hash},
             )
-        decision = admission_check(
+        decision = admission_data(
             opened.plan,
             live=self.live(),
             candidate=opened.estate.catalog,
-            open_update=None,
         )
-        # The revision and in-progress gates above already passed (DL-463).
-        assert isinstance(decision, Admitted)
         self._begin(request, opened, decision)
         answer = self._answer = UpdateAnswer(decision)
         answer.applied = asyncio.get_running_loop().create_future()

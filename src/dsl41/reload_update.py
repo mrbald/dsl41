@@ -154,19 +154,14 @@ def _touched(plan: Plan) -> frozenset[str]:
     return frozenset([*plan.added, *(change.name for change in plan.changed), *plan.removed])
 
 
-def admission_check(
+def admission_data(
     plan_doc: Mapping[str, Any],
     *,
     live: Live,
     candidate: CatalogIR,
-    open_update: str | None,
-) -> Admitted | Refused:
-    """Admit one current prepared candidate and recompute its stop set (DL-463)."""
+) -> Admitted:
+    """Build admitted data for a current prepared candidate and its stop set (DL-463)."""
     token = str(plan_doc["token"])
-    if open_update is not None:
-        return Refused(token, UPDATE_IN_PROGRESS, (open_update,))
-    if plan_doc["live_rev"] != live.revision:
-        return Refused(token, STALE_PLAN)
     plan = plan_of(plan_doc, live.catalog)
     stops = stop_set(plan, live, candidate)
     runs = tuple((job, live.runs.get(job, 0)) for job in stops)
@@ -611,7 +606,7 @@ __all__ = [
     "UpdateIntents",
     "UpdateRecord",
     "UpdateTier",
-    "admission_check",
+    "admission_data",
     "apply_application",
     "flags_of",
     "live_of",
