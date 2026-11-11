@@ -15,8 +15,6 @@ State handled outside a state machine and duplicated logic make the whole system
   Next: a `chart-simplify` review of the UPDATE chart, then an engineer plan.
 - **FEAT-9**: Share one pure per-job effect calculation between reread forecasts and update execution (`src/dsl41/reread_worker.py:25-133`, `src/dsl41/runner_update.py:437-687`).
   Next: an engineer plan, after FEAT-10's.
-- **FEAT-16**: Emit known-unsupported findings from one pipeline instead of filtering duplicates at consumers (`src/dsl41/runner_preflight.py:903-915`, `src/dsl41/reload_plan.py:292`).
-  Next: an engineer plan.
 - **FEAT-28**: Give Engine ownership of update cancellation/reaping and share common live/resume update setup ([update](src/dsl41/runner_update.py)); preserve distinct live/recovery selection and existing ordering.
   Next: an engineer plan with FEAT-10, which touches the same code.
 - **FEAT-30**: Establish ownership of the unintegrated [process preparation](src/dsl41/runner_adapters.py) before deletion or activation. If activation is authorized, share path resolution and trace a real dispatch through it.
@@ -97,6 +95,7 @@ In fix order. BUG-4, BUG-5 and BUG-6 go with BUG-1 as one clock pass. BUG-20, BU
 - **BUG-63**: `test_kill_signals_update_affects_later_kills_only` left its ten child processes running after three runs on one day; cause unknown (`tests/test_main_config_update.py:1054`).
 - **BUG-64**: After an engine restart whose new trace is already longer than the terminal UI's cursor, the UI does not see the restart: it skips the earlier entries, and a job's count of scheduler refusals can include entries twice (`src/dsl41/runner_tui.py`, the cursor check; DL-484).
 - **BUG-65**: A start that a run window postponed carries no origin when it is refused at the opening, so it prints every time and `rehearse` does not list it. The timer would have to carry the source, which changes derived state: do it with the next state-machine version step (DL-484).
+- **BUG-66**: Three tests pin a start's whole stderr and take out only the pidfd notice (`tests/test_main_config.py`, `without_cookie_scan_notice`). On a Linux without pidfd, such as EL7's kernel 3.10, the notice reads `os.kill (start-token check)` and the tests fail there.
 
 ### Unranked
 

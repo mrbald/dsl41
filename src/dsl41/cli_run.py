@@ -45,9 +45,10 @@ from dsl41.status_hook import HookSettings, StatusHooks, notify_once
 
 if TYPE_CHECKING:
     import asyncio
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Sequence
     from datetime import datetime
 
+    from dsl41.lint import Violation
     from dsl41.oracle_state import Event, TraceEntry
     from dsl41.rehearse_check import CadencePolicy
     from dsl41.runner_access import AccessControl
@@ -106,7 +107,7 @@ def _preflight_or_exit(
     std_file_mode: str = "append",
     hook_configured: bool = False,
     set_job_attribute_environmentals: bool = True,
-    reported_policy: LintPolicy | None = None,
+    known_unsupported: Sequence[Violation] | None = None,
 ) -> "list[PreflightItem]":
     """Print ss8 findings; exit 2 on any ERROR; return the WARNs for the caller to journal.
 
@@ -136,11 +137,10 @@ def _preflight_or_exit(
         std_file_mode=cast("Any", std_file_mode),
         hook_configured=hook_configured,
         set_job_attribute_environmentals=set_job_attribute_environmentals,
+        known_unsupported=known_unsupported,
     )
-    if reported_policy and "known-unsupported" in reported_policy.ignore:
-        items = [item for item in items if item.code != "known-unsupported"]
     return _preflight_items_or_exit(
-        items, warns_to_stderr=warns_to_stderr, known_reported=reported_policy is not None
+        items, warns_to_stderr=warns_to_stderr, known_reported=known_unsupported is not None
     )
 
 
@@ -485,7 +485,7 @@ def _run_main_config_checked(path: Path, *, ui: bool, hooks: HookSettings, raw: 
         catalog = CatalogIR() if estate is None else estate.catalog
         warns = []
         if estate is not None:
-            main_config.emit_policy(estate, summarize=True)
+            _, report = main_config.emit_policy(estate, summarize=True)
             warns = _preflight_or_exit(
                 catalog,
                 execution=True,
@@ -502,7 +502,7 @@ def _run_main_config_checked(path: Path, *, ui: bool, hooks: HookSettings, raw: 
                 std_file_mode=profile.std_file_mode,
                 hook_configured=hooks.status_hook is not None,
                 set_job_attribute_environmentals=profile.set_job_attribute_environmentals,
-                reported_policy=LintPolicy.model_validate(estate.metadata["config"]["lint"]),
+                known_unsupported=report.by_code("known-unsupported"),
             )
         if ui:
             import_tui_or_exit_2()
@@ -1030,15 +1030,10 @@ async def _serve_run(
                     hook_configured=hook_settings is not None
                     and hook_settings.status_hook is not None,
                     preflight_warnings=restart_warnings,
+                    lint_ignore=captured_estate.metadata["config"]["lint"]["ignore"]
+                    if captured_estate is not None
+                    else (),
                 )
-                # DL-466: restart reports active warnings without applying lint refusal policy.
-                if (
-                    captured_estate is not None
-                    and "known-unsupported" in captured_estate.metadata["config"]["lint"]["ignore"]
-                ):
-                    restart_warnings = [
-                        item for item in restart_warnings if item.code != "known-unsupported"
-                    ]
                 printed = {(item.code, item.job, item.message) for item in warns}
                 _restart_preflight_items_or_exit(
                     [
@@ -1654,7 +1649,7 @@ def rehearse(
                     "rehearsal --run-root must differ from the engine run root and cannot contain or lie inside it"
                 )
             )
-        main_config.emit_policy(prepared)
+        _, report = main_config.emit_policy(prepared)
         profile = main_config.profile_of(prepared)
         tz_aliases: dict[str, str] | None = tz_aliases_of(profile)
         timezone_map_source = "estate.timezone_map"
@@ -1698,9 +1693,7 @@ def rehearse(
         job_shell=profile.job_shell if main_path is not None else None,
         job_profile=profile.job_profile if main_path is not None else None,
         std_file_mode=profile.std_file_mode if main_path is not None else "append",
-        reported_policy=LintPolicy.model_validate(prepared.metadata["config"]["lint"])
-        if prepared is not None
-        else None,
+        known_unsupported=report.by_code("known-unsupported") if prepared is not None else None,
     )
     try:
         adapter, events = _scenario_adapter(scenario)

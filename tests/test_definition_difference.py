@@ -155,7 +155,7 @@ def test_shared_reference_and_setting_are_sent_once_with_bounded_values(monkeypa
         new.jobs[name] = new_job.model_copy(update={"name": name})
     monkeypatch.setattr(reread_worker, "preflight_items", lambda *a: [])
     monkeypatch.setattr(reload_plan, "preflight_items", lambda *a: [])
-    monkeypatch.setattr(reload_plan, "_lint_findings", lambda *a: [])
+    monkeypatch.setattr(reload_plan, "_lint_findings", lambda *a: ([], []))
     live = Live(old, {"job_env": {"V": "x" * 6000}}, 1, {})
     candidate = Estate(new, {"job_env": {"V": "y" * 6000}}, ())
     view = reread_worker.preview(candidate, live)
@@ -265,7 +265,7 @@ def test_whole_difference_budget_for_5000_jobs_and_300_settings(monkeypatch, dis
                 new.jobs[name].passthrough[key] = f"new-{index}-{field}-" + "y" * 200
     monkeypatch.setattr(reread_worker, "preflight_items", lambda *a: [])
     monkeypatch.setattr(reload_plan, "preflight_items", lambda *a: [])
-    monkeypatch.setattr(reload_plan, "_lint_findings", lambda *a: [])
+    monkeypatch.setattr(reload_plan, "_lint_findings", lambda *a: ([], []))
     before = {"job_env": {f"V_{i:03}": f"old-secret-{i}" for i in range(300)}}
     after = {"job_env": {f"V_{i:03}": f"new-secret-{i}" for i in range(300)}}
     view = reread_worker.preview(Estate(new, after, ()), Live(old, before, 1, {}))
@@ -295,7 +295,7 @@ def test_whole_difference_budget_for_5000_jobs_and_300_settings(monkeypatch, dis
     ],
 )
 def test_environment_introduction_removal_and_edit_expose_names_only(monkeypatch, before, after):
-    monkeypatch.setattr(reload_plan, "_lint_findings", lambda *a: [])
+    monkeypatch.setattr(reload_plan, "_lint_findings", lambda *a: ([], []))
     monkeypatch.setattr(reload_plan, "preflight_items", lambda *a: [])
     catalog = lower_source(JOB)
     details = reread_worker.definition_changes(

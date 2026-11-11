@@ -107,7 +107,8 @@ def lint(
             candidate = prepare(main_path)
         except RereadRefused as exc:
             raise typer.Exit(refuse(exc)) from exc
-        raise typer.Exit(1 if emit_policy(candidate, refuse=False) else 0)
+        blocking, _ = emit_policy(candidate, refuse=False)
+        raise typer.Exit(1 if blocking else 0)
     files, properties, timezone, timezone_map, _ = estate_args(
         manifest, environment, files, properties, timezone, timezone_map
     )

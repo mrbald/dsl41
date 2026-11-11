@@ -8,7 +8,7 @@ import shlex
 import subprocess
 import sys
 import time
-from contextlib import closing
+from contextlib import closing, nullcontext
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -515,14 +515,24 @@ def test_02_shell_tokens_stay_literal(tmp_path: Path) -> None:
     }
 
 
-def boot_and_stop(path: Path, *, pending: bool = False) -> str:
+def without_cookie_scan_notice(stderr: str) -> str:
+    """Exclude the Linux pidfd diagnostic from exact policy-output assertions (DL-436)."""
+    return "".join(
+        line
+        for line in stderr.splitlines(keepends=True)
+        if line != "dsl41: cookie scan signalling: pidfd\n"
+    )
+
+
+def boot_and_stop(path: Path, *, pending: bool = False, stderr_log: Path | None = None) -> str:
     log = path.parent / "boot.log"
     with (
         log.open("w") as output,
+        stderr_log.open("w") if stderr_log else nullcontext(subprocess.STDOUT) as errors,
         subprocess.Popen(
             [sys.executable, "-m", "dsl41", "run", "--config", str(path)],
             stdout=output,
-            stderr=subprocess.STDOUT,
+            stderr=errors,
         ) as child,
     ):
         try:
@@ -594,7 +604,7 @@ def test_start_and_reread_share_counts_without_changing_answers(
             main.emit_policy(candidate, summarize=True)
         assert caught.value.exit_code == 2
     else:
-        assert not main.emit_policy(candidate, summarize=True)
+        assert not main.emit_policy(candidate, summarize=True)[0]
     assert capsys.readouterr().err.splitlines() == expected
     live = Live(candidate.catalog, candidate.settings, 1, {}, launch={})
     answer = {
@@ -790,6 +800,53 @@ def test_known_unsupported_lint_policy(
         )
 
 
+@pytest.mark.parametrize("supplied", [None, [], ["routed"]])
+def test_preflight_known_unsupported_uses_supplied_findings(supplied):
+    from unittest.mock import patch
+
+    from dsl41 import lint
+    from dsl41.ir import lower_source
+    from dsl41.runner_preflight import preflight
+
+    catalog = lower_source(JOB + "group: batch\n")
+    findings = (
+        [Violation(code="known-unsupported", severity="warn", message="routed", jobs=["B"])]
+        if supplied
+        else supplied
+    )
+    with patch.object(lint, "rule_known_unsupported", wraps=lint.rule_known_unsupported) as rule:
+        items = preflight(catalog, execution=False, known_unsupported=findings)
+    assert rule.call_count == int(supplied is None)
+    if supplied is None:
+        assert [item.model_dump() for item in items] == [
+            {
+                "severity": "WARN",
+                "code": "known-unsupported",
+                "job": "A",
+                "message": "job A: group: known but unsupported; it has no effect in this release",
+            }
+        ]
+    else:
+        assert [item.model_dump() for item in items] == (
+            [{"severity": "WARN", "code": "known-unsupported", "job": "B", "message": "routed"}]
+            if supplied
+            else []
+        )
+
+
+def test_main_preflight_does_not_evaluate_known_unsupported(tmp_path, monkeypatch):
+    from dsl41 import lint
+    from dsl41.reload_plan import preflight_items
+
+    path = estate_file(tmp_path, engine='job_shell = "/bin/sh"\n')
+    (tmp_path / "a.jil").write_text(JOB + "group: batch\n")
+    candidate = main.prepare(path)
+    monkeypatch.setattr(
+        lint, "rule_known_unsupported", lambda *a, **kw: pytest.fail("main preflight repeated lint")
+    )
+    assert preflight_items(candidate, T0) == []
+
+
 def test_known_unsupported_keeps_other_reread_findings(tmp_path, capsys):
     from dsl41.reread_worker import preview
 
@@ -817,7 +874,13 @@ def test_known_unsupported_keeps_other_reread_findings(tmp_path, capsys):
 
 @pytest.mark.parametrize(
     "configured,policy,ignored",
-    [(False, "none", False), (True, "none", False), (True, "warn", False), (True, "warn", True)],
+    [
+        (False, "none", False),
+        (True, "none", False),
+        (True, "none", True),
+        (True, "warn", False),
+        (True, "warn", True),
+    ],
 )
 def test_known_unsupported_rehearse_reports_once(tmp_path, configured, policy, ignored):
     path = estate_file(
@@ -829,9 +892,133 @@ def test_known_unsupported_rehearse_reports_once(tmp_path, configured, policy, i
     selection = ["--config", str(path)] if configured else [str(tmp_path / "a.jil")]
     result = CliRunner().invoke(app, ["rehearse", *selection, "--format", "json", "--hours", "1"])
     assert result.exit_code == (2 if policy == "warn" and not ignored else 0), result.output
-    assert result.stderr.count("job A: group:") == int(not ignored)
+    message = "job A: group: known but unsupported; it has no effect in this release"
+    if configured:
+        expected = f"lint policy: refuse={policy}; ignore=L011"
+        expected += ",known-unsupported\n" if ignored else "\n"
+        if not ignored:
+            expected += f"{tmp_path / 'a.jil'}:1: known-unsupported warn: {message}\n"
+    else:
+        expected = f"preflight WARN [known-unsupported] A: {message}\n"
+    assert result.stderr == expected
     if result.exit_code == 0:
         json.loads(result.stdout)
+
+
+@pytest.mark.parametrize("ignored", [False, True])
+def test_known_unsupported_start_journals_full_order(short_root, ignored):
+    from store_surgery import rows
+
+    ignore = ["L010", *(["known-unsupported"] if ignored else [])]
+    path = estate_file(
+        short_root,
+        engine='job_shell = "/bin/sh"\n',
+        lint=f"ignore = {json.dumps(ignore)}\n",
+    )
+    (short_root / "a.jil").write_text(
+        JOB
+        + "group: batch\ncondition: s(B)\n"
+        + JOB.replace("insert_job: A", "insert_job: B")
+        + "condition: s(A)\n"
+    )
+    errors = short_root / "stderr.log"
+    output = boot_and_stop(path, stderr_log=errors)
+    expected = f"lint policy: refuse=none; ignore={','.join(ignore)}\nL022 info: 2 findings\n"
+    if not ignored:
+        expected += "known-unsupported warn: 2 findings\n"
+    expected += f"full list: dsl41 lint --config {shlex.quote(str(path))}\n"
+    assert without_cookie_scan_notice(errors.read_text()) == expected
+    cycle = (
+        "cycle in the AND-success skeleton (A -> B -> A): legal AutoSys"
+        " (edge-triggered re-runs, DL-13/L010); `plan` is disabled for this estate"
+    )
+    assert output.startswith(f"preflight WARN [skeleton-cycle]: {cycle}\n")
+    warnings = [body["items"] for _, kind, body in rows(short_root / "run") if kind == "preflight"]
+    known = [
+        {
+            "severity": "WARN",
+            "code": "known-unsupported",
+            "job": "A",
+            "message": "job A: group: known but unsupported; it has no effect in this release",
+        },
+        {
+            "severity": "WARN",
+            "code": "known-unsupported",
+            "job": None,
+            "message": "engine.job_shell: known but unsupported; it has no effect in this release",
+        },
+    ]
+    assert warnings == [
+        [
+            *([] if ignored else known),
+            {"severity": "WARN", "code": "skeleton-cycle", "job": None, "message": cycle},
+        ]
+    ]
+
+
+@pytest.mark.parametrize("ignored", [False, True])
+def test_known_unsupported_update_preparation_full_findings(tmp_path, ignored):
+    from dsl41.reread_worker import preview
+
+    ignore = ["L011", *(["known-unsupported"] if ignored else [])]
+    path = estate_file(
+        tmp_path,
+        engine='job_shell = "/bin/sh"\n',
+        lint=f"ignore = {json.dumps(ignore)}\n",
+    )
+    source = JOB + 'group: batch\ndate_conditions: 1\nstart_times: "08:00"\ntimezone: GMT+1\n'
+    jil = tmp_path / "a.jil"
+    jil.write_text(source)
+    candidate = main.prepare(path)
+    live = live_of(candidate)
+    view = preview(candidate, live, include_definition_changes=False)
+    group = "job A: group: known but unsupported; it has no effect in this release"
+    shell = "engine.job_shell: known but unsupported; it has no effect in this release"
+    zone = (
+        "timezone 'GMT+1' read as a POSIX fixed offset = UTC-01:00"
+        " (POSIX offsets are west-positive: GMT+5 means 5h WEST of GMT)"
+    )
+    assert "lint_summary" not in view
+    assert view["lint_messages"] == [
+        f"lint policy: refuse=none; ignore={','.join(ignore)}",
+        *(
+            []
+            if ignored
+            else [f"{jil}:1: known-unsupported warn: {group}", f"known-unsupported warn: {shell}"]
+        ),
+        f"preflight WARN [timezone] A: {zone}",
+    ]
+    result = reread(tmp_path, live, tmp_path / "plans", candidate=candidate, start=T0)
+    document = read_plan(tmp_path / "plans", result.token)
+    assert document["preflight_warnings"] == [{"code": "timezone", "job": "A", "message": zone}]
+    assert document["lint_findings"] == (
+        []
+        if ignored
+        else [
+            {
+                "code": "known-unsupported",
+                "severity": "warn",
+                "message": group,
+                "jobs": ["A"],
+                "detail": "group",
+                "span": {
+                    "file": str(jil),
+                    "line_start": 1,
+                    "line_end": 8,
+                    "byte_start": 0,
+                    "byte_end": len(source.encode()) - 1,
+                },
+            },
+            {
+                "code": "known-unsupported",
+                "severity": "warn",
+                "message": shell,
+                "jobs": [],
+                "span": None,
+                "detail": "job_shell",
+            },
+        ]
+    )
 
 
 @pytest.mark.parametrize("ignored", [False, True])
@@ -866,22 +1053,26 @@ def test_known_unsupported_restart_reports_without_refusal(short_root, ignored):
     )
     engine.journal.close()
     (short_root / "a.jil").write_text(JOB + "application: pending\n")
-    output = boot_and_stop(path)
+    errors = short_root / "stderr.log"
+    output = boot_and_stop(path, stderr_log=errors)
     assert "engine up; control socket:" in output
-    assert output.count("known-unsupported warn: 5 findings") == int(not ignored)
-    assert output.count(
-        f"files on disk (may differ from applied estate until update): dsl41 lint --config {path}"
-    ) == int(not ignored)
+    stderr = (
+        ""
+        if ignored
+        else (
+            "known-unsupported warn: 5 findings\n"
+            f"files on disk (may differ from applied estate until update): dsl41 lint --config {path}\n"
+        )
+    )
+    assert without_cookie_scan_notice(errors.read_text()) == (
+        stderr + f"1 pending source changes; run dsl41 reread -S {root / 'control.sock'}\n"
+    )
     assert "job A: group:" not in output
     assert "job B: group:" not in output
     assert "job A: application:" not in output
     assert "preflight WARN [skeleton-cycle]: cycle in the AND-success skeleton" in output
     warnings = [
-        item
-        for _, kind, body in rows(root)
-        if kind == "preflight"
-        for item in body["items"]
-        if item["code"] == "known-unsupported"
+        item for _, kind, body in rows(root) if kind == "preflight" for item in body["items"]
     ]
     expected = [
         {
@@ -900,7 +1091,16 @@ def test_known_unsupported_restart_reports_without_refusal(short_root, ignored):
             "message": "engine.job_shell: known but unsupported; it has no effect in this release",
         }
     ]
-    assert warnings == ([] if ignored else expected)
+    assert warnings == [
+        *([] if ignored else expected),
+        {
+            "severity": "WARN",
+            "code": "skeleton-cycle",
+            "job": None,
+            "message": "cycle in the AND-success skeleton (A -> B -> A): legal AutoSys"
+            " (edge-triggered re-runs, DL-13/L010); `plan` is disabled for this estate",
+        },
+    ]
     assert active_configuration(root).catalog == captured.catalog
 
 

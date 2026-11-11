@@ -18,10 +18,10 @@ import sys
 import graphlib
 import socket as socket_mod
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel
 
@@ -47,6 +47,9 @@ from dsl41.oracle_state import OracleError
 from dsl41.runner_scheduler import _DAY_CODES
 from dsl41.semantics import SemanticSwitches
 from dsl41.timezones import city_candidates, map_entry, resolve_timezone, to_local
+
+if TYPE_CHECKING:
+    from dsl41.lint import Violation
 
 
 # ------------------------------------------------------------------ preflight (ss8)
@@ -884,6 +887,7 @@ def preflight(
     std_file_mode: StreamMode = "append",
     hook_configured: bool = False,
     set_job_attribute_environmentals: bool = True,
+    known_unsupported: Sequence[Violation] | None = None,
 ) -> list[PreflightItem]:
     """ss8: refuse loudly, run honestly. `execution=False` (rehearse) skips the machine, owner
     and execution-input rules; calendars, timezones and construction still gate.
@@ -901,6 +905,8 @@ def preflight(
     some members here: `strict` refuses it, `local-eligible` runs it here with a WARN. The other
     verdicts ignore it.
 
+    `known_unsupported` reuses supplied lint findings, including an empty sequence; None
+    evaluates the rule here (DL-466).
     The per-job rules are independent and run in a fixed order (DL-178t)."""
     if start is None:
         # no anchor means now (DL-213)
@@ -919,6 +925,10 @@ def preflight(
         items.extend(_resource_preflight(name, job, catalog))
     from dsl41.lint import rule_known_unsupported
 
+    if known_unsupported is None:
+        known_unsupported = rule_known_unsupported(
+            catalog, job_shell=job_shell, job_profile=job_profile, std_file_mode=std_file_mode
+        )
     items.extend(
         PreflightItem(
             severity="WARN",
@@ -926,9 +936,7 @@ def preflight(
             job=finding.jobs[0] if finding.jobs else None,
             message=finding.message,
         )
-        for finding in rule_known_unsupported(
-            catalog, job_shell=job_shell, job_profile=job_profile, std_file_mode=std_file_mode
-        )
+        for finding in known_unsupported
     )
     items.extend(_oracle_preflight(catalog, semantics))
     items.extend(_skeleton_cycle_preflight(catalog))
