@@ -118,6 +118,19 @@ its admission `seq` is not the SQLite row sequence. `check_record` refuses
 unknown store kinds, engine/config events, outcome kinds and plan kinds.
 The input event alphabet is strict too (DL-158).
 
+The `config intent` reader ignores unknown fields. Its optional `restart_boxes`
+is a sorted list of unique names, `[]` included, used as stored; only an absent
+key recomputes the roots. Record and snapshot readers refuse a malformed present
+value, so it also stops history, replay and subscribe backfill. A missing key is
+accepted by every reader. Before recovery acts, each name must be a BOX of the
+applied or candidate catalog, or restart refuses by name (DL-489). Snapshot
+refusals name the store path and snapshot sequence. Snapshots carry the intent
+body unchanged. State version stays 28; replay and history do not use the roots
+to derive state. An older state-28 build ignores the key
+and recomputes, including the old crash-window defect. Let an open update finish
+(`status.update` absent) before rollback or takeover by a standby on the older
+package (DL-489).
+
 **Main-config captures and plans (DL-437, DL-438).** New configuration rows use version 3.
 A required `job_order` list names every catalog job exactly once. The catalog
 map remains canonical and sorted; readers rebuild it in `job_order` order

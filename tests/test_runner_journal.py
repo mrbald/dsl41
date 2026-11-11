@@ -413,6 +413,73 @@ def test_a_snapshot_round_trips_and_a_foreign_one_is_refused_by_name() -> None:
         decode_snapshot(7, b"{}", where="here")
 
 
+@pytest.mark.parametrize("roots", [None, "BX", {}, [7], [["BX"]], ["BX", "BX"], ["Z", "BX"]])
+def test_invalid_update_box_roots_refuse_in_records_and_snapshots(roots) -> None:
+    """DL-489: an optional field is checked in both retained forms before recovery."""
+    store = MemoryStore()
+    journal = Journal(store)
+    intent = {"event": "intent", "restart_boxes": roots}
+    with pytest.raises(EngineError, match="config intent restart_boxes must be a sorted list"):
+        journal.append(Record(T0, "config", None, None, intent))
+    assert store.last_seq() == 0
+    table = OpenTable()
+    table.update = intent
+    data = encode_snapshot(
+        Oracle(lower_source(_SOLO_JIL)),
+        frontiers=Frontiers(),
+        position=Position(),
+        config_rev=1,
+        open_table=table,
+    )
+    with pytest.raises(
+        EngineError,
+        match=r"run/engine\.db: unreadable snapshot at seq 7: config intent restart_boxes must be a sorted list",
+    ):
+        decode_snapshot(7, data, where="run/engine.db")
+
+
+@pytest.mark.parametrize(
+    "extension", [{}, {"restart_boxes": []}, {"restart_boxes": ["BX"]}, {"future": 7}]
+)
+def test_update_box_roots_do_not_change_replay_or_snapshot_rows(extension) -> None:
+    """DL-489: keyed, keyless and unknown-field bodies have the same log-to-state projection."""
+    from dsl41.runner_journal import oracle_rows
+    from dsl41.runner_config import RuntimeProfile
+    from dsl41.runner_admission import apply_attempt
+
+    configuration = Configuration(catalog=lower_source(_SOLO_JIL), profile=RuntimeProfile())
+    seen = []
+    for fields in ({}, extension):
+        store = MemoryStore()
+        store.put_config(configuration.to_bytes(), configuration.digest())
+        journal = Journal(store)
+        attempt = _attempt(1, ev("STARTJOB", job="j1"))
+        journal.admission(attempt, apply_attempt(Oracle(configuration.catalog), attempt).result)
+        intent = {"event": "intent", "token": "t", **fields}
+        journal.append(Record(T0, "config", None, None, intent))
+        replayed = replay_store(store, where="box roots")
+        data = encode_snapshot(
+            replayed.oracle,
+            frontiers=replayed.replay.frontiers,
+            position=journal.position,
+            config_rev=1,
+            open_table=journal.open,
+        )
+        snapshot = decode_snapshot(store.last_seq(), data, where="box roots")
+        assert snapshot.update == snapshot.open.update == {**intent, "seq": store.last_seq()}
+        assert snapshot.open.update is not None
+        seen.append(
+            (
+                oracle_rows(replayed.oracle),
+                snapshot.rows,
+                snapshot.open.to_payload(),
+                {key: value for key, value in snapshot.open.update.items() if key not in fields},
+                replayed.records,
+            )
+        )
+    assert seen[0] == seen[1]
+
+
 # ------------------------------------------------------------- 3. catalog_hash
 
 
