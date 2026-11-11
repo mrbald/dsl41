@@ -29,7 +29,7 @@ from dsl41.runner_startup import active_configuration, resume_run, start_run
 from dsl41.runner_store import Record, SqliteStore
 from dsl41.runner_update import UpdateRequest, store_config
 from store_surgery import rows
-from test_main_config import JOB, config_file, estate_file
+from test_main_config import JOB, config_file, estate_file, without_cookie_scan_notice
 
 pytestmark = pytest.mark.usefixtures("cli_env")
 
@@ -1083,7 +1083,9 @@ def test_k1_captured_compiler_changes_keep_applied_ir(
     from dsl41.reload_plan import RereadRefused
 
     path = estate_file(short_root)
-    (short_root / "a.jil").write_text(JOB + "\ninsert_job: B\njob_type: c\ncommand: true\n")
+    (short_root / "a.jil").write_text(
+        JOB + "group: batch\n\ninsert_job: B\njob_type: c\ncommand: true\n"
+    )
     root, captured = k_seed(path)
     stored = active_configuration(root)
     before = read_config_row(root, 1)
@@ -1135,6 +1137,20 @@ def test_k1_captured_compiler_changes_keep_applied_ir(
     result = CliRunner().invoke(app, ["run", "--config", str(path)])
     assert result.exit_code == 0, result.output
     assert seen == [1] and "engine up; control socket:" in result.output
+    assert without_cookie_scan_notice(result.stderr) == (
+        "known-unsupported warn: 1 finding\n"
+        f"files on disk (may differ from applied estate until update): dsl41 lint --config {path}\n"
+    )
+    assert [body["items"] for _, kind, body in rows(root) if kind == "preflight"] == [
+        [
+            {
+                "severity": "WARN",
+                "code": "known-unsupported",
+                "job": "A",
+                "message": "job A: group: known but unsupported; it has no effect in this release",
+            },
+        ]
+    ]
     assert read_config_row(root, 1) == before
     assert main.encoded_parts(captured) == stored.source_capture
 

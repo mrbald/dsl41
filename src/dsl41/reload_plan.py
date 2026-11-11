@@ -67,7 +67,7 @@ from dsl41.ast_jil import JilFile, JilParseError, parse, render_statement
 from dsl41.canon import ARTIFACT_FORMAT_VERSION, CanonError, canonical_bytes, decode
 from dsl41.estate_manifest import ManifestError, read_regular, resolve_manifest
 from dsl41.ir import CatalogIR, LoweringError, lower_catalog
-from dsl41.lint import lint_catalog
+from dsl41.lint import Violation, lint_catalog
 from dsl41.placeholders import PlaceholderError, load_properties, substitute
 from dsl41.reload_diff import Plan, catalog_hash_v2, diff, plan_token, running_boxes
 from dsl41.runner_preflight import PreflightItem, preflight
@@ -280,23 +280,28 @@ def load_estate(
     )
 
 
-def _lint_findings(estate: Estate) -> list[str]:
-    """Findings that refuse under `--strict`: every error and warning; info never counts."""
+def _lint_findings(estate: Estate) -> tuple[list[str], list[Violation]]:
+    """Legacy strict-gate findings and unsupported warnings routed to preflight (DL-466)."""
     base_tz = estate.settings["timezone"]
     aliases = estate.settings["timezone_aliases"]
     assert base_tz is None or isinstance(base_tz, str)
     assert aliases is None or isinstance(aliases, dict)
     report = lint_catalog(estate.catalog, base_tz=base_tz, tz_aliases=aliases)
-    # DL-466: legacy reread reports this warning through preflight, without a lint gate.
-    return [
-        v.render()
-        for v in report.violations
-        if v.severity != "info" and v.code != "known-unsupported"
-    ]
+    return (
+        [
+            v.render()
+            for v in report.suppress({"known-unsupported"}).violations
+            if v.severity != "info"
+        ],
+        report.by_code("known-unsupported"),
+    )
 
 
 def preflight_items(
-    estate: Estate, start: datetime | None, startup_env: Mapping[str, str] | None = None
+    estate: Estate,
+    start: datetime | None,
+    startup_env: Mapping[str, str] | None = None,
+    known_unsupported: Sequence[Violation] | None = None,
 ) -> list[PreflightItem]:
     """Main config checks its launch settings; legacy plans defer them (DL-437, DL-432)."""
     base_tz = estate.settings["timezone"]
@@ -326,10 +331,9 @@ def preflight_items(
             MachinePolicy, estate.metadata.get("launch", {}).get("machine_policy", "strict")
         ),
         as_machine=frozenset(estate.metadata.get("launch", {}).get("as_machine", ())),
+        known_unsupported=() if estate.metadata else known_unsupported,
     )
-    # DL-466: main-config plans own this diagnostic in lint_findings only.
-    dropped = {"known-unsupported"} if estate.metadata else _LAUNCH_CODES
-    return [item for item in items if item.code not in dropped]
+    return items if estate.metadata else [item for item in items if item.code not in _LAUNCH_CODES]
 
 
 def _plan_document(
@@ -436,6 +440,7 @@ def check_reload_candidate(
     estate: Estate, live: Live, start: datetime | None = None
 ) -> list[PreflightItem]:
     """Apply the preparation refusals to preview and update alike (DL-482)."""
+    known_unsupported: Sequence[Violation] = ()
     if estate.metadata:
         from dsl41.main_config import policy_report
 
@@ -455,10 +460,10 @@ def check_reload_candidate(
                 ]
             )
     else:
-        findings = _lint_findings(estate)
+        findings, known_unsupported = _lint_findings(estate)
     if findings:
         raise RereadRefused(findings)
-    items = preflight_items(estate, start, live.path_environment)
+    items = preflight_items(estate, start, live.path_environment, known_unsupported)
     errors = [item for item in items if item.severity == "ERROR"]
     if errors:
         raise RereadRefused(

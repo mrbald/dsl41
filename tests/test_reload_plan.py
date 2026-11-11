@@ -525,13 +525,33 @@ def test_a_preflight_warning_goes_into_plan_json(tmp_path: Path) -> None:
     assert document is not None
     from dsl41.runtime_policy import resolve_job_shell
 
-    warnings = document["preflight_warnings"]
-    unsupported_warnings = [item for item in warnings if item["code"] == "known-unsupported"]
-    assert len(unsupported_warnings) == 1
-    assert unsupported_warnings[0]["job"] == "M1"
     _, shell_warning = resolve_job_shell(None)
-    assert sum(item["code"] == "shell" for item in warnings) == (shell_warning is not None)
-    assert len(warnings) == 1 + (shell_warning is not None)
+    assert document["preflight_warnings"] == [
+        {
+            "code": "known-unsupported",
+            "job": "M1",
+            "message": "job M1: group: known but unsupported; it has no effect in this release",
+        },
+        *(
+            []
+            if shell_warning is None
+            else [
+                {"code": "shell", "job": None, "message": shell_warning},
+            ]
+        ),
+    ]
+
+
+def test_legacy_known_unsupported_does_not_exempt_other_lint_warnings(tmp_path: Path) -> None:
+    estate = _tiny(tmp_path, _BOX + _member("M1"))
+    live = _live(estate)
+    _edit(estate, "a.jil", "job_type: c\n", 'job_type: c\ngroup: batch\nstart_times: "08:00"\n')
+    with pytest.raises(RereadRefused) as refused:
+        _reread(estate, live, tmp_path / "plans")
+    assert len(refused.value.findings) == 1
+    assert "L005 warn:" in refused.value.findings[0]
+    assert "known-unsupported" not in refused.value.findings[0]
+    assert not (tmp_path / "plans").exists()
 
 
 def test_a_job_with_envvars_that_run_refuses_is_refused(tmp_path: Path) -> None:
