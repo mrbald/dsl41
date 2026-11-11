@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -11,7 +12,7 @@ from pydantic import ValidationError
 from dsl41 import cli_run, main_config, runner_preflight, runner_startup
 from dsl41.ir import LoweringError, lower_source
 from dsl41.reload_diff import definition_hash
-from dsl41.reload_plan import Estate, Live, RereadRefused, estate_settings, reread
+from dsl41.reload_plan import Live, RereadRefused, estate_settings, reread
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import EngineError, RealClock
 from dsl41.runner_config import Configuration, RuntimeProfile, runtime_hash
@@ -122,7 +123,7 @@ def test_known_unsupported_ignore_preserves_refusals(tmp_path, attributes, kind,
     candidate = main_config.prepare(path)
     live = Live(candidate.catalog, candidate.settings, 1, {}, launch=candidate.metadata["launch"])
     with pytest.raises(RereadRefused, match=code) as caught:
-        reread(tmp_path, live, tmp_path / "plans", candidate=candidate)
+        reread(live, tmp_path / "plans", candidate=candidate)
     assert "group:" not in str(caught.value)
 
 
@@ -171,14 +172,12 @@ def test_shared_policy_refuses_start_restart_and_reload(
         assert rows(root) == before
     live_catalog = catalog()
     live = Live(live_catalog, estate_settings(None, None, {}, live_catalog), 1, {})
-    candidate_estate = Estate(
-        candidate,
-        settings,
-        (),
-        metadata={"config": {"lint": {"refuse": "none"}}, "non_idempotent": {}, "launch": {}},
+    candidate_estate = replace(
+        main_config.prepare(estate_file(tmp_path)), catalog=candidate, settings=settings
     )
+    live = replace(live, launch=candidate_estate.metadata["launch"])
     with pytest.raises(RereadRefused, match=code):
-        reread(tmp_path, live, tmp_path / "plans", candidate=candidate_estate)
+        reread(live, tmp_path / "plans", candidate=candidate_estate)
     assert not (tmp_path / "plans").exists()
 
 
@@ -282,7 +281,7 @@ def test_reserved_attribute_path_refuses_start_and_reread(
     candidate = main_config.prepare(path)
     live = Live(candidate.catalog, candidate.settings, 1, {}, launch=candidate.metadata["launch"])
     with pytest.raises(RereadRefused, match="runtime-variable.*__job_name"):
-        reread(tmp_path, live, tmp_path / "plans", candidate=candidate)
+        reread(live, tmp_path / "plans", candidate=candidate)
     assert not (tmp_path / "plans").exists() and not (tmp_path / "WRONG_TARGET.out").exists()
 
 
@@ -502,7 +501,7 @@ def test_oversized_decimal_refuses_preflight_start_and_reread(tmp_path, attribut
     candidate = main_config.prepare(path)
     live = Live(candidate.catalog, candidate.settings, 1, {}, launch=candidate.metadata["launch"])
     with pytest.raises(RereadRefused, match=code):
-        reread(tmp_path, live, tmp_path / "plans", candidate=candidate)
+        reread(live, tmp_path / "plans", candidate=candidate)
     assert not (tmp_path / "plans").exists()
 
 
@@ -607,7 +606,7 @@ def test_unrepresentable_soft_or_hard_refuses_real_preflight_start_and_reread(
     candidate = main_config.prepare(path)
     live = Live(candidate.catalog, candidate.settings, 1, {}, launch=candidate.metadata["launch"])
     with pytest.raises(RereadRefused, match="ulimit"):
-        reread(tmp_path, live, tmp_path / "plans", candidate=candidate)
+        reread(live, tmp_path / "plans", candidate=candidate)
     assert not (tmp_path / "plans").exists()
 
 
@@ -714,7 +713,7 @@ def test_reread_refuses_unavailable_explicit_shell(tmp_path):
     candidate = main_config.prepare(path)
     live = Live(candidate.catalog, candidate.settings, 1, {}, launch=candidate.metadata["launch"])
     with pytest.raises(RereadRefused, match="shell"):
-        reread(tmp_path, live, tmp_path / "plans", candidate=candidate)
+        reread(live, tmp_path / "plans", candidate=candidate)
     assert not (tmp_path / "plans").exists()
 
 

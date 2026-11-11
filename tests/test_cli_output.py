@@ -13,7 +13,10 @@ from dsl41 import cli_control, cli_reload
 from dsl41.cli import app
 from dsl41.cli_output import OutputStyle, prepare_status, status_lines
 from dsl41.ir import CatalogIR, lower_source
-from dsl41.reload_plan import Estate, Live, estate_settings
+from dsl41.reload_plan import Live, estate_settings
+from dataclasses import replace
+from dsl41 import main_config
+from test_main_config import estate_file
 from dsl41.reload_update import Admitted, Application, Refused
 from dsl41.reread_worker import preview
 
@@ -179,26 +182,28 @@ def test_brief_is_exactly_the_neutral_renderer(monkeypatch):
     assert brief.stdout == neutral.stdout
 
 
-def candidate_answer(*, changed=True, running=False, settings_only=False, size=1):
+def candidate_answer(tmp_path, *, changed=True, running=False, settings_only=False, size=1):
     text = "".join(
         f"insert_job: j{i}\njob_type: c\ncommand: true\nmachine: localhost\ndate_conditions: 1\nstart_mins: 0\n"
         for i in range(size)
     )
     old = lower_source(text)
     new = lower_source(text.replace("true", "false") if changed and not settings_only else text)
-    candidate = Estate(
-        new,
-        {
+    prepared = main_config.prepare(estate_file(tmp_path))
+    candidate = replace(
+        prepared,
+        catalog=new,
+        settings={
             **estate_settings("UTC", None, {}, new),
             **({"job_env": {"K": "V"}} if settings_only else {}),
         },
-        (),
     )
     live = Live(
         old,
         estate_settings("UTC", None, {}, old),
         1,
         {name: "RUNNING" for name in old.jobs} if running else {},
+        launch=candidate.metadata["launch"],
     )
     return {
         "ok": True,
@@ -212,8 +217,10 @@ def candidate_answer(*, changed=True, running=False, settings_only=False, size=1
     "changed,running,settings_only",
     [(False, False, False), (True, False, False), (True, True, False), (True, False, True)],
 )
-def test_reread_cases(monkeypatch, style, changed, running, settings_only):
-    answer = candidate_answer(changed=changed, running=running, settings_only=settings_only)
+def test_reread_cases(monkeypatch, style, changed, running, settings_only, tmp_path):
+    answer = candidate_answer(
+        tmp_path, changed=changed, running=running, settings_only=settings_only
+    )
     monkeypatch.setattr(cli_reload, "socket_send", lambda *a, **kw: lambda *a: answer)
     result = invoke(["reread"], style)
     assert result.exit_code == int(running), result.output
@@ -229,8 +236,10 @@ def test_reread_cases(monkeypatch, style, changed, running, settings_only):
     "summary",
     [None, [], ["L002 info: 2 findings", "full list: dsl41 lint --config /synthetic/main.toml"]],
 )
-def test_reread_prints_summary_or_older_engine_messages_verbatim(monkeypatch, style, summary):
-    answer = candidate_answer()
+def test_reread_prints_summary_or_older_engine_messages_verbatim(
+    monkeypatch, style, summary, tmp_path
+):
+    answer = candidate_answer(tmp_path)
     view = answer["preview"]
     view.pop("lint_summary", None)
     view["lint_messages"] = [
@@ -253,8 +262,8 @@ def test_reread_prints_summary_or_older_engine_messages_verbatim(monkeypatch, st
 
 
 @pytest.mark.parametrize("running", [False, True])
-def test_reread_grouping_240_jobs(monkeypatch, style, running):
-    answer = candidate_answer(size=240, running=running)
+def test_reread_grouping_240_jobs(monkeypatch, style, running, tmp_path):
+    answer = candidate_answer(tmp_path, size=240, running=running)
     monkeypatch.setattr(cli_reload, "socket_send", lambda *a, **kw: lambda *a: answer)
     result = invoke(["reread"], style)
     assert result.exit_code == int(running)
@@ -267,8 +276,8 @@ def test_reread_grouping_240_jobs(monkeypatch, style, running):
 @pytest.mark.parametrize(
     "blocked", [[], ["host launch settings changed"], ["blocking lint"], ["preflight ERROR"]]
 )
-def test_reread_advice_only_with_shared_admission_success(monkeypatch, style, blocked):
-    answer = candidate_answer()
+def test_reread_advice_only_with_shared_admission_success(monkeypatch, style, blocked, tmp_path):
+    answer = candidate_answer(tmp_path)
     answer["preview"]["definition_changes"]["blocked"] = blocked
     monkeypatch.setattr(cli_reload, "socket_send", lambda *a, **kw: lambda *a: answer)
     result = invoke(["reread"], style)
@@ -361,15 +370,18 @@ def test_structured_changes_use_record_labels_and_only_fitting_values(before, af
     assert (" -> " in text) == shown
 
 
-def test_indirect_reference_change_in_each_layout(monkeypatch, style):
+def test_indirect_reference_change_in_each_layout(monkeypatch, style, tmp_path):
     text = "insert_machine: localhost\ntype: a\nnode_name: old\n\ninsert_job: j\njob_type: c\ncommand: true\nmachine: localhost\n"
     old, new = lower_source(text), lower_source(text.replace("node_name: old", "node_name: new"))
     settings = estate_settings("UTC", None, {}, old)
+    candidate = replace(main_config.prepare(estate_file(tmp_path)), catalog=new, settings=settings)
     answer = {
         "ok": True,
         "live_rev": 1,
         "source": {"path": "/synthetic/estate.jil"},
-        "preview": preview(Estate(new, settings, ()), Live(old, settings, 1, {})),
+        "preview": preview(
+            candidate, Live(old, settings, 1, {}, launch=candidate.metadata["launch"])
+        ),
     }
     monkeypatch.setattr(cli_reload, "socket_send", lambda *a, **kw: lambda *a: answer)
     result = invoke(["reread"], style)
@@ -569,7 +581,9 @@ def test_hostname_240_has_exactly_one_difference_line(tmp_path, style, defined):
     "draining,open_update,preparing",
     [(True, False, False), (False, True, False), (False, False, True)],
 )
-def test_engine_state_prevents_affirmative_reread_advice(style, draining, open_update, preparing):
+def test_engine_state_prevents_affirmative_reread_advice(
+    style, draining, open_update, preparing, tmp_path
+):
     import asyncio
     from types import SimpleNamespace
     from dsl41.runner_control import ControlServer
@@ -582,7 +596,7 @@ def test_engine_state_prevents_affirmative_reread_advice(style, draining, open_u
     server._preparing_update = object() if preparing else None
 
     async def prepare(**kwargs):
-        return candidate_answer()
+        return candidate_answer(tmp_path)
 
     server._prepare_reload = prepare
     answer = asyncio.run(server._reread({"v": 4, "cmd": "reread"}))
@@ -614,27 +628,27 @@ def test_empty_stop_set_only_claims_what_update_proves(monkeypatch, style):
 
 
 @pytest.mark.parametrize("source_changed", [True, False])
-def test_reread_source_only_and_no_change_headers(style, source_changed):
+def test_reread_source_only_and_no_change_headers(style, source_changed, tmp_path):
     from dsl41.cli_output import reread_lines
 
-    answer = candidate_answer(changed=False)
+    answer = candidate_answer(tmp_path, changed=False)
     answer["preview"]["definition_changes"]["sources_changed"] = source_changed
     text = "\n".join(reread_lines(answer, style, "dsl41 update"))
     if source_changed:
         assert "estate files changed, but no job or setting did; update still applies them" in text
     else:
         assert text.startswith("no job, setting or estate file changed\n")
-    changed = candidate_answer()
+    changed = candidate_answer(tmp_path)
     changed["preview"]["definition_changes"]["sources_changed"] = True
     assert "estate files changed, but" not in "\n".join(
         reread_lines(changed, style, "dsl41 update")
     )
 
 
-def test_read_from_line_is_bounded(style):
+def test_read_from_line_is_bounded(style, tmp_path):
     from dsl41.cli_output import reread_lines
 
-    answer = candidate_answer()
+    answer = candidate_answer(tmp_path)
     answer["preview"]["source_changes"] = [
         {"job": f"j{i}", "before": None, "after": "/synthetic/" + "x" * 100 + str(i)}
         for i in range(30)
@@ -647,10 +661,10 @@ def test_read_from_line_is_bounded(style):
     assert len(line) <= 240 and line.endswith("[cut]")
 
 
-def test_source_only_refusal_does_not_claim_update_applies_it(style):
+def test_source_only_refusal_does_not_claim_update_applies_it(style, tmp_path):
     from dsl41.cli_output import reread_lines
 
-    answer = candidate_answer(changed=False)
+    answer = candidate_answer(tmp_path, changed=False)
     details = answer["preview"]["definition_changes"]
     details.update(sources_changed=True, blocked=["the engine is draining"])
     text = "\n".join(reread_lines(answer, style, "dsl41 update"))
@@ -658,10 +672,10 @@ def test_source_only_refusal_does_not_claim_update_applies_it(style):
     assert "engine is draining" in text
 
 
-def test_hash_affecting_setting_is_described_once_without_a_job_list(style):
+def test_hash_affecting_setting_is_described_once_without_a_job_list(style, tmp_path):
     from dsl41.cli_output import reread_lines
 
-    answer = candidate_answer(changed=False)
+    answer = candidate_answer(tmp_path, changed=False)
     answer["preview"]["changed"] = [{"name": "j0", "reason": "estate setting timezone changed"}]
     answer["preview"]["unchanged"] = 0
     answer["preview"]["definition_changes"].update(
@@ -699,20 +713,20 @@ def test_r2_stop_line_is_absent_or_names_only_reported_stops(monkeypatch, style,
         assert "stops reported" not in result.stdout
 
 
-def test_r2_omitted_job_details_say_size_limit(style):
+def test_r2_omitted_job_details_say_size_limit(style, tmp_path):
     from dsl41.cli_output import reread_lines
 
-    answer = candidate_answer()
+    answer = candidate_answer(tmp_path)
     answer["preview"]["definition_changes"].update(groups=[], omitted=1)
     text = "\n".join(reread_lines(answer, style, "dsl41 update"))
     assert "details not shown (size limit)" in text
     assert "attribute details unavailable" not in text
 
 
-def test_r2_blocked_file_only_edit_still_explains_the_change(style):
+def test_r2_blocked_file_only_edit_still_explains_the_change(style, tmp_path):
     from dsl41.cli_output import reread_lines
 
-    answer = candidate_answer(changed=False)
+    answer = candidate_answer(tmp_path, changed=False)
     answer["preview"]["definition_changes"].update(
         sources_changed=True, blocked=["the engine is draining"]
     )
@@ -721,10 +735,10 @@ def test_r2_blocked_file_only_edit_still_explains_the_change(style):
     assert not any("update still applies" in line for line in lines)
 
 
-def test_r2_neutral_shared_settings_precede_alphabetically_earlier_jobs():
+def test_r2_neutral_shared_settings_precede_alphabetically_earlier_jobs(tmp_path):
     from dsl41.cli_output import reread_lines
 
-    answer = candidate_answer()
+    answer = candidate_answer(tmp_path)
     answer["preview"]["definition_changes"]["groups"].append(
         {
             "field": "estate setting timezone",
@@ -809,7 +823,7 @@ def test_r3_application_text_has_no_general_box_rule_and_preserves_outcomes(styl
         assert sum(text in line for line in lines) == 1
 
 
-def test_r3_existing_preview_branches_remain_exercised(style):
+def test_r3_existing_preview_branches_remain_exercised(style, tmp_path):
     from dsl41.cli_output import reread_lines
 
     boxed = {"status": "RUNNING", "box_name": "BX"}
@@ -817,11 +831,11 @@ def test_r3_existing_preview_branches_remain_exercised(style):
         "box BX" in "\n".join(status_lines({"jobs": {"j": boxed}}, style))
         or style is OutputStyle.neutral
     )
-    answer = candidate_answer()
+    answer = candidate_answer(tmp_path)
     answer["preview"].pop("definition_changes")
     text = "\n".join(reread_lines(answer, style, "dsl41 update"))
     assert "attribute details unavailable" in text and "update readiness unavailable" in text
-    answer = candidate_answer()
+    answer = candidate_answer(tmp_path)
     view = answer["preview"]
     view["restored"] = [{"name": "j0", "flags": ["ON_HOLD", "ON_ICE"]}]
     view["non_idempotent"] = [{"job": "j0", "reason": "synthetic reason"}]

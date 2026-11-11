@@ -151,7 +151,7 @@ def read_config_row(root: Path, rev: int) -> bytes:
 
 def plan_for(path: Path, ask):
     root = main.load_run_root(path)
-    return reread(path.parent, live_of_answer(ask()), root / "plans", candidate=main.prepare(path))
+    return reread(live_of_answer(ask()), root / "plans", candidate=main.prepare(path))
 
 
 @pytest.mark.parametrize(
@@ -245,7 +245,7 @@ def seed_root(path: Path, *, stopping: bool, boundary: bool, snapshot: bool = Fa
                 engine.take_snapshot()
             (path.parent / "a.jil").write_text(JOB.replace("true", "echo captured"))
             candidate = main.prepare(path)
-            result = reread(path.parent, engine.update.live(), root / "plans", candidate=candidate)
+            result = reread(engine.update.live(), root / "plans", candidate=candidate)
             if stopping:
                 request = UpdateRequest(result.token, 1, engine.baseline_id, "review-recovery")
                 intent = {
@@ -332,7 +332,9 @@ def test_b2_b4_stopping_cli_restart_applies_host_and_captured_plan(
     assert (root / "perimeter.jsonl").is_file()
 
 
-@pytest.mark.parametrize("damage", ["missing", "corrupt", "incompatible", "settings"])
+@pytest.mark.parametrize(
+    "damage", ["missing", "corrupt", "incompatible", "settings", "v1", "unversioned"]
+)
 def test_b3_plan_refusal_precedes_engine_journal_and_signals(
     short_root: Path, monkeypatch: pytest.MonkeyPatch, damage: str
 ) -> None:
@@ -344,11 +346,16 @@ def test_b3_plan_refusal_precedes_engine_journal_and_signals(
         shutil.rmtree(plan.plan_dir)
     elif damage == "corrupt":
         plan.plan_json.write_bytes(b"invalid JSON")
-    elif damage == "settings":
+    elif damage in {"settings", "v1", "unversioned"}:
         import json
 
         document = json.loads(plan.plan_json.read_bytes())
-        document["settings"] = []
+        if damage == "settings":
+            document["settings"] = []
+        elif damage == "v1":
+            document["plan_format_version"] = 1
+        else:
+            document.pop("plan_format_version")
         plan.plan_json.write_text(json.dumps(document))
     else:
 
@@ -368,6 +375,8 @@ def test_b3_plan_refusal_precedes_engine_journal_and_signals(
 
     monkeypatch.setattr(dsl41.runner_procid, "signal_ours", forbidden)
     stored = active_configuration(root)
+    monkeypatch.setattr(SqliteStore, "append", forbidden)
+    monkeypatch.setattr(SqliteStore, "put_config", forbidden)
     with pytest.raises(EngineError, match="plan cannot be read") as error:
         asyncio.run(
             resume_run(
@@ -379,6 +388,11 @@ def test_b3_plan_refusal_precedes_engine_journal_and_signals(
                 stored_sources=True,
             )
         )
+    if damage in {"v1", "unversioned"}:
+        assert "reload plan version 1 is retired (DL-486)" in str(error.value)
+        assert "this build cannot finish the open update" in str(error.value)
+        assert "Finish the update with the build that began it." in str(error.value)
+        assert "restore" not in str(error.value)
     if damage == "incompatible":
         assert "attribute rejected by newer lowering" in str(error.value)
         assert "use a compatible binary" in str(error.value)
@@ -695,7 +709,7 @@ def test_interrupted_update_refuses_compiler_definition_drift(short_root, monkey
             assert tool_version() == writer_version
             candidate = main.prepare(path)
             assert candidate.catalog.meta.tool_version == writer_version
-            plan = reread(short_root, engine.update.live(), root / "plans", candidate=candidate)
+            plan = reread(engine.update.live(), root / "plans", candidate=candidate)
             assert plan.plan.unchanged == ("B",) and plan.stop == ("A",)
             request = UpdateRequest(plan.token, 1, engine.baseline_id, "compiler-drift")
             engine.journal.append(
@@ -1280,7 +1294,7 @@ def test_k2_pending_candidate_is_checked_before_update_recovery(short_root, monk
     try:
         (short_root / "a.jil").write_text(JOB + f"profile: {profile}\n")
         candidate = main.prepare(path)
-        result = reread(short_root, engine.update.live(), root / "plans", candidate=candidate)
+        result = reread(engine.update.live(), root / "plans", candidate=candidate)
         request = UpdateRequest(result.token, 1, engine.baseline_id, "synthetic-pending")
         engine.journal.append(
             Record(
@@ -1375,9 +1389,7 @@ def test_restart_accepts_current_kill_signals(
             engine.launch_settings = estate.metadata["launch"]
             if updated:
                 config_file(short_root, engine="kill_signals = [15,9]\n")
-                plan = reread(
-                    short_root, engine.update.live(), root / "plans", candidate=main.prepare(path)
-                )
+                plan = reread(engine.update.live(), root / "plans", candidate=main.prepare(path))
                 pending = engine.request_update(
                     UpdateRequest(plan.token, 1, engine.baseline_id, "policy")
                 )

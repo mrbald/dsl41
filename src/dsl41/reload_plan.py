@@ -1,4 +1,4 @@
-"""`reread` as a module: load an estate from disk, diff it against the live catalog, store a plan.
+"""Diff a prepared main-config estate against the live catalog and store a plan (DL-486).
 
 This is spec-reload steps 1 to 6, without a CLI verb and without any access to the engine. The
 engine's part is the `Live` record: the catalog it runs, the estate settings it runs under, the
@@ -6,46 +6,18 @@ catalog revision and each row's status. `reread` changes nothing live. It writes
 `<plans_dir>/<token>/`, and a second call with the same inputs rewrites the same directory and
 returns the same token.
 
-`reread` takes the inputs `dsl41 run --manifest M [--environment E] -p SITE` takes, and loads
-them with the same functions: the manifest (read without following a symlink), its files, its
-properties layers (the base ones, then the environment's), the timezone map, then the site
-layers `-p` adds. A manifest that declares environments needs one named, as `run` demands. JIL
-and layer files are read as `run` reads them, following a symlink.
+`reread` takes a prepared main-config candidate (DL-486). Its captured inputs and
+settings bind the token and the stored plan. `main_config.prepare` owns source loading,
+substitution, lowering and lint policy. `Estate.settings` holds the estate-wide values
+compared by `reload_diff.diff`.
 
-The estate is `estate.toml`, the JIL files it names in order, and `non-idempotent.toml` (absent
-means empty). Every other input is a part of the candidate and of the token too, because it
-changes the catalog or the settings. The parts are, in order: `estate.toml`, the files, the
-manifest's layers, the timezone map, each site layer as `site/<basename>`, `non-idempotent.toml`,
-then `invocation.json`: the environment name and the site layers' absolute paths `reread` was
-called with, as canonical JSON, so the same files under another environment are another plan.
-Each part is read once; the catalog, the settings, the token and the stored copy all come from
-those bytes, and an input that changed while loading is refused. A part name may appear once,
-compared case-insensitively; `estate.toml`, `non-idempotent.toml`, `invocation.json` and
-`plan.json` are reserved.
-
-The candidate settings (`estate_settings`) are the estate-wide values every job runs under:
-
-- `timezone`: the manifest's base timezone, or `UTC` without one, the zone an engine launched
-  with no `--timezone` runs under (`runner_config.runtime_profile_from_cli`);
-- `timezone_aliases`: the parsed timezone map, or None without one or for an empty one, as the
-  engine reads a map (`timezones.alias_table`);
-- `semantics`: the manifest's semantic switches as `check_overrides` returns them, defaults
-  dropped, so one profile is one value;
-- `external_instances`: each `insert_xinst` record without its source span.
-
-The engine must build `Live.settings` with the same function. `job_env` is retained in these
+The engine builds `Live.settings` with `estate_settings`. `job_env` is retained in these
 settings and the token-bound runtime revision but excluded from job-definition hashes
 (DL-447). An environment-only update stops nothing and may apply while boxes run.
 
-Refusals, all as `RereadRefused`: a load error, a lint finding of error or warning severity
-(`--strict`), a preflight ERROR. Running boxes are restarted by update (DL-463). The preflight is the
-runner-design ss8 preflight minus the rules that need the launch profile: job type, the execution
-inputs (envvars, global substitution, check files), calendars, timezones, retry, resources, oracle
-construction and the skeleton cycle. Its WARNs go into `plan.json` as `preflight_warnings`.
-Deferred to the engine at admission: the machine rules (`machine`, `machine-mixed`; the strict
-policy and the declared identity) and the owner rule (`owner`; the invoking user). `start`
-anchors the calendar probes and defaults to now, so a calendar warning can differ between two
-calls on different days.
+Refusals, all as `RereadRefused`: a blocking lint finding, changed host launch settings,
+or a preflight ERROR. Preflight WARNs go into `plan.json` as `preflight_warnings`.
+Running boxes are restarted by update (DL-463).
 
 Write order in `plans/<token>/`: each candidate file by the durable-write sequence, `plan.json`
 last. `plan.json` lists every part with its sha256, so `read_plan` takes a directory as complete
@@ -56,19 +28,15 @@ recomputed from the parts and the live revision is the directory's name.
 from __future__ import annotations
 
 import hashlib
-import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
-from dsl41.ast_jil import JilFile, JilParseError, parse, render_statement
+from dsl41.ast_jil import JilFile, render_statement
 from dsl41.canon import ARTIFACT_FORMAT_VERSION, CanonError, canonical_bytes, decode
-from dsl41.estate_manifest import ManifestError, read_regular, resolve_manifest
-from dsl41.ir import CatalogIR, LoweringError, lower_catalog
-from dsl41.lint import Violation, lint_catalog
-from dsl41.placeholders import PlaceholderError, load_properties, substitute
+from dsl41.ir import CatalogIR
 from dsl41.reload_diff import Plan, catalog_hash_v2, diff, plan_token, running_boxes
 from dsl41.runner_preflight import PreflightItem, preflight
 from dsl41.runner_config import MachinePolicy
@@ -76,7 +44,7 @@ from dsl41.runtime_policy import policy_values
 from dsl41.runner_procid import durable_write, mkdir_durable
 from dsl41.semantics import check_overrides
 from dsl41.semantics import resolve as resolve_switches
-from dsl41.timezones import alias_table, parse_timezone_map, resolve_timezone
+from dsl41.timezones import alias_table
 
 #: The base zone of an estate that names none: an engine launched with no `--timezone` runs UTC.
 DEFAULT_TZ = "UTC"
@@ -84,14 +52,7 @@ DEFAULT_TZ = "UTC"
 #: Statuses of a job with a process the plan would have to stop (spec-reload `update`).
 STOPPABLE = frozenset({"RUNNING", "STARTING"})
 
-MANIFEST = "estate.toml"
-MARKED = "non-idempotent.toml"
-INVOCATION = "invocation.json"
 PLAN_JSON = "plan.json"
-_RESERVED = frozenset({MANIFEST, MARKED, INVOCATION, PLAN_JSON})
-
-#: Preflight codes that need the launch profile (host identity, invoking user): the engine's.
-_LAUNCH_CODES = frozenset({"machine", "machine-mixed", "owner"})
 
 
 class RereadRefused(Exception):
@@ -100,6 +61,10 @@ class RereadRefused(Exception):
     def __init__(self, findings: Sequence[str]) -> None:
         super().__init__("; ".join(findings))
         self.findings = tuple(findings)
+
+
+class RetiredPlan(RereadRefused):
+    """A reload-plan dialect retired under DL-486."""
 
 
 @dataclass(frozen=True)
@@ -157,9 +122,10 @@ def estate_settings(
     runtime_policy: Mapping[str, object] | None = None,
     fw_default_interval_s: int = 60,
 ) -> dict[str, object]:
-    """The estate-wide settings `reload_diff.diff` compares (module docstring). Each value is
-    spelled as the engine runs it, so the engine's own settings and an unchanged estate's
-    compare equal."""
+    """The estate-wide settings `reload_diff.diff` compares: timezone, timezone_aliases,
+    semantics, job_env, external_instances, the keys `runtime_policy.policy_values` returns,
+    and fw_default_interval_s when nondefault. Values use the engine's spelling so an
+    unchanged candidate compares equal."""
     return {
         "timezone": timezone or DEFAULT_TZ,
         "timezone_aliases": alias_table(tz_aliases),
@@ -174,149 +140,25 @@ def estate_settings(
     }
 
 
-def _read(path: Path, *, manifest: bool = False) -> bytes:
-    """PATH's bytes. The manifest is read as `parse_manifest` reads it, without following a
-    symlink; any other file as `run` reads it. An absent `non-idempotent.toml` is empty."""
-    if path.name == MARKED and not os.path.lexists(path):
-        return b""
-    try:
-        return read_regular(path) if manifest else path.read_bytes()
-    except ManifestError as exc:
-        raise RereadRefused([str(exc)]) from exc
-    except OSError as exc:
-        raise RereadRefused([f"{path}: {exc.strerror}"]) from exc
-
-
-def _findings(exc: Exception) -> list[str]:
-    if isinstance(exc, LoweringError):
-        return [finding.render() for finding in exc.findings]
-    if isinstance(exc, PlaceholderError):
-        return list(exc.findings)
-    return [str(exc)]
-
-
-def _check_names(names: Sequence[str]) -> None:
-    """A part name may appear once, compared case-insensitively, and none may be reserved."""
-    reserved = {name.casefold() for name in _RESERVED}
-    seen: dict[str, str] = {}
-    for name in names:
-        key = name.casefold()
-        if key in reserved:
-            raise RereadRefused([f"{name!r} is a reserved name"])
-        if key in seen:
-            raise RereadRefused(
-                [f"{name!r} and {seen[key]!r} are one name: a part may appear once"]
-            )
-        seen[key] = name
-
-
-def load_estate(
-    estate_dir: Path, properties: Sequence[Path] = (), environment: str | None = None
-) -> Estate:
-    """Read, substitute, parse and lower the estate in ESTATE_DIR, or raise RereadRefused.
-
-    PROPERTIES are the site layers `run -p` adds after the manifest's. Every part is read once
-    and the manifest is parsed from its bytes; the inputs are read again after loading, and one
-    that changed meanwhile is refused, so the parts are the bytes the catalog came from.
-    """
-    directory = estate_dir.absolute()
-    manifest_path = directory / MANIFEST
-    manifest_bytes = _read(manifest_path, manifest=True)
-    try:
-        inputs = resolve_manifest(manifest_path, environment, manifest_bytes)
-    except ManifestError as exc:
-        raise RereadRefused([str(exc)]) from exc
-
-    def named(joined: str) -> tuple[str, Path]:
-        path = Path(joined)
-        return path.relative_to(directory).as_posix(), path
-
-    files = [named(path) for path in inputs.files]
-    layers = [named(path) for path in inputs.layers]
-    tz_map = [] if inputs.timezone_map is None else [named(inputs.timezone_map)]
-    site = [(f"site/{path.name}", path) for path in properties]
-    ordered = dict.fromkeys([*files, *layers, *tz_map, *site])
-    _check_names([name for name, _ in ordered])
-    parts = [(MANIFEST, manifest_bytes)]
-    parts += [(name, _read(path)) for name, path in ordered]
-    parts.append((MARKED, _read(directory / MARKED)))
-    by_name = dict(parts)
-    aliases = None
-    if tz_map:
-        try:
-            aliases = alias_table(parse_timezone_map(by_name[tz_map[0][0]].decode("utf-8")))
-        except ValueError as exc:
-            raise RereadRefused([f"{tz_map[0][1]}: {exc}"]) from exc
-    if inputs.timezone is not None and resolve_timezone(inputs.timezone, aliases) is None:
-        raise RereadRefused([f"{manifest_path}: timezone {inputs.timezone!r} is not resolvable"])
-    try:
-        layer_paths = [path for _, path in [*layers, *site]]
-        bindings = load_properties(layer_paths) if layer_paths else None
-        parsed = []
-        for name, path in files:
-            text = by_name[name].decode("utf-8")
-            if bindings is not None:
-                text, _ = substitute(text, bindings, file=str(path))
-            parsed.append(parse(text, file=str(path)))
-        catalog = lower_catalog(parsed, permit_unknown=False)
-    except (JilParseError, LoweringError, PlaceholderError, UnicodeDecodeError, OSError) as exc:
-        raise RereadRefused(_findings(exc)) from exc
-    again = [(manifest_path, True), *((path, False) for _, path in ordered)]
-    again.append((directory / MARKED, False))
-    for (path, is_manifest), (_, data) in zip(again, parts, strict=True):
-        if _read(path, manifest=is_manifest) != data:
-            raise RereadRefused([f"{path}: changed while it was being read"])
-    site_paths = tuple(str(path.absolute()) for path in properties)
-    invocation = {"environment": environment, "properties": list(site_paths)}
-    parts.append((INVOCATION, canonical_bytes(invocation)))
-    return Estate(
-        catalog=catalog,
-        settings=estate_settings(inputs.timezone, aliases, inputs.semantics, catalog),
-        parts=tuple(parts),
-        environment=environment,
-        properties=site_paths,
-        parsed=tuple(parsed),
-        directory=str(directory),
-    )
-
-
-def _lint_findings(estate: Estate) -> tuple[list[str], list[Violation]]:
-    """Legacy strict-gate findings and unsupported warnings routed to preflight (DL-466)."""
-    base_tz = estate.settings["timezone"]
-    aliases = estate.settings["timezone_aliases"]
-    assert base_tz is None or isinstance(base_tz, str)
-    assert aliases is None or isinstance(aliases, dict)
-    report = lint_catalog(estate.catalog, base_tz=base_tz, tz_aliases=aliases)
-    return (
-        [
-            v.render()
-            for v in report.suppress({"known-unsupported"}).violations
-            if v.severity != "info"
-        ],
-        report.by_code("known-unsupported"),
-    )
-
-
 def preflight_items(
     estate: Estate,
     start: datetime | None,
     startup_env: Mapping[str, str] | None = None,
-    known_unsupported: Sequence[Violation] | None = None,
 ) -> list[PreflightItem]:
-    """Main config checks its launch settings; legacy plans defer them (DL-437, DL-432)."""
+    """Check the candidate and its captured launch settings (DL-437, DL-486)."""
     base_tz = estate.settings["timezone"]
     aliases = estate.settings["timezone_aliases"]
     semantics = estate.settings["semantics"]
     assert base_tz is None or isinstance(base_tz, str)
     assert aliases is None or isinstance(aliases, dict)
     assert isinstance(semantics, dict)
-    items = preflight(
+    return preflight(
         estate.catalog,
         execution=True,
         start=start,
         default_tz=base_tz,
         tz_aliases=aliases,
-        timezone_map_source="estate.timezone_map" if estate.metadata else "timezone_map",
+        timezone_map_source="estate.timezone_map",
         semantics=resolve_switches(semantics),
         job_env=cast(dict[str, str], estate.settings.get("job_env", {})),
         startup_env=startup_env,
@@ -326,14 +168,11 @@ def preflight_items(
         job_profile=cast(str | None, estate.settings.get("job_profile")),
         job_shell=cast(str | None, estate.settings.get("job_shell")),
         std_file_mode=cast(Any, estate.settings.get("std_file_mode", "append")),
-        hook_configured=bool(estate.metadata.get("launch", {}).get("status_hook")),
-        machine_policy=cast(
-            MachinePolicy, estate.metadata.get("launch", {}).get("machine_policy", "strict")
-        ),
-        as_machine=frozenset(estate.metadata.get("launch", {}).get("as_machine", ())),
-        known_unsupported=() if estate.metadata else known_unsupported,
+        hook_configured=bool(estate.metadata["launch"]["status_hook"]),
+        machine_policy=cast(MachinePolicy, estate.metadata["launch"]["machine_policy"]),
+        as_machine=frozenset(estate.metadata["launch"]["as_machine"]),
+        known_unsupported=(),
     )
-    return items if estate.metadata else [item for item in items if item.code not in _LAUNCH_CODES]
 
 
 def _plan_document(
@@ -376,16 +215,15 @@ def _plan_document(
             for name, data in estate.parts
         ],
     }
-    if estate.metadata:
-        from dsl41.main_config import policy_report
+    from dsl41.main_config import policy_report
 
-        policy, report = policy_report(estate)
-        document.update(
-            plan_format_version=2,
-            lint_policy=policy.model_dump(mode="json"),
-            lint_findings=[v.model_dump(mode="json") for v in report.violations],
-            source_mapping=estate.metadata["records"],
-        )
+    policy, report = policy_report(estate)
+    document.update(
+        plan_format_version=2,
+        lint_policy=policy.model_dump(mode="json"),
+        lint_findings=[v.model_dump(mode="json") for v in report.violations],
+        source_mapping=estate.metadata["records"],
+    )
     return document
 
 
@@ -440,30 +278,26 @@ def check_reload_candidate(
     estate: Estate, live: Live, start: datetime | None = None
 ) -> list[PreflightItem]:
     """Apply the preparation refusals to preview and update alike (DL-482)."""
-    known_unsupported: Sequence[Violation] = ()
-    if estate.metadata:
-        from dsl41.main_config import policy_report
+    from dsl41.main_config import policy_report
 
-        policy, report = policy_report(estate)
-        findings = [v.render() for v in report.violations if policy.blocks(v.severity)]
-        if live.launch != estate.metadata["launch"]:
-            changed = sorted(
-                key
-                for key in estate.metadata["launch"]
-                if live.launch.get(key) != estate.metadata["launch"][key]
-            )
-            raise RereadRefused(
-                [
-                    "engine host launch settings changed: "
-                    + ", ".join(changed)
-                    + "; restart the engine to apply them before update"
-                ]
-            )
-    else:
-        findings, known_unsupported = _lint_findings(estate)
+    policy, report = policy_report(estate)
+    findings = [v.render() for v in report.violations if policy.blocks(v.severity)]
+    if live.launch != estate.metadata["launch"]:
+        changed = sorted(
+            key
+            for key in estate.metadata["launch"]
+            if live.launch.get(key) != estate.metadata["launch"][key]
+        )
+        raise RereadRefused(
+            [
+                "engine host launch settings changed: "
+                + ", ".join(changed)
+                + "; restart the engine to apply them before update"
+            ]
+        )
     if findings:
         raise RereadRefused(findings)
-    items = preflight_items(estate, start, live.path_environment, known_unsupported)
+    items = preflight_items(estate, start, live.path_environment)
     errors = [item for item in items if item.severity == "ERROR"]
     if errors:
         raise RereadRefused(
@@ -477,17 +311,14 @@ def check_reload_candidate(
 
 
 def reread(
-    estate_dir: Path,
     live: Live,
     plans_dir: Path,
-    properties: Sequence[Path] = (),
-    environment: str | None = None,
     *,
     start: datetime | None = None,
-    candidate: Estate | None = None,
+    candidate: Estate,
 ) -> RereadResult:
     """Spec-reload steps 1 to 6: refuse, or store the plan and return it."""
-    estate = candidate or load_estate(estate_dir, properties, environment)
+    estate = candidate
     items = check_reload_candidate(estate, live, start)
     plan = diff(live.catalog, estate.catalog, live.settings, estate.settings)
     stop = stop_set(plan, live, estate.catalog)
@@ -516,14 +347,17 @@ def read_plan(plans_dir: Path, token: str) -> dict[str, Any] | None:
 
     Complete means `plan.json` decodes, names this token, every part it lists is a file in the
     directory with the listed sha256, and the token recomputed from those bytes and the
-    recorded live revision is this token. A crash before `plan.json` leaves no plan."""
+    recorded live revision is this token. A crash before `plan.json` leaves no plan.
+    Raises RereadRefused for a retired or unsupported plan version (DL-486)."""
     plan_dir = plans_dir / token
     try:
         document = decode((plan_dir / PLAN_JSON).read_bytes())
         if not isinstance(document, dict) or document.get("token") != token:
             return None
         version = document.get("plan_format_version", 1)
-        if type(version) is not int or version not in (1, 2):
+        if type(version) is int and version == 1:
+            raise RetiredPlan(["reload plan version 1 is retired (DL-486)"])
+        if type(version) is not int or version != 2:
             raise RereadRefused([f"unsupported plan_format_version {version!r}"])
         parts: list[tuple[str, bytes]] = []
         for part in document["parts"]:
@@ -546,9 +380,6 @@ def read_plan(plans_dir: Path, token: str) -> dict[str, Any] | None:
 
 
 __all__ = [
-    "MANIFEST",
-    "INVOCATION",
-    "MARKED",
     "PLAN_JSON",
     "STOPPABLE",
     "Estate",
@@ -556,7 +387,6 @@ __all__ = [
     "RereadRefused",
     "RereadResult",
     "estate_settings",
-    "load_estate",
     "read_plan",
     "reread",
     "spec_texts",

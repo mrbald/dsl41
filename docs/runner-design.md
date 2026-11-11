@@ -718,7 +718,9 @@ in host-only loading, and the pending-source scan blocks the loop.
 
 **Configuration.** A `configs` row holds the catalog, `RuntimeProfile` and
 non-idempotent marks. Main-config rows also hold captured source bytes and
-mapping (DL-437). `reread -S SOCKET` passively reports current launch-config inputs. `update -S SOCKET`
+mapping (DL-437). Reread and update require a main-config candidate. Reload plan
+version 1, including an absent version, refuses as retired (DL-486), including
+restart of an open update before writes or signals. `reread -S SOCKET` passively reports current launch-config inputs. `update -S SOCKET`
 prepares current inputs itself (DL-463). Ordinary jobs keep the interruption rule:
 stop, swap, then choose rerun/hold/none under the new catalog. Structural running-box
 changes stop members, commit KILLJOBs before application to prevent old-run replacement,
@@ -755,9 +757,11 @@ starting with non-empty state (DL-433):
 
    For a legacy launch: on a root no update touched, a catalog-hash mismatch
    refuses, so semantics never drift silently; a changed estate needs a fresh
-   run root. Socket reread/update refuse JIL-only launches (DL-463). On a root an update touched, compare the launch's estate
-   job by job with the applied configuration, or the open update's
-   candidate, ignoring paths (DL-432). A runtime-profile mismatch refuses
+   run root. Socket reread/update refuse JIL-only launches (DL-463). A legacy
+   root with an open version 1 update refuses as retired (DL-486). On a root
+   an update touched, compare the launch's estate job by job with the applied
+   configuration, or the open update's version 2 candidate, ignoring paths
+   (DL-432). A runtime-profile mismatch refuses
    by name, except that the currently supplied `kill_signals` list is accepted
    for later kills (DL-462). A resume with different switches is refused, the same as a changed
    `--timezone` (§8a). A main-config restart skips the launch

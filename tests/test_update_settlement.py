@@ -10,6 +10,8 @@ The process stand-ins are `test_engine_stops_cookie`'s: no real process is signa
 
 from __future__ import annotations
 
+from reload_fixtures import prepare_estate, write_config
+
 import asyncio
 import json
 import signal
@@ -29,7 +31,7 @@ from test_engine_stops_cookie import (
     _Procs,
 )
 
-from dsl41 import runner_procid
+from dsl41 import main_config as main, runner_procid
 from dsl41.oracle_state import Event
 from dsl41.reload_plan import reread
 from dsl41.reload_update import Admitted
@@ -58,7 +60,7 @@ def _jil(jobs: dict[str, str], extra: dict[str, str] | None = None) -> str:
 def _estate(tmp_path: Path, text: str, marked: dict[str, str] | None = None) -> Path:
     directory = tmp_path / "estate"
     directory.mkdir(exist_ok=True)
-    (directory / "estate.toml").write_text('name = "t"\nfiles = ["jobs.jil"]\n')
+    write_config(directory)
     (directory / "jobs.jil").write_text(text)
     lines = "".join(f'"{job}" = "{why}"\n' for job, why in (marked or {}).items())
     (directory / "non-idempotent.toml").write_text(f"[jobs]\n{lines}" if lines else "")
@@ -66,11 +68,12 @@ def _estate(tmp_path: Path, text: str, marked: dict[str, str] | None = None) -> 
 
 
 def _engine(tmp_path: Path, text: str, **adapter: Any) -> Engine:
-    from dsl41.reload_plan import load_estate
 
     return start_run(
-        load_estate(_estate(tmp_path, text)).catalog,
+        prepare_estate(_estate(tmp_path, text)).catalog,
         tmp_path / "run",
+        source_capture=main.encoded_parts(prepare_estate(tmp_path / "estate")),
+        launched=main.profile_of(prepare_estate(tmp_path / "estate")),
         clock=VirtualClock(start=T0),
         adapters={"CMD": FakeAdapter(**({"default": None} | adapter))},
         settings=EngineSettings(grace_term_s=0.05, grace_kill_s=0.1),
@@ -119,7 +122,11 @@ async def _request(engine: Engine, token: str) -> Any:
 
 def _plan(engine: Engine, tmp_path: Path) -> str:
     assert engine.run_root is not None
-    return reread(tmp_path / "estate", engine.update.live(), engine.run_root / "plans").token
+    return reread(
+        engine.update.live(),
+        engine.run_root / "plans",
+        candidate=prepare_estate(tmp_path / "estate"),
+    ).token
 
 
 def _close(engine: Engine) -> None:
@@ -577,21 +584,27 @@ def test_the_spec_drift_baseline_names_the_original_paths_of_every_part(tmp_path
     """The applied plan's bytes are bound to the paths `reread` read them from: each estate
     file (one the update adds included) in the estate directory, each site layer at its own
     path, never the plan directory's copies, wherever the run root is."""
-    from dsl41.reload_plan import Live, load_estate, reread
+    from dsl41.reload_plan import Live, reread
     from dsl41.runner_update import open_plan
 
     directory = _estate(tmp_path, _jil({"a": "x"}))
-    (directory / "estate.toml").write_text('name = "t"\nfiles = ["jobs.jil", "more.jil"]\n')
+
     (directory / "more.jil").write_text("insert_job: m\njob_type: c\ncommand: x\ncondition: s(a)\n")
     external = tmp_path / "elsewhere" / "site.properties"
     external.parent.mkdir()
     external.write_text("SITE=one\n")
     (tmp_path / "old").mkdir()
-    live = Live(load_estate(_estate(tmp_path / "old", _jil({"a": "x"}))).catalog, {}, 1, {})
+    live = Live(prepare_estate(_estate(tmp_path / "old", _jil({"a": "x"}))).catalog, {}, 1, {})
     run_root = tmp_path / "run"
-    token = reread(directory, live, run_root / "plans", [external]).token
+    write_config(directory, properties=[str(external)])
+    candidate = prepare_estate(directory)
+    from dataclasses import replace
+
+    live = replace(live, launch=candidate.metadata["launch"])
+    token = reread(live, run_root / "plans", candidate=candidate).token
     expected = {
-        str(directory.absolute() / name) for name in ("estate.toml", "jobs.jil", "more.jil")
+        str(directory.absolute() / name)
+        for name in ("dsl41.toml", "jobs.jil", "more.jil", "non-idempotent.toml")
     } | {str(external.absolute())}
     assert set(open_plan(run_root, token).fingerprint()) == expected
     moved = tmp_path / "moved"
@@ -599,11 +612,11 @@ def test_the_spec_drift_baseline_names_the_original_paths_of_every_part(tmp_path
     assert set(open_plan(moved, token).fingerprint()) == expected
 
 
-def test_a_plan_written_before_the_estate_directory_was_recorded_is_stale(
+def test_a_plan_without_its_estate_directory_is_refused_stale(
     tmp_path: Path,
 ) -> None:
-    """A plan an older `reread` wrote names no estate directory: refused `stale_plan` before
-    anything is written, saying it predates the engine."""
+    """A damaged version 2 plan that names no estate directory is refused `stale_plan`
+    before anything is written."""
     from dsl41.canon import canonical_bytes, decode
 
     seen: list[Any] = []
@@ -637,7 +650,6 @@ def test_a_restart_starts_with_the_update_stopping_and_applies_it_as_a_loop_step
     `dispatch_pending`; a job outside it runs. Once the stop is finished, the update applies as
     a step of the loop, before any dispatch of a plan job; a closing attempt's rerun plan
     dispatches exactly one replacement, after it (spec-restart §6, DL-432)."""
-    from dsl41.reload_plan import load_estate
     from dsl41.runner_startup import resume_run
 
     run_root, _ = _crashed_update(tmp_path, closing=closing, idle=True)
@@ -650,7 +662,7 @@ def test_a_restart_starts_with_the_update_stopping_and_applies_it_as_a_loop_step
 
     async def restart() -> None:
         engine = await resume_run(
-            load_estate(tmp_path / "estate").catalog,
+            prepare_estate(tmp_path / "estate").catalog,
             run_root,
             clock=VirtualClock(start=T0 + timedelta(minutes=1)),
             adapters={"CMD": FakeAdapter(default=None)},
@@ -707,7 +719,6 @@ def test_a_closing_attempt_whose_plan_finished_retains_its_ladder_effects(
 ) -> None:
     """A closing attempt's completed task still owns its callback: a finished plan cannot
     forget it before `ladder_done` and `cleaned` let the update apply (spec-restart, DL-433)."""
-    from dsl41.reload_plan import load_estate
     from dsl41.runner_startup import resume_run
 
     run_root, attempt = _crashed_update(tmp_path, closing=True)
@@ -716,7 +727,7 @@ def test_a_closing_attempt_whose_plan_finished_retains_its_ladder_effects(
 
     async def restart() -> None:
         engine = await resume_run(
-            load_estate(tmp_path / "estate").catalog,
+            prepare_estate(tmp_path / "estate").catalog,
             run_root,
             clock=VirtualClock(start=T0 + timedelta(minutes=1)),
             adapters={"CMD": FakeAdapter(default=None)},
@@ -782,7 +793,6 @@ def test_an_update_whose_stops_all_finished_before_the_crash_applies_at_the_firs
     Without the queued first look the update stays STOPPING."""
     from store_surgery import append
 
-    from dsl41.reload_plan import load_estate
     from dsl41.runner import outcome_record, plan_record
     from dsl41.runner_startup import resume_run
     from dsl41.runner_update import EngineUpdate
@@ -797,7 +807,7 @@ def test_an_update_whose_stops_all_finished_before_the_crash_applies_at_the_firs
 
     async def restart() -> None:
         engine = await resume_run(
-            load_estate(tmp_path / "estate").catalog,
+            prepare_estate(tmp_path / "estate").catalog,
             run_root,
             clock=VirtualClock(start=T0 + timedelta(minutes=1)),
             adapters={"CMD": FakeAdapter(default=None)},
@@ -847,7 +857,6 @@ def test_a_quarantine_an_update_keeps_survives_a_second_crash(
     nothing until the application: no `ladder_done` closes it early. The engine dies before
     the update applies; the second restart quarantines it again, the update applies, and
     exactly one quarantine outcome and one hold survive."""
-    from dsl41.reload_plan import load_estate
     from dsl41.runner_journal import OpenTable
     from dsl41.runner_startup import resume_run
     from dsl41.runner_store import SqliteStore
@@ -866,7 +875,7 @@ def test_a_quarantine_an_update_keeps_survives_a_second_crash(
             if not apply:  # as if another stop still laddered: the update never applies
                 held.setattr(EngineUpdate, "look", lambda _self: None)
             engine = await resume_run(
-                load_estate(tmp_path / "estate").catalog,
+                prepare_estate(tmp_path / "estate").catalog,
                 run_root,
                 clock=VirtualClock(start=T0 + timedelta(minutes=1)),
                 adapters={"CMD": FakeAdapter(default=None)},
@@ -903,7 +912,6 @@ def test_the_outside_job_s_feed_lands_before_the_application_at_equal_stamps(
     at its observation, ahead of `b`'s."""
     from store_surgery import append
 
-    from dsl41.reload_plan import load_estate
     from dsl41.runner import outcome_record, plan_record
     from dsl41.runner_startup import resume_run
 
@@ -915,7 +923,7 @@ def test_the_outside_job_s_feed_lands_before_the_application_at_equal_stamps(
 
     async def restart() -> None:
         engine = await resume_run(
-            load_estate(tmp_path / "estate").catalog,
+            prepare_estate(tmp_path / "estate").catalog,
             run_root,
             clock=VirtualClock(start=T0),
             adapters={"CMD": FakeAdapter(default=None)},
@@ -942,7 +950,6 @@ def test_a_box_run_keeps_its_rev_through_snapshot_prune_resume_update_snapshot_p
     """Astra's five steps: boxes run under rev 1; a snapshot and a prune; a restart; an
     update that edits one box and removes the other; a snapshot and a prune again. Each box run
     keeps rev 1, recorded when it opened, and the removed box's run stays in `runs`."""
-    from dsl41.reload_plan import load_estate
     from dsl41.runner_history import read_run_root
     from dsl41.runner_startup import resume_run
 
@@ -971,7 +978,7 @@ def test_a_box_run_keeps_its_rev_through_snapshot_prune_resume_update_snapshot_p
 
     async def second() -> None:
         engine = await resume_run(
-            load_estate(tmp_path / "estate").catalog,
+            prepare_estate(tmp_path / "estate").catalog,
             run_root,
             clock=VirtualClock(start=T0 + timedelta(minutes=1)),
             adapters={"CMD": FakeAdapter()},

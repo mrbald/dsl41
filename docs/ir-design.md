@@ -557,7 +557,7 @@ classifications in `lint.py`; their presence does not imply a supported UC outpu
 
 Engine shell/profile settings warn once when configured; truncate mode warns once.
 Restart reports active captured warnings without applying lint refusal policy.
-Legacy reread reports this code as a preflight warning.
+Reread records `known-unsupported` in the main-config plan's `lint_findings` (DL-486).
 
 ## 10. Design decisions D1–D4
 

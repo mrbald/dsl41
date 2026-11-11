@@ -15,6 +15,8 @@ asyncio.run per async scenario.
 
 from __future__ import annotations
 
+from reload_fixtures import prepare_estate, write_config
+
 from contextlib import closing
 
 import asyncio
@@ -34,7 +36,8 @@ from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import ApplyResult, Attempt, Frontiers, fingerprint
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.reload_diff import catalog_hash_v2 as catalog_hash
-from dsl41.reload_plan import load_estate, reread
+from dsl41 import main_config as main
+from dsl41.reload_plan import reread
 from dsl41.runner_config import Configuration
 from dsl41.runner_journal import (
     BackfillRefused,
@@ -923,23 +926,25 @@ def test_catalog_order_survives_store_replay_restart_and_reload(tmp_path: Path, 
         root = tmp_path / "run"
         clock = VirtualClock(start=T0)
         adapter = FakeAdapter(default=None)
+        estate = tmp_path / "estate"
+        estate.mkdir()
+        write_config(estate, engine='machine_policy = "local-eligible"\nas_machine = ["m1"]\n')
+        (estate / "jobs.jil").write_text(_ORDER_GATE if "reload" in route else _ORDER_JIL)
+        initial = prepare_estate(estate)
         engine = start_run(
-            lower_source(_ORDER_GATE if "reload" in route else _ORDER_JIL),
+            initial.catalog,
             root,
+            source_capture=main.encoded_parts(initial),
+            launched=main.profile_of(initial),
             clock=clock,
             adapters={"CMD": adapter},
         )
         expected_rev = 1
         try:
             if "reload" in route:
-                estate = tmp_path / "estate"
-                estate.mkdir()
-                (estate / "estate.toml").write_text('name = "order"\nfiles = ["jobs.jil"]\n')
                 (estate / "jobs.jil").write_text(_ORDER_JIL)
-                candidate = load_estate(estate)
-                plan = reread(
-                    estate, engine.update.live(), root / "plans", candidate=candidate, start=T0
-                )
+                candidate = prepare_estate(estate)
+                plan = reread(engine.update.live(), root / "plans", candidate=candidate, start=T0)
                 pending = engine.request_update(
                     UpdateRequest(plan.token, 1, engine.baseline_id, "order-update")
                 )

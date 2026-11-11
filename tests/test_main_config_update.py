@@ -188,7 +188,6 @@ def test_bug57_unchanged_update_preserves_marks_until_next_reread(tmp_path, monk
             marks = dict(engine.reread_marks)
             (tmp_path / "a.jil").write_text(JOB)
             plan = reread(
-                tmp_path,
                 engine.update.live(),
                 root / "plans",
                 candidate=main.prepare(path),
@@ -231,7 +230,6 @@ def test_bug57_equal_update_after_application_or_restart(tmp_path, after):
             if after == "application":
                 (tmp_path / "a.jil").write_text(JOB.replace("true", "echo changed"))
                 plan = reread(
-                    tmp_path,
                     engine.update.live(),
                     root / "plans",
                     candidate=main.prepare(path),
@@ -260,7 +258,6 @@ def test_bug57_equal_update_after_application_or_restart(tmp_path, after):
             before = list(engine.journal.store.read_from(0))
             config = engine.journal.store.get_config(rev)
             plan = reread(
-                tmp_path,
                 engine.update.live(),
                 root / "plans",
                 candidate=main.prepare(path),
@@ -341,9 +338,7 @@ def test_bug57_edits_still_apply(tmp_path, monkeypatch, edit):
             candidate = main.prepare(path)
             if edit == "lowering":
                 assert main.encoded_parts(candidate) == main.encoded_parts(initial)
-            plan = reread(
-                tmp_path, engine.update.live(), root / "plans", candidate=candidate, start=T0
-            )
+            plan = reread(engine.update.live(), root / "plans", candidate=candidate, start=T0)
             assert plan.stop == ()
             assert bool(plan.plan.changed) is (edit == "lowering")
             pending = engine.request_update(UpdateRequest(plan.token, 1, engine.baseline_id, edit))
@@ -396,9 +391,7 @@ def test_bug57_kill_signals_restart_revert(tmp_path):
             path.write_bytes(original)
             candidate = main.prepare(path)
             assert main.encoded_parts(candidate) == main.encoded_parts(initial)
-            plan = reread(
-                tmp_path, engine.update.live(), root / "plans", candidate=candidate, start=T0
-            )
+            plan = reread(engine.update.live(), root / "plans", candidate=candidate, start=T0)
             pending = engine.request_update(
                 UpdateRequest(plan.token, 1, engine.baseline_id, "revert")
             )
@@ -434,9 +427,7 @@ def test_bug57_unchanged_update_respects_refusals(tmp_path, monkeypatch, busy):
         try:
             engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "A"}))
             await engine.run_until_quiescent(T0)
-            plan = reread(
-                tmp_path, engine.update.live(), root / "plans", candidate=initial, start=T0
-            )
+            plan = reread(engine.update.live(), root / "plans", candidate=initial, start=T0)
             if busy == "drain":
                 monkeypatch.setattr(engine.attempts, "unsettled", lambda: ("waiting",))
                 monkeypatch.setattr(engine.attempts, "stop_all", lambda cause: None)
@@ -446,7 +437,6 @@ def test_bug57_unchanged_update_respects_refusals(tmp_path, monkeypatch, busy):
             else:
                 (tmp_path / "a.jil").write_text(JOB.replace("true", "echo changed"))
                 changed = reread(
-                    tmp_path,
                     engine.update.live(),
                     root / "plans",
                     candidate=main.prepare(path),
@@ -492,7 +482,7 @@ def test_runtime_policy_update_reread_and_restart(tmp_path: Path) -> None:
 
     def unchanged(engine):
         live = engine.update.live()
-        plan = reread(tmp_path, live, root / "plans", candidate=candidate, start=T0)
+        plan = reread(live, root / "plans", candidate=candidate, start=T0)
         assert not plan.plan.changed and plan.plan.unchanged == ("A",)
         assert plan.stop == ()
         assert definition_hash(live.catalog.jobs["A"], live.catalog, live.settings) == (
@@ -510,9 +500,7 @@ def test_runtime_policy_update_reread_and_restart(tmp_path: Path) -> None:
             source_capture=main.encoded_parts(initial),
         )
         try:
-            plan = reread(
-                tmp_path, engine.update.live(), root / "plans", candidate=candidate, start=T0
-            )
+            plan = reread(engine.update.live(), root / "plans", candidate=candidate, start=T0)
             answer = engine.request_update(
                 UpdateRequest(plan.token, 1, engine.baseline_id, "policy")
             )
@@ -579,9 +567,7 @@ def test_stopping_job_shell_update_resumes_with_candidate_profile(
             await engine.run_until_quiescent(T0)
             config_file(tmp_path, engine='job_shell = "/bin/bash"\n')
             candidate = main.prepare(path)
-            plan = reread(
-                tmp_path, engine.update.live(), root / "plans", candidate=candidate, start=T0
-            )
+            plan = reread(engine.update.live(), root / "plans", candidate=candidate, start=T0)
             assert plan.stop == ("A",)
             with monkeypatch.context() as held:
                 held.setattr(engine.update, "stop_attempt", lambda job, cause: None)
@@ -641,9 +627,7 @@ def test_07_08_09_captured_update_retry_stale_and_drift(
             (tmp_path / "author.py").write_text(PYTHON)
             config_file(tmp_path, include=["*.jil", "*.py"])
             candidate = main.prepare(path)
-            plan = reread(
-                tmp_path, engine.update.live(), root / "plans", candidate=candidate, start=T0
-            )
+            plan = reread(engine.update.live(), root / "plans", candidate=candidate, start=T0)
             assert plan.plan.unchanged == ("A",)
             (tmp_path / "author.py").unlink()
             (tmp_path / "a.jil").unlink()
@@ -721,9 +705,7 @@ def test_09_10_stopping_restart_keeps_admitted_policy_and_bytes(
             await engine.run_until_quiescent(T0)
             (tmp_path / "a.jil").write_text(JOB.replace("true", "echo captured"))
             candidate = main.prepare(path)
-            result = reread(
-                tmp_path, engine.update.live(), root / "plans", candidate=candidate, start=T0
-            )
+            result = reread(engine.update.live(), root / "plans", candidate=candidate, start=T0)
             assert result.stop == ("A",)
             request = UpdateRequest(result.token, 1, engine.baseline_id, "stopping")
             intent = {
@@ -786,7 +768,6 @@ def test_09_running_box_membership_is_prepared(tmp_path: Path) -> None:
         (tmp_path / "a.jil").read_text() + JOB.replace("A", "B") + "box_name: BX\n"
     )
     result = reread(
-        tmp_path,
         live_of(initial, {"BX": "RUNNING"}),
         tmp_path / "plans",
         candidate=main.prepare(path),
@@ -857,19 +838,15 @@ def test_legacy_config_row_retry_never_appends(tmp_path: Path, version: int, kin
             assert store.current_config_rev() == 2
 
 
-@pytest.mark.parametrize("version", [1, 2])
 def test_older_build_crash_after_config_row_resumes_without_another_row(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: int
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from dsl41.reload_plan import load_estate
-
     path = estate_file(tmp_path)
     jobs = JOB + "\ninsert_job: B\njob_type: c\ncommand: true\ncondition: s(A)\n"
     (tmp_path / "a.jil").write_text(jobs)
-    (tmp_path / "estate.toml").write_text('name = "boundary"\nfiles = ["a.jil"]\n')
-    initial = main.prepare(path) if version == 2 else load_estate(tmp_path)
-    profile = main.profile_of(initial) if version == 2 else RuntimeProfile()
-    capture = main.encoded_parts(initial) if version == 2 else {}
+    initial = main.prepare(path)
+    profile = main.profile_of(initial)
+    capture = main.encoded_parts(initial)
     root = tmp_path / "run"
 
     async def scenario() -> None:
@@ -885,19 +862,14 @@ def test_older_build_crash_after_config_row_resumes_without_another_row(
         assert engine.journal is not None
         try:
             (tmp_path / "a.jil").write_text(jobs.replace("true", "echo captured"))
-            candidate = main.prepare(path) if version == 2 else load_estate(tmp_path)
-            plan = reread(
-                tmp_path, engine.update.live(), root / "plans", candidate=candidate, start=T0
-            )
+            candidate = main.prepare(path)
+            plan = reread(engine.update.live(), root / "plans", candidate=candidate, start=T0)
             append = engine.journal.append
 
             def old_writer(store, configuration, rev):
                 payload = json.loads(configuration.to_bytes())
                 payload.pop("job_order")
-                if version == 1:
-                    payload.pop("configuration_format_version")
-                else:
-                    payload["configuration_format_version"] = 2
+                payload["configuration_format_version"] = 2
                 data = canonical_bytes(payload)
                 assert store.put_config(data, "sha256:" + hashlib.sha256(data).hexdigest()) == rev
 
@@ -920,12 +892,12 @@ def test_older_build_crash_after_config_row_resumes_without_another_row(
         stored = active_configuration(root)
         assert stored.catalog.jobs["A"].exec_.command == "true"
         resumed = await resume_run(
-            stored.catalog if version == 2 else candidate.catalog,
+            stored.catalog,
             root,
             clock=clock,
             adapters={"CMD": FakeAdapter()},
             declared=stored.profile,
-            stored_sources=version == 2,
+            stored_sources=True,
         )
         try:
             await resumed.run_until_quiescent(T0)
@@ -1096,7 +1068,7 @@ def test_kill_signals_update_affects_later_kills_only(
             await _until(log_a.exists)
             config_file(tmp_path, engine="kill_signals = [9]\n")
             candidate = main.prepare(path)
-            plan = reread(tmp_path, engine.update.live(), root / "plans", candidate=candidate)
+            plan = reread(engine.update.live(), root / "plans", candidate=candidate)
             assert plan.plan.changed == () and plan.stop == ()
             answer = await engine.request_update(
                 UpdateRequest(plan.token, 1, engine.baseline_id, "policy")
@@ -1166,7 +1138,6 @@ def test_fw_wildcard_to_exact_survives_update_and_restart(tmp_path: Path) -> Non
 
             source.write_text(definition(exact))
             plan = reread(
-                tmp_path,
                 engine.update.live(),
                 root / "plans",
                 candidate=main.prepare(path),
@@ -1339,7 +1310,6 @@ def test_box_restart_commits_kills_and_holds_finished_marked_members(
             (short_root / "a.jil").write_text(text + JOB.replace("A", "NEW") + "box_name: BX\n")
             candidate = main.prepare(path)
             plan = reread(
-                short_root,
                 engine.update.live(),
                 short_root / "run" / "plans",
                 candidate=candidate,
@@ -1469,7 +1439,6 @@ def test_box_restart_is_outermost_and_removed_boxes_stay_stopped(short_root: Pat
                     "INNER"
                 ] == "restart_box"
             plan = reread(
-                short_root,
                 engine.update.live(),
                 short_root / "run" / "plans",
                 candidate=candidate,
@@ -1704,7 +1673,6 @@ def test_box_restart_ends_boxes_before_done_sibling_can_start(short_root: Path):
             (short_root / "a.jil").write_text(old + JOB.replace("A", "NEW") + "box_name: ZB\n")
             candidate = main.prepare(path)
             plan = reread(
-                short_root,
                 engine.update.live(),
                 short_root / "run" / "plans",
                 candidate=candidate,

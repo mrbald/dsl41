@@ -358,9 +358,7 @@ def test_main_config_captures_job_env_and_reload_revision(tmp_path: Path) -> Non
             engine.launch_settings = initial.metadata["launch"]
             path.write_text(path.read_text().replace('AUTOSERV = "one"', 'AUTOSERV = "two"'))
             candidate = main_config.prepare(path)
-            plan = reread(
-                tmp_path, engine.update.live(), tmp_path / "root" / "plans", candidate=candidate
-            )
+            plan = reread(engine.update.live(), tmp_path / "root" / "plans", candidate=candidate)
             reply = engine.request_update(
                 UpdateRequest(plan.token, 1, engine.baseline_id, "env-update")
             )
@@ -571,16 +569,14 @@ def test_reread_validates_against_engine_startup_values_not_the_client(
                 (tmp_path / "a.jil").read_text() + "std_out_file: $CAPTURED_DIR/$AUTORUN\n"
             )
             candidate = main_config.prepare(path)
-            plan = reread(tmp_path, live, tmp_path / "root" / "plans", candidate=candidate)
+            plan = reread(live, tmp_path / "root" / "plans", candidate=candidate)
             assert plan.token
             monkeypatch.setenv("CLIENT_ONLY", "client-value")
             (tmp_path / "a.jil").write_text(
                 (tmp_path / "a.jil").read_text().replace("CAPTURED_DIR", "CLIENT_ONLY")
             )
             with pytest.raises(RereadRefused, match="references unavailable variable CLIENT_ONLY"):
-                reread(
-                    tmp_path, live, tmp_path / "root" / "plans", candidate=main_config.prepare(path)
-                )
+                reread(live, tmp_path / "root" / "plans", candidate=main_config.prepare(path))
         finally:
             await engine.shutdown()
             engine.journal.close()

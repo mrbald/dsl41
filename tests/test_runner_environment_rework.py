@@ -330,7 +330,6 @@ def test_environment_only_revision_stops_nothing_while_a_box_runs(tmp_path):
                 candidate.catalog.jobs["J0"], candidate.catalog, candidate.settings
             )
             plan = reread(
-                tmp_path,
                 engine.update.live(),
                 engine.run_root / "plans",
                 candidate=candidate,
@@ -544,7 +543,7 @@ def test_update_rechecks_a_candidate_against_the_engine_environment(tmp_path, mo
             )
             candidate = main_config.prepare(path)
             live = replace(engine.update.live(), path_environment={"PLAN_ONLY": "set"})
-            plan = reread(tmp_path, live, engine.run_root / "plans", candidate=candidate, start=T0)
+            plan = reread(live, engine.run_root / "plans", candidate=candidate, start=T0)
             reply = engine.request_update(
                 UpdateRequest(plan.token, 1, engine.baseline_id, "unknown-env")
             )
