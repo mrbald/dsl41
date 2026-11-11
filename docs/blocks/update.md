@@ -21,6 +21,7 @@ Its intent and its application are store records, so a crash between them resume
 ## States
 
 One update request's states are [update](../state-machines.md#update): IDLE, STOPPING, APPLIED and REFUSED, with the token and the stop set as the instance's data.
+STOPPING contains WAITING for the stop set and ENDING_BOXES while the old box runs' KILLJOBs commit (DL-487).
 The anchor holds the generated diagram and transition table.
 The [chart lifecycles](../chart-lifecycles.md) view lists each target state with the ways into it.
 

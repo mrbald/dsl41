@@ -11,8 +11,8 @@ None open.
 
 State handled outside a state machine and duplicated logic make the whole system fragile, so they rank here, not under maintenance (owner, 2026-11-10).
 
-- **FEAT-10**: Declare box stop, apply, hold and restart in the UPDATE chart and decide its recovery window (`src/dsl41/runner.py:803-818`, `src/dsl41/reload_update.py:8-13`).
-  Next: the review is ruled (only the box stop is a state; the window stays): chart slices S1 and S2, then BUG-67.
+- **FEAT-10**: Declare apply, hold and restart in the UPDATE chart (`src/dsl41/runner.py:798-840`, the `applied` block of `_update_step`). The box stop is a state (DL-487) and the recovery window stays (DL-463).
+  Next: chart slice S2, the apply row's ordered intents; then BUG-67.
 - **FEAT-9**: Share one pure per-job effect calculation between reread forecasts and update execution (`src/dsl41/reread_worker.py:25-133`, `src/dsl41/runner_update.py:437-687`).
   Next: an engineer plan, after FEAT-10's.
 - **FEAT-30**: Establish ownership of the unintegrated [process preparation](src/dsl41/runner_adapters.py) before deletion or activation. If activation is authorized, share path resolution and trace a real dispatch through it.
@@ -142,7 +142,6 @@ In fix order. BUG-4, BUG-5 and BUG-6 go with BUG-1 as one clock pass. BUG-20, BU
   - Improve the existing document routes for [admission](docs/blocks/admission.md) between current authority, component explanation and how-to, without copying contracts.
 
 - **FEAT-13**: Complete the 20 due spec reviews at main 071c312 (`scripts/arch_check.py --spec-status`).
-- **FEAT-14**: Remove UpdateTier's unused production settle default; engine callers pass false and settle externally (`src/dsl41/reload_update.py:476`, `src/dsl41/runner_update.py:413`).
 - **FEAT-15**: Replace placeholder update identities and client replies with types that need no fake token, revision or catalog (`src/dsl41/runner_control.py:724-732`, `src/dsl41/cli_reload.py:193-231`).
 - **FEAT-17**: Remove the dead client `PLANS` and move `live_of_answer` to test support (`src/dsl41/cli_reload.py:18,166`).
 - **FEAT-33**: Check that a difference label is unique within a job record. Labels such as `passthrough.description` and `kind` are unclear (DL-482).

@@ -26403,3 +26403,26 @@ relitigate an entry; append a new one.
   state version 24 or below; this build has 28. Main builds between the version 28 step
   and DL-463 could write one; the owner keeps no run root from them.
   THE LIMIT. A run root from such a build that holds an open update refuses to restart.
+
+- DL-487 The UPDATE chart declares the box stop: STOPPING holds WAITING and ENDING_BOXES
+  (2026-11-11; operator ruling on the FEAT-10 chart review; reload_update.py, runner.py,
+  runner_update.py, blocks/update.md)
+  THE RULE. STOPPING has two children. WAITING waits for the stop set; the engine posts
+  one `look` after each update step, and `look [none_open]` (update.05) enters
+  ENDING_BOXES, whose entering row ends each old box run, boxes first. The tier hands
+  those KILLJOBs to the update step, which awaits their commit and posts `boxes_ended`;
+  update.03 keeps its id and now leaves ENDING_BOXES on `boxes_ended` into APPLIED.
+  `look [some_open]` (update.06) moves nothing. "None open" is decided by the guard alone;
+  the `settle=` switch and the engine's own test are gone. The event
+  `all_stopped_or_none` retires. STOPPING stays active through ENDING_BOXES, so the
+  dispatch filter and every reader of STOPPING are unchanged; a restore names
+  `{update, STOPPING, WAITING}`. This replaces DL-427's "four rows, no more".
+  THE REASON. The box stop waits on committed KILLJOBs while the dispatch filter holds,
+  which is STOPPING's projection, so by the owner's test it is a state (FEAT-10). The
+  decision "the stops are down" was made in three places.
+  UNCHANGED. Golden traces, journal records, snapshots, `status.update`, the wire, stored
+  forms and `STATE_MACHINE_VERSION`. Nothing stores a state or event name of this chart.
+  NOT DONE HERE. The steps after the application (time advance, hold, box restart,
+  finish) stay in the update step until the next slice. The recovery window stays
+  `config intent` to `config applied` (DL-463). A crash between a box's KILLJOB and a
+  member's is BUG-67.

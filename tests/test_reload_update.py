@@ -26,7 +26,7 @@ import pytest
 import statechart_completeness as sc
 
 from dsl41.cli_reload import UpdateReply, reread_command, update_command
-from dsl41.engine_charts import UPDATE_STOP
+from dsl41.engine_charts import UPDATE_STOP, Intent
 from dsl41.idempotence import load_exceptions
 from dsl41.ir import CatalogIR, ExecSpec, lower_source
 from dsl41.oracle import Oracle
@@ -34,11 +34,13 @@ from dsl41.canon import canonical_bytes, decode
 from dsl41.oracle_state import CarriedRows, Event, JobRuntime, OracleError
 from dsl41.reload_plan import Live, RereadResult, read_plan, reread
 from dsl41.reload_update import (
-    ALL_STOPPED_OR_NONE,
     APPLY,
+    BOXES_ENDED,
+    END_BOXES,
     EXIT_RECORDED,
     JOURNAL_APPLIED,
     JOURNAL_INTENT,
+    LOOK,
     STOP_ATTEMPT,
     UPDATE,
     UPDATE_ADMITTED,
@@ -91,27 +93,33 @@ STALE = Refused(TOKEN, STALE_PLAN)
 # ---- the chart
 
 
-def test_the_chart_is_well_formed_has_the_specs_four_rows_and_no_warning() -> None:
+def test_the_chart_is_well_formed_has_six_rows_and_no_warning() -> None:
     assert well_formed(UPDATE) == []
     assert chart_warnings(UPDATE) == []
     rows = [(r.id, r.source, r.event, r.target, r.kind, r.guard) for r in UPDATE.rows]
     assert rows == [
         ("update.01", "IDLE", UPDATE_ADMITTED, "STOPPING", "external", "admitted"),
         ("update.02", "IDLE", UPDATE_ADMITTED, "REFUSED", "external", "refused"),
-        ("update.03", "STOPPING", ALL_STOPPED_OR_NONE, "APPLIED", "external", ""),
-        ("update.04", "STOPPING", EXIT_RECORDED, "", "internal", ""),
+        ("update.03", "ENDING_BOXES", BOXES_ENDED, "APPLIED", "external", ""),
+        ("update.04", "WAITING", EXIT_RECORDED, "", "internal", ""),
+        ("update.05", "WAITING", LOOK, "ENDING_BOXES", "external", "none_open"),
+        ("update.06", "WAITING", LOOK, "", "internal", "some_open"),
     ]
-    assert alphabet(UPDATE) == sorted([UPDATE_ADMITTED, ALL_STOPPED_OR_NONE, EXIT_RECORDED])
+    assert UPDATE_STATES == ("IDLE", "STOPPING", "APPLIED", "REFUSED")
+    assert alphabet(UPDATE) == sorted([UPDATE_ADMITTED, LOOK, BOXES_ENDED, EXIT_RECORDED])
 
 
 def _executor(state: str) -> Executor:
     executor = Executor()
     executor.start("u", UPDATE, UpdateRecord())
     executor.run()
-    if state in ("STOPPING", "APPLIED"):
-        executor.dispatch("u", ChartEvent(UPDATE_ADMITTED, ADMITTED))
+    if state in ("STOPPING", "WAITING", "WAITING_EMPTY", "ENDING_BOXES", "APPLIED"):
+        admitted = ADMITTED if state in ("STOPPING", "WAITING") else NONE_TO_STOP
+        executor.dispatch("u", ChartEvent(UPDATE_ADMITTED, admitted))
+    if state in ("ENDING_BOXES", "APPLIED"):
+        executor.dispatch("u", ChartEvent(LOOK))
     if state == "APPLIED":
-        executor.dispatch("u", ChartEvent(ALL_STOPPED_OR_NONE))
+        executor.dispatch("u", ChartEvent(BOXES_ENDED))
     if state == "REFUSED":
         executor.dispatch("u", ChartEvent(UPDATE_ADMITTED, STALE))
     return executor
@@ -122,7 +130,10 @@ def _witness(state: str) -> sc.Builder:
 
 
 ABSTRACTION = sc.Abstraction(
-    witnesses={state: _witness(state) for state in UPDATE_STATES},
+    witnesses={
+        state: _witness(state)
+        for state in ("IDLE", "WAITING", "WAITING_EMPTY", "ENDING_BOXES", "APPLIED", "REFUSED")
+    },
     partitions={UPDATE_ADMITTED: {"admitted": ADMITTED, "refused": STALE}},
 )
 
@@ -135,21 +146,25 @@ def test_the_completeness_table_is_the_specs_design() -> None:
         for event, label in [
             (UPDATE_ADMITTED, "admitted"),
             (UPDATE_ADMITTED, "refused"),
-            (ALL_STOPPED_OR_NONE, "any"),
+            (LOOK, "any"),
+            (BOXES_ENDED, "any"),
             (EXIT_RECORDED, "any"),
         ]
     }
     assert table == {
         ("IDLE", UPDATE_ADMITTED, "admitted"): "update.01",
         ("IDLE", UPDATE_ADMITTED, "refused"): "update.02",
-        ("STOPPING", ALL_STOPPED_OR_NONE, "any"): "update.03",
-        ("STOPPING", EXIT_RECORDED, "any"): "update.04",
+        ("WAITING", LOOK, "any"): "update.06",
+        ("WAITING_EMPTY", LOOK, "any"): "update.05",
+        ("WAITING", EXIT_RECORDED, "any"): "update.04",
+        ("WAITING_EMPTY", EXIT_RECORDED, "any"): "update.04",
+        ("ENDING_BOXES", BOXES_ENDED, "any"): "update.03",
         **finals,
     }
 
 
 def test_an_excluded_cell_raises_rather_than_being_ignored() -> None:
-    assert len(UPDATE.exclusions) == 3
+    assert len(UPDATE.exclusions) == 7
     for exclusion in UPDATE.exclusions:
         executor = _executor(exclusion.state)
         with pytest.raises(UnhandledEvent):
@@ -169,6 +184,9 @@ class Effects:
     def stop_attempt(self, job: str, cause: str) -> None:
         self.log.append((STOP_ATTEMPT, job, cause))
 
+    def box_ends(self) -> tuple[str, ...]:
+        return ()
+
     def apply(self, application: Application) -> None:
         self.log.append((APPLY, application.token))
         if self.then is not None:
@@ -176,6 +194,14 @@ class Effects:
 
     def journal_applied(self, rev: int, digest: str) -> None:
         self.log.append((JOURNAL_APPLIED, rev, digest))
+
+
+def _look(tier: UpdateTier) -> None:
+    """The pure tier's caller replies after its box stop, as the engine does (DL-487)."""
+    box_ends = tier.look()
+    if box_ends is not None:
+        assert box_ends == ()
+        tier.boxes_ended()
 
 
 def _application(token: str = TOKEN) -> Application:
@@ -204,10 +230,14 @@ def test_every_coverage_item_of_the_chart_is_hit(
     monkeypatch.setenv(HITS_ENV, str(tmp_path))
     applied = UpdateTier(Effects(), _prepare)
     applied.admit(ADMITTED)
+    _look(applied)
     applied.exit_recorded("A")
+    _look(applied)
     applied.exit_recorded("B")
+    _look(applied)
     refused = UpdateTier(Effects(), _prepare)
     refused.admit(STALE)
+    _look(refused)
     for state in ("APPLIED", "REFUSED"):
         executor = _executor(state)
         for event in alphabet(UPDATE):
@@ -226,6 +256,7 @@ def test_an_admission_journals_the_intent_then_stops_each_job_and_applies_after_
     tier = UpdateTier(effects, _prepare)
     assert tier.state == "IDLE" and tier.dispatch_filter == frozenset()
     tier.admit(ADMITTED)
+    _look(tier)
     assert tier.state == "STOPPING"
     assert tier.open == {"A", "B"}
     assert tier.dispatch_filter == {"A", "B", "C"}
@@ -235,21 +266,26 @@ def test_an_admission_journals_the_intent_then_stops_each_job_and_applies_after_
         (STOP_ATTEMPT, "B", UPDATE_STOP),
     ]
     tier.exit_recorded("Z")  # not in the stop set: nothing
+    _look(tier)
     tier.exit_recorded("A")
+    _look(tier)
     assert tier.state == "STOPPING" and tier.open == {"B"}
     assert tier.application is None
     tier.exit_recorded("B")
+    _look(tier)
     tier.exit_recorded("B")  # after the application: nothing
+    _look(tier)
     assert tier.state == "APPLIED" and tier.dispatch_filter == frozenset()
     application = _application()
     assert tier.application == application
     assert effects.log[3:] == [(APPLY, TOKEN), (JOURNAL_APPLIED, 8, application.digest)]
 
 
-def test_an_admission_with_nothing_to_stop_applies_at_once() -> None:
+def test_an_admission_with_nothing_to_stop_applies_on_its_look() -> None:
     effects = Effects()
     tier = UpdateTier(effects, _prepare)
     tier.admit(NONE_TO_STOP)
+    _look(tier)
     assert tier.state == "APPLIED"
     assert [entry[0] for entry in effects.log] == [JOURNAL_INTENT, APPLY, JOURNAL_APPLIED]
 
@@ -258,16 +294,18 @@ def test_a_refusal_ends_the_update_with_no_effect() -> None:
     effects = Effects()
     tier = UpdateTier(effects, _prepare)
     tier.admit(Refused(TOKEN, STALE_PLAN, ("A",)))
+    _look(tier)
     assert tier.state == "REFUSED"
     assert tier.refusal == Refused(TOKEN, STALE_PLAN, ("A",))
     assert effects.log == [] and tier.application is None
 
 
-def test_a_stop_that_ends_at_once_reaches_the_application_inside_the_admission() -> None:
+def test_a_stop_that_ends_at_once_applies_on_the_admissions_look() -> None:
     effects = Effects()
     tier = UpdateTier(effects, _prepare)
     effects.stop_attempt = lambda job, cause: tier.exit_recorded(job)  # type: ignore[method-assign]
     tier.admit(ADMITTED)
+    _look(tier)
     assert tier.state == "APPLIED"
     assert [entry[0] for entry in effects.log] == [JOURNAL_INTENT, APPLY, JOURNAL_APPLIED]
 
@@ -279,11 +317,58 @@ def test_a_crash_between_intent_and_application_resumes_to_applied(
     effects = Effects()
     tier = UpdateTier(effects, _prepare)
     tier.resume(ADMITTED, still_open)
+    _look(tier)
     if still_open:
         assert tier.state == "STOPPING" and tier.dispatch_filter == {"A", "B", "C"}
         tier.exit_recorded("B")
+        _look(tier)
     assert tier.state == "APPLIED"
     assert [entry[0] for entry in effects.log] == [APPLY, JOURNAL_APPLIED]
+
+
+@pytest.mark.parametrize("restored", [False, True])
+def test_box_kills_keep_the_filter_until_the_callers_reply(
+    restored: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    effects = Effects()
+    tier = UpdateTier(effects, _prepare)
+    reads = []
+
+    def box_ends() -> tuple[str, ...]:
+        assert tier.dispatch_filter == {"C"} and tier.application is None
+        assert tier._executor.active("update") == {"update", "STOPPING", "ENDING_BOXES"}
+        reads.append("boxes")
+        return ("BX", "member")
+
+    monkeypatch.setattr(effects, "box_ends", box_ends)
+    if restored:
+        tier.resume(NONE_TO_STOP, ())
+    else:
+        tier.admit(NONE_TO_STOP)
+    assert tier._executor.active("update") == {"update", "STOPPING", "WAITING"}
+    assert reads == [] and tier.application is None
+    assert tier.look() == (Intent("KILLJOB", "BX"), Intent("KILLJOB", "member"))
+    assert reads == ["boxes"] and tier.application is None
+    assert tier.state == "STOPPING" and tier.dispatch_filter == {"C"}
+    tier.boxes_ended()
+    assert tier.state == "APPLIED" and tier.dispatch_filter == frozenset()
+    assert [entry[0] for entry in effects.log[-2:]] == [APPLY, JOURNAL_APPLIED]
+    assert tier.look() is None and reads == ["boxes"]
+
+
+def test_a_look_with_an_open_stop_does_not_compute_box_kills(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    effects = Effects()
+    tier = UpdateTier(effects, _prepare)
+    monkeypatch.setattr(effects, "box_ends", lambda: pytest.fail("a stop is still open"))
+    tier.admit(ADMITTED)
+    assert tier.look() is None and tier.open == {"A", "B"}
+    assert tier._executor.active("update") == {"update", "STOPPING", "WAITING"}
+    assert tier.application is None
+    executor = _executor("WAITING_EMPTY")
+    (outcome,) = executor.dispatch("u", ChartEvent(LOOK))
+    assert outcome.intents == (Intent(END_BOXES, TOKEN),)
 
 
 # ---- the nightbank engine: the real oracle state and the real scheduler
@@ -366,6 +451,7 @@ class World:
 
         tier = UpdateTier(effects, prepare)
         tier.admit(decision)
+        _look(tier)
         if isinstance(decision, Admitted):
             self.last, self.last_token = tier, document["token"]
         return tier, effects
@@ -480,8 +566,10 @@ def test_two_running_jobs_are_stopped_and_eighteen_untouched_with_consent(tmp_pa
     untouched = [job for job in running if job not in touched]
     assert len(untouched) == 18
     tier.exit_recorded(untouched[0])  # an unrelated end moves nothing
+    _look(tier)
     for job in touched:
         tier.exit_recorded(job)
+        _look(tier)
     assert tier.state == "APPLIED"
     assert [entry[0] for entry in effects.log[3:]] == [APPLY, JOURNAL_APPLIED]
     assert effects.log[-1] == (JOURNAL_APPLIED, 2, catalog_hash_v2(candidate))
@@ -513,6 +601,7 @@ def test_the_dispatch_filter_names_the_added_changed_and_removed_jobs_while_stop
     assert tier.dispatch_filter == {"OPS_HEARTBEAT_C", "OPS_FAIL_ALERT_C", "ZZ_NEW_C"}
     assert "ZZ_NEW_C" not in world.oracle.store.job
     tier.exit_recorded("OPS_HEARTBEAT_C")
+    _look(tier)
     assert tier.dispatch_filter == frozenset()
     # an added job is INACTIVE, with the flag its initial_status seeds (SEM-24)
     row = world.row("ZZ_NEW_C")
@@ -644,6 +733,7 @@ def test_a_removed_running_job_is_stopped_not_rerun_and_its_spent_units_stay_spe
     tier, effects = world.update(document, candidate)
     assert effects.log[1] == (STOP_ATTEMPT, "OPS_SPOOL_C", UPDATE_STOP)
     tier.exit_recorded("OPS_SPOOL_C")
+    _look(tier)
     assert tier.application is not None
     assert tier.application.stopped == (("OPS_SPOOL_C", "none"),)
     tombstone = world.oracle.store.tombstones["OPS_SPOOL_C"]
@@ -661,6 +751,7 @@ def test_a_marked_stopped_job_is_held_by_the_interruption_rule(tmp_path: Path) -
     _, document, candidate = world.reread()
     tier, _ = world.update(document, candidate)
     tier.exit_recorded("OPS_HEARTBEAT_C")
+    _look(tier)
     assert tier.application is not None
     assert tier.application.stopped == (("OPS_HEARTBEAT_C", "hold"),)
 
@@ -770,7 +861,9 @@ def test_a_stopped_job_the_oracle_ended_meanwhile_is_answered_none(tmp_path: Pat
     world.feed("STATUS", job="OPS_SPOOL_C", exit_code=0)  # a natural end beat the stop
     world.feed("FORCE_STARTJOB", job="OPS_FAIL_ALERT_C")  # not in the stop set
     tier.exit_recorded("OPS_SPOOL_C")
+    _look(tier)
     tier.exit_recorded("OPS_HEARTBEAT_C")
+    _look(tier)
     assert tier.application is not None
     assert tier.application.stopped == (("OPS_HEARTBEAT_C", "rerun"), ("OPS_SPOOL_C", "none"))
 
@@ -786,6 +879,7 @@ def test_a_stopped_run_the_oracle_replaced_meanwhile_is_answered_none(tmp_path: 
     row = world.row("OPS_HEARTBEAT_C")
     assert (row.status, row.run_number) == ("RUNNING", 2)
     tier.exit_recorded("OPS_HEARTBEAT_C")
+    _look(tier)
     assert tier.application is not None
     assert tier.application.stopped == (("OPS_HEARTBEAT_C", "none"),)
 
@@ -800,6 +894,7 @@ def test_a_dropped_depletable_keeps_its_type_so_its_spent_units_stay_spent(
     _, document, candidate = world.reread()
     tier, _ = world.update(document, candidate)
     tier.exit_recorded("OPS_SPOOL_C")
+    _look(tier)
     assert tier.state == "APPLIED"
     assert world.row("OPS_SPOOL_C").reservations  # the live run still holds its units
     world.feed("STATUS", job="OPS_SPOOL_C", exit_code=0)
@@ -824,9 +919,11 @@ def test_a_raise_while_applying_propagates_and_resume_applies(tmp_path: Path) ->
     crashed = UpdateTier(Effects(), broken)
     with pytest.raises(RuntimeError, match="disk full"):
         crashed.admit(NONE_TO_STOP)
+        _look(crashed)
     effects = Effects()
     restarted = UpdateTier(effects, _prepare)
     restarted.resume(NONE_TO_STOP, ())
+    _look(restarted)
     assert restarted.state == "APPLIED"
     assert [entry[0] for entry in effects.log] == [APPLY, JOURNAL_APPLIED]
 
@@ -854,6 +951,7 @@ def test_a_running_job_whose_type_changes_is_stopped_retired_and_admitted(
     tier, effects = world.update(document, candidate)
     assert effects.log[1] == (STOP_ATTEMPT, "OPS_HEARTBEAT_C", UPDATE_STOP)
     tier.exit_recorded("OPS_HEARTBEAT_C")
+    _look(tier)
     assert tier.application is not None
     assert tier.application.stopped == (("OPS_HEARTBEAT_C", "none"),)
     row = world.row("OPS_HEARTBEAT_C")

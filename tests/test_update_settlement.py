@@ -1155,14 +1155,14 @@ def test_task_cancellation_reports_down_before_cleanup_and_reaps_after_it(
                 update._attempts = {"anchor": attempt}
                 tier = update.tier = UpdateTier(update, update._prepare)
                 admitted = Admitted("token", ("anchor",), frozenset({"anchor"}))
-                tier.resume(admitted, ("anchor",), settle=False)
+                tier.resume(admitted, ("anchor",))
                 exit_recorded = tier.exit_recorded
 
-                def report(job: str, *, settle: bool = True) -> None:
+                def report(job: str) -> None:
                     assert task in engine._reaping and task.cancelling() == 1 and not task.done()
                     assert update._cancelled == [("anchor", 7, attempt)]
                     order.append("report")
-                    exit_recorded(job, settle=settle)
+                    exit_recorded(job)
 
                 monkeypatch.setattr(tier, "exit_recorded", report)
                 update.stop_attempt("anchor", "update_stop")
@@ -1204,7 +1204,7 @@ def test_an_update_does_not_cancel_a_different_attempt(
         update = engine.update
         update._attempts = {"anchor": "selected"}
         tier = update.tier = UpdateTier(update, update._prepare)
-        tier.resume(Admitted("token", ("anchor",), frozenset()), ("anchor",), settle=False)
+        tier.resume(Admitted("token", ("anchor",), frozenset()), ("anchor",))
         try:
             update.stop_attempt("anchor", "update_stop")
             assert task.cancelling() == 0 and engine.live_jobs() == {"anchor"}
