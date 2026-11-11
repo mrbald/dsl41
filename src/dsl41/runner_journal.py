@@ -30,7 +30,8 @@ Record kinds (`Record.kind`) and what each payload holds:
 - `config`: a configuration rev the engine applied (`event: applied`), with, for an update,
   the plan's token and what it added, changed and removed; and an update's `event: intent`
   while it stops: the token, the stop set with each attempt it stops, the dispatch filter,
-  and the request's id (the store's unique column) and fingerprint (spec-wiring 1b).
+  the admitted box roots (`restart_boxes`, DL-489), and the request's id (the store's unique
+  column) and fingerprint (spec-wiring 1b).
 - `engine`: the engine's own life: `started`, `draining`, `clean_shutdown`, `unclean_shutdown`,
   `shutdown_during_startup`, `drain_interrupted`, `snapshot`.
 
@@ -251,12 +252,30 @@ def _check_steps(steps: Any) -> None:
                 raise EngineError("version-28 replacement env lacks DSL41_SCHEDULED_AT (DL-447)")
 
 
+def update_box_roots(intent: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """The admitted box roots, or None for a keyless intent (DL-489)."""
+    if "restart_boxes" not in intent:
+        return None
+    roots = intent["restart_boxes"]
+    if (
+        not isinstance(roots, list)
+        or not all(isinstance(name, str) for name in roots)
+        or roots != sorted(set(roots))
+    ):
+        raise EngineError(
+            "config intent restart_boxes must be a sorted list of unique names (DL-489)"
+        )
+    return tuple(roots)
+
+
 def check_record(record: Record) -> None:
     """Refuse, by name, a record this binary does not know: a kind outside `KINDS`, an engine
     event outside `ENGINE_EVENTS`, an outcome outside `OUTCOMES`, a plan outside `PLANS`
     (protocol-evolution: an unknown kind refuses by name). The writer checks before the append
     and every reader before it acts on the record."""
     kind, body = record.kind, record.payload
+    if kind == "config" and body.get("event") == "intent":
+        update_box_roots(body)
     if kind == "dispatch":
         check_dispatch(body)
     if kind == "follow_up" and body.get("event") == "plan":
@@ -1093,6 +1112,11 @@ def encode_snapshot(
 def _with_update(table: OpenTable, update: Any) -> OpenTable:
     """`table` holding the snapshot's update in STOPPING."""
     table.update = dict(update) if isinstance(update, Mapping) else None
+    if table.update is not None:
+        try:
+            update_box_roots(table.update)
+        except EngineError as exc:
+            raise ValueError(str(exc)) from exc
     return table
 
 

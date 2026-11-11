@@ -6,7 +6,8 @@ admission reads the version 2 plan `reread` stored under `plans/<token>/`, loads
 main-config inputs (DL-486), and re-checks the runtime
 preconditions against the engine's state now (`reload_update.admission_check`). A refusal is the
 reply and writes nothing. An admission appends `config intent` (the token, the stop set with the
-attempt each stop interrupts, the dispatch filter, and the request's id and fingerprint), then
+attempt each stop interrupts, the dispatch filter, the admitted box roots (DL-489), and the
+request's id and fingerprint), then
 stops each attempt of the stop set with cause `update_stop` through the attempt tier. While the
 update stops, no job of the plan's added, changed and removed sets is dispatched: a start the
 oracle decides for one is held as `dispatch_pending`.
@@ -78,7 +79,7 @@ from dsl41.runner_attempts import UNSETTLED, FollowUp
 from dsl41.runner_clock import EngineError
 from dsl41.runner_codes import Code
 from dsl41.runner_config import Configuration, RuntimeProfile, tz_aliases_of, with_host_settings
-from dsl41.runner_journal import CONFIG_MARKER, config_marker
+from dsl41.runner_journal import CONFIG_MARKER, config_marker, update_box_roots
 from dsl41.runner_ledger import STATE_MACHINE_VERSION
 from dsl41.runner_store import Record, Store
 from dsl41.runtime_policy import policy_values
@@ -420,6 +421,7 @@ class EngineUpdate:
         admitted: Admitted,
         attempts: dict[str, str | None],
         cleaning: dict[str, str],
+        box_roots: tuple[str, ...] | None = None,
     ) -> None:
         """Install the update and its selected attempts before creating its tier (DL-432)."""
         engine = self.engine
@@ -428,14 +430,17 @@ class EngineUpdate:
         self._moved = frozenset(engine.marked ^ set(opened.marked.names))
         self._held = admitted.dispatch_filter
         self._admitted = admitted
-        self._set_box_scope(opened)
+        self._set_box_scope(opened, box_roots)
         self._attempts = attempts
         self._cleaning = cleaning
         self.tier = UpdateTier(self, self._prepare)
 
-    def _set_box_scope(self, opened: OpenedPlan) -> None:
+    def _set_box_scope(self, opened: OpenedPlan, roots: tuple[str, ...] | None = None) -> None:
         old, new = self.engine.oracle.catalog, opened.estate.catalog
-        self._box_roots = restart_boxes(plan_of(opened.plan, old), self.live(), new)
+        # DL-489: admission and keyless recovery compute roots; keyed recovery keeps them.
+        self._box_roots = (
+            restart_boxes(plan_of(opened.plan, old), self.live(), new) if roots is None else roots
+        )
         self._box_members = box_members(old, self._box_roots) | box_members(new, self._box_roots)
 
     def _post(self, post: Callable[[UpdateTier], object]) -> None:
@@ -520,7 +525,7 @@ class EngineUpdate:
         # an attempt whose outcome is in while its cleanup was cut short is down once the
         # catch-up's cleanup step has finished it (`cleaned`)
         cleaning = {run_id: job for job, run_id in still.items() if table[run_id].closing}
-        self._install(request, opened, admitted, attempts, cleaning)
+        self._install(request, opened, admitted, attempts, cleaning, update_box_roots(intent))
         # the request's own answer: a retry under its id while it still stops waits on it
         self._answer = UpdateAnswer(admitted)
         self._answer.applied = asyncio.get_running_loop().create_future()
@@ -601,6 +606,7 @@ class EngineUpdate:
                 for job in stop_set
             ],
             "filter": sorted(self._held),
+            "restart_boxes": list(self._box_roots),
             "stop_running": True,
             "request_id": request.request_id,
             "fingerprint": request.fingerprint,

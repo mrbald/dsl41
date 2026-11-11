@@ -15,7 +15,7 @@ Its intent and its application are store records, so a crash between them resume
 - `dsl41 reread -S SOCK` previews; `dsl41 update -S SOCK [--wait]` prepares and applies current inputs. Both default to DSL41_SOCKET. They use v4 ADM requests; there is no token or consent handoff (DL-463).
 - `reload_plan.reread` computes and stores the plan; `reload_update.admission_check` re-checks it against the engine's state now; `reload_update.plan_application` and `apply_application` compute and apply the swap.
 - `runner_update.EngineUpdate` binds the update chart's tier to the engine: the admission as one step of the single writer, the stops through the attempt tier, the dispatch filter, the application and its records.
-- The store records `config intent` (the token, the stop set with the attempt each stop interrupts, the dispatch filter, the request's id and fingerprint) and `config applied` (the new rev, its segment fields and the job sets). A configuration row holds each rev's catalog, profile and marked set.
+- The store records `config intent` (the token, the stop set with the attempt each stop interrupts, the dispatch filter, the admitted box roots in `restart_boxes`, the request's id and fingerprint) and `config applied` (the new rev, its segment fields and the job sets). A configuration row holds each rev's catalog, profile and marked set (DL-489).
 - `status` shows `config_rev`, `update_window_s` and, while an update stops, the update and the jobs it waits for; the TUI shows the rev and the update in its subtitle. Once applied, `spec` and `spec_drift` follow the applied plan.
 
 ## States
@@ -46,6 +46,7 @@ The [chart lifecycles](../chart-lifecycles.md) view lists each target state with
 ## Failure and recovery
 
 - A crash between `config intent` and `config applied` is resumed by the restart's fold, which restores the update in STOPPING with its dispatch filter holding; nothing waits for it. The catch-up observes its attempts like any open one, and what is left of each gets the live cleanup (the ladder, the reading after). The update applies as a step of the loop once its stops are finished, wherever the last one finishes: in the catch-up, at the first look the catch-up queues when every stop was finished before the crash, or later. The recovered outcomes of jobs outside its stop set are fed under the old catalog before it. No job of the plan is dispatched and no kept outcome is committed before the application (DL-433).
+- Recovery uses the intent's admitted box roots and derives their members from both catalogs, so it finishes the remaining kills, holds and starts. Only an absent `restart_boxes` recomputes the roots; `[]` stays empty. Malformed roots or a name that is not a BOX of either the applied or candidate catalog refuse before writes or signals (DL-489).
 - A plan an older `reread` wrote (no estate directory) is refused `stale_plan` before anything is written.
 - A plan directory removed while an update stops refuses the restart by name.
 - The admission checks the plan's revision and the catalog hash preparation saw before it writes anything, so the application's own check of them cannot fail after the intent. Any other raise while applying is a crash, not a state: the engine dies, and the restart resumes the update; a raise the same input meets every time stops every restart, and the operator restores or removes the run root.
@@ -86,13 +87,17 @@ The [chart lifecycles](../chart-lifecycles.md) view lists each target state with
 - `test_a_snapshot_taken_while_the_update_stops_carries_it`
 - `test_reread_and_update_over_the_control_socket`
 - `test_every_coverage_item_of_the_chart_is_hit`
+- `test_box_restart_commits_kills_and_holds_finished_marked_members`
+- `test_box_scope_compatibility_and_refusals`
+- `test_retyped_command_box_scope_recovers_as_the_uncut_update`
 
 DL-463 box orchestration commits KILLJOBs before application; otherwise kept member
 outcomes would choose old-run replacements. After the swap, ON_HOLD every marked
 non-INACTIVE member, even one that already finished, before FORCE_STARTJOB of retained
 outermost boxes. Removed boxes stay stopped. The new run and old end are visible to
-normal successors. A crash can leave a box stopped: hold its marked non-INACTIVE members
-before operator force-start. No additional automatic repair is promised.
+normal successors. A crash after `config applied` can leave a box stopped: put its marked
+non-INACTIVE members on hold before force-starting it. No automatic completion after that record
+is promised (DL-489).
 
 The CLI/TUI status annotation caches the last reread forecast in memory. New/failed
 reread replaces it; applied update and restart clear it. Update never consumes it.

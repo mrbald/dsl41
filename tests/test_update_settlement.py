@@ -266,6 +266,7 @@ def test_an_attempt_already_stopping_keeps_its_first_cause_through_intent_and_sn
 
     asyncio.run(scenario())
     [intent] = [c for c in _kinds(tmp_path, "config") if c["event"] == "intent"]
+    assert intent["restart_boxes"] == []  # DL-489: the writer records empty scope too.
     assert [entry["cause"] for entry in intent["stop"]] == ["wrapper_lost"]
     assert seen == ["wrapper_lost", "wrapper_lost"]
 

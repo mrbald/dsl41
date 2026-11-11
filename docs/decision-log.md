@@ -26448,3 +26448,33 @@ relitigate an entry; append a new one.
   applied and leaves its boxes stopped for the operator, as DL-463 states. Neither clock
   yields there in production, and nothing reuses an engine
   after such a cancel.
+
+- DL-489 An update's intent records its box roots, and recovery restarts those boxes
+  (2026-11-11; owner ruling on the FEAT-10 chart review, X1; fixes BUG-67;
+  runner_update.py, runner_journal.py, runner_startup.py, runner-design, control-protocol,
+  protocol-evolution, blocks/update.md)
+  THE RULE. The `config intent` body always carries `restart_boxes`: the sorted, unique
+  names of the running boxes the update admitted to end and restart, `[]` when none. The
+  members are derived at resume from the old and new catalogs, as at admission. A
+  restart that resumes an open update reads the stored roots; it no longer recomputes
+  them from the statuses the box KILLJOBs left, nor from statuses that changed while
+  the update waited (an operator's KILLJOB of a root, say): the resumed update ends and
+  restarts what admission chose, as the live update does. Before recovery acts, the value
+  must be a sorted list of unique names, each a BOX of the applied or the candidate
+  catalog, as admission can choose them; anything else refuses the restart by name. A
+  body without the key, written by an older build, keeps the recomputation.
+  THE EFFECT. A crash anywhere between the intent and `config applied` now ends as the
+  uncut update does: the remaining members are ended, the plan applied, the marked
+  members held and the boxes started. Before, a crash after a box's KILLJOB lost the box
+  from the scope, so a member could start again inside the killed box, and a crash after
+  all KILLJOBs left the box stopped and its marked members unheld. After `config
+  applied`, DL-463's manual step for an unfinished box restart stands. This narrows
+  DL-463's limits to the cuts after the application.
+  THE VERSION. `STATE_MACHINE_VERSION` stays 28: no replay, history or snapshot reader
+  reads the roots; only the live update step does (`runner_ledger.py`, "a change a
+  replay cannot see does not bump it"; DL-485 and DL-463 changed a restart's choice the
+  same way). An older build that restarts a root with an open update ignores the key and
+  recomputes, which is the old defect for that update.
+  REJECTED. A version step: it blocks every rollback of the release for this one case.
+  A new record kind an older build refuses: it needs no snapshots while an update stops.
+  A durable box restart after `config applied` (X2): not now.

@@ -725,9 +725,15 @@ prepares current inputs itself (DL-463). Ordinary jobs keep the interruption rul
 stop, swap, then choose rerun/hold/none under the new catalog. Structural running-box
 changes stop members, commit KILLJOBs before application to prevent old-run replacement,
 then hold every marked non-INACTIVE member (including finished members) before a new
-outermost box run. A crash can leave that box stopped; hold marked non-INACTIVE members
-before operator force-start. Successors observe the old run's end. Artifacts keep their
-existing formats, and there is no extra box-restart recovery protocol (DL-463).
+outermost box run. The intent stores the admitted box roots in `restart_boxes`;
+recovery uses them and derives members from both catalogs. Only a missing key
+recomputes the roots. Before recovery acts, malformed roots or a name that is not
+a BOX of either the applied or candidate catalog refuse by name (DL-489).
+A crash before `config applied` resumes the update with its admitted scope.
+A crash after it can leave a box stopped;
+put marked non-INACTIVE members on hold before force-starting it. Successors observe
+the old run's end. No automatic completion after `config applied` is promised
+(DL-463, DL-489).
 An unfinished stop keeps the update in STOPPING; this path has no cancel verb.
 
 Without `engine.db`, genesis is allowed only without surviving runtime
