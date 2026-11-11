@@ -814,14 +814,20 @@ class Engine:
                 update.ended(pending.update)
         finally:
             update.direct = False
-        if update.stopping and update.tier is not None and not update.tier.open:
-            # Box ends must commit before application chooses member follow-ups (DL-463).
-            for job in update.box_ends():
-                ev = Event(
-                    at=self.now_admitted(), kind="KILLJOB", payload={"job": job}, source="reconcile"
-                )
-                await self._admit_and_apply(_Pending(at=ev.at, request_id=None, ev=ev))
-            update.tier.settle()
+        if update.tier is not None:
+            box_ends = update.tier.look()
+            if box_ends is not None:
+                # Box KILLJOBs commit inside STOPPING before application (DL-487).
+                for intent in box_ends:
+                    assert intent.name == "KILLJOB"
+                    ev = Event(
+                        at=self.now_admitted(),
+                        kind="KILLJOB",
+                        payload={"job": intent.detail},
+                        source="reconcile",
+                    )
+                    await self._admit_and_apply(_Pending(at=ev.at, request_id=None, ev=ev))
+                update.tier.boxes_ended()
         if update.applied:
             await self._admit_and_apply(_Pending(at=self.now_admitted(), request_id=None))
             for kind, job in update.box_starts():

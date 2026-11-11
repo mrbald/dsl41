@@ -398,7 +398,7 @@ class EngineUpdate:
         self._begin(request, opened, decision)
         answer = self._answer = UpdateAnswer(decision)
         answer.applied = asyncio.get_running_loop().create_future()
-        self._post(lambda tier: tier.admit(decision, settle=False))
+        self._post(lambda tier: tier.admit(decision))
         return answer
 
     def _decide(self, refusal: Refused) -> UpdateAnswer:
@@ -526,7 +526,7 @@ class EngineUpdate:
         # the request's own answer: a retry under its id while it still stops waits on it
         self._answer = UpdateAnswer(admitted)
         self._answer.applied = asyncio.get_running_loop().create_future()
-        self._post(lambda tier: tier.resume(admitted, still.keys(), settle=False))
+        self._post(lambda tier: tier.resume(admitted, still.keys()))
 
     def look(self) -> None:
         """Queue the loop's first look at a resumed update's stop set, after every catch-up
@@ -572,9 +572,9 @@ class EngineUpdate:
         elif job is None:
             ended, self._ended_meanwhile = self._ended_meanwhile, []
             for one in ended:
-                self._post(partial(UpdateTier.exit_recorded, job=one, settle=False))
+                self._post(partial(UpdateTier.exit_recorded, job=one))
         else:
-            self._post(lambda tier: tier.exit_recorded(job, settle=False))
+            self._post(lambda tier: tier.exit_recorded(job))
 
     # ---- UpdateIntents
 
@@ -631,7 +631,7 @@ class EngineUpdate:
         if not known and (run := engine.cancel_and_reap(job, run_id)) is not None:
             self._cancelled.append((job, run, run_id))
         assert self.tier is not None
-        self.tier.exit_recorded(job, settle=False)
+        self.tier.exit_recorded(job)
 
     def box_ends(self) -> list[str]:
         """End old box runs before application can choose replacement attempts (DL-463)."""
