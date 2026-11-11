@@ -14,6 +14,10 @@ the cookie can be read.
 
 from __future__ import annotations
 
+from dsl41 import main_config as main
+
+from reload_fixtures import prepare_estate
+
 import asyncio
 import errno
 import json
@@ -612,6 +616,84 @@ def test_a_store_with_no_root_id_or_another_state_version_refuses_by_name(
     with pytest.raises(EngineError, match=match):
         asyncio.run(_resume(run_root, text))
     assert rows(run_root) == before
+
+
+def test_legacy_root_with_retired_update_refuses_before_writes_and_signals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A legacy root's open v1 update cannot be recovered by this build (DL-486)."""
+    from dsl41.canon import canonical_bytes
+    from dsl41.runner_startup import active_configuration
+    from dsl41.runner_store import Record, SqliteStore
+
+    run_root = tmp_path / "run"
+    catalog = lower_source(_jil("j"))
+    token = "1" * 64
+
+    async def seed() -> None:
+        engine = start_run(
+            catalog, run_root, clock=VirtualClock(start=T0), adapters={"CMD": FakeAdapter()}
+        )
+        assert engine.source_capture == {}
+        assert engine.journal is not None
+        try:
+            engine.journal.append(
+                Record(
+                    T0,
+                    "config",
+                    None,
+                    "retired-update",
+                    {
+                        "event": "intent",
+                        "token": token,
+                        "live_rev": 1,
+                        "stop": [],
+                        "filter": [],
+                        "stop_running": True,
+                        "request_id": "retired-update",
+                        "fingerprint": "synthetic",
+                    },
+                )
+            )
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(seed())
+    plan_dir = run_root / "plans" / token
+    plan_dir.mkdir(parents=True)
+    (plan_dir / "plan.json").write_bytes(
+        canonical_bytes({"token": token, "plan_format_version": 1})
+    )
+    assert active_configuration(run_root).source_capture == {}
+    before = rows(run_root)
+    effects: list[str] = []
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        effects.append("runtime effect")
+        pytest.fail("retired-plan refusal followed a write or signal")
+
+    monkeypatch.setattr(SqliteStore, "append", forbidden)
+    monkeypatch.setattr(SqliteStore, "put_config", forbidden)
+    monkeypatch.setattr(runner_procid, "signal_ours", forbidden)
+    monkeypatch.setattr(runner_startup, "_first_reading", forbidden)
+    monkeypatch.setattr(runner_startup, "Engine", forbidden)
+    with pytest.raises(EngineError) as error:
+        asyncio.run(
+            resume_run(
+                catalog,
+                run_root,
+                clock=VirtualClock(start=T0),
+                adapters={"CMD": FakeAdapter()},
+            )
+        )
+    assert str(error.value) == (
+        f"the update {token} was stopping and its plan cannot be read:"
+        " reload plan version 1 is retired (DL-486);"
+        " this build cannot finish the open update."
+        " Finish the update with the build that began it."
+    )
+    assert effects == [] and rows(run_root) == before
 
 
 def _cookied(run_root: Path, run_id: str, script: str) -> subprocess.Popen[bytes]:
@@ -1303,7 +1385,7 @@ def test_a_completed_watch_a_resumed_update_touches_is_fed_before_the_applicatio
     from test_update_settlement import _estate
 
     from dsl41.canon import canonical_bytes
-    from dsl41.reload_plan import load_estate, reread
+    from dsl41.reload_plan import reread
     from dsl41.runner_adapters import ARTIFACT_FORMAT_VERSION, WATCH_LOG
     from dsl41.runner_store import Record
     from dsl41.runner_update import UpdateRequest
@@ -1321,11 +1403,15 @@ def test_a_completed_watch_a_resumed_update_touches_is_fed_before_the_applicatio
 
     async def first() -> None:
         engine = start_run(
-            load_estate(_estate(tmp_path, jil("x", "/tmp/dsl41-one"))).catalog,
+            prepare_estate(_estate(tmp_path, jil("x", "/tmp/dsl41-one"))).catalog,
             run_root,
             clock=VirtualClock(start=T0),
             adapters=dict(adapters),
             settings=GRACE,
+            source_capture=main.encoded_parts(
+                prepare_estate(_estate(tmp_path, jil("x", "/tmp/dsl41-one")))
+            ),
+            launched=main.profile_of(prepare_estate(_estate(tmp_path, jil("x", "/tmp/dsl41-one")))),
         )
         for job in ("j", "w"):
             engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": job}))
@@ -1334,7 +1420,9 @@ def test_a_completed_watch_a_resumed_update_touches_is_fed_before_the_applicatio
         table = engine.journal.open.attempts
         ids = {a.job: a.attempt for a in table.values()}
         _estate(tmp_path, jil("y", "/tmp/dsl41-two"))
-        token = reread(tmp_path / "estate", engine.update.live(), run_root / "plans").token
+        token = reread(
+            engine.update.live(), run_root / "plans", candidate=prepare_estate(tmp_path / "estate")
+        ).token
         fingerprint = UpdateRequest(token, 1, engine.baseline_id, "u1").fingerprint
         intent = {
             "event": "intent",
@@ -1372,7 +1460,7 @@ def test_a_completed_watch_a_resumed_update_touches_is_fed_before_the_applicatio
 
     async def restart() -> None:
         engine = await resume_run(
-            load_estate(tmp_path / "estate").catalog,
+            prepare_estate(tmp_path / "estate").catalog,
             run_root,
             clock=VirtualClock(start=T0 + timedelta(minutes=5)),
             adapters=dict(adapters),

@@ -9,6 +9,10 @@ never elapsed time. A crash is the loop cancelled with no shutdown record, then 
 
 from __future__ import annotations
 
+from dsl41 import main_config as main
+
+from reload_fixtures import prepare_estate, write_config
+
 import asyncio
 import contextlib
 import json
@@ -42,7 +46,7 @@ from dsl41.canon import canonical_bytes, decode
 from dsl41.ir import CatalogIR, lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import CarriedRows, Event
-from dsl41.reload_plan import load_estate, reread
+from dsl41.reload_plan import reread
 from dsl41.reload_update import Admitted, Refused
 from dsl41.runner import Engine
 from dsl41.runner_adapters import JobAdapter, LocalCommandAdapter
@@ -196,13 +200,13 @@ def _jil(jobs: dict[str, str], extra: str = "") -> str:
 
 
 class Estate:
-    """An estate directory the engine runs and `reread` reads: `estate.toml`, one JIL file and
+    """An estate directory the engine runs and `reread` reads: a main config, one JIL file and
     `non-idempotent.toml`."""
 
     def __init__(self, root: Path, text: str, marked: dict[str, str] | None = None) -> None:
         self.dir = root / "estate"
         self.dir.mkdir(parents=True, exist_ok=True)
-        (self.dir / "estate.toml").write_text('name = "t"\nfiles = ["jobs.jil"]\n')
+        write_config(self.dir)
         self.write(text, marked)
 
     def write(self, text: str, marked: dict[str, str] | None = None) -> None:
@@ -212,7 +216,7 @@ class Estate:
 
     @property
     def catalog(self) -> CatalogIR:
-        return load_estate(self.dir).catalog
+        return prepare_estate(self.dir).catalog
 
     @property
     def marked(self) -> dict[str, str]:
@@ -241,6 +245,8 @@ def _start(
         hold_open=True,
         settings=settings,
         non_idempotent=estate.marked,
+        source_capture=main.encoded_parts(prepare_estate(estate.dir)),
+        launched=main.profile_of(prepare_estate(estate.dir)),
     )
 
 
@@ -316,7 +322,9 @@ async def _crash(engine: Engine, loop: asyncio.Future[Any]) -> None:
 
 def _plan(engine: Engine, estate: Estate) -> str:
     assert engine.run_root is not None
-    return reread(estate.dir, engine.update.live(), engine.run_root / "plans").token
+    return reread(
+        engine.update.live(), engine.run_root / "plans", candidate=prepare_estate(estate.dir)
+    ).token
 
 
 def _request(engine: Engine, token: str, *, rid: str = "r1") -> UpdateRequest:
@@ -826,6 +834,8 @@ def test_a_crash_between_intent_and_application_resumes_to_applied_before_any_di
             adapters=_adapters(slow_grace),
             hold_open=True,
             settings=slow_grace,
+            source_capture=main.encoded_parts(prepare_estate(estate.dir)),
+            launched=main.profile_of(prepare_estate(estate.dir)),
         )
         loop = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
         _start_jobs(engine, "gone", "idem", "held", "other", "newmark")
@@ -947,6 +957,8 @@ def test_a_snapshot_taken_while_the_update_stops_carries_it(tmp_path: Path) -> N
             adapters=_adapters(slow_grace),
             hold_open=True,
             settings=slow_grace,
+            source_capture=main.encoded_parts(prepare_estate(estate.dir)),
+            launched=main.profile_of(prepare_estate(estate.dir)),
         )
         loop = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
         _start_jobs(engine, "slow")
@@ -983,7 +995,9 @@ def test_a_snapshot_taken_while_the_update_stops_carries_it(tmp_path: Path) -> N
             clock=RealClock(),
             adapters=_adapters(GRACE),
             settings=GRACE,
-            declared=RuntimeProfile(as_machine=("elsewhere",)),
+            declared=main.profile_of(prepare_estate(estate.dir)).model_copy(
+                update={"as_machine": ("elsewhere",)}
+            ),
         )
 
     with pytest.raises(EngineError, match="runtime-profile mismatch on as_machine"):
@@ -1014,7 +1028,7 @@ def test_a_snapshot_taken_while_the_update_stops_carries_it(tmp_path: Path) -> N
             scheduler=Scheduler(estate.catalog, start=RealClock().now(), default_tz="UTC"),
             hold_open=True,
             settings=GRACE,
-            declared=RuntimeProfile(),
+            declared=main.profile_of(prepare_estate(estate.dir)),
         )
         loop = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
         await _until(engine.started.is_set)
@@ -1234,6 +1248,8 @@ def test_while_an_update_stops_a_retry_waits_for_it_and_another_update_is_refuse
             adapters=_adapters(slow_grace),
             hold_open=True,
             settings=slow_grace,
+            source_capture=main.encoded_parts(prepare_estate(estate.dir)),
+            launched=main.profile_of(prepare_estate(estate.dir)),
         )
         loop = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
         await engine.submit(
@@ -1288,6 +1304,8 @@ def test_a_task_the_attempt_tier_does_not_run_is_cancelled_then_taken_up_or_clos
             run_root,
             clock=clock,
             adapters={"CMD": fake, "FW": FileWatcherAdapter(existence="stable")},
+            source_capture=main.encoded_parts(prepare_estate(estate.dir)),
+            launched=main.profile_of(prepare_estate(estate.dir)),
         )
         _start_jobs(engine, "a", "b")
         # an injected STARTING launches nothing: the update has no attempt of `c` to stop
@@ -1296,9 +1314,7 @@ def test_a_task_the_attempt_tier_does_not_run_is_cancelled_then_taken_up_or_clos
         )
         await engine.run_until_quiescent(clock.now())
         first = engine._live["a"].attempt
-        (estate.dir / "estate.toml").write_text(
-            'name = "t"\nfiles = ["jobs.jil"]\n[semantics]\nfw-existence = "immediate"\n'
-        )
+        write_config(estate.dir, estate='[estate.semantics]\nfw-existence = "immediate"\n')
         estate.write(_jil({"a": "y", "c": "y"}))
         answer = engine.request_update(_request(engine, _plan(engine, estate)))
         await engine.run_until_quiescent(clock.now())
@@ -1471,7 +1487,7 @@ def test_the_update_verb_refuses_a_malformed_request_and_answers_a_slow_applicat
 def test_an_engine_with_no_run_root_or_an_unreadable_plan_refuses_the_update(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from dsl41 import runner_update
+    from dsl41 import main_config
     from dsl41.reload_plan import RereadRefused
     from dsl41.runner_adapters import FakeAdapter
     from dsl41.runner_clock import VirtualClock
@@ -1481,12 +1497,24 @@ def test_an_engine_with_no_run_root_or_an_unreadable_plan_refuses_the_update(
 
     async def scenario() -> None:
         clock = VirtualClock(start=T0)
-        bare = start_run(estate.catalog, None, clock=clock, adapters={"CMD": FakeAdapter()})
+        bare = start_run(
+            estate.catalog,
+            None,
+            clock=clock,
+            adapters={"CMD": FakeAdapter()},
+            source_capture=main.encoded_parts(prepare_estate(estate.dir)),
+            launched=main.profile_of(prepare_estate(estate.dir)),
+        )
         answer = bare.request_update(_request(bare, "0" * 64))
         await bare.run_until_quiescent(clock.now())
         codes.append(answer.result().code)
         engine = start_run(
-            estate.catalog, tmp_path / "run", clock=clock, adapters={"CMD": FakeAdapter()}
+            estate.catalog,
+            tmp_path / "run",
+            clock=clock,
+            adapters={"CMD": FakeAdapter()},
+            source_capture=main.encoded_parts(prepare_estate(estate.dir)),
+            launched=main.profile_of(prepare_estate(estate.dir)),
         )
         estate.write(_jil({"a": "y"}))
         token = _plan(engine, estate)
@@ -1494,7 +1522,7 @@ def test_an_engine_with_no_run_root_or_an_unreadable_plan_refuses_the_update(
         def unreadable(*args: object) -> object:
             raise RereadRefused(["the timezone database moved"])
 
-        monkeypatch.setattr(runner_update, "load_estate", unreadable)
+        monkeypatch.setattr(main_config, "verified_from_parts", unreadable)
         answer = engine.request_update(_request(engine, token))
         await engine.run_until_quiescent(clock.now())
         codes.append(answer.result().code)
@@ -1519,7 +1547,14 @@ def test_a_client_that_gave_up_on_the_decision_leaves_the_loop_running(tmp_path:
 
     async def scenario() -> None:
         clock = VirtualClock(start=T0)
-        engine = start_run(estate.catalog, run_root, clock=clock, adapters={"CMD": FakeAdapter()})
+        engine = start_run(
+            estate.catalog,
+            run_root,
+            clock=clock,
+            adapters={"CMD": FakeAdapter()},
+            source_capture=main.encoded_parts(prepare_estate(estate.dir)),
+            launched=main.profile_of(prepare_estate(estate.dir)),
+        )
         estate.write(_jil({"a": "y"}))
         request = _request(engine, _plan(engine, estate))
         future = engine.request_update(request)
@@ -1571,7 +1606,12 @@ def test_a_retry_while_a_resumed_update_still_stops_waits_for_its_application(
     async def scenario() -> None:
         clock = VirtualClock(start=T0)
         engine = start_run(
-            estate.catalog, run_root, clock=clock, adapters={"CMD": FakeAdapter(default=None)}
+            estate.catalog,
+            run_root,
+            clock=clock,
+            adapters={"CMD": FakeAdapter(default=None)},
+            source_capture=main.encoded_parts(prepare_estate(estate.dir)),
+            launched=main.profile_of(prepare_estate(estate.dir)),
         )
         _start_jobs(engine, "a")
         await engine.run_until_quiescent(clock.now())

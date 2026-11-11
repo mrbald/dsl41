@@ -231,9 +231,7 @@ def test_interval_revision_update_restart_and_unchanged_hashes(tmp_path):
             )
             config_file(tmp_path, engine="fw_default_interval_s = 11\n")
             candidate = main.prepare(path)
-            plan = reread(
-                tmp_path, engine.update.live(), root / "plans", candidate=candidate, start=T0
-            )
+            plan = reread(engine.update.live(), root / "plans", candidate=candidate, start=T0)
             assert plan.plan.changed == () and plan.stop == ()
             for name in initial.catalog.jobs:
                 assert definition_hash(
@@ -296,7 +294,6 @@ def test_interval_revision_update_restart_and_unchanged_hashes(tmp_path):
                 seconds=18
             )
             plan = reread(
-                tmp_path,
                 resumed.update.live(),
                 root / "plans",
                 candidate=main.prepare(path),
@@ -432,7 +429,6 @@ def test_update_box_restart_emits_termination(tmp_path):
                 box + JOB + "box_name: BX\n" + JOB.replace("A", "B") + "box_name: BX\n"
             )
             plan = reread(
-                tmp_path,
                 engine.update.live(),
                 root / "plans",
                 candidate=main.prepare(path),

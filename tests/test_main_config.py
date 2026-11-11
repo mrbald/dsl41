@@ -289,7 +289,7 @@ def test_05_preflight_and_exceptions_are_hard(tmp_path: Path) -> None:
     (tmp_path / "a.jil").write_text(JOB + "envvars: X=value\n")
     candidate = main.prepare(path)
     with pytest.raises(RereadRefused, match="preflight ERROR"):
-        reread(tmp_path, live_of(candidate), tmp_path / "plans", candidate=candidate)
+        reread(live_of(candidate), tmp_path / "plans", candidate=candidate)
     assert not (tmp_path / "plans").exists()
     (tmp_path / "non-idempotent.toml").write_text("[jobs]\nA = 2\n")
     with pytest.raises(RereadRefused, match="reason"):
@@ -302,7 +302,7 @@ def test_05_reread_launch_preflight_cannot_be_suppressed(tmp_path: Path, executi
     (tmp_path / "a.jil").write_text(JOB.replace("machine: localhost", execution))
     candidate = main.prepare(path)
     with pytest.raises(RereadRefused, match="preflight ERROR"):
-        reread(tmp_path, live_of(candidate), tmp_path / "plans", candidate=candidate)
+        reread(live_of(candidate), tmp_path / "plans", candidate=candidate)
     assert not (tmp_path / "plans").exists()
 
 
@@ -343,7 +343,7 @@ def test_07_collision_free_capture_and_python_free_plan(
     path = config_file(tmp_path, include=["*/*.jil", "author.py"], properties=["*/*.properties"])
     candidate = main.prepare(path)
     root = tmp_path / "run"
-    result = reread(tmp_path, live_of(candidate), root / "plans", candidate=candidate, start=T0)
+    result = reread(live_of(candidate), root / "plans", candidate=candidate, start=T0)
     for name in ("one", "two"):
         (tmp_path / name / "jobs.jil").unlink()
         (tmp_path / name / "site.properties").unlink()
@@ -393,10 +393,36 @@ def test_08_origins_moves_and_shared_settings(
     assert "shared settings sources:" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("version", [1, "absent", 999, None, True, "2", [], {}])
+def test_plan_version_dispatch(tmp_path, version):
+    candidate = main.prepare(estate_file(tmp_path))
+    root = tmp_path / "run"
+    result = reread(live_of(candidate), root / "plans", candidate=candidate, start=T0)
+    document = json.loads(result.plan_json.read_bytes())
+    if version == "absent":
+        document.pop("plan_format_version")
+    else:
+        document["plan_format_version"] = version
+    result.plan_json.write_text(json.dumps(document))
+    expected = (
+        "reload plan version 1 is retired (DL-486)"
+        if type(version) is int and version == 1 or version == "absent"
+        else f"unsupported plan_format_version {version!r}"
+    )
+    with pytest.raises(RereadRefused) as refused:
+        read_plan(root / "plans", result.token)
+    assert str(refused.value) == expected
+    from dsl41.runner_update import PlanUnreadable
+
+    with pytest.raises(PlanUnreadable) as refused:
+        open_plan(root, result.token)
+    assert str(refused.value) == expected
+
+
 def test_09_partial_plan_and_format_dispatch(tmp_path: Path) -> None:
     candidate = main.prepare(estate_file(tmp_path))
     root = tmp_path / "run"
-    result = reread(tmp_path, live_of(candidate), root / "plans", candidate=candidate, start=T0)
+    result = reread(live_of(candidate), root / "plans", candidate=candidate, start=T0)
     plan = json.loads(result.plan_json.read_bytes())
     result.plan_json.unlink()
     assert read_plan(root / "plans", result.token) is None
@@ -408,6 +434,9 @@ def test_09_partial_plan_and_format_dispatch(tmp_path: Path) -> None:
 
     with pytest.raises(PlanUnreadable, match="plan_format_version 999"):
         open_plan(root, result.token)
+    plan["plan_format_version"] = 1.0
+    result.plan_json.write_text(json.dumps(plan))
+    assert read_plan(root / "plans", result.token) is None
     plan["plan_format_version"] = 2
     plan["unknown_field"] = True
     result.plan_json.write_text(json.dumps(plan))
@@ -784,12 +813,10 @@ def test_known_unsupported_lint_policy(
     assert not (tmp_path / "run").exists()
     if blocked:
         with pytest.raises(RereadRefused, match="known-unsupported"):
-            reread(tmp_path, live_of(candidate), tmp_path / "run" / "plans", candidate=candidate)
+            reread(live_of(candidate), tmp_path / "run" / "plans", candidate=candidate)
         assert not (tmp_path / "run" / "plans").exists()
     else:
-        result = reread(
-            tmp_path, live_of(candidate), tmp_path / "run" / "plans", candidate=candidate
-        )
+        result = reread(live_of(candidate), tmp_path / "run" / "plans", candidate=candidate)
         document = read_plan(tmp_path / "run" / "plans", result.token)
         assert not any(
             item["code"] == "known-unsupported" for item in document["preflight_warnings"]
@@ -988,7 +1015,7 @@ def test_known_unsupported_update_preparation_full_findings(tmp_path, ignored):
         ),
         f"preflight WARN [timezone] A: {zone}",
     ]
-    result = reread(tmp_path, live, tmp_path / "plans", candidate=candidate, start=T0)
+    result = reread(live, tmp_path / "plans", candidate=candidate, start=T0)
     document = read_plan(tmp_path / "plans", result.token)
     assert document["preflight_warnings"] == [{"code": "timezone", "job": "A", "message": zone}]
     assert document["lint_findings"] == (
@@ -1357,7 +1384,6 @@ def test_city_timezone_resolution(
             assert starts[0] == expected_start
 
 
-@pytest.mark.parametrize("source", ["config", "manifest"])
 @pytest.mark.parametrize(
     ("zone", "supplied_map", "message"),
     [
@@ -1370,7 +1396,7 @@ def test_city_timezone_resolution(
 )
 @pytest.mark.usefixtures("fixed_zone_names")
 def test_reload_timezone_message_source(
-    tmp_path: Path, source: str, zone: str, supplied_map: bool, message: str
+    tmp_path: Path, zone: str, supplied_map: bool, message: str
 ) -> None:
     from dsl41 import reload_plan
 
@@ -1379,15 +1405,8 @@ def test_reload_timezone_message_source(
     )
     (tmp_path / "zones").write_text("LOCAL UTC\n")
     map_setting = 'timezone_map = "zones"\n' if supplied_map else ""
-    if source == "config":
-        estate = main.prepare(config_file(tmp_path, estate=map_setting))
-        map_source = "estate.timezone_map"
-    else:
-        (tmp_path / "estate.toml").write_text(
-            'name = "synthetic"\nfiles = ["a.jil"]\n' + map_setting
-        )
-        estate = reload_plan.load_estate(tmp_path)
-        map_source = "timezone_map"
+    estate = main.prepare(config_file(tmp_path, estate=map_setting))
+    map_source = "estate.timezone_map"
     items = [item for item in reload_plan.preflight_items(estate, T0) if item.code == "timezone"]
     assert len(items) == 1
     assert f"{message} {map_source}" in items[0].message
@@ -1402,10 +1421,9 @@ def test_reload_timezone_message_source(
         assert "assumed to be America/Indiana/Indianapolis" in items[0].message
         assert "unique zoneinfo city match, DL-62" in items[0].message
         result = reread(
-            tmp_path,
             Live(estate.catalog, estate.settings, 1, {}, launch=estate.metadata.get("launch", {})),
             tmp_path / "plans",
-            candidate=estate if source == "config" else None,
+            candidate=estate,
             start=T0,
         )
         document = read_plan(tmp_path / "plans", result.token)
@@ -1414,13 +1432,10 @@ def test_reload_timezone_message_source(
         assert warnings == [{"code": "timezone", "job": "A", "message": items[0].message}]
 
 
-@pytest.mark.parametrize("source", ["config", "manifest"])
 @pytest.mark.parametrize("empty_map", [False, True])
 @pytest.mark.usefixtures("fixed_zone_names")
-def test_empty_timezone_map_keeps_the_estate_city_default(
-    tmp_path: Path, source: str, empty_map: bool
-) -> None:
-    """DL-163: an empty map and no map accept the same estate zone through either loader."""
+def test_empty_timezone_map_keeps_the_estate_city_default(tmp_path: Path, empty_map: bool) -> None:
+    """DL-163: an empty map and no map accept the same estate zone through main-config preparation."""
     from dsl41 import reload_plan
 
     (tmp_path / "a.jil").write_text(JOB + 'date_conditions: 1\nstart_times: "08:00"\n')
@@ -1428,21 +1443,16 @@ def test_empty_timezone_map_keeps_the_estate_city_default(
     setting = 'timezone = "Indianapolis"\n'
     if empty_map:
         setting += 'timezone_map = "zones"\n'
-    if source == "config":
-        estate = main.prepare(config_file(tmp_path, estate=setting))
-    else:
-        (tmp_path / "estate.toml").write_text('name = "synthetic"\nfiles = ["a.jil"]\n' + setting)
-        estate = reload_plan.load_estate(tmp_path)
+    estate = main.prepare(config_file(tmp_path, estate=setting))
     assert estate.settings["timezone"] == "Indianapolis"
     assert estate.settings["timezone_aliases"] is None
     assert not [
         item for item in reload_plan.preflight_items(estate, T0) if item.severity == "ERROR"
     ]
     result = reread(
-        tmp_path,
         Live(estate.catalog, estate.settings, 1, {}, launch=estate.metadata.get("launch", {})),
         tmp_path / "plans",
-        candidate=estate if source == "config" else None,
+        candidate=estate,
         start=T0,
     )
     assert result.plan.unchanged == ("A",)

@@ -58,7 +58,7 @@ a row.
 | Perimeter journal | Access perimeter → audit; sequence recovery reads `access_seq` | `rec`; no version | Ignored | Not applicable; no engine decision dispatches it (DL-147) | Retained root |
 | Access role map | Operator → `runner_access` loader | `format_version` | Refused | Unsupported or absent refuses | Operator's retained map |
 | Stored configurations | Startup/update → `Configuration.from_bytes` | `configuration_format_version`, 1, 2 or 3 | Refused for all three | Unsupported refuses; absent selects supported version 1 (DL-437, DL-438) | Retained `configs` rows |
-| Reload plans | update preparation → `read_plan` and update | `plan_format_version`, 1 or 2; `artifact_format_version` (PR-08d) | Ignored | Unsupported plan version refuses by name; absent plan version selects supported version 1 (DL-437). Unsupported artifact version makes `read_plan` return no plan; absent artifact version passes | Retained plan; an interrupted update requires it |
+| Reload plans | update preparation → `read_plan` and update | `plan_format_version = 2`; `artifact_format_version` (PR-08d) | Ignored | Version 1 and an absent plan version refuse as retired (DL-486); other unsupported versions refuse; malformed plans return no plan. Unsupported artifact version makes `read_plan` return no plan; absent artifact version passes | Retained plan; an interrupted update requires it |
 | Main-config input mapping | `main_config.prepare` → `from_parts` | `format_version = 1` in `main-inputs.json` | Ignored | Unsupported or absent refuses (DL-437) | Retained plan or stored capture |
 | Main config | Site → `load_config` | `format_version = 1` | Refused; restart host loading has the limit below | Unsupported or absent refuses (DL-437) | Site's config file |
 | Control socket | Client → `ControlServer` | `v` on every request; dual-read 3 and 4 (DL-462) | Ignored except strict v4 reread/update envelopes; v3 ignores `kill_signals` | Unsupported or absent refuses, connection stays open; defaults write 3, additions write 4, no fallback | One request; `subscribe` lasts to hangup |
@@ -144,8 +144,9 @@ memory-only reread annotation. Default framing and persisted formats stay unchan
 A v3 update is unknown_cmd after authorization: retiring its token form is the stated
 exception to DL-462. Older engines refuse without client fallback.
 
-Main-config plans use version 2;
-the unversioned legacy plan reads as version 1. `main-inputs.json` binds
+Main-config plans use version 2. Version 1 and an absent version refuse as
+retired, citing DL-486, including interrupted-update recovery before writes or signals.
+`main-inputs.json` binds
 config bytes, environment, lint policy, source mapping, membership and part
 names. Each Python part retains its generated JIL. Every part has a SHA-256
 in `plan.json`, published last. Update preparation rereads current sources in an
@@ -186,8 +187,9 @@ loop. These are limits, not permission to change the rules in this pass.
 **Wrapper evidence and input.** Spool readers ignore unknown fields but
 reject a present version other than the integer 1; booleans and floats do
 not count (DL-151). Only the two wrapper spool files allow an absent
-`version` (DL-157, DL-227). Stored configurations and plans separately
-support an absent discriminator as legacy version 1 (DL-437).
+`version` (DL-157, DL-227). Stored configurations support an absent discriminator
+as version 1 (DL-437).
+Reload plans refuse an absent discriminator as retired version 1 (DL-486).
 Unread or mismatched restart evidence is quarantined under DL-433;
 missing evidence follows the interruption rule, not a guessed outcome.
 
@@ -333,6 +335,10 @@ value is `false`, the refusal lives in that field's validator and no
 table is built. A table with one row is a table nobody consults. The four
 rules above still apply: the message names the value and its entry, and the
 malformed case keeps its own distinct error.
+
+Reload plan version 1, including an absent `plan_format_version`, is retired
+(DL-486). Its reader refuses with `reload plan version 1 is retired (DL-486)`.
+An open update holding such a plan refuses restart before writes or signals.
 
 ## 7. What every evolution event owes
 

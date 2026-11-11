@@ -318,7 +318,7 @@ def test_config_edit_between_selection_and_host_load_never_mixes_settings(
         assert result.exit_code == 2 and "changed during preparation" in result.output
         assert served == [] and refused == [("/old-hook", "engine_refused")]
     with pytest.raises(RereadRefused, match="restart the engine to apply them before update"):
-        reread(tmp_path, live_of(initial), tmp_path / "plans", candidate=main_config.prepare(path))
+        reread(live_of(initial), tmp_path / "plans", candidate=main_config.prepare(path))
 
 
 def test_old_exit_code_is_null_for_hold_alarm_long_running_and_code_less_failure(monkeypatch):

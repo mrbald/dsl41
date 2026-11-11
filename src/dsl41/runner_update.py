@@ -2,8 +2,8 @@
 the engine's store, its attempt tier, its oracle and its scheduler.
 
 An update request is one step of the engine's single writer (`Engine.request_update`). Its
-admission reads the plan `reread` stored under `plans/<token>/`, loads the candidate from those
-bytes with the environment and the site layers `invocation.json` names, and re-checks the runtime
+admission reads the version 2 plan `reread` stored under `plans/<token>/`, loads its captured
+main-config inputs (DL-486), and re-checks the runtime
 preconditions against the engine's state now (`reload_update.admission_check`). A refusal is the
 reply and writes nothing. An admission appends `config intent` (the token, the stop set with the
 attempt each stop interrupts, the dispatch filter, and the request's id and fingerprint), then
@@ -37,7 +37,6 @@ and is answered from its `config intent` record and, once applied, from its
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import shutil
 from collections.abc import Callable, Mapping
 from contextlib import suppress
@@ -49,16 +48,14 @@ from typing import TYPE_CHECKING, Any, Final, cast
 
 from dsl41.canon import digest
 from dsl41.engine_charts import UPDATE_STOP, AttemptOutcome
-from dsl41.idempotence import Exceptions, IdempotenceError, load_exceptions
+from dsl41.idempotence import Exceptions
 from dsl41.ir import CatalogIR
 from dsl41.reload_plan import (
-    INVOCATION,
-    MARKED,
     Estate,
     Live,
     RereadRefused,
+    RetiredPlan,
     estate_settings,
-    load_estate,
     read_plan,
     box_members,
     restart_boxes,
@@ -191,36 +188,20 @@ class OpenedPlan:
     plan: dict[str, Any]
     estate: Estate
     marked: Exceptions
-    #: the site layers' original paths, as `invocation.json` records them (the estate holds
-    #: the plan directory's copies it was loaded from)
-    site: tuple[str, ...] = ()
 
     def fingerprint(self) -> dict[str, str]:
-        """The applied estate's input files as `run` fingerprints its own (path -> sha256, the
-        `spec_drift` baseline, DL-65): each part at its place in the estate directory `reread`
-        read (`plan.json`'s `estate_dir`), each site layer at the original path `reread` was
-        given, never the plan directory's copy, with the plan's own bytes."""
-        if self.estate.metadata:
-            from dsl41.main_config import fingerprint
+        """Captured inputs at their original paths, for `spec_drift` (DL-65, DL-486)."""
+        from dsl41.main_config import fingerprint
 
-            return fingerprint(self.estate)
-        directory = str(self.plan["estate_dir"])
-        site = {Path(path).name: path for path in self.site}
-        prints: dict[str, str] = {}
-        for name, data in self.estate.parts:
-            if name == INVOCATION or (name == MARKED and not data):
-                continue  # not a file `run` reads: the invocation, an absent marked set
-            path = site[name[len("site/") :]] if name.startswith("site/") else f"{directory}/{name}"
-            prints[path] = hashlib.sha256(data).hexdigest()
-        return prints
+        return fingerprint(self.estate)
 
 
 def open_plan(run_root: Path, token: str) -> OpenedPlan:
-    """The plan `reread` stored under `RUN_ROOT/plans/TOKEN`, its candidate loaded as `reread`
-    loaded it: the manifest and its files from the plan directory, the site layers from their
-    copies under `site/`, the environment `invocation.json` names (`read_plan` checked every
-    part against `plan.json`). Raises PlanUnreadable naming what is wrong."""
-    from dsl41.canon import decode
+    """Load the captured main-config candidate after checking its plan (DL-486).
+
+    Raises PlanUnreadable naming an incomplete, retired or invalid plan.
+    """
+    from dsl41.main_config import verified_from_parts
 
     plans = run_root / PLANS
     try:
@@ -231,20 +212,12 @@ def open_plan(run_root: Path, token: str) -> OpenedPlan:
         raise PlanUnreadable(f"no complete plan {token} under {plans}: run reread first")
     plan_dir = plans / token
     try:
-        if plan.get("plan_format_version") == 2:
-            from dsl41.main_config import verified_from_parts
-
-            estate = verified_from_parts(
-                [(p["name"], (plan_dir / p["name"]).read_bytes()) for p in plan["parts"]]
-            )
-            return OpenedPlan(plan, estate, Exceptions(estate.metadata["non_idempotent"]))
-        invocation: Any = decode((plan_dir / INVOCATION).read_bytes())
-        layers = [plan_dir / "site" / Path(str(path)).name for path in invocation["properties"]]
-        estate = load_estate(plan_dir, layers, invocation["environment"])
-        marked = load_exceptions(plan_dir)
-    except (RereadRefused, IdempotenceError, OSError, KeyError, TypeError) as exc:
+        estate = verified_from_parts(
+            [(p["name"], (plan_dir / p["name"]).read_bytes()) for p in plan["parts"]]
+        )
+        return OpenedPlan(plan, estate, Exceptions(estate.metadata["non_idempotent"]))
+    except (RereadRefused, OSError, KeyError, TypeError) as exc:
         raise PlanUnreadable(f"plan {token} does not load: {exc}") from exc
-    return OpenedPlan(plan, estate, marked, tuple(str(path) for path in invocation["properties"]))
 
 
 class EngineUpdate:
@@ -378,8 +351,8 @@ class EngineUpdate:
         except PlanUnreadable as exc:
             return UpdateAnswer(code="invalid_argument", error=str(exc))
         if not isinstance(opened.plan.get("estate_dir"), str):
-            # a plan an older `reread` wrote names no estate directory, which the engine's
-            # account of the files on disk needs once it applies (`spec_drift`)
+            # a version 2 plan always names its estate directory; one without it is damaged
+            # and refused before any write (DL-486)
             return UpdateAnswer(
                 code="stale_plan",
                 error=f"plan {request.token} predates this engine: run update again",
@@ -851,15 +824,14 @@ def admitted_of(intent: Mapping[str, Any]) -> Admitted:
 def _source_capture(estate: Estate) -> dict[str, str]:
     from dsl41.main_config import encoded_parts
 
-    return encoded_parts(estate) if estate.metadata else {}
+    return encoded_parts(estate)
 
 
 def configuration_of(opened: OpenedPlan, base: RuntimeProfile) -> Configuration:
     """The candidate's configuration, retaining its captured host profile (DL-437, DL-478)."""
     profile = profile_for(opened.estate.settings, base)
-    if opened.estate.metadata:
-        launch = opened.estate.metadata["launch"]
-        profile = with_host_settings(profile, launch["as_machine"], launch["machine_policy"])
+    launch = opened.estate.metadata["launch"]
+    profile = with_host_settings(profile, launch["as_machine"], launch["machine_policy"])
     return Configuration(
         catalog=opened.estate.catalog,
         profile=profile,
@@ -938,6 +910,12 @@ def reopen_plan(run_root: Path, token: str, *, configuration: Configuration) -> 
             )
         return opened
     except (PlanUnreadable, KeyError, TypeError) as exc:
+        if isinstance(exc.__cause__, RetiredPlan):
+            raise EngineError(
+                f"the update {token} was stopping and its plan cannot be read: {exc};"
+                " this build cannot finish the open update."
+                " Finish the update with the build that began it."
+            ) from exc
         raise EngineError(
             f"the update {token} was stopping and its plan cannot be read: {exc}; restore"
             f" {run_root / PLANS / token} if missing or damaged, or use a compatible binary"

@@ -9,6 +9,8 @@ will, and records every other effect by name. Assertions are on order, never on 
 
 from __future__ import annotations
 
+from reload_fixtures import prepare_estate, write_config
+
 import json
 import os
 import pwd
@@ -30,7 +32,7 @@ from dsl41.ir import CatalogIR, ExecSpec, lower_source
 from dsl41.oracle import Oracle
 from dsl41.canon import canonical_bytes, decode
 from dsl41.oracle_state import CarriedRows, Event, JobRuntime, OracleError
-from dsl41.reload_plan import Live, RereadResult, load_estate, read_plan, reread
+from dsl41.reload_plan import Live, RereadResult, read_plan, reread
 from dsl41.reload_update import (
     ALL_STOPPED_OR_NONE,
     APPLY,
@@ -314,16 +316,23 @@ class World:
         return self.oracle.store.job[job]
 
     def live(self) -> Live:
-        return live_of(self.oracle, self.settings, self.rev)
+        from dataclasses import replace
+
+        return replace(
+            live_of(self.oracle, self.settings, self.rev),
+            launch=prepare_estate(self.estate).metadata["launch"],
+        )
 
     def site(self) -> dict[str, Any]:
         return {"properties": [self.root / "night.properties"], "environment": "sandbox"}
 
     def reread(self) -> tuple[RereadResult, dict[str, Any], CatalogIR]:
-        result = reread(self.estate, self.live(), self.root / "plans", start=START, **self.site())
+        result = reread(
+            self.live(), self.root / "plans", start=START, candidate=prepare_estate(self.estate)
+        )
         document = read_plan(self.root / "plans", result.token)
         assert document is not None
-        return result, document, load_estate(self.estate, **self.site()).catalog
+        return result, document, prepare_estate(self.estate).catalog
 
     def apply(self, application: Application) -> None:
         apply_application(self.oracle, application, revision=self.rev)
@@ -382,7 +391,9 @@ def _world(tmp_path: Path, edit: Any = None) -> World:
     estate.mkdir()
     for path in SMALL.glob("*.jil"):
         shutil.copy(path, estate)
-    shutil.copy(SMALL / "estate.toml", estate)
+    write_config(
+        estate, properties=[str(tmp_path / "night.properties")], estate='timezone = "UTC"\n'
+    )
     profile = tmp_path / "profile.env"
     profile.write_text("export SYNTHETIC=1\n")
     owner = pwd.getpwuid(os.geteuid()).pw_name
@@ -391,7 +402,7 @@ def _world(tmp_path: Path, edit: Any = None) -> World:
     (tmp_path / "night.properties").write_text(properties)
     if edit is not None:
         edit(estate)
-    loaded = load_estate(estate, [tmp_path / "night.properties"], "sandbox")
+    loaded = prepare_estate(estate)
     scheduler = Scheduler(loaded.catalog, start=START, default_tz="UTC")
     return World(tmp_path, estate, Oracle(loaded.catalog), loaded.settings, scheduler)
 
@@ -685,9 +696,9 @@ def test_a_settings_only_edit_swaps_the_zone_and_the_switches(tmp_path: Path) ->
     ticks = dict((job, tick) for tick, job in world.scheduler.upcoming())
     assert ticks["OPS_MONTHLY_ATTRIB_C"] == datetime(2026, 1, 30, 6, 0)
     rows = {name: world.row(name) for name in world.oracle.store.job}
-    world.edit("estate.toml", 'timezone = "UTC"', 'timezone = "America/New_York"')
-    with (world.estate / "estate.toml").open("a") as handle:
-        handle.write('\n[semantics]\n"dst-start-times" = "fold0"\n')
+    world.edit("dsl41.toml", 'timezone = "UTC"', 'timezone = "America/New_York"')
+    with (world.estate / "dsl41.toml").open("a") as handle:
+        handle.write('\n[estate.semantics]\n"dst-start-times" = "fold0"\n')
     result, document, candidate = world.reread()
     assert len(result.plan.changed) == len(candidate.jobs)
     assert result.plan.added == result.plan.removed == ()

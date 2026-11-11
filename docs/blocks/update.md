@@ -28,7 +28,7 @@ The [chart lifecycles](../chart-lifecycles.md) view lists each target state with
 
 - One update is in flight at a time; a second is refused with `update_in_progress` ([DL-427](../decision-log.md)).
 - Admission rechecks revision and current stops. Running boxes do not refuse; structural edits restart outermost affected boxes and their running members (DL-463).
-- The engine loads the candidate from the plan's own bytes, with the environment and the site layers `invocation.json` names, and runs it under the settings it read itself.
+- The engine loads the main-config candidate from the version 2 plan's captured inputs and runs it under the captured settings (DL-486).
 - While the update stops, no job of the plan's added, changed and removed sets is dispatched: a start the oracle decides for one waits as `dispatch_pending` and goes after the application.
 - An attempt the update stops keeps its outcome back until the application, so its follow-up plan is chosen under the applied catalog and marked set, once, and the `config applied` record names it: a removed job gets none, a marked one is held, any other reruns the same run under its new definition ([DL-424](../decision-log.md)).
 - A stop is finished when its job's next run could go: its ladder done and a reading finding nothing of it left, not at its record ([DL-431](../decision-log.md)). The update applies only once every stop is finished, an attempt that ended before the admission while its cleanup still runs included.

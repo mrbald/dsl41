@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from types import SimpleNamespace
 from pathlib import Path
 import hashlib
@@ -13,7 +13,7 @@ import pytest
 from dsl41 import reread_worker, reload_plan
 from dsl41.ir import lower_source
 from dsl41.reload_diff import definition_hash, definition_record, diff, record_difference
-from dsl41.reload_plan import Estate, Live, RereadRefused, check_reload_candidate
+from dsl41.reload_plan import Live, RereadRefused, check_reload_candidate
 from dsl41.runner_adapters import LINE_LIMIT
 from dsl41.runner_preflight import PreflightItem
 
@@ -34,6 +34,14 @@ run_calendar: hols
 start_times: "01:00"
 """
 JOB = "insert_job: j\njob_type: c\ncommand: true\nmachine: localhost\n"
+
+
+def difference_estate(tmp_path, catalog, settings):
+    from test_main_config import estate_file
+    from dsl41 import main_config
+
+    candidate = main_config.prepare(estate_file(tmp_path))
+    return replace(candidate, catalog=catalog, settings={**candidate.settings, **settings})
 
 
 @pytest.mark.parametrize(
@@ -143,7 +151,9 @@ def test_missing_null_and_boolean_integer_are_different():
 
 
 @pytest.mark.parametrize("size", [240, 5000])
-def test_shared_reference_and_setting_are_sent_once_with_bounded_values(monkeypatch, size):
+def test_shared_reference_and_setting_are_sent_once_with_bounded_values(
+    monkeypatch, tmp_path, size
+):
     old = lower_source(JOB + "insert_machine: localhost\ntype: a\nnode_name: " + "a" * 6000 + "\n")
     new = lower_source(JOB + "insert_machine: localhost\ntype: a\nnode_name: " + "b" * 6000 + "\n")
     old_job, new_job = old.jobs["j"], new.jobs["j"]
@@ -155,9 +165,14 @@ def test_shared_reference_and_setting_are_sent_once_with_bounded_values(monkeypa
         new.jobs[name] = new_job.model_copy(update={"name": name})
     monkeypatch.setattr(reread_worker, "preflight_items", lambda *a: [])
     monkeypatch.setattr(reload_plan, "preflight_items", lambda *a: [])
-    monkeypatch.setattr(reload_plan, "_lint_findings", lambda *a: ([], []))
-    live = Live(old, {"job_env": {"V": "x" * 6000}}, 1, {})
-    candidate = Estate(new, {"job_env": {"V": "y" * 6000}}, ())
+    candidate = difference_estate(tmp_path, new, {"job_env": {"V": "y" * 6000}})
+    live = Live(
+        old,
+        {**candidate.settings, "job_env": {"V": "x" * 6000}},
+        1,
+        {},
+        launch=candidate.metadata["launch"],
+    )
     view = reread_worker.preview(candidate, live)
     groups = view["definition_changes"]["groups"]
     assert len(groups) == 2
@@ -178,7 +193,7 @@ def test_shared_reference_and_setting_are_sent_once_with_bounded_values(monkeypa
 def test_update_worker_skips_difference_builder(monkeypatch, tmp_path):
     catalog = lower_source(JOB)
     live = Live(catalog, {}, 1, {})
-    candidate = Estate(catalog, {}, ())
+    candidate = difference_estate(tmp_path, catalog, {})
     from dsl41 import runner_update
 
     monkeypatch.setattr(reread_worker, "prepare", lambda _: candidate)
@@ -222,7 +237,7 @@ def test_preview_reuses_preparation_refusals(monkeypatch, tmp_path, reason):
     assert blocked
     assert all(reason in reported or reason in blocked for reason in caught.value.findings)
     with pytest.raises(RereadRefused) as prepared:
-        reload_plan.reread(tmp_path, live, tmp_path / "plans", candidate=candidate)
+        reload_plan.reread(live, tmp_path / "plans", candidate=candidate)
     assert prepared.value.findings == caught.value.findings
     assert not (tmp_path / "plans").exists()
 
@@ -248,7 +263,7 @@ def test_reason_keeps_main_equality_for_undefined_transitive_references_and_bool
 
 
 @pytest.mark.parametrize("distinct", [False, True])
-def test_whole_difference_budget_for_5000_jobs_and_300_settings(monkeypatch, distinct):
+def test_whole_difference_budget_for_5000_jobs_and_300_settings(monkeypatch, tmp_path, distinct):
     base = lower_source(JOB)
     old, new = base.model_copy(deep=True), base.model_copy(deep=True)
     template = base.jobs["j"]
@@ -265,10 +280,13 @@ def test_whole_difference_budget_for_5000_jobs_and_300_settings(monkeypatch, dis
                 new.jobs[name].passthrough[key] = f"new-{index}-{field}-" + "y" * 200
     monkeypatch.setattr(reread_worker, "preflight_items", lambda *a: [])
     monkeypatch.setattr(reload_plan, "preflight_items", lambda *a: [])
-    monkeypatch.setattr(reload_plan, "_lint_findings", lambda *a: ([], []))
     before = {"job_env": {f"V_{i:03}": f"old-secret-{i}" for i in range(300)}}
     after = {"job_env": {f"V_{i:03}": f"new-secret-{i}" for i in range(300)}}
-    view = reread_worker.preview(Estate(new, after, ()), Live(old, before, 1, {}))
+    candidate = difference_estate(tmp_path, new, after)
+    view = reread_worker.preview(
+        candidate,
+        Live(old, {**candidate.settings, **before}, 1, {}, launch=candidate.metadata["launch"]),
+    )
     details = view["definition_changes"]
     wire = json.dumps(details).encode()
     assert len(wire) <= reread_worker.DIFFERENCE_BYTE_BUDGET
@@ -294,13 +312,20 @@ def test_whole_difference_budget_for_5000_jobs_and_300_settings(monkeypatch, dis
         ({"job_env": {"NAME": "old-secret"}}, {"job_env": {"NAME": "new-secret"}}),
     ],
 )
-def test_environment_introduction_removal_and_edit_expose_names_only(monkeypatch, before, after):
-    monkeypatch.setattr(reload_plan, "_lint_findings", lambda *a: ([], []))
+def test_environment_introduction_removal_and_edit_expose_names_only(
+    monkeypatch, tmp_path, before, after
+):
     monkeypatch.setattr(reload_plan, "preflight_items", lambda *a: [])
     catalog = lower_source(JOB)
-    details = reread_worker.definition_changes(
-        Estate(catalog, after, ()), Live(catalog, before, 1, {})
+    candidate = difference_estate(tmp_path, catalog, after)
+    live = Live(
+        catalog,
+        {**candidate.settings, "job_env": before.get("job_env", {})},
+        1,
+        {},
+        launch=candidate.metadata["launch"],
     )
+    details = reread_worker.definition_changes(candidate, live)
     assert details["settings_changed"]
     assert len(details["groups"]) == 1
     group = details["groups"][0]
