@@ -138,6 +138,85 @@ def _kinds(tmp_path: Path, kind: str) -> list[dict[str, Any]]:
     return [body for _, k, body in rows(tmp_path / "run") if k == kind]
 
 
+@pytest.mark.parametrize(
+    ("case", "stopped"),
+    [
+        ("natural", [["b", "complete"], ["j", "rerun"]]),
+        ("replaced", [["j", "none"]]),
+        ("removed", [["j", "none"]]),
+        ("marked", [["j", "hold"]]),
+        ("retyped", [["j", "none"]]),
+    ],
+)
+def test_config_applied_records_the_settled_follow_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, stopped: list[list[str]]
+) -> None:
+    """Spec-wiring 2b: the applied record and reply name the plans committed after the swap.
+    A natural end before its stop completes; the interruption rule keeps an oracle end or
+    a replaced run, never relaunches a removed/retyped job, and holds a marked job."""
+    _Procs(monkeypatch, p4194311=(PGID, True, False))
+
+    async def scenario() -> None:
+        engine = _engine(tmp_path, _jil({"j": "sleep 30", "b": "sleep 30"}))
+        try:
+            for job in ("j", "b"):
+                engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": job}))
+            await engine.run_until_quiescent(T0)
+            _adopt(engine, "j", RUN_ID, PGID)
+            if case == "natural":
+                _adopt(engine, "b", OTHER_ID, PGID + 1)
+                stop_attempt = engine.update.stop_attempt
+
+                def end_before_stop(job: str, cause: str) -> None:
+                    if job == "b":
+                        engine.attempts.status_recorded(
+                            OTHER_ID, {"version": 1, "outcome": "exited", "exit_code": 0}
+                        )
+                    stop_attempt(job, cause)
+
+                monkeypatch.setattr(engine.update, "stop_attempt", end_before_stop)
+            jobs = {"b": "sleep 31" if case == "natural" else "sleep 30"}
+            if case != "removed":
+                jobs["j"] = "sleep 31"
+            candidate = _jil(jobs)
+            if case == "retyped":
+                candidate = _jil({"b": "sleep 30"}) + "insert_job: j\njob_type: b\n\n"
+            _estate(tmp_path, candidate, {"j": "posts twice"} if case == "marked" else None)
+            answer = await _request(engine, _plan(engine, tmp_path))
+            assert isinstance(answer.decision, Admitted)
+            assert answer.decision.stop_set == tuple(job for job, _ in stopped)
+            assert engine.update.stopping
+            if case == "replaced":
+                engine.inject(Event(at=T0, kind="KILLJOB", payload={"job": "j"}))
+                engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "j"}))
+                await engine.run_until_quiescent(T0)
+                row = engine.oracle.store.job["j"]
+                assert (row.status, row.run_number) == ("RUNNING", 2)
+            engine.attempts.status_recorded(RUN_ID, SIGNALED)
+            await engine.attempts.join()
+            await asyncio.sleep(0)  # DL-431: the queued ladder-done callback releases the stop.
+            await engine.run_until_quiescent(engine.clock.now())
+            [applied] = [
+                c for c in _kinds(tmp_path, "config") if c["event"] == "applied" and "token" in c
+            ]
+            assert applied["stopped"] == stopped
+            assert answer.applied is not None and answer.applied.result() == applied
+            assert engine.update.tier is not None and engine.update.tier.application is not None
+            assert [list(item) for item in engine.update.tier.application.stopped] == stopped
+            attempts = {RUN_ID, OTHER_ID} if case == "natural" else {RUN_ID}
+            plans = [
+                p
+                for p in _kinds(tmp_path, "follow_up")
+                if p["event"] == "plan" and p["attempt"] in attempts
+            ]
+            assert [[p["job"], p["plan"]] for p in plans] == stopped
+        finally:
+            await engine.shutdown()
+            _close(engine)
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("case", ["record-mid-ladder", "record-after-the-kill-with-a-survivor"])
 def test_the_update_applies_only_once_each_stop_is_finished(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str

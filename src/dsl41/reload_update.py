@@ -26,9 +26,11 @@ and the row keeps status, ON_HOLD, ON_ICE, ON_NOEXEC, run counters, run history 
 Globals, consumed capacity and the clock are untouched; a resource a changed definition no
 longer names keeps its consumed bucket. The schedule plans follow in `Scheduler.replace`.
 
-A job the update stops takes the interruption rule once its attempt ends (spec-wiring 2b): a
-removed job is not relaunched, a marked one is held, any other reruns under the new definition.
-`Application.stopped` states that choice for each job in the stop set, for the reply.
+A job the update stops takes the interruption rule once its attempt ends (spec-wiring 2b): an
+attempt that ended on its own completes, a removed job is not relaunched, a marked one is held,
+any other reruns under the new definition. The engine chooses this once when it journals the
+application and fills `Application.stopped` for each job in the stop set; the record and the
+reply read that one value.
 """
 
 from __future__ import annotations
@@ -42,7 +44,7 @@ from dsl41.ir import CatalogIR
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import JobRuntime
 from dsl41.reload_diff import Change, Plan, catalog_hash_v2, retyped_jobs
-from dsl41.reload_plan import STOPPABLE, Live, stop_set
+from dsl41.reload_plan import Live, stop_set
 from dsl41.semantics import SemanticSwitches
 from dsl41.semantics import resolve as resolve_switches
 from dsl41.state_machine import (
@@ -103,7 +105,7 @@ UPDATE_IN_PROGRESS: Final = "update_in_progress"
 UPDATE_STATES: Final = ("IDLE", "STOPPING", "APPLIED", "REFUSED")
 
 #: What the interruption rule chooses for a stopped job (spec-wiring 2b, the follow-up kinds).
-type OnStop = Literal["rerun", "hold", "none"]
+type OnStop = Literal["complete", "rerun", "hold", "none"]
 
 
 @dataclass(frozen=True)
@@ -328,7 +330,7 @@ class Application:
     changed: tuple[str, ...]
     removed: tuple[str, ...]
     restored: tuple[tuple[str, tuple[str, ...]], ...]
-    stopped: tuple[tuple[str, OnStop], ...]
+    stopped: tuple[tuple[str, OnStop], ...] = ()
     #: the candidate's estate settings (`reload_plan.estate_settings`), swapped with the catalog
     settings: Mapping[str, Any] = field(default_factory=dict)
 
@@ -376,31 +378,17 @@ def live_of(live_state: Oracle, settings: Mapping[str, object], revision: int) -
     )
 
 
-def _on_stop(
-    job: str, run: int, live_state: Oracle, removed: Collection[str], marked: Collection[str]
-) -> OnStop:
-    """The interruption rule's answer for the stopped run `run` of `job` (spec-wiring 2b):
-    removed, or a run that is not the oracle's current one in STARTING or RUNNING, is
-    `none` (step 3); a marked job is `hold`; any other reruns."""
-    row = live_state.store.job.get(job)
-    if job in removed or row is None or row.status not in STOPPABLE or row.run_number != run:
-        return "none"
-    return "hold" if job in marked else "rerun"
-
-
 def plan_application(
     live_state: Oracle,
     candidate: CatalogIR,
     plan: Mapping[str, Any],
-    marked: Collection[str],
-    stops: Mapping[str, int],
 ) -> Application:
     """The application of the stored plan `plan` to the oracle `live_state`, computed only.
 
     The plan must describe the oracle's catalog: its added and removed names are the two sides'
     difference plus the jobs whose type changed, and its changed and unchanged names are the
-    rest, or ValueError. `marked` is the candidate's non-idempotent set and `stops` the
-    admitted stop set with each job's stopped run; each gets the interruption rule's answer.
+    rest, or ValueError. The engine fills `stopped` when it journals the application, from
+    its chosen follow-up plans (spec-wiring 2b).
     """
     live_names = live_state.catalog.jobs.keys()
     cand_names = candidate.jobs.keys()
@@ -427,9 +415,6 @@ def plan_application(
             (name, flags_of(tombstones[name]))
             for name in added
             if name in tombstones and flags_of(tombstones[name])
-        ),
-        stopped=tuple(
-            (job, _on_stop(job, stops[job], live_state, removed, marked)) for job in sorted(stops)
         ),
         settings=dict(plan["settings"]),
     )
@@ -469,7 +454,7 @@ class UpdateIntents(Protocol):
 
     def apply(self, application: Application) -> None: ...
 
-    def journal_applied(self, rev: int, digest: str) -> None: ...
+    def journal_applied(self, application: Application) -> Application: ...
 
 
 class UpdateTier:
@@ -597,7 +582,7 @@ class UpdateTier:
             self._intents.apply(self._application)
         else:  # JOURNAL_APPLIED, which follows APPLY in one outcome
             assert intent.name == JOURNAL_APPLIED and self._application is not None
-            self._intents.journal_applied(self._application.rev, self._application.digest)
+            self._application = self._intents.journal_applied(self._application)
 
 
 __all__ = [
