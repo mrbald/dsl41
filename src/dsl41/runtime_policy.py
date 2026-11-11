@@ -26,13 +26,6 @@ from dsl41.conditions import And, ExitCodeAtom, Paren, StatusAtom, Or
 from dsl41.ir import ExecSpec, FwSpec, JobIR, find_var_sites, unquote_jil_value
 from dsl41.runner_environment import ATTRIBUTE_NAMES, JobEnvironment as BaseJobEnvironment
 
-POLICY_FIELDS = (
-    "job_profile",
-    "job_shell",
-    "std_file_mode",
-    "kill_signals",
-    "set_job_attribute_environmentals",
-)
 StreamMode = Literal["append", "truncate"]
 
 
@@ -107,6 +100,9 @@ class RuntimePolicySettings(BaseModel):
         if value[-1] != signal.SIGKILL:
             raise ValueError("kill_signals must end with KILL (9) for bounded escalation")
         return value
+
+
+POLICY_FIELDS = tuple(RuntimePolicySettings.model_fields)
 
 
 def policy_values(settings: Mapping[str, object]) -> dict[str, object]:
