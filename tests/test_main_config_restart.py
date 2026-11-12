@@ -17,7 +17,6 @@ from typer.testing import CliRunner
 
 from dsl41 import main_config as main, runner_startup
 from dsl41.cli import app
-from dsl41.cli_reload import live_of_answer
 from dsl41.oracle_state import Event
 from dsl41.reload_plan import reread
 from dsl41.runner_adapters import FakeAdapter
@@ -36,7 +35,7 @@ pytestmark = pytest.mark.usefixtures("cli_env")
 
 @contextmanager
 def cli_engine(path: Path, *, force_unsupported_shell: bool = False):
-    root = main.load_run_root(path)
+    root = Path(main.load_host(path).run_root)
     socket = root / "control.sock"
     log = root.parent / "cli-engine.log"
     ready = stopped = False
@@ -149,11 +148,6 @@ def read_config_row(root: Path, rev: int) -> bytes:
         return store.get_config(rev)
 
 
-def plan_for(path: Path, ask):
-    root = main.load_run_root(path)
-    return reread(live_of_answer(ask()), root / "plans", candidate=main.prepare(path))
-
-
 @pytest.mark.parametrize(
     "options",
     [
@@ -218,7 +212,7 @@ def test_b4_updated_root_resumes_captured_inputs(short_root: Path, change: str) 
 
 def seed_root(path: Path, *, stopping: bool, boundary: bool, snapshot: bool = False):
     initial = main.prepare(path)
-    root = main.load_run_root(path)
+    root = Path(main.load_host(path).run_root)
 
     async def seed():
         clock = RealClock()
@@ -1062,7 +1056,7 @@ def k_bourne_account(monkeypatch):
 
 def k_seed(path):
     estate = main.prepare(path)
-    root = main.load_run_root(path)
+    root = Path(main.load_host(path).run_root)
     engine = start_run(
         estate.catalog,
         root,
@@ -1233,7 +1227,7 @@ def test_restart_prints_and_journals_authoritative_warnings_once(short_root: Pat
         "insert_machine: pool\ntype: v\nmachine: here\nmachine: there\n\n"
         "insert_job: A\njob_type: c\ncommand: true\nmachine: pool\nauto_hold: 1\n"
     )
-    root = main.load_run_root(path)
+    root = Path(main.load_host(path).run_root)
     with cli_engine(path, force_unsupported_shell=True):
         pass
     first_log = (short_root / "cli-engine.log").read_text()
@@ -1280,7 +1274,7 @@ def test_k2_cli_restart_uses_stored_profile_before_any_effect(short_root, monkey
 def test_k2_pending_candidate_is_checked_before_update_recovery(short_root, monkeypatch):
     path = estate_file(short_root)
     applied = main.prepare(path)
-    root = main.load_run_root(path)
+    root = Path(main.load_host(path).run_root)
     profile = short_root / "pending.profile"
     profile.write_text("export SYNTHETIC=candidate\n")
     engine = start_run(

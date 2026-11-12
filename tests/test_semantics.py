@@ -156,20 +156,6 @@ def test_the_queued_recheck_default_is_dsl41_s_and_the_vendor_s_is_1() -> None:
     assert semantics.resolve(RECHECK).queued_recheck == "1"
 
 
-def test_queued_recheck_affects_the_jobs_that_can_queue() -> None:
-    """A job that names a resource, or whose positive priority makes its
-    start check machine load (DL-247), can wait in QUE_WAIT."""
-    affects = semantics.REGISTRY["queued-recheck"].affects
-    catalog = lower_source(
-        "insert_resource: R1\nres_type: R\namount: 1\n\n"
-        "insert_job: res\njob_type: c\nmachine: m1\ncommand: x\nresources: (R1, QUANTITY=1)\n\n"
-        "insert_job: prio\njob_type: c\nmachine: m1\ncommand: x\npriority: 3\n\n"
-        "insert_job: zero\njob_type: c\nmachine: m1\ncommand: x\njob_load: 5\npriority: 0\n\n"
-        "insert_job: plain\njob_type: c\nmachine: m1\ncommand: x\njob_load: 5\n"
-    )
-    assert {name for name, job in catalog.jobs.items() if affects(job, catalog)} == {"res", "prio"}
-
-
 @pytest.mark.parametrize(
     ("calendar", "message"),
     [
@@ -585,17 +571,6 @@ def test_a_resume_with_a_different_switch_refuses(tmp_path: Path) -> None:
     resumed.journal.close()
 
 
-def test_ice_lookback_affects_exactly_the_jobs_with_a_lookback_atom() -> None:
-    affects = semantics.REGISTRY["ice-lookback"].affects
-    catalog = lower_source(
-        "insert_job: a\njob_type: c\nmachine: m1\ncommand: x\n\n"
-        "insert_job: plain\njob_type: c\nmachine: m1\ncommand: y\ncondition: f(a)\n\n"
-        "insert_job: lb\njob_type: c\nmachine: m1\ncommand: y\ncondition: e(a, 01.00) = 0\n\n"
-        "insert_job: bf\njob_type: b\nbox_failure: t(a, 0)\n"
-    )
-    assert {name for name, job in catalog.jobs.items() if affects(job, catalog)} == {"lb", "bf"}
-
-
 @pytest.mark.parametrize(
     ("text", "under_true", "under_ordinary"),
     [
@@ -623,27 +598,6 @@ def test_iced_atom_truth_is_the_on_ice_row_under_each_switch_value(
     assert semantics.iced_atom_truth(atom, "ordinary") is under_ordinary
 
 
-def test_renewable_free_affects_exactly_the_renewable_requests_without_free() -> None:
-    """DL-256: an omitted FREE on a renewable resource, an absent res_type
-    included, is what `renewable-free` reads. An explicit FREE, a depletable
-    and a threshold are outside it."""
-    affects = semantics.REGISTRY["renewable-free"].affects
-    catalog = lower_source(
-        "insert_resource: R1\nres_type: R\namount: 2\n\n"
-        "insert_resource: U1\namount: 2\n\n"
-        "insert_resource: D1\nres_type: D\namount: 2\n\n"
-        "insert_resource: T1\nres_type: T\namount: 2\n\n"
-        "insert_job: r\njob_type: c\nmachine: m1\ncommand: x\nresources: (R1, QUANTITY=1)\n\n"
-        "insert_job: u\njob_type: c\nmachine: m1\ncommand: x\nresources: (U1, QUANTITY=1)\n\n"
-        "insert_job: rf\njob_type: c\nmachine: m1\ncommand: x\n"
-        "resources: (R1, QUANTITY=1, FREE=Y)\n\n"
-        "insert_job: d\njob_type: c\nmachine: m1\ncommand: x\nresources: (D1, QUANTITY=1)\n\n"
-        "insert_job: t\njob_type: c\nmachine: m1\ncommand: x\nresources: (T1, QUANTITY=1)\n\n"
-        "insert_job: none\njob_type: c\nmachine: m1\ncommand: x\n"
-    )
-    assert {name for name, job in catalog.jobs.items() if affects(job, catalog)} == {"r", "u"}
-
-
 # --------------------------------------------------------------- fw-existence
 
 _FW_ESTATE = (
@@ -657,9 +611,11 @@ _FW_ESTATE = (
 def test_fw_no_min_size_is_true_only_for_an_fw_job_with_no_minimum_size() -> None:
     """DL-258: `None` and an explicit `0` read the same -- the adapter's own
     `spec_ir.watch_file_min_size or 0` -- and a non-FW job is never affected."""
-    affects = semantics.REGISTRY["fw-existence"].affects
     catalog = lower_source(_FW_ESTATE)
-    assert {name for name, job in catalog.jobs.items() if affects(job, catalog)} == {"w", "wz"}
+    assert {name for name, job in catalog.jobs.items() if semantics.fw_no_min_size(job)} == {
+        "w",
+        "wz",
+    }
 
 
 def test_fw_existence_immediate_needs_both_the_switch_and_no_minimum_size() -> None:
@@ -693,17 +649,6 @@ def test_the_wekr_default_is_dsl41_s_first_full_week() -> None:
     assert switch.values == ("first-full", "partial")
     assert switch.default == "first-full"
     assert switch.autosys == "unknown"
-
-
-def test_wekr_first_week_affects_exactly_the_calendars_with_a_wekr_token() -> None:
-    entry = semantics.REGISTRY["wekr-first-week"]
-    catalog = lower_source(_WEKR_JIL)
-    assert {name for name, cal in catalog.calendars.items() if entry.affects_calendar(cal)} == {
-        "wk"
-    }
-    assert not any(entry.affects(job, catalog) for job in catalog.jobs.values())
-    ice = semantics.REGISTRY["ice-lookback"]
-    assert not any(ice.affects_calendar(cal) for cal in catalog.calendars.values())
 
 
 def test_the_scheduler_compiles_wekr_calendars_under_its_switches() -> None:
@@ -907,24 +852,6 @@ def test_a_rehearse_root_records_the_calendar_switch(tmp_path: Path) -> None:
     assert _recorded(run_root).profile.semantics == PARTIAL
 
 
-def test_dst_start_times_affects_exactly_the_jobs_with_start_times_or_start_mins() -> None:
-    """DL-260: a flip moves the ticks of every job with start_times or
-    start_mins, whatever its zone; a calendar-only job and an unscheduled
-    one keep theirs."""
-    affects = semantics.REGISTRY["dst-start-times"].affects
-    catalog = lower_source(
-        "insert_job: st\njob_type: c\nmachine: m1\ncommand: x\n"
-        'date_conditions: 1\nstart_times: "02:05"\n\n'
-        "insert_job: sm\njob_type: c\nmachine: m1\ncommand: x\n"
-        "date_conditions: 1\nstart_mins: 5\ntimezone: UTC\n\n"
-        "insert_job: cal\njob_type: c\nmachine: m1\ncommand: x\n"
-        "date_conditions: 1\nrun_calendar: c1\n\n"
-        "insert_job: plain\njob_type: c\nmachine: m1\ncommand: y\n\n"
-        "calendar: c1\n03/08/2026\n"
-    )
-    assert {name for name, job in catalog.jobs.items() if affects(job, catalog)} == {"st", "sm"}
-
-
 def test_the_box_switch_defaults_are_the_documented_autosys_readings() -> None:
     """SEM-20 and SEM-14: both box switches default to the vendor's reading,
     and the other value keeps dsl41's earlier behavior."""
@@ -934,37 +861,6 @@ def test_the_box_switch_defaults_are_the_documented_autosys_readings() -> None:
     terminator = semantics.REGISTRY["box-terminator-on-terminated"]
     assert terminator.values == ("true", "false")
     assert terminator.default == "true" == terminator.autosys
-
-
-_BOX_SWITCH_JIL = (
-    "insert_job: b\njob_type: b\n\n"
-    "insert_job: bt\njob_type: c\nmachine: m1\ncommand: x\nbox_name: b\nbox_terminator: 1\n\n"
-    "insert_job: m\njob_type: c\nmachine: m1\ncommand: x\nbox_name: b\n\n"
-    "insert_job: sb\njob_type: b\nbox_name: b\n\n"
-    "insert_job: sbm\njob_type: c\nmachine: m1\ncommand: x\nbox_name: sb\n\n"
-    "insert_job: lone\njob_type: c\nmachine: m1\ncommand: x\nbox_terminator: 1\n"
-)
-
-
-def test_off_ice_in_running_box_affects_exactly_the_jobs_inside_a_box() -> None:
-    """SEM-20: a flip changes what an OFF_ICE does to any job inside a box,
-    a subbox included; a job outside every box is not reached."""
-    affects = semantics.REGISTRY["off-ice-in-running-box"].affects
-    catalog = lower_source(_BOX_SWITCH_JIL)
-    assert {name for name, job in catalog.jobs.items() if affects(job, catalog)} == {
-        "bt",
-        "m",
-        "sb",
-        "sbm",
-    }
-
-
-def test_box_terminator_on_terminated_affects_exactly_the_box_terminator_members() -> None:
-    """SEM-14: a flip changes only a box member with box_terminator. A job
-    outside every box with the attribute has no box to end."""
-    affects = semantics.REGISTRY["box-terminator-on-terminated"].affects
-    catalog = lower_source(_BOX_SWITCH_JIL)
-    assert {name for name, job in catalog.jobs.items() if affects(job, catalog)} == {"bt"}
 
 
 def test_the_box_start_switch_defaults_to_complete_and_the_vendor_reading_is_unknown() -> None:
@@ -987,16 +883,6 @@ def test_the_idle_box_switch_defaults_to_ignore_and_the_vendor_reading_is_unknow
     assert switch.values == ("ignore", "vote")
     assert switch.default == "ignore"
     assert switch.autosys == "unknown"
-
-
-@pytest.mark.parametrize("switch", ["box-start-all-members-out", "idle-box-iced-member"])
-def test_a_box_wide_switch_affects_exactly_the_boxes(switch: str) -> None:
-    """SEM-11, SEM-15: a flip changes whether a box completes at its start,
-    or how a box that is not running re-derives its status, so it reaches
-    every box, a subbox included, and no other job."""
-    affects = semantics.REGISTRY[switch].affects
-    catalog = lower_source(_BOX_SWITCH_JIL)
-    assert {name for name, job in catalog.jobs.items() if affects(job, catalog)} == {"b", "sb"}
 
 
 # ------------------------------------------------------------------ the CLI

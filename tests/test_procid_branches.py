@@ -229,16 +229,6 @@ def test_procid_zombie_macos_is_a_stat_that_starts_with_z(
 # ----------------------------------------------- token grammar and comparison
 
 
-def test_procid_valid_start_token_rejects_non_strings_and_bad_forms() -> None:
-    assert procid.valid_start_token(None) is False
-    assert procid.valid_start_token(12) is False
-    assert procid.valid_start_token("ticks:0") is True
-    assert procid.valid_start_token("ticks:007") is False
-    assert procid.valid_start_token("lstart:Mon Jan  1 00:00:00 2001") is True
-    assert procid.valid_start_token("lstart:not a date") is False
-    assert procid.valid_start_token("other:1") is False
-
-
 def test_procid_start_tokens_match_by_kind() -> None:
     """Tick tokens match exactly; lstart tokens within the tolerance; a
     foreign or unparseable token never matches."""

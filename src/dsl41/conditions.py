@@ -318,10 +318,8 @@ STATUS_LETTER: dict[Status, str] = {
 }
 
 
-def _span(node: Tree[Token]) -> CondSpan | None:
+def _span(node: Tree[Token]) -> CondSpan:
     meta = node.meta
-    if meta.empty:
-        return None
     return CondSpan(start=meta.start_pos, end=meta.end_pos)
 
 

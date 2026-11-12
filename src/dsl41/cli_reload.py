@@ -13,10 +13,8 @@ import typer
 
 from dsl41.cli_control import SOCKET_OPT
 from dsl41.cli_output import OutputStyle, application_lines, counted, names_text, reread_lines
-from dsl41.reload_plan import Live
 from dsl41.reload_update import Admitted, Application, Refused
 
-PLANS = "plans"
 type Send = Callable[[str, Mapping[str, object]], object]
 
 
@@ -142,33 +140,6 @@ def socket_send(socket_path: Path, *, request_id: str | None = None, timeout: fl
         )
 
     return send
-
-
-def live_of_answer(answer: Mapping[str, Any]) -> Live:
-    """The `Live` a `catalog` answer carries."""
-    from dsl41.ir import CatalogIR
-
-    if not answer.get("ok"):
-        raise SendFailed(str(answer.get("error", "the engine refused the catalog read")))
-    if (
-        answer.get("environment_view") != "ops"
-        or not isinstance(answer.get("path_environment"), dict)
-        or not isinstance(answer.get("settings"), dict)
-        or not isinstance(answer.get("settings", {}).get("job_env"), dict)
-    ):
-        raise SendFailed(
-            "reread requires the ops catalog view; redacted or missing environment data"
-        )
-    return Live(
-        CatalogIR.model_validate(answer["catalog"]),
-        dict(answer["settings"]),
-        int(answer["revision"]),
-        dict(answer["status"]),
-        {name: tuple(flags) for name, flags in dict(answer.get("tombstones") or {}).items()},
-        {name: int(run) for name, run in dict(answer.get("runs") or {}).items()},
-        dict(answer.get("launch") or {}),
-        dict(answer["path_environment"]),
-    )
 
 
 def update_reply_of(answer: Mapping[str, Any]) -> UpdateReply:

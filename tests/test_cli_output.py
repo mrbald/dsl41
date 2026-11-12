@@ -904,23 +904,6 @@ def test_r3_reload_transport_errors_keep_their_detail(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "answer",
-    [
-        {"ok": False, "error": "catalog refused"},
-        {
-            "ok": True,
-            "environment_view": "read",
-            "path_environment": {},
-            "settings": {"job_env": {}},
-        },
-    ],
-)
-def test_r3_catalog_refusals_and_redacted_inputs_cannot_supply_ops_state(answer):
-    with pytest.raises(cli_reload.SendFailed):
-        cli_reload.live_of_answer(answer)
-
-
-@pytest.mark.parametrize(
     "kind", ["pending", "admitted", "unchanged", "stale_plan", "update_in_progress"]
 )
 def test_r3_update_reply_keeps_admission_application_and_refusal_distinct(kind):

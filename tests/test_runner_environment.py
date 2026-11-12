@@ -538,50 +538,34 @@ def test_legacy_prefixed_dispatch_paths_survive_replay(tmp_path, monkeypatch):
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("cli_env")
 def test_reread_validates_against_engine_startup_values_not_the_client(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from dsl41.cli_reload import live_of_answer
+    from dsl41.cli_reload import SendFailed, socket_send
+    from dsl41.runner_control import roundtrip
     from test_main_config import estate_file
+    from test_main_config_restart import cli_engine
 
     monkeypatch.setenv("CAPTURED_DIR", "captured-secret-value")
-    path = estate_file(tmp_path)
-    initial = main_config.prepare(path)
-
-    async def scenario() -> None:
-        clock = VirtualClock(T0)
-        engine = start_run(
-            initial.catalog,
-            tmp_path / "root",
-            clock=clock,
-            adapters={"CMD": FakeAdapter()},
-            launched=main_config.profile_of(initial),
-            source_capture=main_config.encoded_parts(initial),
-        )
-        try:
-            server = ControlServer(engine, tmp_path / "unused.sock")
-            answer = server._catalog()
-            assert answer["path_environment"]["CAPTURED_DIR"] == "set"
-            assert "captured-secret-value" not in str(answer)
-            live = live_of_answer(answer)
-            monkeypatch.delenv("CAPTURED_DIR")
-            (tmp_path / "a.jil").write_text(
-                (tmp_path / "a.jil").read_text() + "std_out_file: $CAPTURED_DIR/$AUTORUN\n"
-            )
-            candidate = main_config.prepare(path)
-            plan = reread(live, tmp_path / "root" / "plans", candidate=candidate)
-            assert plan.token
-            monkeypatch.setenv("CLIENT_ONLY", "client-value")
-            (tmp_path / "a.jil").write_text(
-                (tmp_path / "a.jil").read_text().replace("CAPTURED_DIR", "CLIENT_ONLY")
-            )
-            with pytest.raises(RereadRefused, match="references unavailable variable CLIENT_ONLY"):
-                reread(live, tmp_path / "root" / "plans", candidate=main_config.prepare(path))
-        finally:
-            await engine.shutdown()
-            engine.journal.close()
-
-    asyncio.run(scenario())
+    path = estate_file(short_root)
+    socket = short_root / "run" / "control.sock"
+    with cli_engine(path) as ask:
+        answer = ask()
+        assert answer["path_environment"]["CAPTURED_DIR"] == "set"
+        assert "captured-secret-value" not in str(answer)
+        monkeypatch.delenv("CAPTURED_DIR")
+        jil = short_root / "a.jil"
+        jil.write_text(jil.read_text() + "std_out_file: $CAPTURED_DIR/$AUTORUN\n")
+        preview = roundtrip(socket, {"v": 4, "cmd": "reread"})
+        assert preview["ok"], preview
+        assert [item["name"] for item in preview["preview"]["changed"]] == ["A"]
+        applied = socket_send(socket)("update", {"wait": True})
+        assert applied.application is not None
+        monkeypatch.setenv("CLIENT_ONLY", "client-value")
+        jil.write_text(jil.read_text().replace("CAPTURED_DIR", "CLIENT_ONLY"))
+        with pytest.raises(SendFailed, match="references unavailable variable CLIENT_ONLY"):
+            socket_send(socket)("update", {})
 
 
 def test_replacement_refuses_before_a_dispatch_record_or_launch(tmp_path: Path) -> None:

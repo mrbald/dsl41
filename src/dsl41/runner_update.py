@@ -92,7 +92,7 @@ if TYPE_CHECKING:  # annotation only: the engine imports this module
     from dsl41.runner import Engine
     from dsl41.runner_journal import Journal
 
-#: The plans directory of a run root (`cli_reload.PLANS`).
+#: The plans directory of a run root.
 PLANS: Final = "plans"
 
 #: The `config applied` fields an update adds to the segment's: what the application did.

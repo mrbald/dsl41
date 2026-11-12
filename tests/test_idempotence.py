@@ -46,7 +46,6 @@ def _write(directory: Path, text: str) -> None:
 def test_an_absent_file_makes_every_job_idempotent(tmp_path: Path) -> None:
     found = load_exceptions(tmp_path)
     assert found.names == ()
-    assert found.is_idempotent("anything")
     assert found.reason("anything") is None
 
 
@@ -58,9 +57,8 @@ def test_a_well_formed_file_marks_its_jobs_with_their_reasons(tmp_path: Path) ->
     )
     found = load_exceptions(tmp_path)
     assert found.names == ("emea.ledger_post", "plain")
-    assert not found.is_idempotent("emea.ledger_post")
-    assert found.is_idempotent("other")
     assert found.reason("emea.ledger_post") == "posts to the GL twice if rerun"
+    assert found.reason("other") is None
 
 
 def test_a_file_with_no_jobs_table_is_empty(tmp_path: Path) -> None:

@@ -1,5 +1,4 @@
-"""Branch tests for src/dsl41/conditions.py: the packaged-grammar layout of
-`_grammar_text` and `_span` on a tree that carries no source position."""
+"""Grammar layouts and source-position spans in conditions.py."""
 
 from __future__ import annotations
 
@@ -29,10 +28,6 @@ def test_grammar_text_falls_back_to_the_repository_grammar(
     monkeypatch.setattr(conditions.resources, "files", lambda package: tmp_path)
     repo = Path(conditions.__file__).resolve().parents[2] / "grammars" / "condition.lark"
     assert conditions._grammar_text() == repo.read_text(encoding="utf-8")
-
-
-def test_span_of_a_tree_without_positions_is_none() -> None:
-    assert conditions._span(Tree("anything", [])) is None
 
 
 def test_span_of_a_positioned_tree_is_its_offsets() -> None:
