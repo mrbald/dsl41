@@ -263,30 +263,32 @@ def test_reason_keeps_main_equality_for_undefined_transitive_references_and_bool
 
 
 @pytest.mark.parametrize("distinct", [False, True])
-def test_whole_difference_budget_for_5000_jobs_and_300_settings(monkeypatch, tmp_path, distinct):
-    base = lower_source(JOB)
-    old, new = base.model_copy(deep=True), base.model_copy(deep=True)
-    template = base.jobs["j"]
-    old.jobs.clear()
-    new.jobs.clear()
-    for index in range(5000):
-        name = f"job_{index:04}"
-        old.jobs[name] = template.model_copy(update={"name": name}, deep=True)
-        new.jobs[name] = template.model_copy(update={"name": name}, deep=True)
-        if distinct:
-            for field in range(16):
-                key = f"field_{field:02}"
-                old.jobs[name].passthrough[key] = f"old-{index}-{field}-" + "x" * 200
-                new.jobs[name].passthrough[key] = f"new-{index}-{field}-" + "y" * 200
-    monkeypatch.setattr(reread_worker, "preflight_items", lambda *a: [])
-    monkeypatch.setattr(reload_plan, "preflight_items", lambda *a: [])
-    before = {"job_env": {f"V_{i:03}": f"old-secret-{i}" for i in range(300)}}
-    after = {"job_env": {f"V_{i:03}": f"new-secret-{i}" for i in range(300)}}
-    candidate = difference_estate(tmp_path, new, after)
-    view = reread_worker.preview(
-        candidate,
-        Live(old, {**candidate.settings, **before}, 1, {}, launch=candidate.metadata["launch"]),
-    )
+def test_whole_difference_budget_for_5000_jobs_and_300_settings(short_root, cli_env, distinct):
+    from dsl41.runner_control import roundtrip
+    from test_main_config import config_file
+    from test_main_config_restart import cli_engine
+
+    def write_inputs(version):
+        description = version if distinct else "same"
+        names = [*(f"job_{index:04}" for index in range(4999)), "z"]
+        (short_root / "a.jil").write_text(
+            "\n".join(
+                f"insert_job: {name}\njob_type: c\ncommand: true\nmachine: localhost\n"
+                f'description: "{description}-{0 if name == "z" else index}-' + "x" * 200 + '"\n'
+                for index, name in enumerate(names)
+            )
+        )
+        environment = ", ".join(f'V_{i:03} = "{version}-secret-{i}"' for i in range(300))
+        return config_file(short_root, engine=f"job_env = {{{environment}}}\n")
+
+    path = write_inputs("old")
+    with cli_engine(path):
+        write_inputs("new")
+        answer = roundtrip(
+            short_root / "run" / "control.sock", {"v": 4, "cmd": "reread"}, timeout=15
+        )
+        assert answer["ok"] is True, answer
+    view = answer["preview"]
     details = view["definition_changes"]
     wire = json.dumps(details).encode()
     assert len(wire) <= reread_worker.DIFFERENCE_BYTE_BUDGET
@@ -297,7 +299,8 @@ def test_whole_difference_budget_for_5000_jobs_and_300_settings(monkeypatch, tmp
     if distinct:
         from dsl41.cli_output import OutputStyle, reread_lines
 
-        answer = {"preview": view, "live_rev": 1, "source": {"path": "/synthetic/estate.jil"}}
+        # Once full, even a small membership in an existing group is omitted (DL-482).
+        assert all("z" not in group["jobs"] for group in details["groups"])
         for style in OutputStyle:
             assert f"{details['omitted']} more differences not shown" in "\n".join(
                 reread_lines(answer, style, "dsl41 update")

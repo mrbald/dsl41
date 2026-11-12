@@ -17,6 +17,9 @@ verified manually for the phase-11e report, see docs/decision-log.md DL-47).
 
 from __future__ import annotations
 
+import asyncio
+import os
+import re
 import shlex
 import shutil
 import socket
@@ -28,6 +31,9 @@ import pytest
 from typer.testing import CliRunner
 
 from dsl41.cli import app
+from dsl41.runner_journal import read_records
+from test_tui_recovery_drivers import _stop
+from tui_terminal import Terminal, painted_lines
 
 cli_runner = CliRunner()
 pytestmark = pytest.mark.usefixtures("cli_env")
@@ -264,16 +270,58 @@ def test_run_ui_tui_failure_is_not_an_operator_stop(short_root, monkeypatch) -> 
     assert captured["kwargs"].get("owns_run") is True
 
 
-def test_run_ui_operator_stop_when_the_tui_return_code_is_none(short_root, monkeypatch) -> None:
-    """The companion case: `return_code` stays `None`, the existing
-    operator-stop path (a clean quit), unaffected by F3's new check."""
+def test_run_ui_confirmed_quit_stops_the_live_engine(short_root, tmp_path) -> None:
+    """A confirmed quit of the real terminal UI drains its engine (DL-187)."""
     _skip_unless_posix_textual()
     jil_path = short_root / "estate.jil"
     jil_path.write_text(_MINIMAL_JIL)
     run_root = short_root / "run"
-    captured: dict = {}
-    monkeypatch.setattr("dsl41.runner_tui.RunnerApp", _fake_runner_app(None, captured))
-    result = cli_runner.invoke(app, ["run", str(jil_path), "--run-root", str(run_root), "--ui"])
-    assert result.exit_code == 0
-    assert "engine stopped: clean_shutdown" in result.output  # quitting the TUI drains the engine
-    assert captured["kwargs"].get("owns_run") is True
+
+    async def scenario():
+        terminal = Terminal(tmp_path, timeout=15)
+        try:
+            await terminal.start(
+                [
+                    sys.executable,
+                    "-m",
+                    "dsl41",
+                    "run",
+                    str(jil_path),
+                    "--run-root",
+                    str(run_root),
+                    "--ui",
+                ],
+                dict(os.environ),
+            )
+            await terminal.until(
+                "quit footer",
+                lambda data: (
+                    "q stop run" in painted_lines(data, terminal.columns, terminal.rows)[-1]
+                ),
+                after=0,
+            )
+            mark = terminal.send(b"q")
+            await terminal.until(
+                "quit confirmation",
+                lambda data: b"stop the run?" in re.sub(rb"\x1b\[[\d;:]*m", b"", data),
+                after=mark,
+            )
+            terminal.send(b"\r")
+            assert terminal.process is not None
+            assert await asyncio.wait_for(terminal.process.wait(), timeout=5) == 0
+            await terminal.until(
+                "clean shutdown", lambda data: b"engine stopped: clean_shutdown" in data, after=mark
+            )
+            assert not (run_root / "control.sock").exists()
+            assert any(
+                record.kind == "engine" and record.payload["event"] == "clean_shutdown"
+                for _, record in read_records(run_root)
+            )
+        finally:
+            try:
+                if terminal.process is not None:
+                    await _stop(terminal.process)
+            finally:
+                terminal.close()
+
+    asyncio.run(scenario())

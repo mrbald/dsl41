@@ -27,6 +27,7 @@ from dsl41.runner_startup import resume_run, start_run
 from dsl41.runner_store import SqliteStore
 from dsl41.status_hook import HookDelivery, HookSettings, StatusHooks, _Invocation
 from test_main_config import config_file, estate_file
+from test_main_config_restart import cli_engine
 
 pytestmark = pytest.mark.usefixtures("cli_env")
 T0 = datetime(2026, 7, 1, 8)
@@ -113,6 +114,32 @@ def test_malformed_toml_cannot_obtain_hook_settings(tmp_path):
     path = config_file(tmp_path, engine=f"status_hook = {json.dumps(str(hook))}\n")
     path.write_text(path.read_text() + "broken = [\n")
     assert CliRunner().invoke(app, ["run", "--config", str(path)]).exit_code == 2
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("fail", [False, True], ids=["no-transitions", "oversize"])
+def test_cli_hook_stops_without_delivery_for_idle_or_oversize_job(short_root, fail):
+    out = short_root / "events"
+    hook = script(
+        short_root, f"import sys\nopen({str(out)!r}, 'ab').write(sys.stdin.buffer.read())\n"
+    )
+    path = estate_file(short_root, engine=f"status_hook = {json.dumps(str(hook))}\n")
+    job = "j" * 16384 if fail else "idle"
+    (short_root / "a.jil").write_text(f"insert_job: {job}\njob_type: b\n")
+    socket = short_root / "run" / "control.sock"
+    with cli_engine(path) as ask:
+        assert ask("status")["jobs"][job]["status"] == "INACTIVE"
+        if fail:
+            result = CliRunner().invoke(
+                app, ["sendevent", "CHANGE_STATUS", "-J", job, "-s", "FAILURE", "-S", str(socket)]
+            )
+            assert result.exit_code == 0, result.output
+            assert ask("status")["jobs"][job]["status"] == "FAILURE"
+        stopped = CliRunner().invoke(app, ["engine", "stop", "--wait", "-S", str(socket)])
+        assert stopped.exit_code == 0, stopped.output
+    log = (short_root / "cli-engine.log").read_text()
+    assert "engine stopped: clean_shutdown" in log
+    assert ("status hook: oversize; counts={'oversize': 1}" in log) == fail
     assert not out.exists()
 
 
