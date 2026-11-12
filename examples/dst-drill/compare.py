@@ -390,27 +390,27 @@ def table(rows: Iterable[Row], *, all_rows: bool = False) -> str:
 
 WARNING_PREFIX = "dsl41: WARNING:"
 STEP_WARNING = re.compile(
-    r"^dsl41: WARNING: wall clock below admission frontier:"
-    r" wall=(?P<wall>\S+) frontier=(?P<frontier>\S+) gap_s=(?P<gap>\S+)$"
+    r"^dsl41: WARNING: wall clock behind engine time:"
+    r" wall=(?P<wall>\S+) until=(?P<until>\S+) gap_s=(?P<gap>\S+)$"
 )
 
 
 def warning_rows(log: str, back: timedelta) -> list[Row]:
-    """DL-435: a backward step of `back` is reported once on stderr, with
-    the wall reading, the admission frontier and the gap. The wall is below
-    the frontier, the gap is their difference, and it is at most the step:
-    the frontier never passes the wall that preceded the step."""
+    """DL-493: a backward step of `back` is reported once on stderr, with
+    the wall reading, the instant engine time resumes at and the gap. The
+    wall is below that instant, the gap is their difference, and it is at
+    most the step: engine time never passes the wall that preceded the step."""
     lines = [line for line in log.splitlines() if line.startswith(WARNING_PREFIX)]
     rows = [Row("step warning", "-", "1 line", f"{len(lines)} lines", len(lines) == 1)]
     if len(lines) != 1:
         return rows
     found = STEP_WARNING.match(lines[0])
     if found is None:
-        return rows + [Row("step warning text", "-", "wall, frontier, gap_s", lines[0], False)]
-    wall, frontier = (datetime.fromisoformat(found[k]) for k in ("wall", "frontier"))
+        return rows + [Row("step warning text", "-", "wall, until, gap_s", lines[0], False)]
+    wall, until = (datetime.fromisoformat(found[k]) for k in ("wall", "until"))
     gap = float(found["gap"])
-    want = f"0 < gap <= {_secs(back)}s, gap = frontier - wall"
-    ok = wall < frontier and abs(gap - (frontier - wall).total_seconds()) < 0.001
+    want = f"0 < gap <= {_secs(back)}s, gap = until - wall"
+    ok = wall < until and abs(gap - (until - wall).total_seconds()) < 0.001
     ok = ok and 0 < gap <= back.total_seconds()
     return rows + [Row("step warning text", "-", want, f"gap {gap:g}s", ok)]
 
@@ -460,8 +460,8 @@ def chain_rows(
 ) -> list[Row]:
     """The producer's run started at `at` ends SUCCESS, and exactly one start
     of the follower falls in [at, before). Count and status, not time: a
-    status that arrives under a stepped-back wall clock is stamped at the
-    frontier."""
+    status that arrives under a stepped-back wall clock is stamped at engine
+    time (DL-493)."""
     runs = [r for r in trace.runs if r.job == producer and r.at == at]
     status = runs[0].status if runs else None
     rows = [

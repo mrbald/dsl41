@@ -167,11 +167,11 @@ The estate has one job that starts every minute and runs 25 seconds, and one tha
 The engine starts at 00:11:30. The 00:12 tick is admitted.
 At 00:12:10 the wall steps back 90 seconds, the driver sends `SET_GLOBAL`,
 and the run goes on to 00:14:15 on the stepped clock, then stops.
-The verdict follows DL-435:
+The verdict follows DL-435 and DL-493:
 
 | Check | Expected |
 | --- | --- |
-| `dsl41: WARNING:` lines on the engine's stderr | one, with `wall` below `frontier` and `gap_s` equal to their difference, at most the step |
+| `dsl41: WARNING:` lines on the engine's stderr | one, with `wall` below `until` and `gap_s` equal to their difference, at most the step |
 | `SET_GLOBAL`, sent under the step | `sendevent` exits 0 with decision `applied`. This exit code is the only proof that none was refused: a refusal writes no record |
 | Every decision in the store | `applied`; none `rejected` |
 | The engine at the end | still running; `engine stop --wait` exits 0, the engine exits 0, `clean_shutdown` |
@@ -183,12 +183,11 @@ The verdict follows DL-435:
 | `dsl41 journal`, `dsl41 rehearse`, `dsl41 lint` | exit 0 in every scenario; an empty trace or a stamp list fails |
 | Each scheduled start's `dispatch` record | 0 to 0.75 s after its tick |
 
-Other record kinds (`dispatch`, `outcome`, `engine`) carry the wall reading and are not asserted:
-after the step they can be stamped below an earlier `input`.
+Other record kinds (`dispatch`, `outcome`, `engine`) take engine time and are not asserted.
 A follow-on start is checked by count and status, not by time.
-A status that arrives while the wall is below the frontier is stamped at the frontier,
+A status that arrives while the wall is behind engine time is stamped at engine time,
 so it comes earlier than in the rehearsal.
-A completion that the engine held until the wall reached the frontier would carry the same stamps,
+A completion that the engine held until the wall reached engine time would carry the same stamps,
 so the drill cannot tell it from a correct run.
 
 ## L023 cross-check

@@ -650,38 +650,38 @@ def test_dst_drill_kill_check_needs_an_oracle_kill_stop_and_a_signaled_command(
 
 STEP_LOG = (
     "engine up; control socket: rr/control.sock\n"
-    "dsl41: WARNING: wall clock below admission frontier: wall=2026-07-15T00:10:47.5"
-    " frontier=2026-07-15T00:12:00 gap_s=72.5\n"
+    "dsl41: WARNING: wall clock behind engine time: wall=2026-07-15T00:10:47.5"
+    " until=2026-07-15T00:12:00 gap_s=72.5\n"
     "engine stopped: clean_shutdown\n"
 )
 BACK = timedelta(seconds=90)
 
 
-def test_dst_drill_step_warning_is_one_line_with_wall_frontier_and_gap() -> None:
+def test_dst_drill_step_warning_is_one_line_with_wall_until_and_gap() -> None:
     assert all(r.ok for r in compare.warning_rows(STEP_LOG, BACK))
     none = [r for r in compare.warning_rows("engine up\n", BACK) if not r.ok]
     assert [r.check for r in none] == ["step warning"]
     twice = STEP_LOG + STEP_LOG.splitlines()[1] + "\n"
     assert [r.check for r in compare.warning_rows(twice, BACK) if not r.ok] == ["step warning"]
-    other = STEP_LOG.replace("wall clock below admission frontier", "something else")
+    other = STEP_LOG.replace("wall clock behind engine time", "something else")
     assert [r.check for r in compare.warning_rows(other, BACK) if not r.ok] == ["step warning text"]
 
 
 @pytest.mark.parametrize(
     "edit",
     [
-        ("gap_s=72.5", "gap_s=10"),  # not frontier - wall
+        ("gap_s=72.5", "gap_s=10"),  # not until - wall
         ("gap_s=72.5", "gap_s=-72.5"),
-        ("wall=2026-07-15T00:10:47.5", "wall=2026-07-15T00:12:30"),  # wall above the frontier
+        ("wall=2026-07-15T00:10:47.5", "wall=2026-07-15T00:12:30"),  # wall above the until instant
         ("gap_s=72.5", "gap_s=72.5"),  # control: passes
     ],
 )
 def test_dst_drill_step_warning_text_is_checked(edit: tuple[str, str]) -> None:
     rows = compare.warning_rows(STEP_LOG.replace(*edit), BACK)
     assert all(r.ok for r in rows) is (edit[0] == edit[1])
-    # a gap larger than the step cannot be: the frontier never passes the earlier wall
+    # a gap larger than the step cannot be: engine time never passes the earlier wall
     big = STEP_LOG.replace(
-        "frontier=2026-07-15T00:12:00 gap_s=72.5", "frontier=2026-07-15T00:13:00 gap_s=132.5"
+        "until=2026-07-15T00:12:00 gap_s=72.5", "until=2026-07-15T00:13:00 gap_s=132.5"
     )
     assert not all(r.ok for r in compare.warning_rows(big, BACK))
 
