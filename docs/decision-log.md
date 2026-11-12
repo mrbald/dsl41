@@ -26568,3 +26568,42 @@ relitigate an entry; append a new one.
   mode on the engine's per-run logs: a replacement attempt would erase the failed try's
   output. The command on a line of its own after the profiles: a profile's alias, such
   as `rm` for `rm -i`, would then rewrite the command.
+- DL-493 In the real domain one function gives the engine's "now", and `status` shows a
+  clock hold (2026-11-12; the owner's clock pass, BUG-1, BUG-4, BUG-5 and BUG-6; operator
+  rulings, Astra consulted twice; `runner.py`, `runner_startup.py`, `runner_control.py`,
+  `cli_run.py`, `cli_output.py`, runner-design §§4 and 9, control-protocol §4; narrows DL-435)
+  THE RULE. Real domain only. A stamp that means "now" is the latest of the wall clock, the
+  admission frontier and the last "now" stamp the engine gave. One function gives it
+  (`Engine.now_admitted`) and remembers it. Every record the engine stamps with the present
+  takes it, and so does every queued step that means now: a stop, a deadline, an update
+  request, an update's exit, a control verb's event, a live completion and a live plan
+  feed. A chosen stamp (a tick, a timer, a catch-up step, a recovered completion's recorded
+  end) is computed as before, never before the frontier and never after now; a recorded
+  end ahead of the wall is capped at now and stays in `ended_at`. The loop's due check,
+  admission's cap and `status` read the same value without remembering it: only a value
+  given as a stamp is remembered. A restart starts "now" at the latest stamp the store
+  retains, so a tick at or before it counts as missed while down (E9), and, as before,
+  raises the frontier to the store's last input, dispatch, drop or opening stamp.
+  EFFECT. "now" stamps never decrease. So arrival order holds with no re-stamping of the
+  queue, a stamp captured before a backward step cannot wait in the queue, and no "now"
+  stamp is before an earlier "now" stamp or an earlier input's stamp. A chosen stamp may
+  be: the second of two ticks of one instant is stamped before the first one's dispatch.
+  The queue re-stamping and the per-site floors of DL-435 are gone. A backward step that
+  stays above the frontier now holds "now" at the last stamp given until the wall passes
+  it, where it held nothing; a job started in the hold gets its relative timers late by
+  what is left of the hold.
+  THE HOLD IS VISIBLE. While the wall is below "now", `status` carries
+  `clock_hold: {"wall", "until"}`, read without remembering anything, and
+  `dsl41 query status` prints one notice. The stderr warning stays once per observed step.
+  This narrows DL-435's "no status field"; there is still no store record.
+  NOT BUILT. No bound on the gap and no refusal: the engine cannot tell a wrong wall from a
+  store stamped under a wrong wall, a held engine still serves operator commands, and
+  DL-435 chose never to refuse. A wrapper stamps its spool with its own wall, so a history
+  duration read from the spool can be negative across a step. The snapshot interval, the
+  loop's per-instant event budget and adapter timers stay on the raw clock. The terminal
+  UI does not show the hold. The virtual domain, record shapes, golden traces and the
+  state version do not change.
+  CLOSES BUG-1 (as a visible hold), BUG-4, BUG-5 (the restart floor is the rule; §9 said
+  less) and BUG-6. REJECTED: flooring each raw stamp at the frontier and keeping the
+  re-stamping, which left a captured stamp and a recorded end able to wait out a gap and
+  let a recovered feed pass a queued catch-up step (Astra).

@@ -992,7 +992,7 @@ def test_dl45_a_same_instant_sibling_lost_to_the_crash_is_dropped_not_forgotten(
     stderr = _without_cookie_scan_report(capsys.readouterr().err)
     if regressed:
         warning, stderr = stderr.split("\n", 1)
-        assert warning.startswith("dsl41: WARNING: wall clock below admission frontier:")
+        assert warning.startswith("dsl41: WARNING: wall clock behind engine time:")
     to = "10:05:00" if regressed else "10:00:00"
     assert stderr == (
         f"engine was down 2026-07-01T10:00:00 to 2026-07-01T{to}; "

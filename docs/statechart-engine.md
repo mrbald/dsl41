@@ -216,7 +216,7 @@ Stale-identity events are refused by a guard row. They are never deferred.
 Each machine declares its clock. All registered machines declare `logical`.
 The executor reads no wall or monotonic clock; the owning tier supplies events.
 The engine schedules attempt grace and abort deadlines outside the executor
-(DL-426, DL-429). Real-clock admission follows DL-435; it never regresses
+(DL-426, DL-429). Real-clock admission follows DL-435 and DL-493; it never regresses
 the oracle's time.
 
 A time event is a declared trigger. How the owning tier produces it is the tier's: an armed

@@ -161,6 +161,11 @@ def prepare_status(answer: Mapping[str, Any]) -> StatusView:
         notices.append("disk comparison unavailable")
     if answer.get("update"):
         notices.append("update pending; waiting for: " + names_text(answer["update"]["stopping"]))
+    if hold := answer.get("clock_hold"):
+        notices.append(
+            f"wall clock {one_line(format_local_at(hold['wall']))} is behind engine time; "
+            f"ticks and timers resume at {one_line(format_local_at(hold['until']))}"
+        )
     notices += [
         f"reread forecast: {one_line(label)} {len(names)}: {names_text(names)}"
         for label, names in forecasts.items()

@@ -64,6 +64,18 @@ def rec(
 
 # ------------------------------------------------------------------ round trip
 
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_latest_at_reads_unordered_retained_stamps(kind: str, tmp_path: Path) -> None:
+    with open_store(kind, tmp_path) as store:
+        assert store.latest_at() is None
+        store.append(rec(at=T0 + timedelta(minutes=5)), rec(at=T0 + timedelta(minutes=2)))
+        store.put_snapshot(2, 28, b"snapshot")
+        assert store.latest_at() == T0 + timedelta(minutes=5)
+        store.append(rec(at=T0 + timedelta(minutes=3)))
+        assert store.latest_at() == T0 + timedelta(minutes=5)
+
+
 json_values = st.recursive(
     st.none() | st.booleans() | st.integers(-(2**70), 2**70) | st.text(),
     lambda inner: st.lists(inner, max_size=4) | st.dictionaries(st.text(), inner, max_size=4),

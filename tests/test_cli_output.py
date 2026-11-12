@@ -95,6 +95,32 @@ def test_status_lifecycle_empty_legacy_and_pending(monkeypatch, style, engine, d
     assert "run dsl41 reread" not in result.stdout
 
 
+@pytest.mark.parametrize("held", [False, True])
+def test_status_clock_hold_notice_and_json(monkeypatch, style, held):
+    answer = {
+        "ok": True,
+        "engine": "RUNNING",
+        "jobs": {},
+        "spec_drift": False,
+        "update": {"stopping": ["j"]},
+    }
+    if held:
+        answer["clock_hold"] = {"wall": "2026-07-01T08:02:00", "until": "2026-07-01T08:05:00"}
+    monkeypatch.setattr(cli_control, "_control_roundtrip", lambda *a: answer)
+    result = invoke(["query", "status"], style)
+    assert result.exit_code == 0, result.output
+    notice = (
+        "wall clock 2026-07-01T10:02:00 is behind engine time; "
+        "ticks and timers resume at 2026-07-01T10:05:00"
+    )
+    assert (notice in result.stdout) == held
+    if held:
+        assert "update pending; waiting for: j\n" + notice in result.stdout
+    raw = runner.invoke(app, ["query", "status", "--json", "-S", "/synthetic/control.sock"])
+    assert raw.exit_code == 0
+    assert json.loads(raw.stdout) == answer
+
+
 @pytest.mark.parametrize("command", [["query", "status"], ["reread"], ["update"]])
 def test_unreachable_keeps_transport_error(monkeypatch, style, command):
     error = "dsl41: no engine is running at /synthetic/control.sock"

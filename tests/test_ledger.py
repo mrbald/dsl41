@@ -592,8 +592,8 @@ def test_a_journal_stamped_in_the_future_resumes_at_its_frontier(
         line for line in capsys.readouterr().err.splitlines() if line.startswith("dsl41: WARNING:")
     ]
     assert reports == [
-        "dsl41: WARNING: wall clock below admission frontier:"
-        f" wall={wall.isoformat()} frontier={frontier.isoformat()} gap_s=180.0"
+        "dsl41: WARNING: wall clock behind engine time:"
+        f" wall={wall.isoformat()} until={frontier.isoformat()} gap_s=180.0"
     ]
 
 

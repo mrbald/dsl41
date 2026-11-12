@@ -11,22 +11,17 @@ None open.
 
 State handled outside a state machine and duplicated logic make the whole system fragile, so they rank here, not under maintenance (owner, 2026-11-10).
 
-- **BUG-1**: Nothing bounds a backward gap: a store stamped far ahead holds every tick and timer until wall time catches up, with one warning (DL-435 N2).
-  Next: one clock pass with BUG-4, BUG-5 and BUG-6.
 - **FEAT-37**: Audit for code and tests that rest on state built by hand (DL-491). List the branches and chart rows that only such tests reach (store surgery, patched internals, harness worlds), from one suite run that records which test covers each branch; delete each or cover it from validated input. Known definitions with no production caller: `live_of_answer`, `load_run_root`, `valid_start_token`, `Exceptions.is_idempotent`, `attempt_spool_dir`; `read_journal` has one script caller.
-  Next: after BUG-1 (owner, 2026-11-12).
+  Next: this item (owner, 2026-11-12).
 
 ## Known bugs
 
 ### Medium
 
-In fix order. BUG-4, BUG-5 and BUG-6 go with BUG-1 as one clock pass. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get one pass that proves or dismisses each.
+In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get one pass that proves or dismisses each.
 
 - **BUG-10**: Restart ignores unknown `[engine]` keys such as `machine_polcy` and uses defaults until reread refuses them (DL-437).
 - **BUG-13**: The engine prints `clean_shutdown` before it exits; TERM in that window ends it with -15. `engine stop --wait` does not wait for process exit, which exposes systemd ExecStop.
-- **BUG-4**: During recovery, update takes the latest queued timestamp, so a future virtual-clock input delays application (DL-433).
-- **BUG-5**: Restart raises admission to the last store timestamp even when wall time is ahead, so recovered completions get the last dispatch time instead of their recorded end. No reordering found (DL-435).
-- **BUG-6**: After a backward clock step, raw wall timestamps on `dispatch`, `outcome` and `engine` records can precede an earlier `input`. DL-435 floors admission timestamps only.
 - **BUG-20**: Bounds and per-input scan cost of the live oracle's `_emitted` and `_kill_emissions` histories are unqualified (`src/dsl41/oracle_writers.py:135`, `src/dsl41/oracle.py:361-365`).
 - **BUG-48**: Update plan directories accumulate, even after stale refusals. Define their retention separately from attempt records (`src/dsl41/reread_worker.py:158`, `src/dsl41/runner_update.py:91`).
 - **BUG-50**: Retention for per-attempt `runs/<job>.<run>/<n>/` records (`spawn.json`, `status.json`) is undefined and unverified; they consume inodes. Keep it separate from job-output archiving.
@@ -55,6 +50,7 @@ In fix order. BUG-4, BUG-5 and BUG-6 go with BUG-1 as one clock pass. BUG-20, BU
 - **BUG-39**: `dsl41 lint --timezone-map` treats an empty file as no map, untested (PR #313).
 - **BUG-46**: Unchanged members of a nested box moved out of a restarting box get no status marker (`src/dsl41/reread_worker.py:75-89`).
 - **BUG-49**: Pilot guidance does not explain the effects of `lint.ignore` and `lint.refuse` (`src/dsl41/lint.py` `rule_known_unsupported`, `src/dsl41/runner_preflight.py:903-915`).
+- **BUG-73**: At a restart, a recovered completion whose recorded end falls between two engine clock readings microseconds apart is queued above engine time. A backward step below it during the catch-up then holds it until the wall returns, and `engine started` is recorded first (`src/dsl41/runner.py` `perform_plan`, DL-493).
 
 #### Tests, tooling and docs
 
@@ -84,7 +80,6 @@ In fix order. BUG-4, BUG-5 and BUG-6 go with BUG-1 as one clock pass. BUG-20, BU
 - **BUG-52**: A closed PR blocks reuse of its branch name with `pr-head-stale` (`scripts/merge_train.py:710-740,764`).
 - **BUG-53**: An open PR on a queued non-head branch stops the train with `other-queued-pr` (`scripts/merge_train.py:806-812`).
 - **BUG-55**: The local train pytest budget exceeds 1800 s under machine load; cause undiagnosed (`scripts/merge_train.py:1065`).
-- **BUG-61**: `tests/test_kill_signals.py::test_non_killjob_stops_keep_term[drain]` failed once in a full run: it reads the signal log before the child has written it.
 - **BUG-62**: The Ubuntu service drill's storage row failed once: `test_frozen_unit` compares a run root that a live engine is writing (`examples/nightbank/deploy/storage_probe.py:271`).
 - **BUG-63**: `test_kill_signals_update_affects_later_kills_only` left its ten child processes running after three runs on one day; cause unknown (`tests/test_main_config_update.py:1054`).
 - **BUG-64**: After an engine restart whose new trace is already longer than the terminal UI's cursor, the UI does not see the restart: it skips the earlier entries, and a job's count of scheduler refusals can include entries twice (`src/dsl41/runner_tui.py`, the cursor check; DL-484).
@@ -111,7 +106,6 @@ In fix order. BUG-4, BUG-5 and BUG-6 go with BUG-1 as one clock pass. BUG-20, BU
 - **FEAT-3**: "we plan to spec and implement the clean (QUEUE)": a running affected job finishes on its old definition; the new one applies at its next start.
 - **FEAT-4**: Provide `dsl41 backup` to capture the store and open-attempt records consistently online, with accepted restoration evidence.
 - **FEAT-5**: Support `update NAME...` for partial apply.
-- **BUG-1**, the High backward-gap bug.
 
 ### Unranked
 
@@ -158,6 +152,8 @@ In fix order. BUG-4, BUG-5 and BUG-6 go with BUG-1 as one clock pass. BUG-20, BU
 - **FEAT-26**: Apply pending estate edits at engine start. Deferred: "defer now, until we have cleaned up state machines, then reassess" (owner, 2026-11-10). It was sized at eleven source files and 700 to 1,000 lines and needs FEAT-10 first. Today restart restores the stored catalog and socket `update` applies edits (DL-437, DL-463, DL-468).
 
 ## Known limits
+
+- A wall clock below engine time holds ticks and timers until it catches up, with no bound; `status` shows `clock_hold` (DL-493).
 
 - Standby starts empty; acceptable for the first system's idempotent jobs. State continuity is deferred.
 - All jobs run under the engine account; per-job accounts are unsupported and deferred.

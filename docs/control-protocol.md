@@ -340,7 +340,7 @@ The client action says what a client does next:
 | `decision_timeout` | unknown | no decision arrived within the window | re-read; retry a mutation only under the same request_id |
 | `apply_faulted` | refused | applying the command on a fork of the engine's state raised, so it was refused before it was logged (DL-292, DL-320) | operator |
 | `precondition_failed` | rejected | the addressed entity is not at the revision `expect` names | re-read then decide |
-| `clock_regressed` | engine invariant failure | a stamp below the admission frontier reached `Frontiers.admit`; real-domain admission floors stamps, so valid control requests cannot emit it; direct guard calls and backdated in-process virtual inputs can | engine bug |
+| `clock_regressed` | engine invariant failure | a stamp below the admission frontier reached `Frontiers.admit`; real-domain admission keeps stamps between the frontier and engine time (DL-493), so valid control requests cannot emit it; direct guard calls and backdated in-process virtual inputs can | engine bug |
 | `stale_completion` | rejected, stored only | the stale-completion gate rejected an engine-made completion; it is stored, and no client request is answered with it | none |
 | `engine_apply_faulted` | rejected | applying an input on a fork of the engine's state raised, and its time half applied alone, so the input was logged with this rejection and only its time half applied: it is quarantined (DL-320). The live engine stores it for an engine-made input. Replay stores it for any input admitted with no decision whose apply raises the same way, a control input included. Like every stored code, an exact retry of that control input is answered with it | operator |
 | `engine_error` | refused | an engine refusal whose raise site names no code | operator |
@@ -688,6 +688,14 @@ is, attempts still open included. An `interrupted` block carries
 `note` when the restart quarantined the attempt: the reason its records
 could not be trusted and the pids the restart's first reading found. The other keys and their types are
 unchanged.
+
+In the real domain, while the wall is below engine time, the answer carries
+`clock_hold: {"wall": <instant>, "until": <instant>}` (DL-493). Both instants
+use the `status_at` format. It is absent outside a hold and in the virtual
+domain. The query reads engine time without remembering a stamp.
+`dsl41 query status` prints `wall clock <wall> is behind engine time; ticks
+and timers resume at <until>` beside the update notice, using local display
+time. JSON carries the key unchanged. The terminal UI does not show it.
 
 ### `catalog`
 

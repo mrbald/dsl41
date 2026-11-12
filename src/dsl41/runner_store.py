@@ -96,6 +96,10 @@ class Store(Protocol):
         """The seq of the newest record, or 0 for an empty journal."""
         ...
 
+    def latest_at(self) -> datetime | None:
+        """The latest stamp among retained records, independent of seq order (DL-493)."""
+        ...
+
     def find_request(self, request_id: str) -> Record | None:
         """The first record written under `request_id`, or None."""
         ...
@@ -267,6 +271,9 @@ class MemoryStore:
 
     def last_seq(self) -> int:
         return self._next_seq - 1
+
+    def latest_at(self) -> datetime | None:
+        return max((_unstamp(entry.row.at) for entry in self._rows), default=None)
 
     def find_request(self, request_id: str) -> Record | None:
         entry = self._requests.get(request_id)
@@ -574,6 +581,10 @@ class SqliteStore:
         # the AUTOINCREMENT high-water mark: the newest seq ever assigned, which a prune cannot lower
         row = self._db.execute("SELECT seq FROM sqlite_sequence WHERE name = 'journal'").fetchone()
         return 0 if row is None else int(row[0])
+
+    def latest_at(self) -> datetime | None:
+        (at,) = self._db.execute("SELECT max(at_utc) FROM journal").fetchone()
+        return None if at is None else _unstamp(at)
 
     def find_request(self, request_id: str) -> Record | None:
         row = self._db.execute(

@@ -33,9 +33,11 @@ until synchronization and can be delayed indefinitely if synchronization fails.
 Check the host's installed unit and overrides for its effective timeout.
 Without it, the engine can start with an unsynchronized clock.
 A clock set ahead stamps the store ahead; after the clock is corrected,
-the engine holds ticks until the wall clock catches up.
+the engine holds ticks and timers until the wall clock catches up, with no bound.
 On a backward gap, the engine reports `dsl41: WARNING:` with the wall reading,
-admission frontier and gap in seconds in the [engine's output](#read-the-engines-output).
+the instant engine time resumes at and the gap in seconds in the
+[engine's output](#read-the-engines-output). `dsl41 query status` shows the
+hold; its JSON answer carries `clock_hold` (DL-493).
 
 1. As root, create the release environment and install the selected version.
    Substitute a concrete version for `<version>` in every command and in
@@ -925,7 +927,8 @@ timestamp, or the snapshot's saved `last_at` when no later records exist.
 It is clamped to the earliest reported tick if that tick is earlier.
 After an unclean stop, the time of death is unknown; an idle engine's last
 record can precede its death by hours. `to` is the captured scheduler sweep
-cutoff, at least the durable scheduler frontier after a backward clock step.
+cutoff: engine time at the restart, including the latest retained store stamp
+(DL-493).
 Missed ticks are recorded and never fired late. For a required manual start,
 check downstream effects and follow the
 [missed-tick intervention](incident-triage.md#the-job-has-not-started).

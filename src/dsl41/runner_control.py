@@ -935,6 +935,7 @@ class ControlServer:
             # every ok:false before submitting is a refusal and says so in one field: only
             # "nothing was written" is safe to re-compose and resend unchanged
             return _failure(exc.code, str(exc), refused=True)
+        ev.at = self.engine.now_present(wall=ev.at)
         return await self._decision(self.engine.submit(ev, envelope), kind=ev.kind)
 
     async def _decision(self, submitted: Awaitable[ApplyResult], *, kind: str) -> dict[str, Any]:
@@ -1154,6 +1155,11 @@ class ControlServer:
         update = self.engine.update.view()
         if update is not None:
             answer["update"] = update
+        if not self.engine.clock.virtual:
+            wall = self.engine.clock.now()
+            until = self.engine.now_admitted(remember=False, wall=wall)
+            if wall < until:
+                answer["clock_hold"] = {"wall": wall.isoformat(), "until": until.isoformat()}
         return answer
 
     def _globals(self, names: list[Any]) -> dict[str, Any]:

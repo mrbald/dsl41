@@ -338,9 +338,7 @@ class StatusHooks:
 
     def check_long_running(self) -> None:
         try:
-            wall = self.engine.clock.now()
-            frontier = self.engine.frontiers.at
-            now = max(wall, frontier) if frontier is not None else wall
+            now = self.engine.now_admitted(remember=False)
             for job, row in self.engine.oracle.store.job.items():
                 interval = (row.run_number, row.status_at)
                 if row.status != "RUNNING":
