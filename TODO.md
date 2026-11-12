@@ -51,6 +51,9 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 - **BUG-46**: Unchanged members of a nested box moved out of a restarting box get no status marker (`src/dsl41/reread_worker.py:75-89`).
 - **BUG-49**: Pilot guidance does not explain the effects of `lint.ignore` and `lint.refuse` (`src/dsl41/lint.py` `rule_known_unsupported`, `src/dsl41/runner_preflight.py:903-915`).
 - **BUG-73**: At a restart, a recovered completion whose recorded end falls between two engine clock readings microseconds apart is queued above engine time. A backward step below it during the catch-up then holds it until the wall returns, and `engine started` is recorded first (`src/dsl41/runner.py` `perform_plan`, DL-493).
+- **BUG-77**: Lowering does not enforce the vendor's character set or its length limit for a job name; its directory-component check only refuses names containing `/` or a NUL byte, or equal to `.` or `..`; a catalog read from saved JSON or from a store is not checked (DL-494).
+- **BUG-78**: `engine stop --wait` run by an unprivileged user other than the engine's cannot confirm the exit and ends with status 2: `leader.lock` is created with mode 0600 (`src/dsl41/runner_procid.py:79`). No operator document says so.
+- **BUG-79**: A block comment between the job name and an inline `job_type:` on the `insert_job` line becomes part of the lowered job name; lowering then refuses the name for its `/` (DL-494), where AutoSys reads the name without the comment.
 
 #### Tests, tooling and docs
 

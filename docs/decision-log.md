@@ -26607,3 +26607,26 @@ relitigate an entry; append a new one.
   less) and BUG-6. REJECTED: flooring each raw stamp at the frontier and keeping the
   re-stamping, which left a captured stamp and a recorded end able to wait out a gap and
   let a recovered feed pass a queued catch-up step (Astra).
+- DL-494 Lowering refuses a job name that is not one directory component (2026-11-12;
+  found by the FEAT-37 audit; operator ruling; `ir.py`, `runner_adapters.py`)
+  THE RULE. A job name that contains `/` or a NUL byte, or is `.` or `..`, is a lowering
+  error, for every job type. The engine keeps a run's files under
+  `runs/<job>.<run_number>/`: a `/` in the name leaves that directory, and a NUL byte is
+  no path. `.` and `..` are refused because the wrapper refuses them as the `job` of its
+  input (wrapper-protocol), and one rule holds for every job type. `/` is not among the
+  characters AutoSys allows in a job name. The command adapter no longer refuses the name
+  at dispatch; it asserts it. The wrapper keeps its own check.
+  THE CAUSE. Lowering and lint accepted such a name. The first start of a command job
+  named `.` or `..`, or with a `/`, raised in the command adapter while it built the
+  wrapper input, and the engine stopped on that error; a name with a NUL byte failed
+  earlier in the same dispatch. The adapter's check was tested only with a job built by
+  hand.
+  WHAT CHANGES FOR INPUT THAT RAN. Only the command adapter checked the name, so a box or
+  a file watcher named `.` or `..`, or with a `/`, ran, and so did a box with a NUL byte
+  in its name. Lowering now refuses them. A stored catalog is not lowered again, so a
+  restart keeps such a job; only a store whose restart lowers its captured JIL again
+  (format 2) is refused at restart.
+  NOT BUILT. The vendor's whole character set and its length limit for a job name are not
+  enforced (BUG-77). The rule is in lowering, not in the IR model: a catalog read from
+  saved JSON (`ir.load_catalog`) or from a store is not checked, so the report's sentinel
+  still widens past a job name (DL-175).

@@ -30,7 +30,9 @@ default there.
    box_name values, and condition job references through the one
    `conditions.unescape_job_name`, per the rule 7 principle that semantic unquoting happens at
    lowering. Both estate spellings therefore converge on the semantic catalog key, and each
-   JIL-emitting path re-escapes. The `hh:mm` time lane is the same shape (DL-251): the vendor's
+   JIL-emitting path re-escapes.
+   Lowering refuses a job name containing `/` or a NUL byte, or equal to `.` or `..` (DL-494).
+   The `hh:mm` time lane is the same shape (DL-251): the vendor's
    own documented spelling escapes every colon instead of quoting the whole value
    (`start_times: 10\:00, 14\:00`). Lowering unescapes `\:` the same way in all four `hh:mm`
    lanes, `start_times`, `run_window`, `must_start_times` and `must_complete_times`, through
