@@ -44,7 +44,7 @@ from dsl41.ir import CatalogIR
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import JobRuntime
 from dsl41.reload_diff import Change, Plan, catalog_hash_v2, retyped_jobs
-from dsl41.reload_plan import Live, stop_set
+from dsl41.reload_plan import BoxScope, Live, stop_set
 from dsl41.semantics import SemanticSwitches
 from dsl41.semantics import resolve as resolve_switches
 from dsl41.state_machine import (
@@ -159,11 +159,12 @@ def admission_data(
     *,
     live: Live,
     candidate: CatalogIR,
+    scope: BoxScope | None = None,
 ) -> Admitted:
     """Build admitted data for a current prepared candidate and its stop set (DL-463)."""
     token = str(plan_doc["token"])
     plan = plan_of(plan_doc, live.catalog)
-    stops = stop_set(plan, live, candidate)
+    stops = stop_set(plan, live, candidate, scope=scope)
     runs = tuple((job, live.runs.get(job, 0)) for job in stops)
     return Admitted(token, stops, _touched(plan), runs)
 
