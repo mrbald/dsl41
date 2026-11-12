@@ -255,20 +255,16 @@ class Deferred:
 @dataclass
 class _Plan:
     """A follow-up plan the engine is carrying out: the interrupted or ended attempt it answers,
-    its steps as the `follow_up` record holds them, the positions done, and its record's seq,
-    which orders the plans a restart owes (spec-restart §6)."""
+    its steps as the `follow_up` record holds them, and its record's seq, which orders the
+    plans a restart owes (spec-restart §6)."""
 
     attempt: str
     job: str
     run_number: int
     steps: list[dict[str, Any]]
     seq: int
-    done: set[int] = field(default_factory=set)
     #: the end the plan's `outcome` record holds (`runner_journal.outcome_end`)
     ended: str | None = None
-
-    def next_step(self) -> int | None:
-        return next((i for i in range(len(self.steps)) if i not in self.done), None)
 
 
 @dataclass
@@ -370,13 +366,14 @@ def adapter_switch(adapters: Mapping[str, JobAdapter], name: str) -> str | None:
     """The value of adapter switch `name` (`ADAPTER_SWITCHES`) that the wired adapter runs, or
     None when no adapter that reads it is wired (DL-258, DL-280).
 
-    A name in `ADAPTER_SWITCHES` this function has no read for raises ValueError, so a new
+    A name in `ADAPTER_SWITCHES` this function has no read for raises AssertionError, so a new
     `reader="fw"` entry cannot pass the drift gates unread."""
     fw = adapters.get("FW")
     if name == "fw-existence":
         return fw.existence if isinstance(fw, FileWatcherAdapter) else None
     if name in ADAPTER_SWITCHES:
-        raise ValueError(f"adapter switch {name!r} has no read in runner.adapter_switch")
+        # ADAPTER_SWITCHES is closed by semantics.REGISTRY; each name has a read here (DL-280).
+        raise AssertionError(f"adapter switch {name!r} has no read in runner.adapter_switch")
     return None
 
 
@@ -614,7 +611,6 @@ class Engine:
         self._observed_tasks: dict[int, str] = {}
         #: the follow-up plans being carried out, by the attempt they answer
         self._plans: dict[str, _Plan] = {}
-        self._plan_count = 0
         #: the `Interrupted` evidence of each held job's interrupted attempt, until its next
         #: start (spec-crash)
         self.evidence: dict[str, dict[str, Any]] = {}
@@ -932,13 +928,14 @@ class Engine:
 
     def journal_lifecycle(self, event: str) -> None:
         """The lifecycle's own record: `draining`, with the attempts it stops."""
-        if self.journal is not None:
-            unsettled = self.attempts.unsettled()
-            # the stops the attempts already take (an oracle's kill) are theirs; the drain's
-            # own stop goes to the rest (DL-426)
-            stops = {a: cause for a in unsettled if (cause := self._stop_cause(a)) is not None}
-            fields = {"unsettled": list(unsettled), "stops": stops} if unsettled else {}
-            self.journal.engine(event, self.now_present(), **fields)
+        # Only start_run/resume_run engines can drain; play_once never requests a stop (DL-426).
+        assert self.journal is not None
+        unsettled = self.attempts.unsettled()
+        # the stops the attempts already take (an oracle's kill) are theirs; the drain's
+        # own stop goes to the rest (DL-426)
+        stops = {a: cause for a in unsettled if (cause := self._stop_cause(a)) is not None}
+        fields = {"unsettled": list(unsettled), "stops": stops} if unsettled else {}
+        self.journal.engine(event, self.now_present(), **fields)
 
     @property
     def leaving_record(self) -> str | None:
@@ -973,19 +970,24 @@ class Engine:
         (spec-wiring 2b: none at `shutdown_during_startup`), and mark the engine stopped. A
         snapshot taken before the record would let a crash between them hide the drain from
         the restart's fold; covering the record, the two are one durable step for it."""
-        if self._leaving is not None and self.journal is not None and not self.shutdown_recorded:
-            record, unsettled = self._leaving
-            fields: dict[str, Any] = {}
-            if unsettled:
-                # each unsettled attempt with the cause of the stop it was taking, which the
-                # restart adopts it with (DL-426)
-                fields["unsettled"] = list(unsettled)
-                fields["stops"] = {a: self._stop_cause(a) for a in unsettled}
-            self.journal.engine(record, self.now_present(), **fields)
-            self.shutdown_recorded = True
-            drained = record != "shutdown_during_startup"
-            if drained and self.settings is not None and self.at_applied_boundary:
-                self.take_snapshot()
+        # EngineStops.exit_process follows a lifecycle stop; play_once requests none (DL-426).
+        assert self.journal is not None
+        # Each ENGINE_LIFECYCLE exit calls leave before exit_process (DL-426).
+        assert self._leaving is not None
+        # The loop returns after this call; startup error paths tear down instead (DL-428).
+        assert not self.shutdown_recorded
+        record, unsettled = self._leaving
+        fields: dict[str, Any] = {}
+        if unsettled:
+            # each unsettled attempt with the cause of the stop it was taking, which the
+            # restart adopts it with (DL-426)
+            fields["unsettled"] = list(unsettled)
+            fields["stops"] = {a: self._stop_cause(a) for a in unsettled}
+        self.journal.engine(record, self.now_present(), **fields)
+        self.shutdown_recorded = True
+        drained = record != "shutdown_during_startup"
+        if drained and self.settings is not None and self.at_applied_boundary:
+            self.take_snapshot()
         self.stops.cancel_all()
         self.stopped.set()
 
@@ -1057,24 +1059,20 @@ class Engine:
                 evidence = asdict(step.detail)
                 extra["evidence"] = {k: v for k, v in evidence.items() if k != "note" or v}
                 self.evidence[job] = {**extra["evidence"], "run_number": run}
-        seq = self._plan_count = self._plan_count + 1
+        # Observed facts come from a stored dispatch or resume_run (spec-wiring 2b).
+        assert self.journal is not None
         ended = outcome_record(
             attempt, job, run, outcome.kind, _evidence_of(outcome), at, cause=outcome.cause
         )
         tier = self.attempts
-        if (
-            self.journal is not None
-            and tier.knows(attempt)
-            and (tier.ladder_running(attempt) or tier.held(attempt))
-        ):
+        if tier.knows(attempt) and (tier.ladder_running(attempt) or tier.held(attempt)):
             # the record ends the observation, not the stop: the attempt stays open until the
             # ladder has ended its group, or its held group is gone (DL-426)
             ended = replace(ended, payload={**ended.payload, "ladder": "running"})
             facts.closing = True
-        if self.journal is not None:
-            seq = self.journal.append(
-                ended, plan_record(attempt, job, run, plan.kind, steps, at, **extra)
-            )
+        seq = self.journal.append(
+            ended, plan_record(attempt, job, run, plan.kind, steps, at, **extra)
+        )
         end = outcome_end(ended.payload)
         self._plans[attempt] = _Plan(attempt, job, run, steps, seq, ended=end)
         self.perform_plan(attempt)
@@ -1128,23 +1126,23 @@ class Engine:
                 plan.run_number,
                 [dict(step) for step in plan.steps],
                 plan.seq,
-                set(plan.done),
-                plan.ended,
+                ended=plan.ended,
             )
         for plan in sorted(owed, key=lambda p: p.seq):
             self.perform_plan(plan.attempt)
 
     def perform_plan(self, attempt: str) -> None:
-        """Carry out the next step of `attempt`'s plan, or finish the plan. A feed or a hold is
-        an input whose admission marks the step done; a replacement is dispatched with its done
-        mark, deferred while the engine recovers, and left to the restart while it drains."""
+        """Carry out the one effect of `attempt`'s plan, or finish an empty plan (DL-426). A feed
+        or a hold is an input whose admission marks the step done; a replacement is dispatched
+        with its done mark, deferred while the engine recovers, and left to the restart while
+        it drains."""
         plan = self._plans.get(attempt)
         if plan is None:
             return
-        position = plan.next_step()
-        if position is None:
+        if not plan.steps:
             self._plan_finished(attempt)
             return
+        position = 0  # _check_steps enforces one effect per non-none plan (DL-426).
         step = plan.steps[position]
         if step["step"] == "dispatch":
             if self.draining:
@@ -1191,13 +1189,10 @@ class Engine:
         else:
             self._enqueue(event, source="reconcile", step=(attempt, position))
 
-    def _step_done(self, attempt: str, position: int) -> None:
-        """A step's effect and its done mark are durable: carry out the next."""
-        plan = self._plans.get(attempt)
-        if plan is None:
-            return
-        plan.done.add(position)
-        self.perform_plan(attempt)
+    def _step_done(self, attempt: str) -> None:
+        """The plan's one effect and its done mark are durable: finish the plan (DL-426)."""
+        if attempt in self._plans:
+            self._plan_finished(attempt)
 
     def _plan_finished(self, attempt: str) -> None:
         """The plan is done: the attempt is settled, and the starts it kept back may go
@@ -1265,10 +1260,8 @@ class Engine:
 
     def group_gone(self, attempt: str) -> None:
         """A held attempt's group has no live member left: the attempt ends or settles as its
-        ladder's end would have let it, and the starts its job kept back go (DL-426). A second
-        release of the same attempt does nothing."""
-        if self.held_groups.pop(attempt, None) is None:
-            return
+        ladder's end would have let it, and the starts its job kept back go (DL-426)."""
+        del self.held_groups[attempt]
         facts = self._facts[attempt]
         facts.note = None
         tier = self.attempts
@@ -1923,7 +1916,7 @@ class Engine:
         # every start the input decided has its `dispatch` or its `dispatch_pending` now
         self._applying = False
         if pending.step is not None:
-            self._step_done(*pending.step)
+            self._step_done(pending.step[0])
         return applied.emitted
 
     def _dry_apply(self, attempt: Attempt) -> AdmissionRefused | None:
@@ -2090,12 +2083,12 @@ class Engine:
         seq = self.journal.append(pending_record(job, run_number, scheduled, at))
         self.defer(Deferred(job, run_number, pending=seq), after=self._deferred_after or at)
 
-    def _pending(self, job: str, run_number: int) -> int | None:
-        """A start this engine does not launch now, durable as `dispatch_pending` when it has a
-        store: one decided while the engine drains (the restart's owed step launches it,
-        spec-drain), or one a held group keeps back (DL-426). Answers the record's seq."""
-        if self.journal is None:
-            return None
+    def _pending(self, job: str, run_number: int) -> int:
+        """A start this engine does not launch now, durable as `dispatch_pending`: one decided
+        while the engine drains (the restart's owed step launches it, spec-drain), or one a held
+        group keeps back (DL-426). Answers the record's seq."""
+        # Drains and held starts require a journal; play_once has neither (spec-drain).
+        assert self.journal is not None
         at = self.now_present()
         row = self.oracle.store.job.get(job)
         scheduled = row.status_at if row is not None and row.status_at is not None else at
@@ -2152,10 +2145,11 @@ class Engine:
             return
         assert item.attempt is not None  # a plan's replacement names its attempt
         if superseded is not None or item.job not in self._dispatchable():
-            if self.journal is not None:
-                self.journal.append(
-                    follow_up_done(item.plan, item.step, None, self.now_present(wall=wall))
-                )
+            # Plans come from commit_outcome or perform_owed_plans, both journaled (DL-426).
+            assert self.journal is not None
+            self.journal.append(
+                follow_up_done(item.plan, item.step, None, self.now_present(wall=wall))
+            )
         elif self._must_wait(item.job, item.run_number, item.plan):
             self._waiting_plans.add(item.plan)  # performed once the group is gone (DL-426)
             return
@@ -2169,7 +2163,7 @@ class Engine:
                 step=(item.plan, item.step),
                 after=item.after,
             )
-        self._step_done(item.plan, item.step)
+        self._step_done(item.plan)
 
     def _takes_due_work(self, work: _Work, instant: datetime) -> bool:
         """Whether the loop's chosen act processes an input, a timer or a tick due at or before
@@ -2223,8 +2217,6 @@ class Engine:
         # the invocation the process is given is the one the record holds (crash spec)
         invocation = invocation_env(job, run_number, scheduled, ordinal)
         if env is not None:
-            if "DSL41_SCHEDULED_AT" not in env:
-                raise EngineError("version-28 replacement env lacks DSL41_SCHEDULED_AT (DL-447)")
             invocation["DSL41_SCHEDULED_AT"] = env["DSL41_SCHEDULED_AT"]
         previous = self.dispatches.get(job, {})
         if ordinal > 1 and previous:
@@ -2282,8 +2274,8 @@ class Engine:
             del self.evidence[job]  # the evidence stays until the job's next start (spec-crash)
         observed = isinstance(adapter, ObservedAdapter)
         if observed:
-            if spool is None:
-                raise EngineError("command dispatch needs a run_root (real domain only)")
+            # wire_from_profile wires observed adapters only on stored runs (spec-wiring 2b).
+            assert spool is not None, "command dispatch needs a run_root (real domain only)"
             # the attempt's processes carry its cookie, and the record holds it for a restart
             invocation[COOKIE_ENV] = cookie(self.root_id, run_id)
             self.stops.note_cookie(run_id, invocation)

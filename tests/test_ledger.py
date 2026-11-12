@@ -563,7 +563,7 @@ def test_a_journal_stamped_in_the_future_resumes_at_its_frontier(
     append(
         run_root,
         "drop",
-        {"at": frontier.isoformat(), "kind": "STARTJOB", "payload": {}, "reason": "x"},
+        {"at": frontier.isoformat(), "kind": "STARTJOB", "payload": {"job": "j"}, "reason": "x"},
         at=frontier,
     )
     wall = T0 + timedelta(minutes=2)

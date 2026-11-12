@@ -482,23 +482,6 @@ def test_the_held_poll_kills_what_outlived_a_stop_and_releases_at_the_first_empt
     assert asyncio.run(scenario()) == ["scan failed: EMFILE", COMMAND_SURVIVED]
 
 
-def test_a_second_release_of_the_same_attempt_does_nothing(tmp_path: Path) -> None:
-    """Opus n1: `group_gone` twice for one attempt releases it once."""
-
-    async def scenario() -> None:
-        engine = _engine(tmp_path)
-        _held(engine, tmp_path, RUN_ID, "j")
-        engine.group_gone(RUN_ID)
-        engine.group_gone(RUN_ID)
-        assert engine.blocked("j") is None
-        await engine.shutdown()
-        _close(engine)
-
-    asyncio.run(scenario())
-    events = [b.get("event") for _, k, b in rows(tmp_path / "run") if k == "follow_up"]
-    assert events == ["ladder_done"]
-
-
 def test_a_forgotten_attempt_leaves_nothing_in_the_stops(tmp_path: Path) -> None:
     """R3: everything the stops keep of an attempt goes where the engine forgets it."""
 

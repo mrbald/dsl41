@@ -244,7 +244,13 @@ def _check_dispatch_seq(
         raise EngineError("version-28 replacement changes S (DL-447)")
 
 
-def _check_steps(steps: Any) -> None:
+def _check_steps(steps: Any, plan: str | None) -> None:
+    if plan not in PLANS:
+        raise EngineError(f"follow-up plan {plan!r}: this binary knows {sorted(PLANS)}")
+    # follow_up_plan emits one effect, or none for plan none (DL-426).
+    count = 0 if plan == "none" else 1
+    if not isinstance(steps, list) or len(steps) != count:
+        raise EngineError(f"follow_up plan {plan!r} must have exactly {count} steps")
     for step in steps:
         if step.get("step") == "dispatch":
             env = step.get("env")
@@ -279,7 +285,7 @@ def check_record(record: Record) -> None:
     if kind == "dispatch":
         check_dispatch(body)
     if kind == "follow_up" and body.get("event") == "plan":
-        _check_steps(body.get("steps", []))
+        _check_steps(body.get("steps", []), body.get("plan"))
     if kind not in KINDS:
         raise EngineError(f"record kind {kind!r}: this binary knows {sorted(KINDS)}")
     if kind == "engine" and body.get("event") not in ENGINE_EVENTS:
@@ -292,8 +298,6 @@ def check_record(record: Record) -> None:
         )
     if kind == "outcome" and body.get("outcome") not in OUTCOMES:
         raise EngineError(f"outcome {body.get('outcome')!r}: this binary knows {sorted(OUTCOMES)}")
-    if kind == "follow_up" and body.get("event") == "plan" and body.get("plan") not in PLANS:
-        raise EngineError(f"follow-up plan {body.get('plan')!r}: this binary knows {sorted(PLANS)}")
 
 
 # ---- one `subscribe` feed as a statechart (control-protocol ss5, DL-267)
@@ -663,8 +667,8 @@ class PendingDispatch:
 
 @dataclass
 class OpenPlan:
-    """A follow-up plan with a step not yet done. `done` maps a step's position to the seq of
-    the record that discharged it."""
+    """A follow-up plan whose one effect is not done (DL-426). `done` stays empty and keeps the
+    snapshot's shape (DL-428)."""
 
     seq: int
     attempt: str
@@ -676,10 +680,6 @@ class OpenPlan:
     #: the end its `outcome` record holds (the wrapper's, or the completion's instant), which a
     #: restart stamps the plan's steps with; None when the outcome holds none
     ended: str | None = None
-
-    def next_step(self) -> int | None:
-        """The first step not yet done, or None."""
-        return next((i for i in range(len(self.steps)) if i not in self.done), None)
 
 
 class OpenTable:
@@ -794,9 +794,7 @@ class OpenTable:
         plan = self.plans.get(attempt)
         if plan is None:
             return
-        plan.done[int(body["step"])] = body["seq"]
-        if plan.next_step() is None:
-            del self.plans[attempt]
+        del self.plans[attempt]
 
     def floor(self) -> int | None:
         """The oldest seq a record the table refers to holds, or None when nothing is open. The
@@ -926,7 +924,7 @@ class OpenTable:
                 p["seq"], p["job"], p["run_number"], p["scheduled_at"]
             )
         for p in payload.get("plans") or ():
-            _check_steps(p["steps"])
+            _check_steps(p.get("steps", []), p.get("plan"))
             table.plans[p["attempt"]] = OpenPlan(
                 p["seq"],
                 p["attempt"],
@@ -1001,9 +999,8 @@ class Position:
         if self.frontier is None or stamp > self.frontier:
             self.frontier, self.ticks = stamp, set()
         if stamp == self.frontier and body.get("kind") == "STARTJOB":
-            job = (body.get("payload") or {}).get("job")
-            if isinstance(job, str):
-                self.ticks.add((job, stamp.isoformat()))
+            job = body["payload"]["job"]
+            self.ticks.add((job, stamp.isoformat()))
 
     def to_payload(self) -> dict[str, Any]:
         return {

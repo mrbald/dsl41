@@ -13,6 +13,9 @@ alone reach every coverage item of both charts but one, which it names with its 
 from __future__ import annotations
 
 import asyncio
+import ast
+import inspect
+import textwrap
 import json
 import signal
 from collections.abc import Callable
@@ -23,7 +26,6 @@ from typing import Any
 import pytest
 
 from dsl41.engine_charts import (
-    RECORD_OUTCOME,
     ATTEMPT,
     ENGINE_LIFECYCLE,
     ENGINE_DEATH,
@@ -51,14 +53,12 @@ from dsl41.runner_attempts import (
     Interrupted,
     Replacement,
     attempt_id,
-    attempt_spool_dir,
     command_group,
     exit_record_from_status,
     follow_up_plan,
     missing_record_verdict,
     oracle_input_for,
 )
-from dsl41.engine_charts import Intent
 from dsl41.runner_journal import is_valid_run_id
 from dsl41.state_machine import HITS_ENV, Event, Outcome, coverage_items
 
@@ -371,11 +371,8 @@ def test_a_step_is_marked_done_with_its_transaction() -> None:
     assert step.done_seq is None and step.done(41) == FollowUpStep(DISPATCH, step.detail, 41)
 
 
-def test_the_attempt_id_and_its_spool_directory() -> None:
+def test_the_attempt_id() -> None:
     assert attempt_id("emea.ledger_post", 3, 2) == "emea.ledger_post.3.2"
-    assert attempt_spool_dir(Path("/r"), "emea.ledger_post", 3, 2) == Path(
-        "/r/runs/emea.ledger_post.3/2"
-    )
 
 
 # ---- the fakes
@@ -967,18 +964,6 @@ def test_an_attempt_whose_plan_is_not_done_cannot_be_forgotten() -> None:
     asyncio.run(scenario())
 
 
-def test_an_intent_with_no_effect_is_refused() -> None:
-    world = World()
-    attempts, engine = _tiers(world)
-    job = attempts.dispatch(attempt_id("j", 1, 1))
-    bogus = Outcome(attempts.key(job), Event("x"), "fired", intents=(Intent("bogus"),))
-    with pytest.raises(ValueError, match="no effect for the intent 'bogus'"):
-        attempts._perform(job, [bogus])
-    with pytest.raises(ValueError, match="no effect for the intent 'bogus'"):
-        engine._perform(Intent("bogus"))
-    assert RECORD_OUTCOME != "bogus" and world.log == []
-
-
 def test_a_spawn_record_that_names_no_group_gets_no_signal_only_the_timer() -> None:
     world = World()
     attempts, _ = _tiers(world)
@@ -1348,3 +1333,42 @@ def test_a_hold_lifted_with_no_engine_tier_tells_nobody() -> None:
         assert attempts.unsettled() == ()
 
     asyncio.run(scenario())
+
+
+def test_every_chart_intent_has_a_tier_handler() -> None:
+    """The closed chart alphabets all have effects in their owning tiers (DL-426)."""
+    from dsl41 import engine_charts
+
+    tree = ast.parse(inspect.getsource(engine_charts))
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    for chart, handler in (
+        (ATTEMPT, AttemptTier._perform),
+        (ENGINE_LIFECYCLE, EngineTier._perform),
+    ):
+        pending = [action.__name__ for action in chart.actions.values()]
+        seen: set[str] = set()
+        emitted: set[str] = set()
+        while pending:
+            name = pending.pop()
+            if name in seen:
+                continue
+            seen.add(name)
+            for call in ast.walk(functions[name]):
+                if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+                    continue
+                if call.func.id == "Intent":
+                    assert isinstance(call.args[0], ast.Name), ast.unparse(call)
+                    emitted.add(getattr(engine_charts, call.args[0].id))
+                elif call.func.id in functions:
+                    pending.append(call.func.id)
+        handled = {
+            getattr(engine_charts, node.comparators[0].id)
+            for node in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(handler))))
+            if isinstance(node, ast.Compare)
+            and isinstance(node.left, ast.Name)
+            and node.left.id == "name"
+            and len(node.ops) == 1
+            and isinstance(node.ops[0], ast.Eq)
+            and isinstance(node.comparators[0], ast.Name)
+        }
+        assert emitted and emitted <= handled, (chart.name, emitted - handled)

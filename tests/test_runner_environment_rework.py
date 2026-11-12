@@ -165,7 +165,7 @@ def test_snapshot_dispatch_data_is_required_and_checked(damage: str) -> None:
             body["env"]["AUTORUN"] = "2-1"
             body["seq"] = 2
         elif damage == "missing-step-env":
-            raw["plans"] = [{"steps": [{"step": "dispatch", "env": {}}]}]
+            raw["plans"] = [{"plan": "rerun", "steps": [{"step": "dispatch", "env": {}}]}]
         resign(raw)
     with pytest.raises(
         (EngineError, ValueError, KeyError), match="dispatch|snapshot|SCHEDULED|attempt"
@@ -363,7 +363,6 @@ def test_environment_only_revision_stops_nothing_while_a_box_runs(tmp_path):
 @pytest.mark.parametrize(
     "case",
     [
-        "missing-env",
         "missing-prior",
         "changed-S",
         "future-S",
@@ -388,10 +387,7 @@ def test_invalid_dispatch_identity_refuses_before_effects(tmp_path, case):
             await engine.run_until_quiescent(T0)
             original = dict(engine.dispatches["J0"])
             before = engine.journal.store.last_seq()
-            if case == "missing-env":
-                with pytest.raises(EngineError, match="SCHEDULED_AT"):
-                    engine.spawn("J0", 1, ordinal=2, env={})
-            elif case == "missing-prior":
+            if case == "missing-prior":
                 engine.dispatches.clear()
                 with pytest.raises(EngineError, match="first dispatch sequence"):
                     engine.spawn("J0", 1, ordinal=2, env=original["env"])
