@@ -158,8 +158,23 @@ Runtime state never refuses a diff. Broken input returns `invalid_argument`
 with the reason no diff is available; worker failures return `engine_error`.
 Success adds `live_rev`, `source: {kind, path}` and `preview` to the read header.
 Preview has added/changed/removed names, unchanged count, stops, restored flags,
-source changes, diagnostics, lint findings and per-job effects (rerun, hold,
-remove, box restart or restart for an unchanged member restarted with its box).
+source changes, diagnostics, lint findings and per-job effects (`rerun`, `hold`,
+`remove`, `restart_box` or `restart`). Effects use the first matching rule:
+`hold` for a marked job the plan keeps, neither removed nor retyped, that is a
+stop or is not INACTIVE inside the box scope; `restart_box` for a root the update
+starts again; `restart` for a job of both catalogs inside such a root in the
+candidate, whether unchanged, changed in place, retyped or moved in, a sub-box
+included; `remove` for a stop the candidate removes or retypes; `rerun` for any
+other stop. The box scope contains the roots and their descendants
+in either catalog. A scope job ends with the roots when it is a root, inside a
+root in the candidate, or removed from the candidate. The forecast's stop list
+includes every running box that ends with the roots (DL-490).
+
+The forecast reads statuses, not flags or the terminator cascade. A held or iced
+member inside a restarting root reads `restart` but does not run. A running
+`job_terminator` member moved out of a root the update ends, to outside every
+restarting root, is ended with the old box run (SEM-14); the forecast reads `rerun` for a command and nothing for a sub-box
+(DL-490, BUG-69).
 Readiness findings accompany a valid diff.
 The optional `preview.definition_changes` holds `groups`, `blocked`,
 `sources_changed`, `settings_changed` and `omitted` (DL-482).
@@ -226,6 +241,14 @@ application so kept outcomes cannot dispatch old-run replacements. After the
 swap, marked non-INACTIVE members, including previously finished members, get
 ON_HOLD before outermost retained boxes get FORCE_STARTJOB. Removed boxes stay
 stopped. Normal box starts open new runs and successors can see old-run ends.
+Jobs of both catalogs inside a restarting root in the candidate follow its new
+run when allowed to run, whether unchanged, changed in place, retyped or moved in.
+Retyping creates an INACTIVE row, so a mark alone does not hold the new job. A running
+sub-box moved out of the roots and retained in the catalog keeps its run unless
+the old box's end terminates it through `job_terminator` (SEM-14, BUG-69).
+A recorded stopped choice of `none` means no follow-up of its own. In a restarted
+box, a marked stopped member kept without retyping is ON_HOLD; other members
+follow the box when allowed to run (DL-490).
 The stored intent's `restart_boxes` keeps the admitted roots through a crash
 before `config applied`; only an absent key recomputes them (DL-489). After
 `config applied`, a crash can leave a box stopped: before force-starting it,
@@ -564,7 +587,8 @@ DL-99).
 A row may add `reread: {change, action}` (DL-463).
 `change` is `changed`, `removed` or `unchanged`.
 `action` is `rerun`, `hold`, `remove`, `restart_box` or `restart`, the same values
-as the preview's effects, or `null` when update will not touch the job.
+as the preview's effects, with the first-match rule in §2's reread forecast
+(DL-490), or `null` when the forecast assigns no action.
 It is the cached forecast
 at the last reread, not a live plan. New or failed reread replaces it; applied
 update and engine restart clear it. It is absent for unmarked rows. CLI and TUI

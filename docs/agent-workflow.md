@@ -25,6 +25,12 @@ Read the [approved operating model](agents/operating-model.md) for authority, ro
   Read the finished changed sections whole before handoff. Reconcile affected
   README and documentation claims with behavior changes; use relative links
   to repository files.
+- Read a declared chart or a pure function to learn what it does; a test pins
+  the reading and ships with the change. Run a probe only for what the code
+  does not determine: the real clock, the operating system, vendor behavior.
+  Judge whether a case can occur from validated input and the machine's inputs,
+  never from state built by hand. Report a case that only hand-built state
+  reaches as unreachable (DL-491).
 - Identify the candidate by commit or file hash. The operator arranges review.
   Address all open findings in each rework round and return them to their raisers.
   Wait for the operator's go-ahead if a round limit or shape note is due.

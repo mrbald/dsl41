@@ -27,6 +27,7 @@ from dsl41.reload_plan import (
     preflight_items,
     box_members,
     box_scope,
+    ends_with_roots,
     marked_holds,
     reread,
     root_starts,
@@ -155,7 +156,7 @@ def preview(
     marked = candidate.metadata["non_idempotent"]
     boxes = {
         name
-        for name in set(scope.roots) | scope.members
+        for name in ends_with_roots(scope, candidate.catalog)
         if name in live.catalog.jobs
         and live.catalog.jobs[name].job_type == "BOX"
         and live.status.get(name) == "RUNNING"
@@ -172,32 +173,34 @@ def preview(
         for name in structural
         if name not in plan.removed and name not in {item.name for item in plan.changed}
     ]
+    restarting = root_starts(scope, candidate.catalog, marked)
+    restart_members = box_members(candidate.catalog, restarting) & live.catalog.jobs.keys()
+    holds = marked_holds(scope, marked, live.status)
     effects = []
     for name in stops:
         action = (
-            "remove"
-            if name in plan.removed
-            else "hold"
-            if name in marked
+            "hold"
+            if name in marked and name not in plan.removed
             else "restart_box"
-            if name in boxes
+            if name in restarting
+            else "restart"
+            if name in restart_members
+            else "remove"
+            if name in plan.removed
             else "rerun"
         )
         effects.append({"job": name, "action": action})
     effects += [
         {"job": name, "action": "hold"}
-        for name in marked_holds(scope, marked, live.status)
-        if name not in stops
+        for name in holds
+        if name not in stops and name not in plan.removed
     ]
     actions = {item["job"]: item["action"] for item in effects}
-    restarting = root_starts(scope, candidate.catalog, marked)
-    unchanged = box_members(candidate.catalog, restarting) & set(plan.unchanged) - {
-        item["name"] for item in changed
-    }
-    for name in sorted(unchanged):
-        if actions.get(name) != "hold":
-            actions[name] = "restart"
-    effects = [{"job": name, "action": action} for name, action in actions.items()]
+    unchanged = restart_members & set(plan.unchanged) - {item["name"] for item in changed}
+    for name in sorted(restart_members):
+        actions.setdefault(name, "restart")
+    effect_order = dict.fromkeys([*stops, *holds, *sorted(restart_members)])
+    effects = [{"job": name, "action": actions[name]} for name in effect_order if name in actions]
     marks = {
         item["name"]: {"change": "changed", "action": actions.get(item["name"])} for item in changed
     }
