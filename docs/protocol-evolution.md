@@ -89,6 +89,10 @@ The catalog's environment view depends on authenticated authority:
 READ receives names only and no inherited names; OPS/ADM keep the full
 view. Engine-owned `reread` uses live engine state (DL-463).
 
+Control `status` may carry `clock_hold: {"wall", "until"}` while real wall
+time is below engine time (DL-493). Clients may ignore this additive field
+in either dialect. It changes no record or state version.
+
 `root_id` is mandatory store identity, not a format version (DL-433).
 Startup refuses a store without it. Clock domain is also checked separately.
 A new binary version alone does not change the catalog or runtime hashes.

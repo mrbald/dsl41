@@ -35,10 +35,10 @@ The plans follow the interruption rule (spec-wiring 2b): a natural end or a fail
 completes; a stopped or unobservable attempt is dropped when its job left the catalog or the
 oracle ended its run, held when its job is named in `non-idempotent.toml`, and otherwise run
 again as a new attempt of the same run with the same invocation. A recovered plan step is
-stamped at the end its outcome holds, never before the admission frontier, and fed before any
-outage deadline. The engine lifecycle leaves STARTING at the barrier (`replay_done`). A restart
-from a snapshot opens its trace with a `RESTART` line: the trace covers what follows the
-snapshot.
+stamped at its recorded end, between the admission frontier and engine time in the real
+domain (DL-493), and fed before any outage deadline. The engine lifecycle leaves STARTING
+at the barrier (`replay_done`). A restart from a snapshot opens its trace with a `RESTART`
+line: the trace covers what follows the snapshot.
 
 `start_run` is genesis: an empty store has nothing to replay or catch up with.
 """
@@ -612,9 +612,11 @@ async def resume_run(
             with contextlib.suppress(Exception):
                 await engine.shutdown()
         for journal in journals:
-            with contextlib.suppress(Exception):
-                if journal.writable:
-                    journal.engine("shutdown_during_startup", clock.now())
+            if journal.writable:
+                restored = next((e for e in engines if e.journal is journal), None)
+                assert restored is not None, "a writable restart journal has its engine"
+                with contextlib.suppress(Exception):
+                    journal.engine("shutdown_during_startup", restored.now_present())
             with contextlib.suppress(Exception):
                 journal.detach()
         lock.release()
@@ -765,6 +767,7 @@ async def _resume_under_lock(
     _require_adapters(catalog, adapters, "resume")
     _require_scheduler(catalog, scheduler, "resume")
     last_at = journal.position.last_at
+    latest_at = store.latest_at() if not clock.virtual else None
     # genesis appends the configuration before anything else, and a snapshot keeps the position
     assert last_at is not None
     engine = Engine(
@@ -793,7 +796,9 @@ async def _resume_under_lock(
         engine.frontiers = engine.frontiers.model_copy(
             update={"at": max(engine.frontiers.at or last_at, last_at)}
         )
-        engine.now_admitted()
+        engine._now_given = max(last_at, latest_at or last_at)
+        wall = clock.now()
+        engine._note_clock_step(wall, engine.now_admitted(remember=False, wall=wall))
     if validate_only:
         return engine
     if preflight_warnings is not None:
@@ -1523,11 +1528,12 @@ def _discharge_pending(
         for plan in table.plans.values()
         if any(step["step"] == "dispatch" for step in plan.steps)
     }
-    at = engine.clock.now()
+    wall = engine.clock.now()
     for job, rt in engine.oracle.store.job.items():
         key = (job, rt.run_number)
         if rt.status not in LIVE or key in covered or key not in replay.spawns:
             continue
+        at = engine.now_present(wall=wall)
         scheduled = rt.status_at if rt.status_at is not None else at
         seq = engine.journal.append(pending_record(job, rt.run_number, scheduled, at))
         engine.defer(Deferred(job, rt.run_number, pending=seq), after=last_at)
@@ -1540,7 +1546,7 @@ def _record_start(
     the last incarnation's records show a `draining` after its last start with no shutdown
     record, `engine started`, and the drop of each scheduler tick missed while down (E9)."""
     assert engine.journal is not None
-    at = engine.clock.now()
+    at = engine.now_present()
     draining = _interrupted_drain(tail) is not None
     if draining:
         engine.journal.engine("drain_interrupted", at)
@@ -1589,7 +1595,7 @@ def _missed_ticks(engine: Engine, position: Position) -> tuple[datetime, list[tu
     # always inclusive: with several jobs at one instant, a crash between the siblings' inputs
     # leaves the frontier at the tick with a sibling unrecorded
     scheduler.reset(position.frontier)
-    now = engine.clock.now() if engine.clock.virtual else engine.now_admitted()
+    now = engine.now_present(remember=False)
     sweep_upto = max(now, position.frontier)
     missed: list[tuple[Event, str]] = []
     for tick_ev in scheduler.pop_due(sweep_upto):

@@ -518,6 +518,7 @@ class Engine:
         self.baseline_id = journal.baseline_id if journal is not None else ""
         self.frontiers = Frontiers()
         self._last_wall: datetime | None = None
+        self._now_given = None if clock.virtual or journal is None else journal.position.last_at
         #: retries answered from the index rather than re-applied (CM-05)
         self.deduped: list[tuple[str, ApplyResult]] = []
         #: refused before admission (concurrency-model ss4), so this list is
@@ -709,7 +710,7 @@ class Engine:
         state the step left (spec-wiring 2b)."""
         reply: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         self._push(
-            _Pending(at=self.clock.now(), request_id=None, control="stop_requested", reply=reply)
+            _Pending(at=self.now_present(), request_id=None, control="stop_requested", reply=reply)
         )
         return reply
 
@@ -736,7 +737,7 @@ class Engine:
 
     def post_control(self, name: str) -> None:
         """Queue a lifecycle step that a timer raised (`abort_deadline`)."""
-        self._push(_Pending(at=self.clock.now(), request_id=None, control=name))
+        self._push(_Pending(at=self.now_present(), request_id=None, control=name))
 
     def request_update(self, request: UpdateRequest) -> asyncio.Future[UpdateAnswer]:
         """Queue an update request as one step of the single writer; the answer is its decision
@@ -744,7 +745,7 @@ class Engine:
         answer: asyncio.Future[UpdateAnswer] = asyncio.get_running_loop().create_future()
         self._push(
             _Pending(
-                at=self.clock.now(),
+                at=self.now_present(),
                 request_id=None,
                 control="update",
                 update=request,
@@ -758,41 +759,42 @@ class Engine:
         stop set is down), as a step of the single writer, so an update applies only in the
         loop and never inside an admission. While a restart recovers, it is stamped after
         everything queued, so every recovered feed is taken first (spec-restart §6)."""
-        at = self.clock.now()
+        at = self.now_present()
         if self.recovery is not None:
             at = max([at, self.resume_at or at, *(item[0] for item in self._queue)])
         self._push(_Pending(at=at, request_id=None, control="update_exit", update=job))
 
-    def now_admitted(self) -> datetime:
-        """The engine's instant, never before the admission frontier."""
-        wall = self.clock.now()
-        self._note_clock_step(wall)
-        return now_of(wall, self.frontiers.at)
+    def now_present(self, *, remember: bool = True, wall: datetime | None = None) -> datetime:
+        """Present stamps keep the raw virtual clock and the admitted real clock (DL-493)."""
+        wall = self.clock.now() if wall is None else wall
+        return wall if self.clock.virtual else self.now_admitted(remember=remember, wall=wall)
 
-    def _note_clock_step(self, wall: datetime) -> None:
-        """Report real-clock steps and keep ready inputs in arrival order (runner-design ss4,
-        ss9). Future work keeps its timestamp."""
+    def now_admitted(self, *, remember: bool = True, wall: datetime | None = None) -> datetime:
+        """Engine time: real stamps hold at the last value given (DL-493).
+
+        A read with `remember=False` observes without giving a stamp. `wall` lets the loop
+        and status use one wall reading for both their raw and admitted clocks.
+        """
+        wall = self.clock.now() if wall is None else wall
+        now = now_of(wall, self.frontiers.at)
         if self.clock.virtual:
-            return
-        frontier = self.frontiers.at
+            return now
+        now = max(now, self._now_given or now)
+        if remember:
+            self._note_clock_step(wall, now)
+            self._now_given = now
+        return now
+
+    def _note_clock_step(self, wall: datetime, until: datetime) -> None:
+        """Report the first reading in a hold and each backward step there (DL-493)."""
         previous = self._last_wall
-        if frontier is not None and wall < frontier:
-            if previous is None or previous >= frontier or wall < previous:
+        if wall < until:
+            if previous is None or previous >= until or wall < previous:
                 best_effort_report(
-                    "dsl41: WARNING: wall clock below admission frontier:"
-                    f" wall={wall.isoformat()} frontier={frontier.isoformat()}"
-                    f" gap_s={(frontier - wall).total_seconds()}"
+                    "dsl41: WARNING: wall clock behind engine time:"
+                    f" wall={wall.isoformat()} until={until.isoformat()}"
+                    f" gap_s={(until - wall).total_seconds()}"
                 )
-        cutoff = max(wall, frontier or wall, previous or wall)
-        if wall < cutoff:
-            at = now_of(wall, frontier)
-            self._queue[:] = [
-                (at, seq, replace(pending, at=min(pending.at, at)))
-                if queued_at <= cutoff
-                else (queued_at, seq, pending)
-                for queued_at, seq, pending in self._queue
-            ]
-            heapq.heapify(self._queue)
         self._last_wall = wall
 
     async def _update_step(self, pending: _Pending) -> None:
@@ -895,7 +897,7 @@ class Engine:
             return
         # the update needs a store, and a cancelled task's attempt has no outcome yet
         assert self.journal is not None and run_id is not None
-        at = self.clock.now()
+        at = self.now_present()
         self.journal.append(
             outcome_record(run_id, job, run_number, "stopped", {}, at, cause=UPDATE_STOP),
             plan_record(run_id, job, run_number, "none", [], at),
@@ -936,7 +938,7 @@ class Engine:
             # own stop goes to the rest (DL-426)
             stops = {a: cause for a in unsettled if (cause := self._stop_cause(a)) is not None}
             fields = {"unsettled": list(unsettled), "stops": stops} if unsettled else {}
-            self.journal.engine(event, self.clock.now(), **fields)
+            self.journal.engine(event, self.now_present(), **fields)
 
     @property
     def leaving_record(self) -> str | None:
@@ -963,9 +965,7 @@ class Engine:
         """Whether a request queued and due is still unanswered: STOPPED is taken only once each
         has its answer, a mutation its durable `engine_draining` rejection and a stop the
         state (spec-drain)."""
-        now = self.clock.now()
-        if not self.clock.virtual:
-            now = now_of(now, self.frontiers.at)
+        now = self.now_present(remember=False)
         return bool(self._queue) and self._queue[0][0] <= now
 
     def _finish_leaving(self) -> None:
@@ -981,7 +981,7 @@ class Engine:
                 # restart adopts it with (DL-426)
                 fields["unsettled"] = list(unsettled)
                 fields["stops"] = {a: self._stop_cause(a) for a in unsettled}
-            self.journal.engine(record, self.clock.now(), **fields)
+            self.journal.engine(record, self.now_present(), **fields)
             self.shutdown_recorded = True
             drained = record != "shutdown_during_startup"
             if drained and self.settings is not None and self.at_applied_boundary:
@@ -1048,7 +1048,7 @@ class Engine:
         facts = self._facts[attempt]
         job, run = facts.job, facts.run_number
         plan = plan if plan is not None else self.plan_for(attempt, outcome)
-        at = self.clock.now()
+        at = self.now_present()
         steps = [self._step_body(facts, step, outcome) for step in plan.steps]
         extra: dict[str, Any] = {}
         for step in plan.steps:
@@ -1169,13 +1169,12 @@ class Engine:
             else:
                 self._discharge(item)
             return
-        # a live step is stamped with the engine's clock; a step a restart performs, with the
-        # end its `outcome` record holds, never earlier than the admission frontier, so time
-        # stays monotone and a deadline that fell inside the outage after that end never beats
-        # it (spec-restart §4, DL-426); an attempt with no recorded end takes the frontier.
+        # In the real domain a recovered feed keeps its recorded end between the frontier and
+        # now; an attempt with no recorded end takes the frontier (DL-493, spec-restart §4).
         # The end rides on the input as evidence too (the history's duration)
         payload = dict(step["payload"])
-        now = self.clock.now()
+        wall = self.clock.now()
+        now = self.now_present(remember=self.recovery is None, wall=wall)
         frontier = self.frontiers.at or self.resume_at or now
         if self.recovery is None:
             at = max(now, frontier)
@@ -1183,6 +1182,8 @@ class Engine:
             at = frontier
         else:
             at = max(datetime.fromisoformat(plan.ended), frontier)
+            if not self.clock.virtual and at > now:
+                at = self.now_present(wall=wall)
             payload["ended_at"] = plan.ended
         event = Event(at=at, kind="STATUS", payload=payload)
         if self.recovery is None:
@@ -1231,7 +1232,7 @@ class Engine:
         if facts.closing:
             facts.closing = False
             assert self.journal is not None  # only an engine with a store marks an attempt closing
-            self.journal.append(ladder_done_record(attempt, self.clock.now()))
+            self.journal.append(ladder_done_record(attempt, self.now_present()))
         if attempt in self._waiting_plans:
             self._waiting_plans.discard(attempt)
             self.perform_plan(attempt)
@@ -1518,15 +1519,6 @@ class Engine:
     def _push(self, pending: _Pending) -> None:
         """Put one input on the time-ordered queue and wake the loop; the arrival counter keeps
         inputs stamped alike in raised order."""
-        wall = self.clock.now()
-        self._note_clock_step(wall)
-        if (
-            not self.clock.virtual
-            and self.frontiers.at is not None
-            and wall < self.frontiers.at
-            and pending.at <= self.frontiers.at
-        ):
-            pending = replace(pending, at=self.frontiers.at)
         self._queue_seq += 1
         heapq.heappush(self._queue, (pending.at, self._queue_seq, pending))
         self._activity.set()
@@ -1579,8 +1571,9 @@ class Engine:
         arriving mid-wait re-plans instead of feeding behind an already-journaled advance.
         Virtual jumps never yield."""
         if not self.clock.virtual:
-            now = now_of(now, self.frontiers.at)
-            horizon = now_of(horizon, self.frontiers.at)
+            wall = now
+            now = self.now_admitted(remember=False, wall=wall)
+            horizon = max(horizon, now) if wall < now else now_of(horizon, self.frontiers.at)
         head_at = self._queue[0][0] if self._queue else None
         due = [
             t
@@ -1684,11 +1677,12 @@ class Engine:
                 return emitted
             await self._settle()
             now = self.clock.now()
-            self._note_clock_step(now)
             if now != instant:
                 instant, instant_events = now, 0
+            ready_at = self.now_present(remember=False, wall=now)
+            if not self.clock.virtual:
+                self._note_clock_step(now, ready_at)
             work = self._next_work(horizon, now)
-            ready_at = now if self.clock.virtual else now_of(now, self.frontiers.at)
             if (
                 self.recovery is not None
                 and not self._catch_up
@@ -1844,9 +1838,10 @@ class Engine:
                 self._answer(pending, prior)
                 return []  # a retry advances no logical time (CM-05)
         if not self.clock.virtual:
-            wall = self.clock.now()
-            self._note_clock_step(wall)
-            pending = replace(pending, at=now_of(min(pending.at, wall), self.frontiers.at))
+            now = self.now_admitted(remember=False)
+            pending = replace(
+                pending, at=min(max(pending.at, self.frontiers.at or pending.at), now)
+            )
         admitted = self.frontiers.admit(pending.at)
         # before the frontier moves: a refusal or a stop takes no index
         attempt = self._attempt(pending, admitted.committed_index, fp)
@@ -2078,7 +2073,7 @@ class Engine:
         if live.attempt not in self.journal.open.attempts:
             return  # the adapter recorded its own outcome before the cancel landed
         job = self.journal.open.attempts[live.attempt].job
-        at = self.clock.now()
+        at = self.now_present()
         self.journal.append(
             outcome_record(live.attempt, job, live.run_number, "stopped", {}, at, cause="killed"),
             plan_record(live.attempt, job, live.run_number, "none", [], at),
@@ -2089,7 +2084,7 @@ class Engine:
         durable at once as `dispatch_pending`, and launched only once the due work has run, so a
         deadline already past ends it first (DL-425)."""
         assert self.journal is not None  # only a restart recovers, and it holds the store
-        at = self.clock.now()
+        at = self.now_present()
         row = self.oracle.store.job.get(job)
         scheduled = row.status_at if row is not None and row.status_at is not None else at
         seq = self.journal.append(pending_record(job, run_number, scheduled, at))
@@ -2101,7 +2096,7 @@ class Engine:
         spec-drain), or one a held group keeps back (DL-426). Answers the record's seq."""
         if self.journal is None:
             return None
-        at = self.clock.now()
+        at = self.now_present()
         row = self.oracle.store.job.get(job)
         scheduled = row.status_at if row is not None and row.status_at is not None else at
         return self.journal.append(pending_record(job, run_number, scheduled, at))
@@ -2134,14 +2129,14 @@ class Engine:
         with no launch (spec-wiring 1b, spec-restart §6). A plan's dispatch is the plan's
         last step, so the plan is then done."""
         superseded = spawn_superseded(self.oracle.store.job.get(item.job), item.run_number)
-        at = self.clock.now()
+        wall = self.clock.now()
         if item.plan is None:  # a start, pending in the store when the engine has one
             if superseded is not None:
                 if item.pending is not None:
                     assert self.journal is not None  # a pending record is the store's
                     self.journal.append(
                         Record(
-                            at,
+                            self.now_present(wall=wall),
                             "dispatch_pending",
                             None,
                             None,
@@ -2158,7 +2153,9 @@ class Engine:
         assert item.attempt is not None  # a plan's replacement names its attempt
         if superseded is not None or item.job not in self._dispatchable():
             if self.journal is not None:
-                self.journal.append(follow_up_done(item.plan, item.step, None, at))
+                self.journal.append(
+                    follow_up_done(item.plan, item.step, None, self.now_present(wall=wall))
+                )
         elif self._must_wait(item.job, item.run_number, item.plan):
             self._waiting_plans.add(item.plan)  # performed once the group is gone (DL-426)
             return
@@ -2219,7 +2216,8 @@ class Engine:
         adapter = self.adapters[job_ir.job_type]
         run_id = attempt or str(uuid.uuid4())
         spool = self.spool_of(job_ir, run_number, ordinal)
-        now = self.clock.now()
+        wall = self.clock.now()
+        now = self.now_present(remember=False, wall=wall)
         row = self.oracle.store.job.get(job)
         scheduled = row.status_at if row is not None and row.status_at is not None else now
         # the invocation the process is given is the one the record holds (crash spec)
@@ -2295,6 +2293,7 @@ class Engine:
             )
             self._job_attempt[job] = run_id
         if self.journal is not None:
+            now = self.now_present(wall=wall)
             records = [
                 dispatch_record(
                     job,
@@ -2440,7 +2439,7 @@ class Engine:
         # (job, run_number) ride along for the ss4 stale-completion gate
         payload: dict[str, object] = {"job": job_ir.name, "run_number": run_number}
         payload |= status_payload(result, where=f"adapter for {job_ir.name!r}")
-        at = self.clock.now()
+        at = self.now_present()
         step: tuple[str, int] | None = None
         if self.journal is not None and run_id is not None:
             # the attempt's end and its plan, one transaction: the completion is the plan's one
@@ -2487,7 +2486,8 @@ class Engine:
         journal = self.journal
         journal.prove()  # an engine that lost the root writes no snapshot (S6b)
         seq = journal.last_seq
-        now = self.clock.now()
+        wall = self.clock.now()
+        now = self.now_present(remember=False, wall=wall)
         retention = None if self.settings is None else self.settings.retention_days
         data = encode_snapshot(
             self.oracle,
@@ -2506,8 +2506,10 @@ class Engine:
             ),
         )
         journal.store.put_snapshot(seq, STATE_MACHINE_VERSION, data)
+        now = self.now_present(wall=wall)
         journal.engine("snapshot", now, seq=seq)
-        self._snapshot_at, self._snapshot_seq = now, seq
+        self._snapshot_at = wall
+        self._snapshot_seq = seq
         if self.settings is not None:
             floor = min(seq, journal.open.floor() or seq)
             cutoff = now - timedelta(days=self.settings.retention_days)

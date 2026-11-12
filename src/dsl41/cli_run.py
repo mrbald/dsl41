@@ -1079,7 +1079,7 @@ async def _serve_run(
             engine.status_hooks = StatusHooks(engine, hook_settings)
         load_settings(run_root)
         if warns and engine.journal is not None:
-            engine.journal.preflight(warns, clock.now())
+            engine.journal.preflight(warns, engine.now_present())
         access = None
         if access_map is not None:
             # access-model ss4: a configured path that does not load REFUSES;
@@ -1171,7 +1171,7 @@ def _record_shutdown(engine: "Engine", *, running: bool) -> None:
     if engine.shutdown_recorded or running:
         return
     try:
-        engine.journal.engine("shutdown_during_startup", engine.clock.now())
+        engine.journal.engine("shutdown_during_startup", engine.now_present())
     except Exception as exc:  # noqa: BLE001 -- the record is best effort; the close follows
         typer.echo(f"dsl41: the shutdown record was not written: {exc}", err=True)
 

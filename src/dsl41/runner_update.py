@@ -687,7 +687,7 @@ class EngineUpdate:
         engine = self.engine
         assert self._opened is not None
         apply_application(engine.oracle, application, revision=engine.config_rev)
-        at = engine.now_admitted()
+        at = engine.now_admitted(remember=False)
         if engine.scheduler is not None:
             engine.scheduler.replace(
                 application.catalog,

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
 import sys
 import time
 from datetime import datetime, timedelta
@@ -41,12 +43,16 @@ def signal_command(directory: Path, name: str = "child", *, exits: tuple[int, ..
     script.write_text(
         "import os, signal, time\nfrom pathlib import Path\n"
         "def received(number, frame):\n"
-        f"    with Path({str(log)!r}).open('a') as stream:\n"
-        "        stream.write(str(number) + '\\n')\n"
+        f"    descriptor = os.open({str(log)!r}, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)\n"
+        "    try: os.write(descriptor, (str(number) + '\\n').encode())\n"
+        "    finally: os.close(descriptor)\n"
         f"    if number in {exits!r}: raise SystemExit(0)\n"
         "signal.signal(signal.SIGINT, received)\n"
         "signal.signal(signal.SIGTERM, received)\n"
-        f"Path({str(ready)!r}).write_text(str(os.getpid()))\n"
+        f"ready = Path({str(ready)!r})\n"
+        "temporary = ready.with_name(ready.name + '.tmp')\n"
+        "temporary.write_text(str(os.getpid()))\n"
+        "temporary.replace(ready)\n"
         "while True: time.sleep(0.01)\n"
     )
     return f"exec {sys.executable} {script}", ready, log
@@ -292,6 +298,8 @@ def test_cli_kill_signals_end_to_end(
             spool = root / "runs/j.1/1/status.json"
             await _until(spool.exists)
             assert json.loads(spool.read_text())["signal"] == 9
+            if first != 9:
+                await _until(lambda: log.exists() and log.read_text().splitlines())
             received = log.read_text().splitlines() if log.exists() else []
             assert received == ([] if first == 9 else [str(first)])
             if first != 9:
@@ -348,9 +356,28 @@ def test_non_killjob_stops_keep_term(short_root, stop, owned_processes):
                 await _until(lambda: engine.attempt_view("j")["state"] == "RUNNING")
                 spawn = json.loads((facts.spool / "spawn.json").read_text())
                 await engine.stops.ladder(spawn["command_pgid"], spawn["command_start_time"], 0.5)
-            await _until(log.exists)
+            await _until(lambda: log.exists() and log.read_text().splitlines() == ["15"])
             assert log.read_text().splitlines() == ["15"]
         finally:
             await _finish(engine, loop)
+
+    asyncio.run(scenario())
+
+
+def test_signal_log_keeps_two_close_signals(short_root, owned_processes):
+    command, ready, log = signal_command(short_root)
+
+    async def scenario():
+        process = await asyncio.create_subprocess_shell(command)
+        try:
+            await _until(ready.exists)
+            pid = int(ready.read_text())
+            os.kill(pid, signal.SIGINT)
+            os.kill(pid, signal.SIGTERM)
+            await _until(lambda: log.exists() and len(log.read_text().splitlines()) == 2)
+            assert sorted(log.read_text().splitlines()) == ["15", "2"]
+        finally:
+            process.kill()
+            await process.wait()
 
     asyncio.run(scenario())

@@ -122,19 +122,24 @@ steps:
    appends its `dispatch` record and then launches; each kill cancels the
    live task.
 
-Real-domain admission floors each input's stamp at the admission frontier
-after deduplication. A control input captured at wall time `wall` is admitted
-at `max(wall, frontier)`, even while the wall clock is below the frontier.
-The oracle sees no backward time. Admission does not wait for the wall clock
-to catch up; timers and future ticks wait for their wall-clock deadlines.
-Scheduler ticks and recovered outcomes keep their chosen stamps, subject to
-the same floor. `Frontiers.admit` guards the non-decreasing invariant: a
-stamp below the frontier reaching it is an engine bug.
-The real-domain loop takes inputs, timers and ticks due at or before
-`max(wall, frontier)`, including frontier-stamped completion plans. A backward
-step rebases already-due queued inputs to that instant in arrival order.
-Inputs queued during the gap keep that order, including `stop_requested`.
-Future queued inputs retain their deadlines.
+In the real domain `Engine.now_admitted()` gives the latest of the wall,
+the admission frontier and the last value it gave (DL-493). Present records
+and queued steps that mean now take this stamp. Requests keep arrival order,
+including `stop_requested`. Heap keys equal the queued stamps.
+After deduplication, admission reads its cap without remembering it and
+keeps a chosen stamp between the frontier and engine time. Only a value
+given as a stamp is remembered. Ticks, timers and catch-up steps keep their computed instants.
+A recovered completion keeps its recorded end between the frontier and
+engine time; `ended_at` carries the recorded end unchanged.
+`Frontiers.admit` guards the non-decreasing invariant: a stamp below the
+frontier reaching it is an engine bug.
+The loop's due check, horizon floor and owed-answer check read engine time
+without remembering it. Outside a hold, the horizon is floored at the
+frontier; inside a hold, at engine time. Admission does not wait for the
+wall to catch up.
+A wall below engine time holds ticks and timers until it catches up, with
+no bound. A job started in the hold gets relative timers late by the
+remaining gap. The per-instant event budget resets on raw wall readings.
 
 Dispatch table (emitted event → effect → what applying it does):
 
@@ -1095,18 +1100,23 @@ instantly. The oracle takes explicit timestamps everywhere, which makes
 this jump possible.
 
 In the real domain, a backward wall-clock step does not refuse an input
-(§4). The loop and enqueue path report a warning on stderr with the fixed
-prefix `dsl41: WARNING:`, the wall reading, admission frontier
-and gap in seconds on the first observation below the frontier and on each
-further observed backward step there. Inputs while the wall clock catches
-up do not repeat the warning. A broken stderr does not stop the engine.
-The observation state is local to the engine
-process; it adds no store record or status field. Oracle time stays at the
-frontier until the wall clock passes it. The virtual domain keeps its
-existing stamp and jump rules. A real-domain restart below the store's last
-stamp restores that admission floor and reports the step. It starts without
-waiting for the wall to catch up. Store identity, configuration, version
-and clock-domain checks still apply.
+(§4, DL-493). A warning on stderr has the prefix `dsl41: WARNING:`, the wall,
+the instant engine time resumes at and the gap in seconds. It appears at the
+first reading below engine time and each further backward step there.
+Inputs while the wall catches up do not repeat it. A broken stderr does not
+stop the engine. The observation state is local to the engine process and
+adds no store record. `status.clock_hold` shows the wall and the held instant
+([control protocol §4](control-protocol.md#4-query-verbs-frozen-response-shapes));
+`query status` prints a notice. The terminal UI does not show the hold.
+A real-domain restart seeds engine time from the latest retained record
+stamp, including records covered by the latest snapshot, whatever the kind.
+It raises the admission frontier to `last_at`: the latest opening, input,
+dispatch or drop stamp.
+It starts without waiting for the wall. Store identity, configuration,
+version and clock-domain checks still apply. Snapshot intervals and their
+last-taken time, adapter timers, file-watch polling and the wrapper use the
+raw clock. The virtual domain keeps its stamp and jump rules and remembers
+no engine-time floor.
 
 - `dsl41 run` — RealClock + real adapters + control socket.
 - `dsl41 rehearse` — VirtualClock + FakeAdapter + optional scenario, in
@@ -1453,10 +1463,10 @@ its rule, with the entry or section that holds it.
   AND records it in the store (a `drop` record), and it never fires the tick late.
   A live-but-stalled engine, in contrast, fires its backlog, stamped at the
   tick. The downtime/live boundary is pinned to the resume-sweep instant,
-  at least the durable scheduler frontier after a backward clock step
-  (DL-435). Ticks at or before that
-  instant are downtime (dropped). Ticks after it are live backlog, even
-  if the loop starts seconds later.
+  engine time at the restart (§9, DL-493). Ticks at or before the store's
+  latest retained stamp therefore count as missed while down.
+  Ticks at or before the sweep instant are downtime (dropped). Ticks after it
+  are live backlog, even if the loop starts seconds later.
   Startup stderr prints one total, then job-name-sorted counts and each
   job's latest missed tick, excluding jobs on ice and jobs already armed on hold
   at start. Held jobs that are not armed and noexec jobs count (DL-476, DL-483):

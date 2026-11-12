@@ -843,9 +843,10 @@ Changing `n_retrys` stops the running try like any definition change; lowering
 it holds the job if that try's number is at least `5 +` the new count (DL-485).
 BOX and FW retries, play and rehearse remain unimplemented.
 Start times missed during downtime are skipped and reported (DL-45).
-A backward wall-clock step keeps admission time at the recorded frontier;
-it does not refuse operator inputs or startup (DL-435).
-A frontier ahead of the wall can delay ticks and timers until the wall catches up.
+A backward wall-clock step holds engine time at its last stamp or admission
+frontier; it does not refuse operator inputs or startup (DL-435, DL-493).
+Ticks and timers wait for the wall to catch up, with no bound. `status` shows
+`clock_hold`, and `dsl41 query status` prints the hold.
 
 Keep the inherited `DSL41_COOKIE` when launching helpers.
 On Linux, the engine finds live members of the recorded process group and readable processes
