@@ -278,20 +278,20 @@ Map values are literal strings. Names use `[A-Za-z_][A-Za-z0-9_]*`.
 NULs and overrides of `DSL41_*`, `AUTO_JOB_NAME` or `AUTORUN` refuse.
 Set path variables here; the author follows [Set stream paths](authoring.md#set-stream-paths).
 
-These accepted engine settings request behavior this release does not apply
-and produce one `known-unsupported` warning per setting (DL-466):
+The applied launch settings control every CMD attempt (DL-492):
 
-| Setting | Warns when |
-| --- | --- |
-| `engine.job_shell` | Configured. |
-| `engine.job_profile` | Configured. |
-| `engine.std_file_mode` | Set to `"truncate"`. |
+- `engine.job_shell` selects an executable sh, dash, bash or ksh by absolute
+  path. Its default is `/bin/sh`, independent of the account's passwd shell.
+- `engine.job_profile` names a literal absolute readable profile. The shell
+  sources it before the job's `profile`. Either profile's failure stops the
+  command with that profile's exit status.
+- `engine.std_file_mode` is `"append"` by default. `"truncate"` truncates an
+  explicit unprefixed output before each launch. `>` truncates and `>>`
+  appends independently of this setting. Default per-run logs always append.
 
-Omitting these settings, or using the default `std_file_mode = "append"`,
-creates no warning. JIL stream prefixes remain effective independently of
-`std_file_mode`. See the author's [unsupported JIL inventory](authoring.md#2-check-which-constructs-dsl41-accepts)
-for record attributes. Both use the configured `lint.ignore` and `lint.refuse`
-policy; ignoring a warning does not activate the setting.
+The wrapper opens streams before sourcing profiles. The author's
+[unsupported JIL inventory](authoring.md#2-check-which-constructs-dsl41-accepts)
+lists attributes that produce warnings.
 
 Input paths may be absolute or relative to that file; the run root must
 be absolute. Patterns support `*`, `?` and brackets; `**` is refused.

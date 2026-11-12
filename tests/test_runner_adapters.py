@@ -358,6 +358,7 @@ def test_truncation_precedes_wrapper_launch(tmp_path, monkeypatch):
             "job",
             "run_number",
             "command",
+            "shell",
             "run_dir",
             "stdout_path",
             "stderr_path",
@@ -472,8 +473,8 @@ def test_std_in_file_feeds_the_command_stdin(tmp_path: Path) -> None:
 
 
 def test_profile_sourced_before_the_command(tmp_path: Path) -> None:
-    """(runner-design ss6): `profile` sources first -- `. <profile> &&
-    <command>` -- so a variable it exports is visible to the command."""
+    """(runner-design ss6, DL-492): `profile` sources before the command.
+    A variable it exports is visible to the command."""
     profile = tmp_path / "profile.sh"
     profile.write_text("export MYVAR=hello\n")
     text = f"insert_job: prj\njob_type: c\ncommand: echo $MYVAR\nmachine: m1\nprofile: {profile}\n"

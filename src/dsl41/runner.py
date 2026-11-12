@@ -178,7 +178,7 @@ from dsl41.runner_environment import (
     inherited_environment,
     resolve_streams,
 )
-from dsl41.runtime_policy import PolicyRefused
+from dsl41.runtime_policy import PolicyRefused, resolve_job_shell
 from dsl41.runner_config import (
     EngineSettings,
     OracleReading,
@@ -2354,6 +2354,7 @@ class Engine:
         if observed:
             assert run_id is not None and isinstance(adapter, ObservedAdapter)
             launch = self._facts[run_id].launch = Launch(Observer(self.stops, run_id), spool)
+            profile = self.profile or RuntimeProfile()
             ctx = AdapterContext(
                 clock=self.clock,
                 run_root=self.run_root,
@@ -2363,6 +2364,9 @@ class Engine:
                 env=dict(env or {}),
                 paths=self.dispatches.get(job_ir.name, {}).get("paths"),
                 startup_env=self.startup_env,
+                shell=resolve_job_shell(profile.job_shell),
+                site_profile=profile.job_profile,
+                std_file_mode=profile.std_file_mode,
             )
             task = loop.create_task(adapter.observe(job_ir, run_number, ctx, launch))
             self._observed_tasks[id(task)] = run_id

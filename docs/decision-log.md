@@ -26528,3 +26528,43 @@ relitigate an entry; append a new one.
   which L025 refuses; its brief had asked for probes over readings. Tests on hand-built
   state had kept an unreached refusal tree and a provisional verdict alive until FEAT-9's
   first two slices removed them.
+- DL-492 The engine's shell, site profile, default stream mode and a job's `ulimit` take
+  effect on the launch (2026-11-12; owner "keep the path and activate it with tests",
+  operator rulings; closes FEAT-30; narrows DL-466 and DL-460; runner_adapters.py,
+  runner_wrapper.py, runtime_policy.py, runner_preflight.py, lint.py, wrapper-protocol,
+  protocol-evolution, runner-design, deploy, authoring)
+  THE RULE. A CMD attempt runs `<shell> -c <script>`. The shell is `engine.job_shell`
+  when set, else `/bin/sh`. The script is one line: `. '<path>' || exit $?;` for
+  `engine.job_profile`, the same for the job's `profile`, then the command. The shell
+  reads the line before it runs a profile, so a profile's alias does not rewrite the
+  command, as before. A job's `ulimit` pairs are set in the child before the shell
+  starts, so a profile can lower them. `engine.std_file_mode = "truncate"` makes an explicit
+  `std_out_file` or `std_err_file` without a prefix truncate before each launch exactly
+  as `>` does (DL-460); `>>` still appends, and the engine's own per-run logs always
+  append. The wrapper still opens the three streams before the shell starts.
+  THE WIRE. The wrapper input stays version 1 and gains two optional fields, as `env`
+  was added (DL-428): `shell`, an absolute path, default `/bin/sh`; `limits`, a list of
+  `[resource, soft, hard]` holding the host's `RLIMIT_*` number and integers, or null
+  for unlimited. A mistyped value is the spec refusal. A shell that cannot be executed
+  or a limit that cannot be set is `spawn_failed`. No spool record, journal record,
+  snapshot or state version changes; a dispatch record holds neither shell nor limits.
+  THE EFFECT. An estate that sets none of the four and uses no `profile` launches as before. A
+  failing profile now stops the whole command and its status is the job's exit status (E5): `. p
+  && a; b` ran `b`. A profile reaches every part of the command: in `. p && a & b`, `b` ran
+  without it. A command that is only a comment ends 0 with a profile, as without one; it was a
+  syntax error. A quoted profile path may hold a space. The `known-unsupported` warnings for the
+  three settings and a CMD job's `ulimit` are gone. Preflight no longer reads or reports the
+  account's passwd shell, which no launch used. The three settings were already part of every
+  job's definition, so an update that changes one reruns the running jobs (interruption rule).
+  REJECTED. The passwd shell as the default for an unset `job_shell`: the contract names
+  `/bin/sh`, a command can end differently under another shell, and an absent setting
+  keeps its earlier behavior (DL-468); a site that wants the login shell sets
+  `job_shell`. Opening the output files in the shell after the profiles, as the unused
+  preparation code did: an open failure becomes an exit status that `max_exit_success`
+  can read as SUCCESS, new files take the umask's mode where they are 0600, DL-150's
+  `spawn_failed` and DL-460's preparation both change, and the profile phase needs
+  streams of its own. That code, its second path resolver and its tests are removed.
+  A wrapper input version 2 beside version 1: two launch paths in one build. The default
+  mode on the engine's per-run logs: a replacement attempt would erase the failed try's
+  output. The command on a line of its own after the profiles: a profile's alias, such
+  as `rm` for `rm -i`, would then rewrite the command.

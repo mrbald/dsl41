@@ -438,10 +438,10 @@ def test_cmd_retry_final_non_exit_outcomes(tmp_path, monkeypatch, ending):
 
             prepare = runner_adapters._prepare_output_files
 
-            def fail_second(job, spec):
+            def fail_second(job, spec, mode):
                 if spec["env"]["DSL41_ATTEMPT"] == "2":
                     raise OSError("synthetic second launch failure")
-                prepare(job, spec)
+                prepare(job, spec, mode)
 
             monkeypatch.setattr(runner_adapters, "_prepare_output_files", fail_second)
         async with serving(engine):

@@ -190,8 +190,6 @@ The operational boundary for `deployment-runbook.md` is [DL-424](decision-log.md
 The following accepted JIL inputs request behavior that this release does not
 apply (DL-466). Each active attribute produces one `known-unsupported` warning
 per record at startup and reread. Defaults and neutral values stay quiet.
-The operator's [unsupported engine settings](deploy.md#what-the-main-config-selects)
-are separate from these JIL inputs.
 
 | Record | Attribute | Warns when |
 | --- | --- | --- |
@@ -210,7 +208,6 @@ are separate from these JIL inputs.
 | Job | `interactive` | True value. |
 | Job | `avg_runtime` | Positive integer. |
 | Job | `n_retrys` | BOX or FW job with a count from 1 through 20 (DL-469, DL-485). |
-| Job | `ulimit` | CMD job with nonempty limits, including zero limits. |
 | Job | `job_load` | Nonzero load on a job assigned to a pool machine. |
 | Machine | Other payload attributes | Nonempty values, except `description`, `node_name` and non-pool `max_load`. |
 | Pool machine or member | Other payload attributes | Nonempty values, except `description` and `node_name`. Includes `max_load` and `factor`, even zero. |
@@ -223,6 +220,14 @@ Descriptions stay quiet on every record kind, including calendars.
 Invalid values and unsupported constructs classified as `refused` in the
 [coverage register](simulation-coverage.md) retain their existing errors.
 Suppressing a warning does not activate the requested behavior.
+
+A CMD job's `ulimit` sets resource soft/hard pairs in the child before the
+shell starts (DL-492). For example, `ulimit: n="64,64"` sets both descriptor
+limits to 64. Invalid or unavailable limits refuse preflight; a later
+setting failure records `spawn_failed`. A job's `profile` is sourced in the
+selected shell after the site profile and before the command. Either
+profile's failure stops the whole command with that profile's status.
+A profile can lower the child limits. See [launch settings](deploy.md#what-the-main-config-selects).
 
 `alarm_if_fail`, `alarm_if_terminated` and positive `max_run_alarm` feed the optional
 [site status hook](runner-design.md#4-engine-loop--single-writer) (DL-469).
@@ -896,13 +901,14 @@ real execution. The reserved attribute variables `__job_name`, `__machine`,
 `watch_file` does not accept dollar syntax.
 
 An output source beginning with `>` truncates or creates a regular file before
-each launch; `>>` appends (DL-460). Unprefixed outputs also append. Put the path
+each launch; `>>` appends (DL-460). An unprefixed explicit output uses
+`engine.std_file_mode`, default `append` (DL-492). Put the path
 immediately after the prefix, with no intervening space. `std_in_file` accepts
 placeholders but refuses either output prefix. The engine recognizes prefixes
 before variable expansion. A `>` introduced by expansion is literal. Use
 `./>name` or an absolute path for a literal filename beginning with `>`.
 
-A replacement applies `>` again; replay alone leaves file bytes alone.
+A replacement applies the selected truncation again; replay alone leaves file bytes alone.
 A later launch failure or interruption can leave output truncated. Special
 files such as `/dev/null` retain the wrapper's ordinary open behavior.
 See [runner §6](runner-design.md#6-adapters) for preparation failures,

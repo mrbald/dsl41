@@ -1590,13 +1590,7 @@ def rule_l025(catalog: CatalogIR, exceptions: Exceptions | None = None) -> list[
     return out
 
 
-def rule_known_unsupported(
-    catalog: CatalogIR,
-    *,
-    job_shell: str | None = None,
-    job_profile: str | None = None,
-    std_file_mode: str = "append",
-) -> list[Violation]:
+def rule_known_unsupported(catalog: CatalogIR) -> list[Violation]:
     """DL-466: report requested, unapplied behavior; descriptions and neutral values are quiet."""
     out: list[Violation] = []
 
@@ -1651,9 +1645,6 @@ def rule_known_unsupported(
             pass
         if job.job_type != "CMD" and 0 < job.sem.n_retrys <= 20:
             attributes.add("n_retrys")
-        if job.job_type == "CMD":
-            if raw.get("ulimit"):
-                attributes.add("ulimit")
         machine = catalog.machines.get(job.exec_.machine or "") if job.exec_ else None
         if machine and machine.members:
             try:
@@ -1692,13 +1683,6 @@ def rule_known_unsupported(
                 }
             ):
                 warn(kind, name, attribute, record.span)
-    for attribute, requested in (
-        ("job_shell", job_shell is not None),
-        ("job_profile", job_profile is not None),
-        ("std_file_mode", std_file_mode == "truncate"),
-    ):
-        if requested:
-            warn("engine", "", attribute)
     return out
 
 
@@ -1755,17 +1739,13 @@ def lint_catalog(
     tz_aliases: Mapping[str, str] | None = None,
     today: date | None = None,
     exceptions: Exceptions | None = None,
-    job_shell: str | None = None,
-    job_profile: str | None = None,
-    std_file_mode: str = "append",
 ) -> LintReport:
     """Run every registered rule: IR-F rules first, then graph rules, each in code order.
 
     The derived graph is computed once unless the caller passes it. `base_tz`, `tz_aliases`
     and `today` reach L023 only: the zone for a schedule without `timezone` (UTC when None),
     the `--timezone-map` table, and the reference date. `exceptions` reaches L024 and L025 only;
-    with None both are inert. The shell, profile and stream-mode settings reach only
-    known-unsupported (DL-466).
+    with None both are inert.
     """
     if graph is None:
         graph = derive_graph(catalog)
@@ -1779,15 +1759,6 @@ def lint_catalog(
             violations.extend(rule_l024(catalog, exceptions))
         elif code == "L025":
             violations.extend(rule_l025(catalog, exceptions))
-        elif code == "known-unsupported":
-            violations.extend(
-                rule_known_unsupported(
-                    catalog,
-                    job_shell=job_shell,
-                    job_profile=job_profile,
-                    std_file_mode=std_file_mode,
-                )
-            )
         else:
             violations.extend(rule(catalog))
     for _code, graph_rule in GRAPH_RULES:

@@ -668,21 +668,19 @@ def test_watcher_pattern_refusals(pattern):
         )
 
 
-@pytest.mark.parametrize("shell", ["/bin/zsh", "/missing/sh", "sh"])
-def test_unsupported_passwd_shell_warns_and_falls_back(monkeypatch, shell):
+@pytest.mark.parametrize("shell", ["/bin/zsh", "/bin/bash", "/missing/sh", "sh"])
+def test_unset_shell_ignores_passwd_and_environment(monkeypatch, shell):
     monkeypatch.setenv("SHELL", "/bin/bash")
     monkeypatch.setattr(
         runner_preflight.pwd,
         "getpwuid",
         lambda uid: SimpleNamespace(pw_name="policy_user", pw_shell=shell),
     )
-    selected, warning = resolve_job_shell(None)
-    assert selected == "/bin/sh" and shell in warning and selected in warning
-    findings = runner_preflight.execution_policy_preflight(catalog())
-    assert [(item.severity, item.code) for item in findings] == [("WARN", "shell")]
+    assert resolve_job_shell(None) == "/bin/sh"
+    assert not runner_preflight.execution_policy_preflight(catalog())
 
 
-def test_shell_fallback_is_one_stderr_warning(monkeypatch, capsys):
+def test_unset_shell_has_no_stderr_warning(monkeypatch, capsys):
     monkeypatch.setattr(
         runner_preflight.pwd,
         "getpwuid",
@@ -694,14 +692,12 @@ def test_shell_fallback_is_one_stderr_warning(monkeypatch, capsys):
     cli_run._preflight_items_or_exit(runner_preflight.execution_policy_preflight(jobs))
     output = capsys.readouterr()
     assert output.out == ""
-    assert output.err.count("preflight WARN [shell]") == 1
-    assert "/bin/zsh" in output.err and "/bin/sh" in output.err
+    assert output.err == ""
 
 
 def test_explicit_shell_never_falls_back():
-    assert resolve_job_shell("/bin/sh", "/bin/zsh") == ("/bin/sh", None)
-    with pytest.raises(ValueError, match="job_shell"):
-        resolve_job_shell("/missing/sh", "/bin/sh")
+    assert resolve_job_shell("/bin/sh") == "/bin/sh"
+    assert resolve_job_shell("/missing/sh") == "/missing/sh"
     assert any(
         item.code == "shell" and item.severity == "ERROR"
         for item in runner_preflight.execution_policy_preflight(catalog(), job_shell="/missing/sh")

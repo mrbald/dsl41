@@ -329,10 +329,19 @@ never report. An adapter that owns a process group must kill the whole group
 before the cancellation finishes.
 
 **LocalCommandAdapter** (CMD): an engine-side task that spawns the per-run
-**wrapper** (§6a) and awaits it. The wrapper spawns `/bin/sh -c`. When
-`profile` is set, the wrapper sources it first — `. <profile> && <command>`.
-Thus a failing profile fails the job with sh's exit code ([?] unverified
-vendor corner, pinned here — E5). The command runs in its own pgid
+**wrapper** (§6a) and awaits it. The wrapper runs `<shell> -c <script>`.
+The applied `engine.job_shell` selects the shell, default `/bin/sh` (DL-492).
+The adapter composes one line: `. <quoted site path> || exit $?; . <quoted job path> || exit $?; <command>`.
+Each profile part is present only when set, site `engine.job_profile` first,
+then job `profile`. Paths use shell quoting. The shell reads the line before
+sourcing either profile, so a profile's alias does not rewrite the command.
+Profile exports reach every part of the command, including `b` in `a & b`
+(DL-492). A failing profile exits the whole script with its status (E5).
+A command that is only a comment ends 0 after succeeding profiles, as without a profile (DL-492).
+The child applies the job's `ulimit` pairs
+after restoring signals and before starting the shell; a profile can
+lower them. An exec or limit-setting failure records `spawn_failed`.
+The command runs in its own pgid
 *separate from the wrapper's* (§6a). The wrapper's `status.json` is the
 **sole data channel** for the outcome. The wrapper's exit only tells the
 engine to read it. KILLJOB, including `term_run_time` and terminator kills,
@@ -392,25 +401,28 @@ and update, even when an inherited value exists; reread reports the error
 beside a diff (DL-463).
 
 When `std_out_file` / `std_err_file` are set, stdout/stderr append to
-them unless the source value starts with `>` (DL-460). A leading `>`
-truncates or creates a regular file before each launch; `>>` appends.
+them by default. An unprefixed explicit output uses the applied
+`engine.std_file_mode`, default `append`; `truncate` prepares it as `>`
+does (DL-492). A leading `>` truncates or creates a regular file before
+each launch; `>>` appends (DL-460).
 The path must immediately follow the prefix. The engine strips the prefix
 before variable expansion and stores the resolved path in the dispatch.
 Expanded values remain literal. Use `./>name` or an absolute path to name
 a file whose name starts with `>` literally. Output prefixes on
-`std_in_file` refuse. Unset outputs append to
-`<run_root>/logs/<job>.<run_number>.{out,err}`.
+`std_in_file` refuse. Unset outputs always append to
+`<run_root>/logs/<job>.<run_number>.{out,err}`, regardless of the default mode.
 
-The engine prepares `>` outputs after dispatch commits and before wrapper
+The engine prepares truncating explicit outputs after dispatch commits and before wrapper
 launch. It uses a nonblocking open, truncates only regular files, and closes
 the descriptor. If opening fails, or the target is nonregular, the engine
 leaves it to the wrapper's ordinary open behavior. This includes `/dev/null`;
 a FIFO can still wait for a reader in the wrapper. Preparation errors after
 a successful open prevent launch and report spawn failure.
 New files use mode `0600` before umask; existing permissions stay.
-The wrapper input stays unchanged and the wrapper opens outputs for append.
+The wrapper opens all three streams before starting the shell. It opens
+outputs for append, after any adapter preparation (DL-492).
 
-A replacement attempt of the same run applies `>` again. Replay alone
+A replacement attempt of the same run applies the selected truncation again. Replay alone
 does not touch output files or reinterpret stored paths. An already aborted
 launch skips preparation. A stop during wrapper creation or a later launch
 failure can leave the output truncated, as a shell stopped after redirection
@@ -1395,8 +1407,8 @@ its rule, with the entry or section that holds it.
 - **E4** — on the tethered path, engine death terminates jobs and resume
   uses §7's reconciliation ladder (DL-41a, DL-424). The supervisor
   reattachment rule is retired (DL-424; DL-48, DL-396).
-- **E5** — profile sourcing failure semantics [?]. Default: the job fails
-  with sh's exit code (§6).
+- **E5** — a failing site or job profile exits the whole script with the
+  profile's status (§6, DL-492). Vendor parity remains unverified [?].
 - **E6** — FW steady-size semantics are the `fw-existence` switch (§8a,
   DL-258, DL-461): default `stable`, two stable polls (exact-path size or wildcard
   five-field samples, retained for the rest of a sampled run under DL-467);

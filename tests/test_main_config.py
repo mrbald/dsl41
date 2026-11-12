@@ -952,7 +952,7 @@ def test_known_unsupported_start_journals_full_order(short_root, ignored):
     output = boot_and_stop(path, stderr_log=errors)
     expected = f"lint policy: refuse=none; ignore={','.join(ignore)}\nL022 info: 2 findings\n"
     if not ignored:
-        expected += "known-unsupported warn: 2 findings\n"
+        expected += "known-unsupported warn: 1 finding\n"
     expected += f"full list: dsl41 lint --config {shlex.quote(str(path))}\n"
     assert without_cookie_scan_notice(errors.read_text()) == expected
     cycle = (
@@ -967,12 +967,6 @@ def test_known_unsupported_start_journals_full_order(short_root, ignored):
             "code": "known-unsupported",
             "job": "A",
             "message": "job A: group: known but unsupported; it has no effect in this release",
-        },
-        {
-            "severity": "WARN",
-            "code": "known-unsupported",
-            "job": None,
-            "message": "engine.job_shell: known but unsupported; it has no effect in this release",
         },
     ]
     assert warnings == [
@@ -1000,7 +994,6 @@ def test_known_unsupported_update_preparation_full_findings(tmp_path, ignored):
     live = live_of(candidate)
     view = preview(candidate, live, include_definition_changes=False)
     group = "job A: group: known but unsupported; it has no effect in this release"
-    shell = "engine.job_shell: known but unsupported; it has no effect in this release"
     zone = (
         "timezone 'GMT+1' read as a POSIX fixed offset = UTC-01:00"
         " (POSIX offsets are west-positive: GMT+5 means 5h WEST of GMT)"
@@ -1008,11 +1001,7 @@ def test_known_unsupported_update_preparation_full_findings(tmp_path, ignored):
     assert "lint_summary" not in view
     assert view["lint_messages"] == [
         f"lint policy: refuse=none; ignore={','.join(ignore)}",
-        *(
-            []
-            if ignored
-            else [f"{jil}:1: known-unsupported warn: {group}", f"known-unsupported warn: {shell}"]
-        ),
+        *([] if ignored else [f"{jil}:1: known-unsupported warn: {group}"]),
         f"preflight WARN [timezone] A: {zone}",
     ]
     result = reread(live, tmp_path / "plans", candidate=candidate, start=T0)
@@ -1035,14 +1024,6 @@ def test_known_unsupported_update_preparation_full_findings(tmp_path, ignored):
                     "byte_start": 0,
                     "byte_end": len(source.encode()) - 1,
                 },
-            },
-            {
-                "code": "known-unsupported",
-                "severity": "warn",
-                "message": shell,
-                "jobs": [],
-                "span": None,
-                "detail": "job_shell",
             },
         ]
     )
@@ -1087,7 +1068,7 @@ def test_known_unsupported_restart_reports_without_refusal(short_root, ignored):
         ""
         if ignored
         else (
-            "known-unsupported warn: 5 findings\n"
+            "known-unsupported warn: 4 findings\n"
             f"files on disk (may differ from applied estate until update): dsl41 lint --config {path}\n"
         )
     )
@@ -1110,13 +1091,6 @@ def test_known_unsupported_restart_reports_without_refusal(short_root, ignored):
         }
         for name in ("A", "B")
         for attribute in ("application", "group")
-    ] + [
-        {
-            "severity": "WARN",
-            "code": "known-unsupported",
-            "job": None,
-            "message": "engine.job_shell: known but unsupported; it has no effect in this release",
-        }
     ]
     assert warnings == [
         *([] if ignored else expected),
@@ -1187,7 +1161,7 @@ def test_known_unsupported_startup_and_socket_reread_process(short_root):
             while "engine up; control socket:" not in log.read_text():
                 assert child.poll() is None and time.monotonic() < deadline, log.read_text()
                 time.sleep(0.05)
-            assert f"known-unsupported warn: {len(expected) + 1} findings" in log.read_text()
+            assert f"known-unsupported warn: {len(expected)} findings" in log.read_text()
             for attribute in expected:
                 assert f"job A: {attribute}:" not in log.read_text()
             assert "engine.job_shell:" not in log.read_text()
@@ -1219,11 +1193,11 @@ def test_known_unsupported_startup_and_socket_reread_process(short_root):
                 assert set((root / "plans").iterdir()) == before
                 full = policy == "warn" and not ignored
                 assert result.stderr.count("known-unsupported warn:") == (
-                    len(expected) + 1 if full else int(not ignored)
+                    len(expected) if full else int(not ignored)
                 )
                 for attribute in expected:
                     assert result.stderr.count(f"job A: {attribute}:") == int(full)
-                assert result.stderr.count("engine.job_shell:") == int(full)
+                assert result.stderr.count("engine.job_shell:") == 0
             assert active_configuration(root).catalog.jobs["A"].passthrough["group"] == "batch"
             with closing(SqliteStore(root / "engine.db", read_only=True)) as store:
                 assert store.current_config_rev() == 1
@@ -1243,7 +1217,7 @@ def test_known_unsupported_startup_and_socket_reread_process(short_root):
         for item in body["items"]
         if item["code"] == "known-unsupported"
     ]
-    assert len(warnings) == len(expected) + 1
+    assert len(warnings) == len(expected)
 
 
 def test_10_restart_uses_stored_catalog_and_reports_pending(short_root: Path) -> None:

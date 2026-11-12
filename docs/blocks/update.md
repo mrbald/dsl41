@@ -111,7 +111,7 @@ not held by its mark (DL-490, D12=MARK).
 The stop list includes every running box that ends with the roots.
 The forecast reads statuses, not flags or the terminator cascade: held or iced
 members can read `restart` without running. A running `job_terminator` member
-moved out of a root the update ends, to outside every restarting root, is ended
+whose own box the update ends, moved to outside every restarting root, is ended
 with the old box run; the forecast reads
 `rerun` for a command and nothing for a sub-box (DL-490, BUG-69).
 

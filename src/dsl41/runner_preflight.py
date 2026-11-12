@@ -39,6 +39,7 @@ from dsl41.runtime_policy import (
     LIMIT_RESOURCES,
     PolicyRefused,
     StreamMode,
+    check_job_shell,
     job_policy,
     stream_target,
 )
@@ -714,15 +715,10 @@ def execution_policy_preflight(
             )
             for name in sorted(catalog.jobs)
         ]
-    from dsl41.runtime_policy import resolve_job_shell
-
     try:
-        _, warning = resolve_job_shell(job_shell, account.pw_shell)
+        check_job_shell(job_shell)
     except ValueError as exc:
         items.append(PreflightItem(severity="ERROR", code="shell", message=str(exc)))
-    else:
-        if warning is not None:
-            items.append(PreflightItem(severity="WARN", code="shell", message=warning))
     for name, job in sorted(catalog.jobs.items()):
         try:
             policy = job_policy(job, hook_configured=hook_configured)
@@ -926,9 +922,7 @@ def preflight(
     from dsl41.lint import rule_known_unsupported
 
     if known_unsupported is None:
-        known_unsupported = rule_known_unsupported(
-            catalog, job_shell=job_shell, job_profile=job_profile, std_file_mode=std_file_mode
-        )
+        known_unsupported = rule_known_unsupported(catalog)
     items.extend(
         PreflightItem(
             severity="WARN",

@@ -194,8 +194,8 @@ nothing.
 | job_attr:permission | refused | runtime_policy.job_policy | - |  |  |  | generic | per-job permissions are refused; engine access policy applies |
 | job_attr:priority | supported | DL-50, DL-247, DL-255 | - |  |  |  | generic | orders the QUE_WAIT queue, lower number first; a positive priority makes a start check machine load, a job waiting for load blocks every lower positive priority on its machine, and a job past its load check that waits on a named resource blocks every lower positive priority naming any resource it names |
 | job_attr:priority#unset-order | provisional | DL-50, DL-247, capacity.CapacityPool.sorted_waiters | Qr2 | yes |  |  | none | a resource waiter with no priority is assumed to sort behind every declared priority, explicit 0 included, though the vendor default is 0 |
-| job_attr:profile | supported | runner_adapters._build_run_spec | - |  |  |  | generic | sourced before the command runs (`. <profile> && <command>`); inert on a BOX (SEM-10) |
-| job_attr:profile#sourcing-failure | provisional | runner_adapters._build_run_spec | E5 | yes |  |  | none | a profile that fails to source fails the job with sh's exit code |
+| job_attr:profile | supported | runner_adapters._build_run_spec, DL-492 | - |  |  |  | generic | sourced after the site profile and before the command; failure exits the script; inert on a BOX (SEM-10) |
+| job_attr:profile#sourcing-failure | provisional | runner_adapters._build_run_spec | E5 | yes |  |  | none | a failing site or job profile exits the whole script with its status (DL-492); vendor parity pending |
 | job_attr:resources | supported | DL-21, DL-50, DL-255 | - |  |  |  | generic | the resource groups a start must satisfy before it may run; a job with a positive priority that waits on any of them blocks every lower positive priority naming any of them, a forced start included, and holds no load while it waits |
 | job_attr:resources#duplicate | refused | runner_preflight._resource_preflight, DL-50 | - |  |  |  | none | a job naming one resource twice is refused at preflight as ambiguous demand; a direct oracle caller instead SUMS the quantities and takes the most restrictive release policy |
 | job_attr:run_calendar | supported | SEM-30, DL-56 | - |  |  |  | generic | the named calendar whose days are the schedule's day set |
@@ -211,15 +211,15 @@ nothing.
 | job_attr:start_mins | supported | SEM-32 | - |  |  |  | generic | the minutes past each hour a schedule tick fires at on an eligible day |
 | job_attr:start_times | supported | SEM-32 | - |  |  |  | generic | the wall-clock times a schedule tick fires at on an eligible day |
 | job_attr:status | supported | SEM-24 | - |  |  |  | generic | the definition-time status: only the out-of-band states are modelled, run states refuse |
-| job_attr:std_err_file | supported | runner_environment.resolve_streams, DL-447 | - |  |  |  | generic | the child's stderr appends here; a source > truncates before each launch, >> appends (DL-460); inert on a BOX (SEM-10); $VAR and ${VAR} resolve once before profile execution |
+| job_attr:std_err_file | supported | runner_environment.resolve_streams, DL-447 | - |  |  |  | generic | explicit stderr uses the configured default mode (DL-492); > truncates before each launch, >> appends (DL-460); inert on a BOX (SEM-10); $VAR and ${VAR} resolve once before profile execution |
 | job_attr:std_in_file | supported | runner_adapters._build_run_spec | - |  |  |  | generic | the child reads stdin from here instead of /dev/null; inert on a BOX (SEM-10); $VAR and ${VAR} resolve once before profile execution (DL-447) |
-| job_attr:std_out_file | supported | runner_environment.resolve_streams, DL-447 | - |  |  |  | generic | the child's stdout appends here; a source > truncates before each launch, >> appends (DL-460); inert on a BOX (SEM-10); $VAR and ${VAR} resolve once before profile execution |
+| job_attr:std_out_file | supported | runner_environment.resolve_streams, DL-447 | - |  |  |  | generic | explicit stdout uses the configured default mode (DL-492); > truncates before each launch, >> appends (DL-460); inert on a BOX (SEM-10); $VAR and ${VAR} resolve once before profile execution |
 | job_attr:success_codes | supported | SEM-09, DL-33 | - |  |  |  | generic | the explicit success set; with no fail_codes beside it, it alone decides the verdict |
 | job_attr:term_run_time | supported | dossier ss5, oracle.Oracle._arm_term_run_time | - |  |  |  | generic | new source accepts 0..527040 minutes (DL-469); arms a timer that TERMINATEs the run after n minutes; zero means no limit and arms no timer (DL-241) |
 | job_attr:timezone | supported | SEM-35 | - |  |  |  | generic | the zone every schedule time on this job is read in |
 | job_attr:timezone#dst-fold | supported | SEM-32, SEM-35, DL-260, timezones.start_time_instants | - |  |  |  | none | on a one-hour DST change at 02:00 local, start_times in the repeated hour fire once, in the second pass, and start_mins fire in both passes; a start time in the missing hour fires in the first minute of 03:00 with its minute as seconds (2:05 at 3:00:05), only the first such start time fires, and start_mins ticks in the missing hour do not exist. The dst-start-times=fold0 switch selects the fold=0 conversion instead |
 | job_attr:timezone#dst-other-shape | provisional | SEM-32, DL-260, timezones.start_time_instants | - |  |  |  | none | a DST change of another shape (a half-hour change, a change at another hour) keeps the fold=0 conversion of start_times and start_mins: the vendor's rules are unverified there, and no label was opened for it |
-| job_attr:ulimit | passthrough | runtime_policy.parse_limits | - |  |  |  | generic | resource pairs are validated; child limit application is not yet activated; known-unsupported warns (DL-466) |
+| job_attr:ulimit | supported | runtime_policy.job_limits, DL-492 | - |  |  |  | generic | CMD child resource limits apply before the shell starts; profiles can lower them |
 | job_attr:watch_file | supported | runner-design ss6, ss8a, DL-258 | - |  |  |  | generic | the exact path or final-component * or ? pattern an FW job polls; any one qualifying match can complete it under runner-design ss6: exact paths without sampled history use size-only stability, wildcards and sampled runs use five-field samples per pathname and file identity (DL-461, DL-467) |
 | job_attr:watch_file#stat-error | provisional | runner-design ss6, runner_adapters.FileWatcherAdapter | - |  |  |  | none | EVERY stat error reads as the file being absent -- a permission denial is not told apart from a missing file -- and the watch resets its stable count and keeps polling; no label was opened for it |
 | job_attr:watch_file_min_size | supported | runner-design ss6 | - |  |  |  | generic | the minimum size any one matching file must reach before the FW job completes |
@@ -619,13 +619,13 @@ nothing.
 | profile_field:fw_default_interval_us | supported | runner-design ss6, DL-122 | - |  |  |  | generic | the poll interval an FW job with no watch_interval uses |
 | profile_field:fw_default_interval_us#rounding | provisional | runner_startup.wire_from_profile, DL-122 | - |  |  |  | none | no shipped surface sets a value that is not whole seconds. A hand-pinned one is wired rounded half to even (at least 1 s), not at the pinned interval, and resume refuses it as profile drift. No label was opened for the conversion |
 | profile_field:job_env | supported | DL-447, runner_environment.validate_job_env | - |  |  |  | generic | literal job environment overrides applied through configuration revisions; instance variables come exclusively from this map |
-| profile_field:job_profile | passthrough | runtime_policy.RuntimePolicySettings | - |  |  |  | generic | validated revisioned setting; execution activation is pending |
-| profile_field:job_shell | passthrough | runtime_policy.RuntimePolicySettings | - |  |  |  | generic | validated revisioned setting; execution activation is pending |
+| profile_field:job_profile | supported | runtime_policy.RuntimePolicySettings, DL-492 | - |  |  |  | generic | site profile is sourced before the job profile |
+| profile_field:job_shell | supported | runtime_policy.RuntimePolicySettings, DL-492 | - |  |  |  | generic | selected shell runs the attempt script with -c |
 | profile_field:kill_signals | supported | DL-462, runner_adapters.selected_signal_ladder | - |  |  |  | generic | ordered KILLJOB signals, five seconds apart; later kills take policy updates |
 | profile_field:machine_policy | supported | DL-122, DL-49 | - |  |  |  | generic | how the one ambiguous machine verdict resolves |
 | profile_field:semantics | supported | DL-122, runner-design ss8a, DL-252 | - |  |  |  | generic | explicit semantic-switch overrides only, an explicit default normalized away; written {} when there is none |
-| profile_field:set_job_attribute_environmentals | passthrough | runtime_policy.RuntimePolicySettings | - |  |  |  | generic | validated revisioned setting; execution activation is pending |
-| profile_field:std_file_mode | passthrough | runtime_policy.RuntimePolicySettings | - |  |  |  | generic | validated revisioned setting; execution activation is pending |
+| profile_field:set_job_attribute_environmentals | supported | runtime_policy.RuntimePolicySettings, DL-492 | - |  |  |  | generic | controls generated job attribute environment variables |
+| profile_field:std_file_mode | supported | runtime_policy.RuntimePolicySettings, DL-492 | - |  |  |  | generic | unprefixed explicit outputs use the selected append or truncate mode; default logs append |
 | profile_field:tz_aliases | supported | DL-122, DL-62 | - |  |  |  | generic | the site-local zone-name table; a name only it resolves fails without it |
 
 ### profile_alt
@@ -657,8 +657,8 @@ nothing.
 | profile_alt:semantics.renewable-free=Y | supported | runner-design ss8a, DL-256 | - |  |  |  | generic | the default and the vendor's: a renewable request with no FREE frees on SUCCESS only and holds its units after FAILURE or TERMINATED |
 | profile_alt:semantics.wekr-first-week=first-full | supported | runner-design ss8a, SEM-37, DL-259 | - |  |  |  | generic | the default: a WEKR token's week 1 starts on the first anchor day on or after January 1, and the days before it are in no numbered week |
 | profile_alt:semantics.wekr-first-week=partial | supported | runner-design ss8a, SEM-37, DL-259 | - |  |  |  | generic | a WEKR token's week 1 runs from January 1 to the day before the first anchor day; unless January 1 is the anchor day, every week number is one higher |
-| profile_alt:std_file_mode=append | passthrough | runtime_policy.RuntimePolicySettings | - |  |  |  | generic | validated stream-mode setting; execution activation is pending |
-| profile_alt:std_file_mode=truncate | passthrough | runtime_policy.RuntimePolicySettings | - |  |  |  | generic | validated stream-mode setting; execution activation is pending |
+| profile_alt:std_file_mode=append | supported | runtime_policy.RuntimePolicySettings, DL-492 | - |  |  |  | generic | default mode for unprefixed explicit outputs; default logs always append |
+| profile_alt:std_file_mode=truncate | supported | runtime_policy.RuntimePolicySettings, DL-492 | - |  |  |  | generic | default mode for unprefixed explicit outputs; default logs always append |
 
 ### adapter_outcome
 

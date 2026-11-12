@@ -474,9 +474,9 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
         _row(
             surface="job_attr",
             member="ulimit",
-            klass=PASSTHROUGH,
-            cite="runtime_policy.parse_limits",
-            effect="resource pairs are validated; child limit application is not yet activated; known-unsupported warns (DL-466)",
+            klass=SUPPORTED,
+            cite="runtime_policy.job_limits, DL-492",
+            effect="CMD child resource limits apply before the shell starts; profiles can lower them",
             trigger=_job(ulimit='n="1,2"'),
         ),
     )
@@ -864,9 +864,9 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             surface="job_attr",
             member="profile",
             klass=SUPPORTED,
-            cite="runner_adapters._build_run_spec",
-            effect="sourced before the command runs (`. <profile> && <command>`); inert on"
-            " a BOX (SEM-10)",
+            cite="runner_adapters._build_run_spec, DL-492",
+            effect="sourced after the site profile and before the command; failure exits the script;"
+            " inert on a BOX (SEM-10)",
             trigger=_job(profile="pyproject.toml"),
         ),
         _row(
@@ -874,7 +874,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="std_out_file",
             klass=SUPPORTED,
             cite="runner_environment.resolve_streams, DL-447",
-            effect="the child's stdout appends here; a source > truncates before each launch,"
+            effect="explicit stdout uses the configured default mode (DL-492); > truncates before each launch,"
             " >> appends (DL-460); inert"
             " on a BOX (SEM-10); $VAR and ${VAR} resolve once before profile execution",
             trigger=_job(std_out_file="/tmp/out.log"),
@@ -884,7 +884,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="std_err_file",
             klass=SUPPORTED,
             cite="runner_environment.resolve_streams, DL-447",
-            effect="the child's stderr appends here; a source > truncates before each launch,"
+            effect="explicit stderr uses the configured default mode (DL-492); > truncates before each launch,"
             " >> appends (DL-460); inert"
             " on a BOX (SEM-10); $VAR and ${VAR} resolve once before profile execution",
             trigger=_job(std_err_file="/tmp/err.log"),
@@ -920,7 +920,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
                 "runner_adapters.LocalCommandAdapter#1",
                 "runner_adapters._build_run_spec#1",
             ),
-            effect="a profile that fails to source fails the job with sh's exit code",
+            effect="a failing site or job profile exits the whole script with its status (DL-492); vendor parity pending",
             trigger=_job(profile="pyproject.toml"),
             quiet=_job(),
         ),
@@ -3184,16 +3184,28 @@ PROFILE_ROWS: tuple[Row, ...] = (
             _row(
                 surface="profile_field",
                 member=name,
-                klass=PASSTHROUGH,
-                cite="runtime_policy.RuntimePolicySettings",
-                effect="validated revisioned setting; execution activation is pending",
+                klass=SUPPORTED,
+                cite="runtime_policy.RuntimePolicySettings, DL-492",
+                effect=effect,
                 trigger='{"%s": %s}' % (name, value),
             )
-            for name, value in (
-                ("job_profile", '"/tmp/synthetic-profile"'),
-                ("job_shell", '"/bin/sh"'),
-                ("std_file_mode", '"truncate"'),
-                ("set_job_attribute_environmentals", "false"),
+            for name, value, effect in (
+                (
+                    "job_profile",
+                    '"/tmp/synthetic-profile"',
+                    "site profile is sourced before the job profile",
+                ),
+                ("job_shell", '"/bin/sh"', "selected shell runs the attempt script with -c"),
+                (
+                    "std_file_mode",
+                    '"truncate"',
+                    "unprefixed explicit outputs use the selected append or truncate mode; default logs append",
+                ),
+                (
+                    "set_job_attribute_environmentals",
+                    "false",
+                    "controls generated job attribute environment variables",
+                ),
             )
         ),
         _profile_row(
@@ -3252,9 +3264,9 @@ PROFILE_ROWS: tuple[Row, ...] = (
             _row(
                 surface="profile_alt",
                 member=f"std_file_mode={mode}",
-                klass=PASSTHROUGH,
-                cite="runtime_policy.RuntimePolicySettings",
-                effect="validated stream-mode setting; execution activation is pending",
+                klass=SUPPORTED,
+                cite="runtime_policy.RuntimePolicySettings, DL-492",
+                effect="default mode for unprefixed explicit outputs; default logs always append",
                 trigger='{"std_file_mode": "%s"}' % mode,
             )
             for mode in ("append", "truncate")

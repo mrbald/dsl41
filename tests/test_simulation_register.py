@@ -1741,19 +1741,11 @@ def test_manual_known_unsupported_inventory() -> None:
                     assert warns == (attribute in active - payloads[key]), (key, name, attribute)
     assert emitted == jobs
     assert visited == set(payloads) == set(labels.values())
-    settings = {
-        name.strip("`").removeprefix("engine.")
-        for name, _ in table("deploy.md", "| Setting | Warns when |")
-    }
-    assert {
+    assert not {
         name
         for name, param in inspect.signature(rule_known_unsupported).parameters.items()
         if param.kind == inspect.Parameter.KEYWORD_ONLY
-    } == settings
-    findings = rule_known_unsupported(
-        ir.CatalogIR(), job_shell="/bin/sh", job_profile="/tmp/profile", std_file_mode="truncate"
-    )
-    assert len(findings) == 3 and {item.detail for item in findings} == settings
+    }
     assert not rule_known_unsupported(ir.CatalogIR())
 
 

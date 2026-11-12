@@ -172,7 +172,7 @@ includes every running box that ends with the roots (DL-490).
 
 The forecast reads statuses, not flags or the terminator cascade. A held or iced
 member inside a restarting root reads `restart` but does not run. A running
-`job_terminator` member moved out of a root the update ends, to outside every
+`job_terminator` member whose own box the update ends, moved to outside every
 restarting root, is ended with the old box run (SEM-14); the forecast reads `rerun` for a command and nothing for a sub-box
 (DL-490, BUG-69).
 Readiness findings accompany a valid diff.

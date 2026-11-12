@@ -748,7 +748,6 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
 @pytest.mark.parametrize(
     "attribute,active,neutral",
     [
-        ("ulimit", 'c="0,0"', '""'),
         ("min_run_alarm", "2", "0"),
         ("send_notification", "1", "0"),
         ("elevated", "y", "n"),
@@ -824,24 +823,19 @@ def test_known_unsupported_supporting_records(kind: str, source: str, attribute:
             )
 
 
-def test_known_unsupported_dedup_and_engine_settings() -> None:
+def test_known_unsupported_dedup() -> None:
     catalog = lower_source(
         "insert_machine: M\ntype: v\nmax_load: 0\nfactor: 1\n"
         "machine: a\nmax_load: 1\nfactor: 2\nmachine: b\nmax_load: 2\nfactor: 3\n"
         + "".join(f"insert_job: J{i}\njob_type: c\ncommand: true\n" for i in range(200))
     )
-    findings = rule_known_unsupported(
-        catalog, job_shell="/bin/sh", job_profile="/site.env", std_file_mode="truncate"
-    )
+    findings = rule_known_unsupported(catalog)
     assert [v.detail for v in findings] == [
         "factor",
         "max_load",
-        "job_shell",
-        "job_profile",
-        "std_file_mode",
     ]
     assert all(v.jobs == [] for v in findings)
-    assert rule_known_unsupported(CatalogIR(), std_file_mode="append") == []
+    assert rule_known_unsupported(CatalogIR()) == []
 
 
 @pytest.mark.parametrize(
@@ -853,6 +847,7 @@ def test_known_unsupported_dedup_and_engine_settings() -> None:
         "insert_xinst: X\nxtype: a\ndescription: text\n",
         "extended_calendar: C\ncondition: DAILY\ndescription: text\n",
         "insert_job: A\njob_type: c\ncommand: true\nprofile: /site.env\nstd_out_file: > /tmp/out\nstd_err_file: >> /tmp/err\npriority: 1\n",
+        'insert_job: A\njob_type: c\ncommand: true\nulimit: c="0,0"\n',
         "insert_job: A\njob_type: f\nwatch_file: /tmp/*.ready\n",
     ],
 )
