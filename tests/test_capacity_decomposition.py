@@ -29,11 +29,13 @@ from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import (
     CapacityReservation,
+    CarriedRows,
     Event,
     JobRuntime,
     OracleError,
     RuntimeState,
 )
+from dsl41.runner_journal import oracle_rows, restore_oracle
 from dsl41.semantics import resolve
 
 T0 = datetime(2026, 7, 1, 8, 0)
@@ -102,8 +104,10 @@ def test_pr19a_ghost_bucket_survives_removal_and_reintroduction() -> None:
     assert "r:FUEL" not in without._bucket_cap
 
     # and when FUEL returns, the 3 are still spent
-    reopened = Oracle(lower_source(_fuel_jil(3)))
-    reopened.store.seed_consumed(spent)
+    reopened = restore_oracle(
+        lower_source(_fuel_jil(3)), CarriedRows.model_validate(oracle_rows(o))
+    )
+    assert dict(reopened.store.consumed) == spent
     assert _fits(reopened, "eight") is False
     assert _fits(reopened, "seven") is True
 
@@ -308,14 +312,8 @@ def test_a_restart_that_asks_less_than_it_holds_frees_the_difference() -> None:
 
 
 def test_consumed_never_negative() -> None:
-    """A seal with `consumed["r:FUEL"] = -3` would open with invented capacity
-    (PR-22). Refused at the seed, and again at every commit."""
+    """A negative spent-unit count is refused at every input commit (DL-120)."""
     store = RuntimeState()
-    store.seed_consumed({"r:FUEL": 3})
-    assert dict(store.consumed) == {"r:FUEL": 3}
-    with pytest.raises(OracleError, match="cannot be negative"):
-        store.seed_consumed({"r:FUEL": -3})
-
     store._consumed["r:FUEL"] = -3  # reaching past the owner, which is the case
     store.begin_input()
     store.move_flag("j", "arm_on")

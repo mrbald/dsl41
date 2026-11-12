@@ -21,7 +21,6 @@ import base64
 import fcntl
 import json
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -324,26 +323,6 @@ def _proc_look(pid: int) -> tuple[str, bool] | None:
 
 
 _LSTART_FORMAT = "%a %b %d %H:%M:%S %Y"
-_TICKS_TOKEN_RE = re.compile(r"ticks:(0|[1-9][0-9]*)")
-
-
-def valid_start_token(value: object) -> bool:
-    """Is `value` a start token THIS module could have minted?
-
-    `start_tokens_match` cannot draw this line: a token that will not parse is not
-    evidence of reuse, so a reader deciding "absent" from a recorded token must know the
-    vocabulary first. The grammar lives beside the minting (DL-75)."""
-    if not isinstance(value, str):
-        return False
-    if value.startswith("ticks:"):
-        return _TICKS_TOKEN_RE.fullmatch(value) is not None
-    if value.startswith("lstart:"):
-        try:
-            time.strptime(value[len("lstart:") :], _LSTART_FORMAT)
-        except ValueError:
-            return False
-        return True
-    return False
 
 
 def start_tokens_match(a: str, b: str, *, tolerance_s: float = 2.0) -> bool:

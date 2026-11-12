@@ -54,9 +54,6 @@ class Exceptions:
         """The marked job names, sorted."""
         return tuple(sorted(self.reasons))
 
-    def is_idempotent(self, name: str) -> bool:
-        return name not in self.reasons
-
     def reason(self, name: str) -> str | None:
         """The operator's reason for a marked job, None for an idempotent one."""
         return self.reasons.get(name)

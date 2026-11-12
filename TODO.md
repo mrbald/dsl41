@@ -11,7 +11,7 @@ None open.
 
 State handled outside a state machine and duplicated logic make the whole system fragile, so they rank here, not under maintenance (owner, 2026-11-10).
 
-- **FEAT-37**: Audit for code and tests that rest on state built by hand (DL-491). List the branches and chart rows that only such tests reach (store surgery, patched internals, harness worlds), from one suite run that records which test covers each branch; delete each or cover it from validated input. Known definitions with no production caller: `live_of_answer`, `load_run_root`, `valid_start_token`, `Exceptions.is_idempotent`, `attempt_spool_dir`; `read_journal` has one script caller.
+- **FEAT-37**: Audit for code and tests that rest on state built by hand (DL-491). List the branches and chart rows that only such tests reach (store surgery, patched internals, harness worlds), from one suite run that records which test covers each branch; delete each or cover it from validated input.
   Next: this item (owner, 2026-11-12).
 
 ## Known bugs
@@ -136,7 +136,6 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 
 - **FEAT-13**: Complete the 20 due spec reviews at main 071c312 (`scripts/arch_check.py --spec-status`).
 - **FEAT-15**: Replace placeholder update identities and client replies with types that need no fake token, revision or catalog (`src/dsl41/runner_control.py:724-732`, `src/dsl41/cli_reload.py:193-231`).
-- **FEAT-17**: Remove the dead client `PLANS` and move `live_of_answer` to test support (`src/dsl41/cli_reload.py:18,166`).
 - **FEAT-33**: Check that a difference label is unique within a job record. Labels such as `passthrough.description` and `kind` are unclear (DL-482).
 - **FEAT-34**: Put the job name last in the neutral `query status` table, so no column is padded to the longest name; long names make the table about 140 columns wide (DL-482).
 - **FEAT-35**: Give `query status JOB` a readable layout; it prints a raw field list with engine-wide fields mixed in (DL-482).

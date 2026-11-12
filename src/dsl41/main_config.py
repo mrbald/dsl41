@@ -156,19 +156,6 @@ def read_document(path: Path, raw: bytes | None = None) -> dict[str, Any]:
         raise RereadRefused([f"{path}: {exc}"]) from exc
 
 
-def load_run_root(path: Path) -> Path:
-    """Update reads only the engine location; the stored plan owns interpretation (DL-437)."""
-    document = read_document(path)
-    try:
-        value = document["engine"]["run_root"]
-        if not isinstance(value, str) or not Path(value).is_absolute():
-            raise ValueError("engine.run_root must be a nonempty absolute path")
-        joined(path, value)
-        return Path(value)
-    except (KeyError, TypeError, ValueError) as exc:
-        raise RereadRefused([f"{path}: engine.run_root: {exc}"]) from exc
-
-
 def load_host(path: Path, raw: bytes | None = None) -> HostConfig:
     """Restart validates format and current host settings; environment stays pending (DL-437)."""
     document = read_document(path, raw)

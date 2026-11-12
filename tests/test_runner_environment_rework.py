@@ -12,7 +12,6 @@ from dispatch_fixtures import dispatch_record
 from test_runner_environment import T0, catalog
 
 from dsl41.canon import canonical_bytes, decode
-from dsl41.cli_reload import SendFailed, live_of_answer
 from dsl41.runner_clock import EngineError, RealClock
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_config import RuntimeProfile, runtime_hash
@@ -246,18 +245,18 @@ def test_authenticated_catalog_view_ignores_claimed_authority(
                     "environment_view": "ops",
                 },
             )
+            assert answer["environment_view"] == ("read" if tier == "read" else "ops")
             if tier == "read":
                 assert answer["job_env_names"] == ["LOG_DIR"]
                 assert "job_env" not in answer["settings"] and "path_environment" not in answer
                 assert "INHERITED_PRIVATE_NAME" not in str(answer) and "explicit-value" not in str(
                     answer
                 )
-                with pytest.raises(SendFailed, match="ops catalog view"):
-                    live_of_answer(answer)
+                refused = await _call(server.path, {"v": 4, "cmd": "reread"})
+                assert refused["ok"] is False and refused["code"] == "access_denied"
             else:
                 assert answer["settings"]["job_env"] == {"LOG_DIR": "explicit-value"}
                 assert "INHERITED_PRIVATE_NAME" in answer["path_environment"]
-                assert live_of_answer(answer).path_environment is not None
         finally:
             await _teardown(engine, server, task)
 
