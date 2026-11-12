@@ -1587,7 +1587,7 @@ def test_retyped_command_box_scope_recovers_as_the_uncut_update(short_root, monk
 def test_box_scope_compatibility_and_refusals(short_root: Path, monkeypatch, snapshot, roots):
     """DL-489: only absence recomputes; invalid roots refuse before writes or signals."""
     import sqlite3
-    from dsl41 import runner_procid, runner_startup
+    from dsl41 import reload_plan, runner_procid, runner_startup
     from dsl41.runner_config import EngineSettings
 
     path = config_file(short_root)
@@ -1703,10 +1703,10 @@ def test_box_scope_compatibility_and_refusals(short_root: Path, monkeypatch, sna
             return
         with monkeypatch.context() as guarded:
             if roots == []:
-                guarded.setattr(runner_update, "restart_boxes", forbidden)
+                guarded.setattr(reload_plan, "restart_boxes", forbidden)
             engine = await restart()
             try:
-                assert engine.update._box_roots == ()
+                assert engine.update._box_scope.roots == ()
                 await engine.run_until_quiescent(T0)
                 assert engine.config_rev == 2 and engine.oracle.store.job["BX"].run_number == 1
                 if roots == "missing":
@@ -1913,21 +1913,105 @@ def test_box_restart_preserves_replacement_run_ownership(short_root: Path, case)
 
 
 @pytest.mark.parametrize(
-    "case,change,action",
+    "case,change,action,expected_effects",
     [
-        ("nested", "unchanged", "restart"),
-        ("held", "unchanged", "hold"),
-        ("finished", "unchanged", "restart"),
-        ("finished_held", "unchanged", "hold"),
-        ("move_out", "changed", "rerun"),
-        ("move_out_held", "changed", "hold"),
-        ("retype", "removed", "remove"),
+        (
+            "nested",
+            "unchanged",
+            "restart",
+            [
+                {"job": "BX", "action": "restart_box"},
+                {"job": "INNER", "action": "restart_box"},
+                {"job": "KEEP", "action": "restart"},
+                {"job": "MEMBER", "action": "restart"},
+            ],
+        ),
+        (
+            "in_place",
+            "changed",
+            "rerun",
+            [
+                {"job": "BX", "action": "restart_box"},
+                {"job": "INNER", "action": "restart_box"},
+                {"job": "KEEP", "action": "restart"},
+                {"job": "MEMBER", "action": "rerun"},
+            ],
+        ),
+        (
+            "held",
+            "unchanged",
+            "hold",
+            [
+                {"job": "BX", "action": "restart_box"},
+                {"job": "INNER", "action": "restart_box"},
+                {"job": "KEEP", "action": "restart"},
+                {"job": "MEMBER", "action": "hold"},
+            ],
+        ),
+        (
+            "finished",
+            "unchanged",
+            "restart",
+            [
+                {"job": "BX", "action": "restart_box"},
+                {"job": "KEEP", "action": "restart"},
+                {"job": "MEMBER", "action": "restart"},
+            ],
+        ),
+        (
+            "finished_held",
+            "unchanged",
+            "hold",
+            [
+                {"job": "BX", "action": "restart_box"},
+                {"job": "KEEP", "action": "restart"},
+                {"job": "MEMBER", "action": "hold"},
+            ],
+        ),
+        (
+            "move_out",
+            "changed",
+            "rerun",
+            [
+                {"job": "BX", "action": "restart_box"},
+                {"job": "INNER", "action": "restart_box"},
+                {"job": "KEEP", "action": "restart"},
+                {"job": "MEMBER", "action": "rerun"},
+            ],
+        ),
+        (
+            "move_out_held",
+            "changed",
+            "hold",
+            [
+                {"job": "BX", "action": "restart_box"},
+                {"job": "INNER", "action": "restart_box"},
+                {"job": "KEEP", "action": "restart"},
+                {"job": "MEMBER", "action": "hold"},
+            ],
+        ),
+        (
+            "retype",
+            "removed",
+            "remove",
+            [
+                {"job": "BX", "action": "remove"},
+                {"job": "INNER", "action": "remove"},
+                {"job": "KEEP", "action": "remove"},
+                {"job": "MEMBER", "action": "remove"},
+            ],
+        ),
     ],
 )
-def test_box_restart_marks_unchanged_members(short_root: Path, case, change, action):
+def test_box_restart_marks_unchanged_members(
+    short_root: Path, case, change, action, expected_effects
+):
+    from dsl41.reread_worker import preview
     from dsl41.runner_control import roundtrip
     from test_main_config_restart import cli_engine
+    from test_main_config import live_of
     from test_runner_control import _sync_sendevent, wait_for
+    from store_surgery import rows
 
     path = config_file(short_root, estate='non_idempotent = "marked.toml"\n')
     marked = "MEMBER" if "held" in case else None
@@ -1940,6 +2024,7 @@ def test_box_restart_marks_unchanged_members(short_root: Path, case, change, act
     text = boxes + member + "box_name: INNER\n" + command.replace("A", "KEEP") + "box_name: BX\n"
     jil = short_root / "a.jil"
     jil.write_text(text)
+    initial = main.prepare(path)
     socket = short_root / "run" / "control.sock"
     with cli_engine(path) as ask:
         assert _sync_sendevent(socket, "FORCE_STARTJOB", job="BX")["ok"]
@@ -1949,12 +2034,17 @@ def test_box_restart_marks_unchanged_members(short_root: Path, case, change, act
                 == ("SUCCESS" if case.startswith("finished") else "RUNNING")
             )
         )
+        live = live_of(
+            initial, {name: row["status"] for name, row in ask("status")["jobs"].items()}
+        )
         replacement = text + JOB.replace("A", "NEW") + "box_name: INNER\n"
         replacement += JOB.replace("A", "OUTER") + "box_name: BX\n"
         if case.startswith("move_out"):
             replacement = replacement.replace(member + "box_name: INNER\n", member)
         elif case == "retype":
             replacement = JOB.replace("A", "BX")
+        elif case == "in_place":
+            replacement = replacement.replace(member, member.replace("sleep 30", "sleep 31"))
         jil.write_text(replacement)
         answer = roundtrip(socket, {"v": 4, "cmd": "reread"})
         assert answer["ok"], answer
@@ -1962,6 +2052,9 @@ def test_box_restart_marks_unchanged_members(short_root: Path, case, change, act
         effects = {item["job"]: item["action"] for item in view["effects"]}
         jobs = ask("status")["jobs"]
         assert jobs["MEMBER"]["reread"] == {"change": change, "action": action}
+        forecast = preview(main.prepare(path), live)
+        assert view["effects"] == expected_effects
+        assert forecast["marks"]["MEMBER"] == {"change": change, "action": action}
         assert effects["MEMBER"] == action
         if change == "unchanged":
             assert "MEMBER" not in {item["name"] for item in view["changed"]}
@@ -1976,7 +2069,85 @@ def test_box_restart_marks_unchanged_members(short_root: Path, case, change, act
             },
         )
         assert applied["ok"] and applied["application"], applied
+        if case in {"nested", "in_place", "held", "finished_held"}:
+            stopped = [["KEEP", "none"]]
+            if case != "finished_held":
+                stopped.append(["MEMBER", "none"])
+            assert applied["application"]["stopped"] == stopped
+            recorded = [
+                body
+                for _, kind, body in rows(short_root / "run")
+                if kind == "config" and body.get("event") == "applied" and body["rev"] == 2
+            ]
+            assert len(recorded) == 1 and recorded[0]["stopped"] == stopped
         assert not any(row.get("reread") for row in ask("status")["jobs"].values())
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_box_restart_holds_before_starts_in_name_order(short_root: Path, nested: bool):
+    path = config_file(short_root, estate='non_idempotent = "marked.toml"\n')
+    (short_root / "marked.toml").write_text(
+        '[jobs]\nZ_HELD = "synthetic effect"\nA_HELD = "synthetic effect"\n'
+    )
+    text = (
+        "insert_job: ZB\njob_type: b\ninsert_job: AB\njob_type: b\n"
+        + ("box_name: ZB\n" if nested else "")
+        + JOB.replace("A", "Z_HELD")
+        + "box_name: AB\n"
+        + JOB.replace("A", "A_HELD")
+        + "box_name: ZB\n"
+    )
+    (short_root / "a.jil").write_text(text)
+    initial = main.prepare(path)
+
+    async def scenario():
+        engine = start_run(
+            initial.catalog,
+            short_root / "run",
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        try:
+            for name in ["ZB"] if nested else ["ZB", "AB"]:
+                engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": name}))
+            await engine.run_until_quiescent(T0)
+            before = engine.journal.store.last_seq()
+            (short_root / "a.jil").write_text(
+                text
+                + JOB.replace("A", "NEW_INNER")
+                + "box_name: AB\n"
+                + JOB.replace("A", "NEW_OUTER")
+                + "box_name: ZB\n"
+            )
+            plan = reread(
+                engine.update.live(),
+                short_root / "run" / "plans",
+                candidate=main.prepare(path),
+                start=T0,
+            )
+            answer = engine.request_update(
+                UpdateRequest(plan.token, 1, engine.baseline_id, "box-order")
+            )
+            await engine.run_until_quiescent(T0)
+            assert answer.result().applied.done()
+            records = list(engine.journal.store.read_from(before))
+            assert [
+                (record.payload["kind"], record.payload["payload"]["job"])
+                for _, record in records
+                if record.kind == "input"
+                and record.payload.get("kind") in {"ON_HOLD", "FORCE_STARTJOB"}
+            ] == [
+                ("ON_HOLD", "A_HELD"),
+                ("ON_HOLD", "Z_HELD"),
+                *[("FORCE_STARTJOB", name) for name in (["ZB"] if nested else ["AB", "ZB"])],
+            ]
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(scenario())
 
 
 def test_box_restart_ends_boxes_before_done_sibling_can_start(short_root: Path):

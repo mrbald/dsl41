@@ -11,8 +11,8 @@ None open.
 
 State handled outside a state machine and duplicated logic make the whole system fragile, so they rank here, not under maintenance (owner, 2026-11-10).
 
-- **FEAT-9**: Share one pure per-job effect calculation between reread forecasts and update execution (`src/dsl41/reread_worker.py:25-133`, `src/dsl41/runner_update.py:437-687`).
-  Next: an engineer plan, after FEAT-10's.
+- **FEAT-9**: The box runs an update ends are still chosen twice, by different rules: `reread_worker.preview` forecasts each running BOX in the scope as a stop, and `EngineUpdate.box_ends` ends RUNNING, STARTING and QUE_WAIT rows of any type that are a root, inside a new root or removed. Share one selector beside `box_scope` or record why the two differ.
+  Next: compare the two on the reachable cases.
 - **FEAT-30**: Establish ownership of the unintegrated [process preparation](src/dsl41/runner_adapters.py) before deletion or activation. If activation is authorized, share path resolution and trace a real dispatch through it.
   Next: keep the path and activate it with tests; not pressing (owner, 2026-11-10).
 - **BUG-1**: Nothing bounds a backward gap: a store stamped far ahead holds every tick and timer until wall time catches up, with one warning (DL-435 N2).
