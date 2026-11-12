@@ -107,16 +107,6 @@ def test_socket_option_is_required_without_environment(socket_command, socket_ca
 # ------------------------------------------------------------------ sendevent
 
 
-def test_sendevent_stops_when_the_engine_answers_no_read_header(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    engine = _engine(monkeypatch, status={"ok": True, "error": "no header", "jobs": {}})
-    result = _run("sendevent", "STARTJOB", "--job", "j")
-    assert result.exit_code == 2
-    assert "no header" in result.output
-    assert len(engine.requests) == 1  # the read; no command followed it
-
-
 def test_sendevent_refuses_a_global_that_is_not_name_equals_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -139,16 +129,6 @@ def test_sendevent_refuses_an_event_that_addresses_nothing(
 
 
 # --------------------------------------------------------------- off-hold-all
-
-
-def test_off_hold_all_stops_when_the_status_read_is_refused(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    engine = _engine(monkeypatch, status={"ok": False, "error": "no status for you"})
-    result = _run("off-hold-all")
-    assert result.exit_code == 2
-    assert "no status for you" in result.output
-    assert len(engine.requests) == 1
 
 
 def test_off_hold_all_stops_when_the_status_carries_no_read_header(
@@ -174,13 +154,12 @@ def test_off_hold_all_with_a_header_and_nothing_held_says_so(
 # ----------------------------------------------------------------------- query
 
 
-def test_a_status_predicate_stops_when_the_status_read_is_refused(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _engine(monkeypatch, status={"ok": False, "error": "no such job"})
-    result = _run("query", "is-success", "--job", "j")
-    assert result.exit_code == 2
-    assert "no such job" in result.output
+def test_status_names_a_socket_path_longer_than_the_unix_limit(tmp_path: Path, cli_env) -> None:
+    socket = tmp_path / ("x" * 200) / "control.sock"
+    result = _run("query", "status", socket=socket)
+    assert result.exit_code == 2, result.output
+    assert f"control socket {socket}: AF_UNIX path too long" in result.stderr
+    assert not result.stdout
 
 
 def test_a_status_predicate_answers_by_exit_code_when_the_read_succeeds(
@@ -376,14 +355,6 @@ def test_status_json_preserves_complete_answer(
     assert result.stdout == json.dumps(response, sort_keys=True) + "\n"
 
 
-@pytest.mark.parametrize("brief", [False, True])
-def test_status_refusal_prints_error_text(monkeypatch, cli_env, local_timezone, brief) -> None:
-    _engine(monkeypatch, status={"ok": False, "error": "unknown job"})
-    result = _run("query", "status", *(["--brief"] if brief else []))
-    assert result.exit_code == 2
-    assert "unknown job" in ANSI.sub("", result.output)
-
-
 @pytest.mark.parametrize("verb", ["trace", "timers", "subscribe", "is-success"])
 def test_json_belongs_to_status_only(monkeypatch, cli_env, verb) -> None:
     engine = _engine(monkeypatch)
@@ -523,34 +494,15 @@ def _roundtrip(monkeypatch: pytest.MonkeyPatch, answer: Any) -> list[dict[str, A
     return sent
 
 
-def test_engine_stop_sends_the_stop_and_prints_the_answer(monkeypatch: pytest.MonkeyPatch) -> None:
-    sent = _roundtrip(monkeypatch, {"ok": True, "engine": "DRAINING"})
-    result = _run("engine", "stop")
-    assert (result.exit_code, sent) == (0, [{"cmd": "engine_stop"}])
-    assert '"engine": "DRAINING"' in result.output
-
-
-def test_engine_stop_refused_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
-    _roundtrip(monkeypatch, {"ok": False, "code": "access_denied", "error": "needs adm"})
-    assert _run("engine", "stop", "--wait").exit_code == 2
-
-
-@pytest.mark.parametrize(
-    ("delivered", "wait", "code"),
-    [(False, False, 2), (False, True, 0), (True, True, 2)],
-    ids=["unreachable", "unreachable_waiting", "lost_after_the_write"],
-)
-def test_engine_stop_with_an_engine_that_cannot_be_reached(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, delivered: bool, wait: bool, code: int
+def test_engine_stop_cannot_confirm_a_request_whose_reply_was_lost(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """An engine that is not running is stopped, for `--wait` (the unit's ExecStop); a write
-    that may have reached it is an unknown outcome and exits 2."""
+    """A write that may have reached the engine is an unknown outcome (DL-216)."""
     from dsl41.runner_control import ControlClientError
 
-    _roundtrip(monkeypatch, ControlClientError("refused", delivered=delivered))
-    args = ["engine", "stop", *(["--wait"] if wait else [])]
-    result = _run(*args, socket=tmp_path / "control.sock")
-    assert result.exit_code == code, result.output
+    _roundtrip(monkeypatch, ControlClientError("refused", delivered=True))
+    result = _run("engine", "stop", "--wait", socket=tmp_path / "control.sock")
+    assert result.exit_code == 2, result.output
 
 
 def test_engine_stop_waits_for_the_socket_and_then_the_lock(

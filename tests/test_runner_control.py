@@ -1589,7 +1589,7 @@ def _query_cli(sock_path: Path, *args: str) -> subprocess.CompletedProcess:
     )
 
 
-def test_cli_run_subprocess_sendevent_and_query_end_to_end(short_root: Path) -> None:
+def test_cli_run_subprocess_sendevent_and_query_end_to_end(short_root: Path, cli_env) -> None:
     """Integration test: spawn `dsl41 run` as a real subprocess (the pattern
     tests/test_runner_lifecycle.py uses), wait for its control socket, drive
     it with sendevent/query over the wire, then stop it with SIGTERM.
@@ -1634,6 +1634,18 @@ def test_cli_run_subprocess_sendevent_and_query_end_to_end(short_root: Path) -> 
         spec = _sync_control_call(sock_path, {"cmd": "spec", "job": "proc_job"})
         assert spec["ok"] is True
         assert spec["jil"] == "insert_job: proc_job\njob_type: c\ncommand: exit 0\n"
+
+        for arguments in (
+            ("is-success", "--job", "NOPE"),
+            ("status", "NOPE"),
+            ("status", "NOPE", "--brief"),
+        ):
+            unknown = _query_cli(sock_path, *arguments)
+            assert unknown.returncode == 2, unknown.stderr
+            assert "unknown job 'NOPE'" in unknown.stderr
+        unknown_json = _query_cli(sock_path, "status", "NOPE", "--json")
+        assert unknown_json.returncode == 2, unknown_json.stderr
+        assert json.loads(unknown_json.stdout)["code"] == "unknown_job"
 
         # DL-65 predicates against the SUCCESS job: is-success matches
         # (exit 0), is-failed does not (exit 1) -- both print the status

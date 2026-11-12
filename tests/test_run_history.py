@@ -1227,7 +1227,7 @@ def test_runs_that_began_before_the_snapshot_of_a_pruned_store_read_partial(
     assert "fidelity=partial" in result.output
 
 
-def test_every_retained_box_run_keeps_its_row_after_a_prune(tmp_path: Path) -> None:
+def test_every_retained_box_run_keeps_its_row_after_a_prune(tmp_path: Path, cli_env) -> None:
     """Decision 6: the snapshot carries the run history, so a retained box run that began
     before it keeps its row. Box `b` and its one-minute member `j` run twice on day 2, five
     minutes apart; the snapshot's own retention prunes day 1's opening. All four runs keep
@@ -1272,6 +1272,18 @@ def test_every_retained_box_run_keeps_its_row_after_a_prune(tmp_path: Path) -> N
         ("j", 1): ("TERMINATED", "partial"),
         ("j", 2): ("TERMINATED", "partial"),
     }
+    result = CliRunner().invoke(app, ["runs", str(run_root), "--format", "json"])
+    assert result.exit_code == 0, result.output
+    assert "fidelity=partial" in result.stderr
+    assert {
+        (row["job"], row["run_number"]): (row["status"], row["fidelity"])
+        for row in json.loads(result.stdout)
+    } == rows
+    journal = CliRunner().invoke(app, ["journal", str(run_root)])
+    assert journal.exit_code == 0, journal.output
+    first = journal.stdout.splitlines()[0]
+    assert first.startswith("trace since the snapshot at ")
+    assert first.endswith("; `dsl41 runs` has the history")
 
 
 def test_a_run_after_a_restart_whose_history_retention_emptied_is_numbered_after_it(

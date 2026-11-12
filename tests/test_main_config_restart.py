@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import errno
+import fcntl
+import json
+import os
 import re
 import shutil
+import socket as socket_mod
 import subprocess
 import sys
 import time
@@ -23,6 +28,7 @@ from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import EngineError, RealClock
 from dsl41.runner_config import Configuration, with_host_settings
 from dsl41.runner_control import roundtrip
+from dsl41.runner_journal import read_journal
 from dsl41.runner_scheduler import Scheduler
 from dsl41.runner_startup import active_configuration, resume_run, start_run
 from dsl41.runner_store import Record, SqliteStore
@@ -146,6 +152,96 @@ def test_cli_engine_never_sends_term_after_protocol_stop(
 def read_config_row(root: Path, rev: int) -> bytes:
     with closing(SqliteStore(root / "engine.db", read_only=True)) as store:
         return store.get_config(rev)
+
+
+@pytest.mark.parametrize("wait", [False, True], ids=["delivered", "waited"])
+def test_cli_engine_stop_and_an_unheld_root(short_root: Path, wait: bool) -> None:
+    path = estate_file(short_root)
+    socket = short_root / "run" / "control.sock"
+    args = ["engine", "stop", "-S", str(socket), *(["--wait"] if wait else [])]
+    with cli_engine(path):
+        result = CliRunner().invoke(app, args)
+        assert result.exit_code == 0, result.output
+        answer = json.loads(result.stdout)
+        assert answer["ok"] is True
+        assert answer["engine"] in {"DRAINING", "STOPPED"}
+        if wait:
+            assert not socket.exists()
+        deadline = time.monotonic() + 10
+        while True:
+            with socket_mod.socket(socket_mod.AF_UNIX) as probe:
+                probe.settimeout(0.2)
+                error = probe.connect_ex(str(socket))
+            assert error in (0, errno.ENOENT, errno.ECONNREFUSED), error
+            with (socket.parent / "leader.lock").open("rb") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    free = False
+                else:
+                    free = True
+            if error and free and not socket.exists():
+                break
+            assert time.monotonic() < deadline, (short_root / "cli-engine.log").read_text()
+            time.sleep(0.01)
+    again = CliRunner().invoke(app, ["engine", "stop", "--wait", "-S", str(socket)])
+    assert again.exit_code == 0, again.output
+    assert again.stdout.startswith("engine not running:")
+    assert not again.stderr
+    unreachable = CliRunner().invoke(app, ["engine", "stop", "-S", str(socket)])
+    assert unreachable.exit_code == 2, unreachable.output
+    assert f"no engine is running at {socket}" in unreachable.stderr
+
+
+def test_cli_journal_narrates_a_real_completion_after_change_status_inactive(
+    short_root: Path,
+) -> None:
+    gate = short_root / "gate"
+    os.mkfifo(gate)
+    path = estate_file(short_root)
+    ready = short_root / "ready"
+    (short_root / "a.jil").write_text(
+        "insert_job: A\njob_type: c\n"
+        f"command: exec 3<> {gate}; echo ready > {ready}; read value <&3; exit 0\n"
+        "machine: localhost\n"
+    )
+    root = short_root / "run"
+    socket = root / "control.sock"
+
+    def send(*arguments):
+        result = CliRunner().invoke(app, ["sendevent", *arguments, "-J", "A", "-S", str(socket)])
+        assert result.exit_code == 0, result.output
+
+    with cli_engine(path) as ask:
+        send("STARTJOB")
+        deadline = time.monotonic() + 10
+        while not ready.exists() or not list((root / "runs").glob("A.1/*/spawn.json")):
+            assert time.monotonic() < deadline, (
+                ask("status"),
+                (short_root / "cli-engine.log").read_text(),
+                list(root.rglob("spawn.json")),
+                ready.exists(),
+            )
+            time.sleep(0.01)
+        assert ask("status")["jobs"]["A"]["status"] == "RUNNING"
+        send("CHANGE_STATUS", "-s", "INACTIVE")
+        assert ask("status")["jobs"]["A"]["status"] == "INACTIVE"
+        fd = os.open(gate, os.O_WRONLY | os.O_NONBLOCK)
+        try:
+            os.write(fd, b"go\n")
+        finally:
+            os.close(fd)
+        while not any(r.get("code") == "stale_completion" for r in read_journal(root)):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert ask("status")["jobs"]["A"]["status"] == "INACTIVE"
+    result = CliRunner().invoke(app, ["journal", str(root)])
+    assert result.exit_code == 0, result.output
+    assert re.search(
+        r"rejected input \d+ \(STATUS for job A run 1 from adapter\): "
+        r"stale_completion: job not live: INACTIVE",
+        result.stdout,
+    )
 
 
 @pytest.mark.parametrize(
