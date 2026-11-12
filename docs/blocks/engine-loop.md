@@ -52,10 +52,10 @@ flowchart TD
 - A timer firing and a calendar tick are inputs. Each takes the one admission order (concurrency-model §4 (`concurrency-model.md`, retired in 2.0.0); ticks: [DL-45](../decision-log.md) item 2, narrowed by [DL-284](../decision-log.md)).
 - The choice is one decision with a fixed priority: input, then tick, then timer. The truth table lives in the `_next_work` docstring; [DL-145](../decision-log.md) keeps its branch count as the domain's.
 - A tick pops before any later-due event and any same-or-later-due timer. A queued input stamped at the tick's instant goes first ([DL-45](../decision-log.md) item 2, narrowed by [DL-284](../decision-log.md); `test_dl137_a_tick_and_an_input_stamped_alike_feed_the_input_first`).
-- On a real clock the loop commits to work only once its instant is due. An earlier instant is waited out, and an input that arrives during the wait makes the loop choose again ([DL-45](../decision-log.md) item 1).
+- On a real clock the loop commits to work due by engine time, read without remembering a stamp. Engine time holds at the latest of the wall, admission frontier and last stamp given ([DL-493](../decision-log.md)). An input that arrives during a wait makes the loop choose again ([DL-45](../decision-log.md) item 1).
 - On a real clock a timer due strictly before a due queued input fires first, as its own input ([DL-232](../decision-log.md); concurrency-model §0 (`concurrency-model.md`, retired in 2.0.0)).
 - Every admitted input ends in a dispatch pass ([DL-234](../decision-log.md)).
-- Work at one clock instant has a budget. The floor is `INSTANT_BUDGET_FLOOR` ([DL-211](../decision-log.md)).
+- Work at one raw clock instant has a budget. The floor is `INSTANT_BUDGET_FLOOR` ([DL-211](../decision-log.md), [DL-493](../decision-log.md)).
 
 ## Failure and recovery
 

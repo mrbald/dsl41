@@ -83,8 +83,8 @@ def test_real_clock_step_admits_at_the_frontier_and_warns_once_per_step(
             assert engine.frontiers.at == frontier
             assert len(_warnings(stderr)) == 1
             assert _warnings(stderr)[0] == (
-                "dsl41: WARNING: wall clock below admission frontier:"
-                f" wall={clock.at.isoformat()} frontier={frontier.isoformat()} gap_s=120.0"
+                "dsl41: WARNING: wall clock behind engine time:"
+                f" wall={clock.at.isoformat()} until={frontier.isoformat()} gap_s=120.0"
             )
 
             retry = engine.submit(
@@ -227,10 +227,10 @@ def test_real_clock_step_keeps_queued_requests_and_stop_in_arrival_order(
             seed = request("seed", T0 + timedelta(minutes=4))
             await engine.run_until_quiescent(clock.now())
             assert (await seed).index == 1
-            a = request("A", clock.now())
+            a = request("A", engine.now_admitted())
             stopped = engine.request_stop() if stop else None
             clock.at = T0 + timedelta(minutes=2)
-            b = request("B", clock.now())
+            b = request("B", engine.now_admitted())
             await engine.run_until_quiescent(datetime.max)
             assert (await a).index == 2
             result = await b
@@ -240,7 +240,7 @@ def test_real_clock_step_keeps_queued_requests_and_stop_in_arrival_order(
             if stopped is not None:
                 assert await stopped == "STOPPED"
             assert clock.now() == T0 + timedelta(minutes=2)
-            assert engine.frontiers.at == T0 + timedelta(minutes=4)
+            assert engine.frontiers.at == T0 + timedelta(minutes=5)
             assert len(_warnings(stderr)) == 1
         finally:
             await engine.shutdown()
@@ -367,7 +367,7 @@ def test_real_clock_step_keeps_future_queue_deadlines(stderr: _Stderr) -> None:
     asyncio.run(scenario())
 
 
-def test_real_clock_step_after_queue_pop_cannot_advance_past_the_frontier(
+def test_real_clock_step_after_queue_pop_keeps_the_held_instant(
     stderr: _Stderr,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -379,7 +379,9 @@ def test_real_clock_step_after_queue_pop_cannot_advance_past_the_frontier(
         try:
             await engine.run_until_quiescent(clock.now())
             engine.inject(
-                Event(at=clock.now(), kind="SET_GLOBAL", payload={"name": "Y", "value": "y"})
+                Event(
+                    at=engine.now_present(), kind="SET_GLOBAL", payload={"name": "Y", "value": "y"}
+                )
             )
             admit = engine._admit_and_apply
 
@@ -389,7 +391,7 @@ def test_real_clock_step_after_queue_pop_cannot_advance_past_the_frontier(
 
             monkeypatch.setattr(engine, "_admit_and_apply", step_then_admit)
             await engine.run_until_quiescent(datetime.max)
-            assert engine.frontiers.at == frontier
+            assert engine.frontiers.at == T0 + timedelta(minutes=5)
             assert engine.oracle.store.global_value("Y") == "y"
             assert len(_warnings(stderr)) == 1
         finally:
