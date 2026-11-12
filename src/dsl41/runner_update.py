@@ -59,8 +59,8 @@ from dsl41.reload_plan import (
     RetiredPlan,
     estate_settings,
     read_plan,
-    box_members,
     box_scope,
+    ends_with_roots,
     marked_holds,
     root_starts,
 )
@@ -647,8 +647,7 @@ class EngineUpdate:
         assert self._opened is not None
         old = self.engine.oracle.catalog.jobs
         new = self._opened.estate.catalog
-        inside = box_members(new, self._box_scope.roots)
-        names = set(self._box_scope.roots) | self._box_scope.members
+        names = ends_with_roots(self._box_scope, new)
 
         def order(name: str) -> tuple[bool, int, str]:
             depth, parent = 0, old[name].box.box_name
@@ -662,7 +661,6 @@ class EngineUpdate:
                 name
                 for name in names
                 if name in old
-                and (name in self._box_scope.roots or name in inside or name not in new.jobs)
                 and self.engine.oracle.store.job[name].status in {"RUNNING", "STARTING", "QUE_WAIT"}
             ),
             key=order,

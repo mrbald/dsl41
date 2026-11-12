@@ -26478,3 +26478,53 @@ relitigate an entry; append a new one.
   REJECTED. A version step: it blocks every rollback of the release for this one case.
   A new record kind an older build refuses: it needs no snapshots while an update stops.
   A durable box restart after `config applied` (X2): not now.
+- DL-490 The reread forecast labels a box restart as the update carries it out
+  (2026-11-12; owner; fixes BUG-68, closes FEAT-9; reload_plan.py, reread_worker.py,
+  runner_update.py, cli_output.py, control-protocol)
+  THE RULE. One selector beside `box_scope` names the scope's jobs that end with the
+  restarting roots: a root, a job inside a root in the candidate, or a removed job. The
+  forecast's box stops and the update's KILLJOB list both read it; each keeps its own
+  status and type test. The forecast labels a job by the first rule that fits. `hold`: a
+  marked job the plan keeps, neither removed nor retyped, that is a stop or is not
+  INACTIVE inside the box scope. `restart_box`: a root the update starts again.
+  `restart`: a job of both catalogs inside such a root in the candidate, whether
+  unchanged, changed in place, retyped or moved in, a sub-box included. `remove`: a stop
+  the candidate removes or retypes. `rerun`: any other stop.
+  THE EFFECT. Forecast labels change; the update's own steps do not. For the statuses and
+  marks the forecast read, `restart_box` names exactly the boxes the update force-starts,
+  which are the boxes an operator starts by hand after a crash past `config applied`
+  (DL-463): a nested running box reads `restart`, and a box that replaces a running
+  command of its name reads `restart_box` where it read `remove`. A member changed in
+  place inside a restarting root, or moved into one, reads `restart` where it read
+  `rerun` or nothing. So do a finished sub-box whose own members change and a member the
+  plan retypes, which read `remove`, `hold` or nothing: the new job starts with the box
+  and is not held. A running sub-box that leaves a restarting root and stays in the
+  catalog is no longer a forecast stop: the update sends it no KILLJOB and no start. The
+  update reply's line for `none` says what follows for a member of a restarted box.
+  LIMITS. The forecast reads statuses, not flags and not the terminator cascade. A held
+  or iced member inside a restarting root reads `restart` but does not run. A running
+  `job_terminator` member that leaves a root the update ends, to outside every restarting
+  root, is ended with the old box run (SEM-14), while the forecast reads `rerun` for a
+  command and nothing for a sub-box (BUG-69).
+  REJECTED. `restart_box` for every running box that ends: it lists nested boxes that
+  must not be started on their own. `remove` before the restart labels: a retyped root
+  the update force-starts would be missing from the list. A sixth label for the
+  terminator case in this change: the forecast would copy the oracle's cascade. A new
+  recorded choice for box members in `config applied.stopped`: it changes a journal
+  record to mend a wording. Ending the moved-out sub-box to match the old forecast: a
+  job that leaves a box keeps its run (DL-463).
+- DL-491 Behavior is read from charts and pure functions; a case can occur only from
+  validated input (2026-11-12; owner; agent-workflow.md, agents/coordination.md,
+  agents/review.md)
+  THE RULE. A declared chart or a pure function is read to learn what it does. A test
+  pins the reading and ships with the change. A probe is for what the code does not
+  determine: the real clock, the operating system, vendor behavior. Whether a state or a
+  case can occur is judged from validated input and the machine's inputs, never from
+  state built by hand. The operator reads before dispatch; a brief states the reading
+  and asks the implementer to verify it and to stop if it is false. A reviewer says for
+  each finding whether validated input reaches it, and reports code or a test that only
+  hand-built state reaches as such.
+  THE CAUSE. A FEAT-9 plan rested on two divergences that only hand-built marks reach,
+  which L025 refuses; its brief had asked for probes over readings. Tests on hand-built
+  state had kept an unreached refusal tree and a provisional verdict alive until FEAT-9's
+  first two slices removed them.

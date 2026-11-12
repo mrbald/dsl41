@@ -101,8 +101,19 @@ is promised (DL-489).
 
 The CLI/TUI status annotation caches the last reread forecast in memory. New/failed
 reread replaces it; applied update and restart clear it. Update never consumes it.
-Unchanged members restarted with a running box carry an `unchanged; restart` marker.
-Members put on hold retain `hold` (DL-463, D12=MARK).
+Forecast labels follow the first-match rule in the
+[control protocol](../control-protocol.md#2-transport-and-framing-frozen) (DL-490).
+`restart_box` names only roots the update starts again. Jobs of both catalogs
+inside such a root in the candidate carry `restart`, retyped jobs and sub-boxes
+included. A marked job the plan keeps without retyping carries `hold` when it is
+a stop or is not INACTIVE inside the box scope. A retyped job's INACTIVE row is
+not held by its mark (DL-490, D12=MARK).
+The stop list includes every running box that ends with the roots.
+The forecast reads statuses, not flags or the terminator cascade: held or iced
+members can read `restart` without running. A running `job_terminator` member
+moved out of a root the update ends, to outside every restarting root, is ended
+with the old box run; the forecast reads
+`rerun` for a command and nothing for a sub-box (DL-490, BUG-69).
 
 ## Open findings
 

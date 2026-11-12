@@ -19,6 +19,9 @@ Read the [approved operating model](operating-model.md) for authority, role limi
 - Keep the candidate read-only. Write findings to the assigned scratch file if permitted;
   otherwise return the full findings for the operator to save.
   Name the failure scenario, file and line, and an acceptance check for each finding.
+  Derive a finding by reading the charts and functions; a targeted test confirms it.
+  Say whether validated input reaches it. Report code or a test that only
+  hand-built state reaches as such, not as a behavior defect (DL-491).
 - Return `accepted`, `rework`, or `blocked`, with a ranked findings table and blocker detail.
   Send the verdict to the operator. A failed invocation or timeout is not a verdict.
 - Confirm fixes to your own findings. Do not close another reviewer's finding

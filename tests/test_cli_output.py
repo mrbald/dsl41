@@ -330,7 +330,8 @@ def test_every_update_outcome_has_true_text(monkeypatch, style):
         "its own result stands",
         "rerun under the new definition",
         "now ON_HOLD",
-        "no rerun or hold follows from this stop",
+        "stopped, no follow-up of its own (in a restarted box, a marked member kept without"
+        " retyping is ON_HOLD; other members follow the box if allowed to run)",
     ):
         assert text in result.stdout
 
@@ -818,7 +819,8 @@ def test_r3_application_text_has_no_general_box_rule_and_preserves_outcomes(styl
         "its own result stands",
         "stopped, rerun under the new definition",
         "stopped, now ON_HOLD (automatic rerun withheld)",
-        "no rerun or hold follows from this stop",
+        "stopped, no follow-up of its own (in a restarted box, a marked member kept without"
+        " retyping is ON_HOLD; other members follow the box if allowed to run)",
     ):
         assert sum(text in line for line in lines) == 1
 

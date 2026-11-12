@@ -154,6 +154,10 @@ allocation column.
 Give a builder or engineer a self-contained brief and only the history the task
 needs. Do not clone the orchestration transcript by default. Reviewers start
 fresh; rework resumes the implementer and the finding's raiser.
+Before dispatch, read the charts and pure functions the question turns on. The
+brief states that reading and asks the implementer to verify it and to stop if
+it is false. It asks for a probe only for what the code does not determine
+(DL-491).
 Run slices in parallel only when their files are disjoint. A slice that
 shares files with one not yet integrated starts from the integrated tip
 (DL-262).

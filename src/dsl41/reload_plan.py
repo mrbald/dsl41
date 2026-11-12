@@ -274,6 +274,16 @@ def box_scope(
     )
 
 
+def ends_with_roots(scope: BoxScope, candidate: CatalogIR) -> frozenset[str]:
+    """Scope jobs that are roots, candidate descendants or removed (DL-490)."""
+    inside = box_members(candidate, scope.roots)
+    return frozenset(
+        name
+        for name in set(scope.roots) | scope.members
+        if name in scope.roots or name in inside or name not in candidate.jobs
+    )
+
+
 def marked_holds(scope: BoxScope, marked: Collection[str], status: Mapping[str, str]) -> list[str]:
     """Hold marked non-INACTIVE rows before starting any root (DL-463)."""
     return sorted(
