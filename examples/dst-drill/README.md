@@ -12,6 +12,21 @@ Rocky Linux 8/aarch64 target; the drill image keeps its Debian package recipe.
 The verdict compares each run with `dsl41 rehearse` over the same window.
 The rehearsal plays the same estate on a virtual clock and is the reference.
 
+The engine's waits on real processes use engine seconds.
+At speed 60, a 5-second wait allows about 83 ms of real time.
+These bounds include the stop ladder's `grace_term_s` and `grace_kill_s`,
+the fixed 5 seconds between selected signals, the record timeout after KILL
+(`grace_kill_s`), and the fixed 5-second drain and spool margins.
+A slow runner can miss the record timeout even when the wrapper writes its end record.
+The verdict reports that kill as a failed `kill applied` row naming the job, run
+and `unobservable` outcome, with no wrapper end available in the engine's record.
+
+A control verb's default reply timeout is 10 seconds on its process's clock.
+The driver runs control verbs without libfaketime, so that budget is 10 real seconds:
+`engine stop --wait` before a restart and at every scenario's end, and
+`sendevent SET_GLOBAL` after the clock step.
+The driver bounds each verb process by 300 real seconds.
+
 The rehearsal runs the same zone arithmetic, and the runner reads only UTC,
 so the container needs no TZ. `dsl41 rehearse` alone cannot test these parts:
 
@@ -128,7 +143,8 @@ The timing is checked by the launch rows: the `dispatch` record carries the
 engine's clock reading when it launched the wrapper.
 A late wake, an overshot sleep slice or a slow launch shows there.
 
-Each bound is a real time times the speed. The v2 runs, one scenario at a time at x60, measured:
+Each verdict tolerance is a real time times the speed.
+The v2 runs, one scenario at a time at x60, measured:
 
 - A follow-on start: bound 0.25 s (15 s at x60). The runs measured 0 to 5 s.
   A follow-on waits for the real producer command to end, so it cannot
@@ -222,7 +238,7 @@ So it is checked only for jobs without a run_window; the window finding covers t
 - One restart and one step are tried. The drill is not a soak.
 - The step is 90 seconds backward. A step far below the frontier, a step forward
   and a step during a restart are not tried.
-- The control verbs of `clock-step` run without libfaketime: `engine stop --wait` sleeps with
-  Python's `time.sleep`, which libfaketime's `clock_nanosleep` wrapper fails with `EINVAL`
-  beside a real monotonic clock. A verb reads no clock.
+- Running control verbs without libfaketime also lets `engine stop --wait` sleep under
+  `clock-step`: libfaketime's `clock_nanosleep` wrapper fails with `EINVAL` beside a real
+  monotonic clock. A verb needs no scenario time.
 - Run it as an ordinary user. The image's user is `drill` (uid 1001).

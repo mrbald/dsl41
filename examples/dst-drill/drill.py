@@ -8,7 +8,7 @@ Run it inside the drill's container (README.md): it needs libfaketime and
 GNU date. With no SCENARIO it runs them all. It prints a short table per
 scenario and exits 1 on any difference.
 
-The driver itself reads the real clock. Every dsl41 process it starts runs
+The driver and control verbs read the real clock. Each engine runs
 under ft.sh with a fake start that continues one timeline: fake time is
 the scenario's start plus the real time since the first launch, times the
 speed. The clock-step scenario runs at speed 1 under ft-step.sh, whose spec
@@ -223,8 +223,10 @@ class FakeClock:
         return [str(FT), f"{self.now():%Y-%m-%dT%H:%M:%S}", str(self.speed), *args]
 
     def client(self, *args: str) -> list[str]:
-        """A control verb on the same timeline."""
-        return self.command(*args)
+        """A control verb needs no scenario time. Its reply timeout uses real
+        seconds. Running unpreloaded also lets `engine stop --wait` sleep
+        beside the clock-step scenario's real monotonic clock (DL-435)."""
+        return list(args)
 
 
 class SteppedClock(FakeClock):
@@ -249,12 +251,6 @@ class SteppedClock(FakeClock):
 
     def command(self, *args: str) -> list[str]:
         return [str(FT_STEP), str(self.spec), *args]
-
-    def client(self, *args: str) -> list[str]:
-        """A control verb reads no clock. libfaketime's clock_nanosleep wrapper
-        refuses Python's `time.sleep` beside a real monotonic clock, which
-        `engine stop --wait` calls, so the verb runs unpreloaded."""
-        return list(args)
 
 
 def _dsl41() -> str:
