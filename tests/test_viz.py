@@ -14,6 +14,7 @@ golden render for one small catalog.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -22,7 +23,7 @@ from typer.testing import CliRunner
 from dsl41.ast_jil import parse_file
 from dsl41.cli import app
 from dsl41.derive import DerivedGraph, derive_graph
-from dsl41.ir import CatalogIR, lower_catalog, lower_source
+from dsl41.ir import CatalogIR, dump_catalog, load_catalog, lower_catalog, lower_source
 from dsl41.viz import (
     _auto_direction,
     _common_prefix,
@@ -690,19 +691,20 @@ def test_dl175_report_does_not_merge_bar_with_the_dangler_it_collides_with() -> 
 
 
 def test_dl175_local_graph_sentinel_widens_past_a_job_named_like_the_sentinel() -> None:
-    """DL-175's own adversarial review found this: `_local_graph`'s
-    rewritten `src` used to be `_pseudo_key(edge.src)` under an assumption
-    ("this prefix cannot occur in a JIL name") the scanner never enforces
-    -- `insert_job: \\x00pseudo` lowers cleanly. The sentinel is now CHECKED
-    against this catalog's actual job names and widens until it is not one
-    of them, so a job pathologically named `"\\x00pseudo"` still lands in
-    its own component, not merged with the M33 consumer."""
+    """Lowering refuses NUL names (DL-494), but a saved catalog can still hold them.
+
+    The sentinel widens past the saved job name, keeping it in its own component (DL-175).
+    """
     text = (
         "insert_xinst: PRD\nxtype: a\nxmachine: h.example.com\nxport: 9000\n\n"
-        "insert_job: \x00pseudo\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: ordinary\njob_type: c\ncommand: x\nmachine: m1\n\n"
         "insert_job: bar2\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(foo2^PRD)\n"
     )
-    catalog = catalog_of(text)
+    saved = json.loads(dump_catalog(catalog_of(text)))
+    job = saved["jobs"].pop("ordinary")
+    job["name"] = "\x00pseudo"
+    saved["jobs"]["\x00pseudo"] = job
+    catalog = load_catalog(json.dumps(saved))
     assert "\x00pseudo" in catalog.jobs  # the pathological name really parsed
     md = to_markdown(catalog, title="t", include_singletons=True)
     assert "## W1 \N{EM DASH} bar2 (1 job)" in md

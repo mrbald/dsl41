@@ -337,8 +337,9 @@ def _build_run_spec(
     spec_ir = job_ir.exec_
     if not isinstance(spec_ir, ExecSpec):
         raise EngineError(f"{job_ir.name!r}: CMD dispatch without an ExecSpec")
-    if os.sep in job_ir.name or job_ir.name in (".", ".."):
-        raise EngineError(f"job name {job_ir.name!r} is not a safe run-directory name")
+    # DL-494: lowering guarantees that every job name is one directory component.
+    if os.sep in job_ir.name or "\0" in job_ir.name or job_ir.name in (".", ".."):
+        raise AssertionError(f"job name {job_ir.name!r} must be one directory component")
     # DL-492: profile failure exits the whole script. PENDING: E5 vendor parity.
     command = "; ".join(
         [
