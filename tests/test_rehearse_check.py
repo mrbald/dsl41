@@ -1158,19 +1158,25 @@ def test_cli_deferred_scheduler_refusal_has_no_origin_and_is_not_listed(
         assert "-- schedule fired while queued --" not in result.output
 
 
-def test_cli_box_member_tick_and_operator_force_keep_their_own_origins(tmp_path: Path) -> None:
+@pytest.mark.parametrize("completed", [False, True], ids=["running", "idle"])
+def test_cli_box_member_tick_and_operator_force_keep_their_own_origins(
+    tmp_path: Path, completed: bool
+) -> None:
+    member_times = "00:00,00:05" if completed else "00:00,00:01"
     jil = tmp_path / "member.jil"
     jil.write_text(
         'insert_job: bx\njob_type: b\ndate_conditions: 1\ndays_of_week: all\nstart_times: "00:00"\n\n'
         "insert_job: member\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bx\n"
-        'date_conditions: 1\ndays_of_week: all\nstart_times: "00:00,00:01"\n'
+        f'date_conditions: 1\ndays_of_week: all\nstart_times: "{member_times}"\n'
     )
     scenario = tmp_path / "scenario.json"
     scenario.write_text(
         json.dumps(
             {
-                "adapter": {"default": [600, 0]},
-                "events": [
+                "adapter": {"default": [30 if completed else 600, 0]},
+                "events": []
+                if completed
+                else [
                     {
                         "at": "2026-11-11T00:00:30",
                         "kind": "FORCE_STARTJOB",
@@ -1188,7 +1194,7 @@ def test_cli_box_member_tick_and_operator_force_keep_their_own_origins(tmp_path:
             "--start",
             "2026-11-11T00:00:00",
             "--hours",
-            "0.02",
+            "0.1" if completed else "0.02",
             "--scenario",
             str(scenario),
             "--format",
@@ -1198,6 +1204,18 @@ def test_cli_box_member_tick_and_operator_force_keep_their_own_origins(tmp_path:
     assert result.exit_code == 0, result.output
     doc = json.loads(result.output)
     refusals = [t for t in doc["trace"] if t["transition"] == "START_REFUSED"]
+    if completed:
+        [refused] = refusals
+        assert (refused["at"], refused["job"], refused["start_source"]) == (
+            "2026-11-11T00:05:00",
+            "member",
+            "scheduler",
+        )
+        assert (refused["run_number"], refused["refused_status"]) == (1, "SUCCESS")
+        assert "box" in refused["cause"]
+        assert any(t["job"] == "bx" and t["transition"] == "RUNNING->SUCCESS" for t in doc["trace"])
+        assert doc["schedule_fired_while_running"] == doc["schedule_fired_while_queued"] == {}
+        return
     assert [(t["start_source"], t["run_number"], t["refused_status"]) for t in refusals] == [
         ("control", 1, "RUNNING"),
         ("scheduler", 1, "RUNNING"),

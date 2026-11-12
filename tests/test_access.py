@@ -33,7 +33,9 @@ from typing import Any
 
 import pytest
 from proc_pipes import close_pipes
+from typer.testing import CliRunner
 
+from dsl41.cli import app
 from dsl41.ir import lower_source
 from dsl41.runner import Engine
 from dsl41.runner_access import (
@@ -351,7 +353,7 @@ def test_access_read_tier_queries_serve_and_mutations_refuse(short_root: Path) -
     asyncio.run(scenario())
 
 
-def test_access_ops_admitted_actor_overwritten_and_ledgered(short_root: Path) -> None:
+def test_access_ops_admitted_actor_overwritten_and_ledgered(short_root: Path, cli_env) -> None:
     """ss3/ss6/ss12.6/ss12.10: an ops principal mutates; the WAL records
     the authenticated spelling, not the wire claim; the admission lands
     in the privileged ledger."""
@@ -364,6 +366,14 @@ def test_access_ops_admitted_actor_overwritten_and_ledgered(short_root: Path) ->
             status = await _call(server.path, read_for("job:acc_job"))
             admitted = await _call(server.path, _envelope("STARTJOB", "acc_job", status))
             assert admitted["ok"] is True, admitted
+            stopped = await asyncio.to_thread(
+                CliRunner().invoke, app, ["engine", "stop", "-S", str(server.path)]
+            )
+            assert stopped.exit_code == 2, stopped.output
+            refusal = json.loads(stopped.stdout)
+            assert refusal["code"] == "access_denied" and refusal["refused"]
+            assert "holds ops tier; engine_stop needs adm tier" in refusal["error"]
+            assert (await _call(server.path, {"cmd": "status"}))["engine"] == "RUNNING"
         finally:
             await _teardown(engine, server, loop_task)
         actors = {
@@ -377,7 +387,7 @@ def test_access_ops_admitted_actor_overwritten_and_ledgered(short_root: Path) ->
     asyncio.run(scenario())
 
 
-def test_access_unmapped_principal_denied_even_read(short_root: Path) -> None:
+def test_access_unmapped_principal_denied_even_read(short_root: Path, cli_env) -> None:
     """ss4: fail closed -- no binding, no unmapped relaxation, no reads."""
 
     async def scenario() -> None:
@@ -393,6 +403,19 @@ def test_access_unmapped_principal_denied_even_read(short_root: Path) -> None:
             sub = await _call(server.path, {"cmd": "subscribe"})
             assert sub["refused"] is True
             assert "subscribe needs read tier" in sub["error"]
+            before = read_journal(run_root)
+            for arguments in (
+                ["sendevent", "STARTJOB", "--job", "acc_job"],
+                ["off-hold-all"],
+                ["query", "is-success", "--job", "acc_job"],
+            ):
+                result = await asyncio.to_thread(
+                    CliRunner().invoke, app, [*arguments, "-S", str(server.path)]
+                )
+                assert result.exit_code == 2, result.output
+                assert f"os/{ME} holds no tier; status needs read tier" in result.stderr
+                assert not result.stdout
+            assert read_journal(run_root) == before
         finally:
             await _teardown(engine, server, loop_task)
 
