@@ -704,17 +704,6 @@ def test_the_adapter_switches_are_the_ones_the_fw_adapter_reads() -> None:
     assert adapter_switch(wired, "ice-lookback") is None
 
 
-def test_an_adapter_switch_with_no_read_is_a_code_bug(monkeypatch: pytest.MonkeyPatch) -> None:
-    """DL-280: a registry entry gaining an adapter reader without a read in
-    `adapter_switch` raises, rather than being skipped by the read-back and
-    the backstop."""
-    from dsl41 import runner
-
-    monkeypatch.setattr(runner, "ADAPTER_SWITCHES", (*runner.ADAPTER_SWITCHES, "ice-lookback"))
-    with pytest.raises(ValueError, match="'ice-lookback' has no read"):
-        runner.adapter_switch({}, "ice-lookback")
-
-
 def test_an_engine_refuses_an_fw_adapter_built_under_another_fw_existence() -> None:
     """The backstop `_engine_switches` holds for the scheduler holds for
     the adapters too (DL-280), once the engine is given a reading: a pin or
@@ -1369,3 +1358,22 @@ def test_a_resume_with_a_scheduler_off_the_dst_pin_writes_nothing(
     assert after[: len(before)] == before
     note = json.loads((run_root / "leader.lock").read_text())
     assert note["pid"] == os.getpid()
+
+
+def test_every_adapter_switch_has_a_read() -> None:
+    """Every registry name with an adapter reader is handled (DL-280)."""
+    import ast
+    import inspect
+    from dsl41.runner import adapter_switch
+
+    reads = {
+        node.comparators[0].value
+        for node in ast.walk(ast.parse(inspect.getsource(adapter_switch)))
+        if isinstance(node, ast.Compare)
+        and isinstance(node.left, ast.Name)
+        and node.left.id == "name"
+        and len(node.ops) == 1
+        and isinstance(node.ops[0], ast.Eq)
+        and isinstance(node.comparators[0], ast.Constant)
+    }
+    assert set(semantics.ADAPTER_SWITCHES) <= reads

@@ -6,6 +6,7 @@ import asyncio
 import io
 import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +19,7 @@ from dsl41.runner_clock import RealClock, VirtualClock
 from dsl41.runner_journal import Journal, read_journal
 from dsl41.runner_scheduler import Scheduler
 from dsl41.runner_store import MemoryStore
+from dsl41.runner_startup import start_run
 
 T0 = datetime(2026, 7, 1, 8)
 
@@ -211,11 +213,13 @@ def test_real_clock_step_admits_a_fake_adapter_completion_below_the_frontier(
 @pytest.mark.parametrize("stop", [False, True])
 def test_real_clock_step_keeps_queued_requests_and_stop_in_arrival_order(
     stderr: _Stderr,
+    tmp_path: Path,
     stop: bool,
 ) -> None:
     async def scenario() -> None:
-        clock = _Wall(T0 + timedelta(minutes=5))
-        engine = Engine(lower_source(""), clock=clock, adapters={})
+        clock = _Wall(T0 + timedelta(minutes=4))
+        engine = start_run(lower_source(""), tmp_path / "run", clock=clock, adapters={})
+        clock.at = T0 + timedelta(minutes=5)
 
         def request(name: str, at: datetime):
             return engine.submit(
@@ -244,6 +248,8 @@ def test_real_clock_step_keeps_queued_requests_and_stop_in_arrival_order(
             assert len(_warnings(stderr)) == 1
         finally:
             await engine.shutdown()
+            assert engine.journal is not None
+            engine.journal.close()
 
     asyncio.run(scenario())
 

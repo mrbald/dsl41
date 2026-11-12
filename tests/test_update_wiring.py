@@ -1462,7 +1462,7 @@ def test_the_update_verb_refuses_a_malformed_request_and_answers_a_slow_applicat
     assert (answers["retry"]["ok"], answers["retry"]["application"]) == (True, None)
 
 
-def test_an_engine_with_no_run_root_or_an_unreadable_plan_refuses_the_update(
+def test_an_unreadable_plan_refuses_the_update(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from dsl41 import main_config
@@ -1475,17 +1475,6 @@ def test_an_engine_with_no_run_root_or_an_unreadable_plan_refuses_the_update(
 
     async def scenario() -> None:
         clock = VirtualClock(start=T0)
-        bare = start_run(
-            estate.catalog,
-            None,
-            clock=clock,
-            adapters={"CMD": FakeAdapter()},
-            source_capture=main.encoded_parts(prepare_estate(estate.dir)),
-            launched=main.profile_of(prepare_estate(estate.dir)),
-        )
-        answer = bare.request_update(_request(bare, "0" * 64))
-        await bare.run_until_quiescent(clock.now())
-        codes.append(answer.result().code)
         engine = start_run(
             estate.catalog,
             tmp_path / "run",
@@ -1509,7 +1498,7 @@ def test_an_engine_with_no_run_root_or_an_unreadable_plan_refuses_the_update(
         engine.journal.close()
 
     asyncio.run(scenario())
-    assert codes == ["invalid_argument", "invalid_argument"]
+    assert codes == ["invalid_argument"]
 
 
 def test_a_client_that_gave_up_on_the_decision_leaves_the_loop_running(tmp_path: Path) -> None:

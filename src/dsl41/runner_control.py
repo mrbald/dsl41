@@ -244,7 +244,8 @@ def _failure(code: Code, error: str, *, refused: bool = False) -> dict[str, Any]
     code table). `code` names the reason and `error` keeps the prose. `refused` says
     nothing was admitted, so an unknown-outcome code never carries it."""
     if refused and code in UNKNOWN_OUTCOME_CODES:
-        raise ValueError(f"{code} is an unknown outcome and cannot be a refusal")
+        # Refusal callers use the closed refusal-code set (control-protocol §2).
+        raise AssertionError(f"{code} is an unknown outcome and cannot be a refusal")
     answer: dict[str, Any] = {"ok": False, "code": code, "error": error}
     if refused:
         answer["refused"] = True

@@ -26,7 +26,7 @@ from dispatch_fixtures import dispatch_record
 from store_surgery import rows
 
 from dsl41 import runner_adapters, runner_procid, runner_stops
-from dsl41.engine_charts import AttemptOutcome, DrainRequest, ExitRecord
+from dsl41.engine_charts import DrainRequest
 from dsl41.ir import lower_source
 from dsl41.oracle_state import Event
 from dsl41.runner import Engine
@@ -538,7 +538,7 @@ def test_attempt_view_and_plan_bookkeeping_branches(tmp_path: Path) -> None:
         engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "j"}))
         await engine.run_until_quiescent(T0)
         assert engine.attempt_view("j") is not None
-        engine._step_done("no such plan", 0)
+        engine._step_done("no such plan")
         engine.perform_plan("no such plan")
         engine._plan_finished("unknown attempt")
         engine._forget_if_over("unknown attempt")
@@ -629,40 +629,6 @@ def test_a_completed_ladder_retains_its_attempt_until_its_callback(
         await engine.shutdown()
         assert engine.journal is not None
         engine.journal.close()
-
-    asyncio.run(scenario())
-
-
-def test_an_engine_with_no_store_runs_a_plan_from_memory() -> None:
-    async def scenario() -> None:
-        engine = Engine(
-            lower_source(_JIL), clock=VirtualClock(start=T0), adapters={"CMD": FakeAdapter()}
-        )
-        engine.lifecycle.replay_done()
-        facts = AttemptFacts(
-            RUN_ID,
-            "j",
-            1,
-            1,
-            Path("/nonexistent"),
-            {"DSL41_SCHEDULED_AT": T0.isoformat(), **({"DSL41_JOB": "j"})},
-        )
-        engine.adopt_attempt(facts)
-        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "j"}))
-        await engine.run_until_quiescent(T0)
-        engine.record_outcome(
-            RUN_ID,
-            AttemptOutcome("natural", record=ExitRecord(exit_code=0, wrapper_outcome="exited")),
-        )
-        await engine.run_until_quiescent(T0 + timedelta(seconds=1))
-        assert engine.oracle.store.job["j"].status == "SUCCESS"
-        engine.journal_lifecycle("draining")  # no store: nothing to write
-        assert engine._pending("j", 2) is None
-        engine.leave("clean_shutdown", ())
-        engine.exit_code = 0
-        await engine.run_until_quiescent(T0 + timedelta(seconds=2))
-        assert engine.stopped.is_set() and not engine.shutdown_recorded
-        await engine.shutdown()
 
     asyncio.run(scenario())
 
@@ -1070,39 +1036,6 @@ def test_engine_side_arcs(tmp_path: Path) -> None:
         await engine.shutdown()
         assert engine.journal is not None
         engine.journal.close()
-
-    asyncio.run(scenario())
-
-
-def test_a_superseded_replacement_on_an_engine_with_no_store_is_closed(tmp_path: Path) -> None:
-    from dsl41.runner import Deferred
-
-    async def scenario() -> None:
-        engine = Engine(
-            lower_source(_JIL), clock=VirtualClock(start=T0), adapters={"CMD": FakeAdapter()}
-        )
-        engine._discharge(Deferred("j", 5, plan=RUN_ID, step=0, attempt=OTHER_ID))
-        assert engine._live == {}  # the run is not the oracle's: nothing launched
-        await engine.shutdown()
-
-    asyncio.run(scenario())
-
-
-def test_a_command_attempt_needs_a_run_root() -> None:
-    """The attempt tier runs a command attempt from its spool, so an engine with no run root
-    refuses the dispatch before anything is recorded or launched."""
-
-    async def scenario() -> None:
-        engine = Engine(
-            lower_source(_JIL),
-            clock=VirtualClock(start=T0),
-            adapters={"CMD": LocalCommandAdapter()},
-        )
-        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "j"}))
-        with pytest.raises(EngineError, match="needs a run_root"):
-            await engine.run_until_quiescent(T0)
-        assert engine._live == {} and engine._facts == {}
-        await engine.shutdown()
 
     asyncio.run(scenario())
 

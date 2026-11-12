@@ -69,6 +69,9 @@ def ev(kind: EventKind, minutes: float = 0.0, **payload: object) -> Event:
 
 _SOLO_JIL = "insert_job: j1\njob_type: c\ncommand: x\nmachine: m1\n"
 _IDENTITY = {"baseline_id": "b", "clock_domain": "virtual", "state_version": "1"}
+_UNKNOWN_PLAN_ERROR = (
+    r"^follow-up plan 'retry': this binary knows \['complete', 'hold', 'none', 'rerun'\]$"
+)
 
 
 def _journal(tmp_path: Path) -> Journal:
@@ -125,7 +128,7 @@ def test_the_writer_refuses_a_record_this_binary_does_not_write(tmp_path: Path) 
         (Record(T0, "segment", None, None, {"n": 1}), "record kind 'segment'"),
         (Record(T0, "engine", None, None, {"event": "paused"}), "engine record 'paused'"),
         (Record(T0, "outcome", None, None, {"outcome": "vanished"}), "outcome 'vanished'"),
-        (Record(T0, "follow_up", None, None, {**plan, "plan": "retry"}), "plan 'retry'"),
+        (Record(T0, "follow_up", None, None, {**plan, "plan": "retry"}), _UNKNOWN_PLAN_ERROR),
     ]
     try:
         for record, message in refused:
@@ -305,7 +308,16 @@ def test_the_kinds_the_wire_does_not_carry_project_to_nothing() -> None:
     are the store's own: the frozen wire has no name for them (control-protocol ss5)."""
     for kind, payload in (
         ("outcome", {"attempt": "a", "outcome": "natural"}),
-        ("follow_up", {"event": "plan", "plan": "complete"}),
+        (
+            "follow_up",
+            {
+                "event": "plan",
+                "plan": "complete",
+                "steps": [
+                    {"step": "feed", "payload": {"job": "j", "run_number": 1, "exit_code": 0}}
+                ],
+            },
+        ),
         ("dispatch_pending", {"event": "pending"}),
         ("engine", {"event": "started"}),
         ("config", {"event": "intent"}),
@@ -318,7 +330,7 @@ def test_the_kinds_the_wire_does_not_carry_project_to_nothing() -> None:
 
 def test_the_open_table_follows_an_attempt_a_pending_start_and_a_plan() -> None:
     """(spec-wiring 1b): a dispatch opens an attempt and an outcome closes it; a pending start
-    closes when a dispatch discharges it; a plan stays until every step has its done mark. The
+    closes when a dispatch discharges it; a plan stays until its one step has its done mark. The
     floor is the oldest seq any of them refers to, and the snapshot carries the table whole."""
     table = OpenTable()
     attempt = "00000000-0000-4000-8000-000000000001"
@@ -344,14 +356,13 @@ def test_the_open_table_follows_an_attempt_a_pending_start_and_a_plan() -> None:
         ),
     )
     plan = {"event": "plan", "attempt": attempt, "job": "j1", "run_number": 1, "plan": "hold"}
-    steps = [{"step": "feed", "payload": {}}, {"step": "hold", "payload": {}}]
+    steps = [{"step": "hold", "payload": {}}]
     table.note(6, Record(T0, "follow_up", None, None, {**plan, "steps": steps}))
     table.note(7, Record(T0, "outcome", None, None, {"attempt": attempt, "outcome": "natural"}))
     assert table.floor() == 3 and list(table.attempts) == []
     assert OpenTable.from_payload(table.to_payload()).to_payload() == table.to_payload()
+    assert list(table.plans) == [attempt]
     table.note(8, follow_up_done(attempt, 0, 7, T0))
-    assert table.plans[attempt].next_step() == 1
-    table.note(9, follow_up_done(attempt, 1, None, T0))
     assert table.plans == {}
     other = "00000000-0000-4000-8000-000000000002"
     table.note(
@@ -1071,6 +1082,63 @@ def test_catalog_order_survives_store_replay_restart_and_reload(tmp_path: Path, 
         finally:
             await engine.shutdown()
             assert engine.journal is not None
+            engine.journal.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("plan", "count", "message"),
+    [
+        ("complete", 0, "exactly 1 steps"),
+        ("complete", 2, "exactly 1 steps"),
+        ("none", 1, "exactly 0 steps"),
+        ("retry", 0, _UNKNOWN_PLAN_ERROR),
+        ("retry", 1, _UNKNOWN_PLAN_ERROR),
+    ],
+)
+def test_plan_step_count_is_checked_at_write_read_and_snapshot(
+    tmp_path: Path, plan: str, count: int, message: str
+) -> None:
+    """A one-effect plan keeps its wire list; no other count can enter the fold (DL-426)."""
+    from dataclasses import replace
+
+    async def scenario() -> None:
+        clock = VirtualClock(T0)
+        engine = start_run(
+            lower_source(_SOLO_JIL),
+            tmp_path / "run",
+            clock=clock,
+            adapters={"CMD": FakeAdapter(default=(1, 0))},
+        )
+        assert engine.journal is not None
+        try:
+            engine.inject(ev("STARTJOB", job="j1"))
+            await engine.run_until_quiescent(T0)
+            await clock.wait_until(T0 + timedelta(seconds=1))
+            await asyncio.sleep(0)
+            journal = engine.journal
+            [record] = [
+                record
+                for _, record in journal.store.read_from(0)
+                if record.kind == "follow_up" and record.payload.get("event") == "plan"
+            ]
+            steps = record.payload["steps"] * count
+            bad = replace(record, payload={**record.payload, "plan": plan, "steps": steps})
+            before = journal.last_seq
+            with pytest.raises(EngineError, match=message):
+                journal.append(bad)
+            assert journal.last_seq == before
+            with pytest.raises(EngineError, match=message):
+                OpenTable().note(before + 1, bad)
+            payload = journal.open.to_payload()
+            assert len(payload["plans"]) == 1
+            payload["plans"][0]["plan"] = plan
+            payload["plans"][0]["steps"] = steps
+            with pytest.raises(EngineError, match=message):
+                OpenTable.from_payload(payload)
+        finally:
+            await engine.shutdown()
             engine.journal.close()
 
     asyncio.run(scenario())

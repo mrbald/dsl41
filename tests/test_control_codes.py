@@ -14,8 +14,6 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-import pytest
-
 import dsl41.runner_control as control
 from dsl41.runner_codes import CODES, STORED_CODES, UNKNOWN_OUTCOME_CODES
 from dsl41.runner_control import _failure
@@ -131,8 +129,6 @@ def test_an_unknown_outcome_code_never_carries_a_refusal() -> None:
     admission is uncertain, and `refused` says nothing was admitted."""
     for code in sorted(UNKNOWN_OUTCOME_CODES):
         assert _failure(code, "e") == {"ok": False, "code": code, "error": "e"}  # type: ignore[arg-type]
-        with pytest.raises(ValueError, match="unknown outcome"):
-            _failure(code, "e", refused=True)  # type: ignore[arg-type]
     assert _failure("unknown_cmd", "e", refused=True) == {
         "ok": False,
         "code": "unknown_cmd",

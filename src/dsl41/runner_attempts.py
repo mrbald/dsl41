@@ -25,7 +25,6 @@ import asyncio
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Any, Final, Literal, Protocol
 
 from dsl41.engine_charts import (
@@ -98,12 +97,6 @@ def attempt_id(job: str, run_number: int, n: int) -> str:
     """An attempt's display name `<job>.<run>.<n>`; `n` counts from 1 within one run. The
     attempt's identity is its run id, never this name (DL-118)."""
     return f"{job}.{run_number}.{n}"
-
-
-def attempt_spool_dir(run_root: Path, job: str, run_number: int, n: int) -> Path:
-    """An attempt's own spool directory, `runs/<job>.<run>/<n>/`, so a replacement attempt never
-    meets the first one's exclusive `mkdir`. The run directory above it keeps the log files."""
-    return run_root / "runs" / f"{job}.{run_number}" / str(n)
 
 
 # -- the exit record
@@ -773,7 +766,8 @@ class AttemptTier:
             elif name == CANCEL_RECORD_TIMEOUT:
                 self.processes.cancel_timer(attempt)
             else:
-                raise ValueError(f"attempt {attempt!r}: no effect for the intent {name!r}")
+                # ATTEMPT emits a closed intent set, declared in engine_charts (DL-426).
+                raise AssertionError(f"attempt {attempt!r}: no effect for the intent {name!r}")
 
     def _what_is_left(self, attempt: str, outcome: AttemptOutcome) -> None:
         """At the record, before the outcome is journaled, a reading of what is left of the
@@ -970,7 +964,8 @@ class EngineTier:
         elif name == EXIT_PROCESS:
             self.effects.exit_process(detail)
         else:
-            raise ValueError(f"engine: no effect for the intent {name!r}")
+            # ENGINE_LIFECYCLE emits a closed intent set in engine_charts (DL-426).
+            raise AssertionError(f"engine: no effect for the intent {name!r}")
 
     def _settle_check(self) -> None:
         """Post `all_attempts_settled` in DRAINING once no attempt is unsettled, its plan done

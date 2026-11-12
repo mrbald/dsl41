@@ -332,8 +332,8 @@ class EngineUpdate:
         """Admit or refuse one update request (module docstring). The answer's `applied` future
         resolves once the update applied, at once when nothing was to stop."""
         engine = self.engine
-        if engine.run_root is None or engine.journal is None:
-            return UpdateAnswer(code="invalid_argument", error="this engine has no run root")
+        # ControlServer admits updates only on stored start_run/resume_run engines (DL-427).
+        assert engine.run_root is not None and engine.journal is not None
         # a retry is answered from its stored admission whatever the engine does now; only a
         # new update is refused while the engine drains
         prior = self._prior(request, engine.journal)
