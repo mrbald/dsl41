@@ -1083,6 +1083,8 @@ class _Lowerer:
         if name is not None:
             # DL-39: the catalog key is the semantic name, `\:` unescaped as in condition refs
             name = unescape_job_name(name)
+            if "/" in name or "\0" in name or name in (".", ".."):
+                self.err(f"job name {name!r} must be one directory component (DL-494)", stmt.span)
         if name is not None and name in self.jobs:
             first = self.jobs[name].span
             origin = first.at if first is not None else "unknown"

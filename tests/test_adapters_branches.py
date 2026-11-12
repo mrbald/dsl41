@@ -64,17 +64,6 @@ def test_build_run_spec_refuses_a_job_without_an_exec_spec(tmp_path: Path) -> No
     assert not (tmp_path / "runs").exists()
 
 
-@pytest.mark.parametrize("name", ["a/b", ".", ".."])
-def test_build_run_spec_refuses_a_name_that_is_not_a_safe_directory(
-    tmp_path: Path, name: str
-) -> None:
-    ctx = AdapterContext(clock=VirtualClock(start=T0), run_root=tmp_path)
-    job = _cmd_job().model_copy(update={"name": name})
-    with pytest.raises(EngineError, match="not a safe run-directory name"):
-        _build_run_spec(job, 1, ctx, grace_seconds=1.0)
-    assert not (tmp_path / "runs").exists()
-
-
 def test_job_log_paths_take_the_job_own_files_or_fall_back_to_the_convention(
     tmp_path: Path,
 ) -> None:

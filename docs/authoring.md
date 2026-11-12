@@ -177,6 +177,7 @@ Lowering refuses unknown attributes outside the inert allow-list under DL-07.
 In Python, `build(permit_unknown=True)` selects that permission.
 The [entity contract](ir-design.md#4-ir-f-entities) defines the passthrough routes.
 Lowering also refuses duplicate job names.
+Lowering refuses a job name containing `/` or a NUL byte, or equal to `.` or `..` (DL-494).
 New input accepts `term_run_time` from 0 through 527040 minutes; zero means no limit
 (DL-469). A main-config engine's stored catalog with an out-of-range value keeps running
 and restarting.

@@ -122,6 +122,8 @@ verbatim instead. Every command that loads a catalog takes it, except
 `-p/--properties`, which resolves `~{$NAME}~` placeholders from properties
 files before parsing.
 
+Lowering refuses a job name containing `/` or a NUL byte, or equal to `.` or `..` (DL-494).
+
 ### Resolve estate templating
 
 ```sh
