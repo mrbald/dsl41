@@ -713,8 +713,8 @@ class RuntimeState:
     SEM-01 latching applies throughout. The rows are frozen, the maps are private and published
     as read-only views, and every write goes through a verb that names what changed
     (DL-82, DL-86): `transition`, `start_run`, `move_flag`, `set_global`, `enqueue_timer`, and
-    the capacity verbs `reserve`, `release_reservations`, `enqueue_waiter`, `dequeue_waiter`,
-    `seed_consumed` (DL-120), `take_over_held` and `release_held` (DL-256). The verbs that move
+    the capacity verbs `reserve`, `release_reservations`, `enqueue_waiter`, `dequeue_waiter`
+    (DL-120), `take_over_held` and `release_held` (DL-256). The verbs that move
     a job's status, flags or held capacity write what the `job` chart reached. `install` and
     `seed_job` install rows; an update's `retire_job` and `admit_job` remove and add one between
     inputs (spec-reload). Optimistic locking needs one place where "this entity changed" is
@@ -1201,14 +1201,6 @@ class RuntimeState:
         """Drop a job out of the queue (admitted, killed, iced or cancelled). The counter is a
         high-water allocator and does not go back."""
         self._replace(job, waiter_seq=None)
-
-    def seed_consumed(self, consumed: Mapping[str, int]) -> None:
-        """Open the map from a carried seal (period-model ss3.3). A negative value is refused
-        here as well as by the loader (PR-22)."""
-        for bucket, units in consumed.items():
-            if units < 0:
-                raise OracleError(f"consumed[{bucket!r}] = {units}: units spent cannot be negative")
-        self._consumed = dict(consumed)
 
     def rebuild_machines(self) -> Executor:
         """A new executor holding the assembly instance in the store's phase (statechart-engine

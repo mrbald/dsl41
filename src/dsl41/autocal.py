@@ -32,7 +32,6 @@ __all__ = [
     "CalendarRuleError",
     "CompiledCalendar",
     "compile_calendar",
-    "reads_family",
     "standard_days",
     "standard_rows",
 ]
@@ -66,8 +65,8 @@ CALENDAR_ATTRS = frozenset(
 
 #: Doc-defective tokens (SEM-37): WORKDXnn contradicts its month-scoped siblings and the CWEK
 #: family is garbled in the vendor's own text. Refused outright, no default, no switch.
-#: Named per family so the register carries a refusal row for each; `_parse_token` and
-#: `classify_token` both read the table (DL-209).
+#: Named per family so the register carries a refusal row for each (DL-209).
+#: `_parse_token` reads the table.
 _DEFECTIVE_FAMILIES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("workdx", re.compile(r"workdx\d+", re.ASCII)),
     ("cwek", re.compile(r"cwek(#(\d|l)|m\d|x\d)", re.ASCII)),
@@ -522,36 +521,6 @@ _FAMILIES: tuple[tuple[str, re.Pattern[str], _Builder], ...] = (
     ("cwrk", re.compile(r"cwrk([#mx])(\d+|l)"), _b_cwrk),
     ("cddd", re.compile(r"c(mon|tue|wed|thu|fri|sat|sun)([#m])(\d+|l)"), _b_cddd),
 )
-
-
-def classify_token(raw: str) -> tuple[str, str] | None:
-    """Which table `_parse_token` reads this token from, without building a predicate.
-
-    Returns ("keyword"|"family"|"defective", name), or None for a token outside the
-    inventory. The register's calendar detectors read it (DL-209); the parser stays the
-    authority on meaning."""
-    tok = raw.lower()
-    for name, pattern in _DEFECTIVE_FAMILIES:
-        if pattern.fullmatch(tok):
-            return "defective", name
-    body = tok[1:] if tok.startswith(_EXCLUSION_PREFIX) else tok
-    if body in _KEYWORDS:
-        return "keyword", body
-    for name, pattern, _builder in _FAMILIES:
-        if pattern.fullmatch(body):
-            return "family", name
-    return None
-
-
-def reads_family(cal: CalendarIR, family: str) -> bool:
-    """Whether any word of `cal`'s rules is a token of the SEM-37 family `family`.
-
-    A rule the parser would refuse still answers."""
-    return any(
-        classify_token(word) == ("family", family)
-        for line in cal.conditions
-        for word in _TOKEN_RE.findall(line)
-    )
 
 
 def _parse_token(cal: str, raw: str) -> _Token:

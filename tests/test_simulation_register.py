@@ -1009,6 +1009,25 @@ _ATTR_SURFACE_SUBCOMMANDS: dict[str, frozenset[str]] = {
 }
 
 
+def _classify_token(raw: str) -> tuple[str, str] | None:
+    """Which table `_parse_token` reads this token from, without building a predicate.
+
+    Returns ("keyword"|"family"|"defective", name), or None for a token outside the
+    inventory. The register's calendar detectors read it (DL-209); the parser stays the
+    authority on meaning."""
+    tok = raw.lower()
+    for name, pattern in autocal._DEFECTIVE_FAMILIES:
+        if pattern.fullmatch(tok):
+            return "defective", name
+    body = tok[1:] if tok.startswith(autocal._EXCLUSION_PREFIX) else tok
+    if body in autocal._KEYWORDS:
+        return "keyword", body
+    for name, pattern, _builder in autocal._FAMILIES:
+        if pattern.fullmatch(body):
+            return "family", name
+    return None
+
+
 def _detect_jil(surface: str, member: str, text: str) -> bool:
     if surface == "statement":
         return any(stmt.subcommand.lower() == member for stmt in _statements(text))
@@ -1037,10 +1056,10 @@ def _detect_jil(surface: str, member: str, text: str) -> bool:
     if surface == "initial_status":
         return any(v.strip().upper() == member for v in _attr_values(text, jobs, "status"))
     if surface == "cal_keyword":
-        return any(autocal.classify_token(t) == ("keyword", member) for t in _calendar_tokens(text))
+        return any(_classify_token(t) == ("keyword", member) for t in _calendar_tokens(text))
     if surface == "cal_family":
         return any(
-            autocal.classify_token(t) in (("family", member), ("defective", member))
+            _classify_token(t) in (("family", member), ("defective", member))
             for t in _calendar_tokens(text)
         )
     if surface == "cal_operator":
@@ -1071,7 +1090,7 @@ def _detect_cal_operator(member: str, text: str) -> bool:
         return any(t.lower() == member for t in _calendar_tokens(text))
     if member == autocal._EXCLUSION_PREFIX:
         return any(
-            t.lower().startswith(member) and autocal.classify_token(t) is not None
+            t.lower().startswith(member) and _classify_token(t) is not None
             for t in _calendar_tokens(text)
         )
     return any(member in rule for rule in rules)
@@ -1868,7 +1887,7 @@ def test_classify_token_agrees_with_the_parser() -> None:
     plain and `X`-prefixed spellings."""
     for token in _register_calendar_tokens():
         for spelling in (token, f"X{token}"):
-            classified = autocal.classify_token(spelling)
+            classified = _classify_token(spelling)
             try:
                 autocal._parse_token("C", spelling)
             except autocal.CalendarRuleError:
@@ -1881,8 +1900,8 @@ def test_classify_token_agrees_with_the_parser() -> None:
 @pytest.mark.parametrize("token", ["WORKDX1", "WORKDX12", "CWEK#1", "CWEKM2", "CWEKX3"])
 def test_defective_tokens_classify_as_defective(token: str) -> None:
     """Breaks when a doc-defective family stops being refused."""
-    assert autocal.classify_token(token) is not None
-    assert autocal.classify_token(token)[0] == "defective"  # type: ignore[index]
+    assert _classify_token(token) is not None
+    assert _classify_token(token)[0] == "defective"  # type: ignore[index]
     with pytest.raises(autocal.CalendarRuleError):
         autocal._parse_token("C", token)
 

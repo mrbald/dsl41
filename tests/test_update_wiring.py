@@ -1204,30 +1204,6 @@ def _status(run_root: Path) -> dict[str, Any]:
     return roundtrip(run_root / "control.sock", {"cmd": "status", "v": 3})
 
 
-def test_the_catalog_answer_maps_back_to_the_live_record() -> None:
-    from dsl41.cli_reload import live_of_answer
-
-    catalog = lower_source(_jil({"a": "x"}))
-    answer = {
-        "ok": True,
-        "catalog": json.loads(json.dumps(catalog.model_dump(mode="json"))),
-        "settings": {"timezone": "UTC", "job_env": {}},
-        "path_environment": {},
-        "environment_view": "ops",
-        "revision": 3,
-        "status": {"a": "RUNNING"},
-        "runs": {"a": 2},
-        "tombstones": {"z": ["ON_HOLD"]},
-    }
-    live = live_of_answer(answer)
-    assert (live.catalog, live.revision, live.runs, live.tombstones) == (
-        catalog,
-        3,
-        {"a": 2},
-        {"z": ("ON_HOLD",)},
-    )
-
-
 def test_while_an_update_stops_a_retry_waits_for_it_and_another_update_is_refused(
     tmp_path: Path,
 ) -> None:

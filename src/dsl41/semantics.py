@@ -3,32 +3,24 @@ without a code change (runner-design ss8a, DL-252).
 
 A switch marks a place where documented AutoSys behavior and dsl41's choice can differ, or the
 documentation is unclear. The default lives here, in code. A period records only explicit
-overrides in its runtime profile, so replay and audit read the values the engine ran. A switch
-also names the jobs and calendars it can change, so a boundary that flips it classifies those
-jobs and the jobs naming those calendars (period-model ss10.2).
+overrides in its runtime profile, so replay and audit read the values the engine ran.
 
 Changing a default is a state-machine change and bumps `STATE_MACHINE_VERSION`.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final, Literal, cast, get_args
 
-from dsl41.capacity import checks_load, resource_type
-from dsl41.conditions import ExitCodeAtom, StatusAtom, iter_atoms
+from dsl41.conditions import ExitCodeAtom, StatusAtom
 from dsl41.ir import FwSpec
 from dsl41.timezones import DstStartTimes
 
 if TYPE_CHECKING:
-    from dsl41.ir import CalendarIR, CatalogIR, JobIR
-
-
-def _no_calendar(calendar: CalendarIR) -> bool:
-    """A switch that changes no calendar's days."""
-    return False
+    from dsl41.ir import JobIR
 
 
 @dataclass(frozen=True)
@@ -45,55 +37,13 @@ class Switch:
     autosys: str
     #: one line, plain English
     description: str
-    #: whether a flip can change how `job` runs or starts in `catalog`: the classifier's job edge
-    #: (period-model ss10.2)
-    affects: Callable[[JobIR, CatalogIR], bool]
-    #: whether a flip can change the days `calendar` generates: the classifier's calendar edge. A
-    #: job reaches such a switch through the calendars it names.
-    affects_calendar: Callable[[CalendarIR], bool] = _no_calendar
+    #: whether the scheduler compiles calendars under this switch (DL-259).
+    calendar: bool = False
     #: the wired component outside the oracle that reads this switch, which the derived runtime
     #: profile reads it back from: the scheduler, to place start instants (DL-260), or the FW
     #: adapter, to decide a watch complete (DL-258); None when none does. The scheduler reads a
     #: calendar switch anyway (DL-259).
     reader: Literal["scheduler", "fw"] | None = None
-
-
-def _no_job(job: JobIR, _catalog: CatalogIR) -> bool:
-    """A switch that reaches jobs only through their calendars."""
-    return False
-
-
-def _reads_wekr(calendar: CalendarIR) -> bool:
-    """An extended calendar with a WEKR token in its rules: what `wekr-first-week` reads
-    (SEM-37)."""
-    from dsl41.autocal import reads_family
-
-    return calendar.kind == "extended" and reads_family(calendar, "wekr")
-
-
-def _has_lookback_atom(job: JobIR, _catalog: CatalogIR) -> bool:
-    """A status or exit-code atom with a lookback in the job's condition, box_success or
-    box_failure: what `ice-lookback` reads."""
-    return any(
-        isinstance(atom, (StatusAtom, ExitCodeAtom)) and atom.lookback is not None
-        for _kind, cond, _span in job.iter_conditions()
-        for atom in iter_atoms(cond)
-    )
-
-
-def _renewable_without_free(job: JobIR, catalog: CatalogIR) -> bool:
-    """A `resources:` request with no FREE on a renewable resource: what `renewable-free` reads
-    (DL-256). An absent res_type is renewable, as in `capacity.release_policy`."""
-    return any(
-        ref.free is None and resource_type(catalog.resources.get(ref.name)) in ("", "R")
-        for ref in job.resources
-    )
-
-
-def _can_queue(job: JobIR, _catalog: CatalogIR) -> bool:
-    """A job that can wait in QUE_WAIT: it names a resource, or its positive priority makes its
-    start check machine load (DL-247). What `queued-recheck` reads."""
-    return bool(job.resources) or checks_load(job)
 
 
 def fw_no_min_size(job: JobIR) -> bool:
@@ -107,38 +57,6 @@ def fw_existence_immediate(job: JobIR, existence: str) -> bool:
     `immediate` and `job` sets no `watch_file_min_size`. A job with a minimum size always needs
     the steady-size rule (runner_adapters.FileWatcherAdapter, runner_startup._resume_watch)."""
     return existence == "immediate" and fw_no_min_size(job)
-
-
-def _box_member(job: JobIR, _catalog: CatalogIR) -> bool:
-    """A job inside a box, a subbox included: what `off-ice-in-running-box` reads (SEM-20)."""
-    return job.box.box_name is not None
-
-
-def _is_box(job: JobIR, _catalog: CatalogIR) -> bool:
-    """A box job: what `box-start-all-members-out` (SEM-11) and `idle-box-iced-member` (SEM-15)
-    read."""
-    return job.job_type == "BOX"
-
-
-def _has_box_terminator(job: JobIR, _catalog: CatalogIR) -> bool:
-    """A member with `box_terminator`: what `box-terminator-on-terminated` reads (SEM-14)."""
-    return job.box.box_name is not None and job.box.box_terminator
-
-
-def _fw_without_min_size(job: JobIR, _catalog: CatalogIR) -> bool:
-    """`fw_no_min_size` in the registry's `affects` shape (DL-256)."""
-    return fw_no_min_size(job)
-
-
-def _has_start_ticks(job: JobIR, _catalog: CatalogIR) -> bool:
-    """A schedule with start_times or start_mins: what `dst-start-times` reads.
-
-    The job's zone is not checked, because a flip is classified without the profile that
-    resolves it; treating every such job as affected never carries a change silently. A running
-    job it reaches is refused (R); a latent one carries a recorded assumption (A).
-    """
-    schedule = job.schedule
-    return schedule is not None and bool(schedule.start_times or schedule.start_mins)
 
 
 #: Each switch's values, in the order the help and the docs list them. The registry reads its
@@ -169,7 +87,6 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
                 autosys="true",
                 description="what a condition atom with a lookback qualifier reads when its"
                 " predecessor is on ice: true, or the ordinary on-ice table",
-                affects=_has_lookback_atom,
             ),
             Switch(
                 name="renewable-free",
@@ -179,7 +96,6 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
                 description="what a renewable resource request with no FREE does with its"
                 " units: Y frees them only on SUCCESS and holds them after FAILURE or"
                 " TERMINATED until RELEASE_RESOURCE, A frees them on every completion",
-                affects=_renewable_without_free,
             ),
             Switch(
                 name="queued-recheck",
@@ -189,7 +105,6 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
                 description="what a job leaving QUE_WAIT re-checks before it starts, as the"
                 " vendor's EvaluateQueuedJobStarts: 0 nothing; 1 its condition, run_window and"
                 " exclude_calendar; 2 also whether today is a run day",
-                affects=_can_queue,
             ),
             Switch(
                 name="fw-existence",
@@ -201,7 +116,6 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
                 " minimum size (stable, dsl41's own choice -- a file still being written is not"
                 " complete), or complete at once, watch_interval ignored (immediate, the vendor"
                 " reading)",
-                affects=_fw_without_min_size,
                 reader="fw",
             ),
             Switch(
@@ -211,8 +125,7 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
                 autosys="unknown",
                 description="where week 1 of a WEKR token's year starts: on the first anchor"
                 " day on or after January 1, or on January 1 itself",
-                affects=_no_job,
-                affects_calendar=_reads_wekr,
+                calendar=True,
             ),
             Switch(
                 name="dst-start-times",
@@ -221,7 +134,6 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
                 autosys="vendor",
                 description="how start_times and start_mins read the hour a one-hour DST"
                 " change skips or repeats: the vendor's rules, or the fold=0 conversion",
-                affects=_has_start_ticks,
                 reader="scheduler",
             ),
             Switch(
@@ -232,7 +144,6 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
                 description="what a member taken off ice while its box runs does, if it has"
                 " not run in that run: it sits the run out and the box completes without it"
                 " while it reads INACTIVE (next-run), or it may start in that run (same-run)",
-                affects=_box_member,
             ),
             Switch(
                 name="box-terminator-on-terminated",
@@ -242,7 +153,6 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
                 description="whether a box_terminator member that ends TERMINATED terminates"
                 " its running box, as one that ends FAILURE does (true), or only FAILURE"
                 " does (false)",
-                affects=_has_box_terminator,
             ),
             Switch(
                 name="box-start-all-members-out",
@@ -252,7 +162,6 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
                 description="what a box does when its start leaves no member in the run,"
                 " every direct member on ice or no members: complete at once through the"
                 " completion door (complete), or stay RUNNING until an operator acts (wait)",
-                affects=_is_box,
             ),
             Switch(
                 name="idle-box-iced-member",
@@ -262,7 +171,6 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
                 description="what an iced member that is out of the run counts for when a box"
                 " that is not running re-derives its status: nothing, as an INACTIVE member"
                 " (ignore), or its own status (vote)",
-                affects=_is_box,
             ),
             Switch(
                 name="process-leak",
@@ -273,7 +181,6 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
                 " it exits: stopped like any stop, TERM, the grace, then KILL, and the job's"
                 " next run waits for them (terminate), or left running with a warning, as the"
                 " vendor does (leak)",
-                affects=_no_job,
             ),
         )
     }
@@ -282,7 +189,7 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
 #: The switches that can change a calendar's days: the ones a scheduler compiles its extended
 #: calendars under (DL-259).
 CALENDAR_SWITCHES: Final[tuple[str, ...]] = tuple(
-    name for name, switch in REGISTRY.items() if switch.affects_calendar is not _no_calendar
+    name for name, switch in REGISTRY.items() if switch.calendar
 )
 
 #: Every switch a scheduler compiles under: the calendar switches and the ones it reads to place
