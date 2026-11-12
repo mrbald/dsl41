@@ -19,6 +19,29 @@ RUN_ID = "00000000-0000-4000-8000-000000000001"
     ("field", "value"),
     [
         ("unknown", "x"),
+        *[("shell", value) for value in (None, True, 1, [], {}, "sh", "", "/bin/sh\0")],
+        *[
+            ("limits", value)
+            for value in (
+                None,
+                True,
+                1,
+                "limits",
+                {},
+                [1],
+                [[1, 2]],
+                [[1, 2, 3, 4]],
+                [[True, 1, 2]],
+                [[1.0, 1, 2]],
+                [[None, 1, 2]],
+                [[1, True, 2]],
+                [[1, 1.0, 2]],
+                [[1, "1", 2]],
+                [[1, 1, False]],
+                [[1, 1, "2"]],
+                [[1, [], 2]],
+            )
+        ],
         ("run_id", "not-a-uuid"),
         ("run_id", RUN_ID.upper().replace("000000000001", "00000000000A")),
         ("run_id", RUN_ID.replace("-4000-", "-1000-")),
@@ -148,3 +171,35 @@ def test_malformed_json_keeps_exit_one(tmp_path: Path) -> None:
         check=False,
     )
     assert result.returncode == 1 and list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("version", [2, None, True, 1.0])
+def test_wrapper_input_dispatcher_refuses_unsupported_version(tmp_path, version):
+    read_fd, write_fd = os.pipe()
+    spec = {
+        "version": version,
+        "run_id": RUN_ID,
+        "job": "synthetic",
+        "run_number": 1,
+        "command": f"touch {tmp_path / 'effect'}",
+        "run_dir": str(tmp_path),
+        "lifeline_fd": read_fd,
+        "stdout_path": str(tmp_path / "out"),
+        "stderr_path": str(tmp_path / "err"),
+        "shell": "/bin/sh",
+        "limits": [],
+    }
+    try:
+        result = subprocess.run(
+            [sys.executable, runner_wrapper.__file__],
+            input=json.dumps(spec),
+            capture_output=True,
+            text=True,
+            pass_fds=(read_fd,),
+            timeout=10,
+        )
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+    assert result.returncode == 2 and "unsupported spec version" in result.stderr
+    assert list(tmp_path.iterdir()) == []

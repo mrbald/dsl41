@@ -22,7 +22,7 @@ Duties, in order (ss6a Tier 0):
    start-time) tokens, command pgid, boot_id, started_at. Every record uses the same
    liturgy: temp file in the same directory, fsync(file), rename, fsync(directory). The
    run dir must be on a local filesystem (rename-over-NFS has ambiguous crash semantics).
-3. Spawn ``/bin/sh -c <command>`` with the DSL41_RUN env tag (base64url JSON: run_id,
+3. Spawn ``<shell> -c <command>`` (default /bin/sh, DL-492) with the DSL41_RUN env tag (base64url JSON: run_id,
    job, run_number, boot_id). The tag is FORENSICS ONLY (DL-41a). The spec's ``env``
    carries the engine's DSL41_COOKIE to the command and its children; on Linux the engine
    reads /proc/<pid>/environ of its own uid's processes for it, and a process that carries
@@ -45,8 +45,8 @@ status.json outcomes (frozen in docs/wrapper-protocol.md):
   exited(exit_code) | signaled(signal) -- how the command itself ended;
   terminated(cause="parent lost")      -- the wrapper killed it on EOF;
   spawn_failed(error)                  -- the command's stdin, stdout or stderr could
-                                          not be opened, or /bin/sh could not be spawned
-                                          (DL-150).
+                                          not be opened, the selected shell could not execute,
+                                          or a child limit could not be set (DL-150, DL-492).
 The engine maps exited -> raw exit_code through SEM-09 oracle-side; signaled/terminated
 -> STATUS TERMINATED (a kill that happened); spawn_failed -> STATUS FAILURE. A missing
 status.json is the one thing this process never produces: that absence IS the E7
@@ -83,12 +83,10 @@ import os
 import re
 import resource
 import select
-import shlex
 import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -163,50 +161,6 @@ _RECORDER_IGNORED = (
 WrapperOutcome = Literal["exited", "signaled", "terminated", "spawn_failed"]
 
 
-@dataclass(frozen=True)
-class ProcessStream:
-    path: str
-    mode: Literal["append", "truncate"]
-
-
-@dataclass(frozen=True)
-class ProcessInput:
-    """In-memory process input; it is not a wrapper wire format."""
-
-    shell: str
-    site_profile: str | None
-    job_profile: str | None
-    command: str
-    stdin_path: str | None
-    stdout: ProcessStream
-    stderr: ProcessStream
-    limits: tuple[tuple[int, int | None, int | None], ...] = ()
-
-
-@dataclass(frozen=True)
-class ProcessEvidence:
-    """A shell invocation's observed wait status, without stage attribution."""
-
-    returncode: int
-    stage: Literal["unknown"] = "unknown"
-    command_reached: bool | None = None
-
-
-def _process_script(spec: ProcessInput) -> str:
-    """Compose shell syntax with literal inputs while sourcing profiles in shell scope."""
-    lines = [
-        f". {shlex.quote(profile)} || exit $?"
-        for profile in (spec.site_profile, spec.job_profile)
-        if profile is not None
-    ]
-    for fd, stream in ((1, spec.stdout), (2, spec.stderr)):
-        operator = ">>" if stream.mode == "append" else ">|"
-        lines.append(f"exec {fd}{operator}{shlex.quote(stream.path)} || exit $?")
-    lines.append(f"exec 0<{shlex.quote(spec.stdin_path or os.devnull)} || exit $?")
-    lines.append(spec.command)
-    return "\n".join(lines)
-
-
 def _prepare_process_child(limits: tuple[tuple[int, int | None, int | None], ...]) -> None:
     _restore_default_signals()
     for number, soft, hard in limits:
@@ -217,33 +171,6 @@ def _prepare_process_child(limits: tuple[tuple[int, int | None, int | None], ...
                 resource.RLIM_INFINITY if hard is None else hard,
             ),
         )
-
-
-def spawn_prepared_process(
-    spec: ProcessInput,
-    *,
-    env: dict[str, str],
-    profile_stdin: int,
-    profile_stdout: int,
-    profile_stderr: int,
-    cwd: str | None = None,
-) -> subprocess.Popen[bytes]:
-    """Start the candidate child; the caller owns it and observes its wait status."""
-    return subprocess.Popen(
-        [spec.shell, "-c", _process_script(spec)],
-        cwd=cwd,
-        env=env,
-        stdin=profile_stdin,
-        stdout=profile_stdout,
-        stderr=profile_stderr,
-        process_group=0,
-        preexec_fn=partial(_prepare_process_child, spec.limits),
-    )
-
-
-def collect_process_evidence(child: subprocess.Popen[bytes]) -> ProcessEvidence:
-    """Observe the invocation's wait status without guessing what its shell reached."""
-    return ProcessEvidence(child.wait())
 
 
 def _test_pause(point: str) -> None:
@@ -361,6 +288,8 @@ def _spec_refusal(spec: dict[str, Any]) -> str | None:
         "stdin_path",
         "grace_seconds",
         "env",
+        "shell",
+        "limits",
     }
     unknown = spec.keys() - allowed
     if unknown:
@@ -399,6 +328,23 @@ def _spec_refusal(spec: dict[str, Any]) -> str | None:
         )
     ):
         return f"env is not an object of strings: {spec['env']!r}"
+    if "shell" in spec and not (
+        isinstance(spec["shell"], str)
+        and "\0" not in spec["shell"]
+        and os.path.isabs(spec["shell"])
+    ):
+        return f"shell is not an absolute path without NUL: {spec['shell']!r}"
+    if "limits" in spec and not (
+        isinstance(spec["limits"], list)
+        and all(
+            isinstance(item, list)
+            and len(item) == 3
+            and _is_wire_int(item[0])
+            and all(value is None or _is_wire_int(value) for value in item[1:])
+            for item in spec["limits"]
+        )
+    ):
+        return f"limits is not a list of [resource, soft, hard]: {spec['limits']!r}"
     if "grace_seconds" in spec:
         grace = spec["grace_seconds"]
         refusal = f"grace_seconds is not a finite number of zero or more: {grace!r}"
@@ -477,16 +423,21 @@ def main() -> int:
             open(spec.get("stdin_path") or os.devnull, "rb") as stdin_f,
         ):
             child = subprocess.Popen(
-                ["/bin/sh", "-c", spec["command"]],
+                [spec.get("shell", "/bin/sh"), "-c", spec["command"]],
                 stdin=stdin_f,
                 stdout=stdout_f,
                 stderr=stderr_f,
                 env=env,
                 process_group=0,  # duty 1: the command's OWN pgid, not ours
                 close_fds=True,
-                preexec_fn=_restore_default_signals,  # single-threaded: safe
+                preexec_fn=partial(
+                    _prepare_process_child, spec.get("limits", ())
+                ),  # single-threaded
             )
-    except _IO_FAILURE as exc:
+    except (*_IO_FAILURE, subprocess.SubprocessError) as exc:
+        error = str(exc)
+        if isinstance(exc, subprocess.SubprocessError):
+            error += f"; limits={json.dumps(spec.get('limits', []))}"
         try:
             durable_write_json(
                 os.path.join(run_dir, "status.json"),
@@ -494,7 +445,7 @@ def main() -> int:
                     "version": SPOOL_VERSION,
                     **identity,
                     "outcome": "spawn_failed",
-                    "error": str(exc),
+                    "error": error,
                     "ended_at": utc_now_iso(),
                 },
             )

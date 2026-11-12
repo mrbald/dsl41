@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import os
-import pwd
 import re
 import signal
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Annotated, Literal
 
 from pydantic import (
@@ -27,6 +26,19 @@ from dsl41.ir import ExecSpec, FwSpec, JobIR, find_var_sites, unquote_jil_value
 from dsl41.runner_environment import ATTRIBUTE_NAMES, JobEnvironment as BaseJobEnvironment
 
 StreamMode = Literal["append", "truncate"]
+SHELL_NAMES = frozenset({"sh", "dash", "bash", "ksh"})
+
+
+def _job_shell_path(path: str) -> bool:
+    return os.path.isabs(path) and "\0" not in path and os.path.basename(path) in SHELL_NAMES
+
+
+def check_job_shell(explicit: str | None) -> None:
+    """DL-492: preflight checks configured shells; dispatch leaves exec to the wrapper."""
+    if explicit is not None and not (
+        _job_shell_path(explicit) and os.path.isfile(explicit) and os.access(explicit, os.X_OK)
+    ):
+        raise ValueError("engine.job_shell must name an executable sh, dash, bash or ksh")
 
 
 def reserve_attributes(value: dict[str, str]) -> dict[str, str]:
@@ -53,7 +65,7 @@ JobEnvironment = Annotated[BaseJobEnvironment, AfterValidator(reserve_attributes
 
 
 class RuntimePolicySettings(BaseModel):
-    """Revisioned settings; execution activation belongs to the integration slice."""
+    """Revisioned execution settings (DL-492)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -79,11 +91,7 @@ class RuntimePolicySettings(BaseModel):
     @field_validator("job_shell")
     @classmethod
     def shell_path(cls, value: str | None) -> str | None:
-        if value is not None and (
-            not os.path.isabs(value)
-            or "\0" in value
-            or Path(value).name not in {"sh", "dash", "bash", "ksh"}
-        ):
+        if value is not None and not _job_shell_path(value):
             raise ValueError("job_shell requires an absolute path to sh, dash, bash or ksh")
         return value
 
@@ -113,27 +121,9 @@ def policy_values(settings: Mapping[str, object]) -> dict[str, object]:
     return {key: getattr(policy, key) for key in POLICY_FIELDS}
 
 
-def resolve_job_shell(
-    explicit: str | None, passwd_shell: str | None = None
-) -> tuple[str, str | None]:
-    """Resolve once on the engine host; return the selected path and optional fallback warning."""
-
-    def usable(path: str) -> bool:
-        return (
-            os.path.isabs(path)
-            and Path(path).name in {"sh", "dash", "bash", "ksh"}
-            and os.path.isfile(path)
-            and os.access(path, os.X_OK)
-        )
-
-    if explicit is not None:
-        if not usable(explicit):
-            raise ValueError("engine.job_shell must name an executable sh, dash, bash or ksh")
-        return explicit, None
-    shell = pwd.getpwuid(os.geteuid()).pw_shell if passwd_shell is None else passwd_shell
-    if usable(shell):
-        return shell, None
-    return "/bin/sh", f"passwd shell {shell!r} is unsupported or unavailable; using /bin/sh"
+def resolve_job_shell(explicit: str | None) -> str:
+    """DL-492: an absent setting keeps /bin/sh; dispatch leaves exec failures to the wrapper."""
+    return "/bin/sh" if explicit is None else explicit
 
 
 @dataclass(frozen=True)
@@ -358,6 +348,22 @@ class JobRuntimePolicy:
     limits: tuple[ResourceLimit, ...] = ()
 
 
+def job_limits(job: JobIR) -> tuple[ResourceLimit, ...]:
+    """Read the same admitted limits for policy and launch (DL-492)."""
+    raw = _raw(job)
+    if "ulimit" not in raw:
+        return ()
+    if job.job_type != "CMD":
+        refuse(
+            job.name,
+            "ulimit",
+            "ulimit",
+            "resource limits apply only to CMD children",
+            "use a CMD job",
+        )
+    return parse_limits(job.name, raw["ulimit"])
+
+
 def job_policy(job: JobIR, *, hook_configured: bool = False) -> JobRuntimePolicy:
     """Validate interpreted attributes without changing the preserved IR or executing them."""
     name, raw = job.name, _raw(job)
@@ -459,17 +465,6 @@ def job_policy(job: JobIR, *, hook_configured: bool = False) -> JobRuntimePolicy
             "enabled notifications require a configured hook",
             "configure engine.status_hook or disable send_notification",
         )
-    limits: tuple[ResourceLimit, ...] = ()
-    if "ulimit" in raw:
-        if job.job_type != "CMD":
-            refuse(
-                name,
-                "ulimit",
-                "ulimit",
-                "resource limits apply only to CMD children",
-                "use a CMD job",
-            )
-        limits = parse_limits(name, raw["ulimit"])
     return JobRuntimePolicy(
         n_retrys=job.sem.n_retrys,
         min_run_alarm=None
@@ -483,7 +478,7 @@ def job_policy(job: JobIR, *, hook_configured: bool = False) -> JobRuntimePolicy
             name, "alarm_if_terminated", raw.get("alarm_if_terminated", "y")
         ),
         send_notification=enabled,
-        limits=limits,
+        limits=job_limits(job),
     )
 
 

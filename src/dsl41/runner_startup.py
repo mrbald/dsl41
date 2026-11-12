@@ -315,14 +315,7 @@ def check_restart_preflight(
 
     if clock.virtual:
         return []
-    known = LintReport(
-        violations=rule_known_unsupported(
-            catalog,
-            job_shell=profile.job_shell,
-            job_profile=profile.job_profile,
-            std_file_mode=profile.std_file_mode,
-        )
-    ).suppress(lint_ignore)
+    known = LintReport(violations=rule_known_unsupported(catalog)).suppress(lint_ignore)
     items = preflight(
         catalog,
         as_machine=frozenset(profile.as_machine),
