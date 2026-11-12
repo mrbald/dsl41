@@ -92,9 +92,9 @@ STEP_FOLLOWER = "DS_AFTER"
 
 @dataclass(frozen=True)
 class Step:
-    """A backward step of the wall clock (DL-435): at fake instant `at`, by
+    """A backward step of the wall clock (DL-435, DL-493): at fake instant `at`, by
     `back`. Right after it the driver sends SET_GLOBAL, an input the engine
-    must admit while the wall clock is below its frontier."""
+    must admit while the wall clock is behind engine time."""
 
     at: datetime
     back: timedelta
@@ -446,16 +446,16 @@ class StepInputs:
 def _step_rows(
     s: Scenario, given: StepInputs, reference: compare.Trace, launch: timedelta
 ) -> list[compare.Row]:
-    """The clock-step verdict (DL-435): the step is reported once, the input
+    """The clock-step verdict (DL-435, DL-493): the step is reported once, the input
     sent under it is applied, the engine stays up, and the admission stamps
     and the trace stay in order. The real run makes the rehearsal's scheduled
     starts and ticks, each once: the step makes none repeat and loses none.
     The run the step lands in ends SUCCESS and starts exactly one follow-on,
-    by count and status: a status that arrives while the wall is below the
-    frontier is stamped at the frontier, so its time is not the rehearsal's.
-    A completion held until the wall reaches the frontier carries the same
+    by count and status: a status that arrives while the wall is behind engine
+    time is stamped at engine time, so its time is not the rehearsal's.
+    A completion held until the wall reaches engine time carries the same
     stamps and is not told apart. The other record kinds (dispatch, outcome,
-    engine) carry the wall reading and are not asserted. `reference` is the
+    engine) take engine time and are not asserted. `reference` is the
     rehearsal's trace, clipped like the real one."""
     assert s.step is not None
     first, last = s.start + s.guard, s.end - s.guard
