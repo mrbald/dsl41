@@ -443,7 +443,10 @@ def application_lines(application: Any, style: OutputStyle) -> list[str]:
         "complete": "its own result stands",
         "rerun": "stopped, rerun under the new definition",
         "hold": "stopped, now ON_HOLD (automatic rerun withheld)",
-        "none": "no rerun or hold follows from this stop",
+        "none": (
+            "stopped, no follow-up of its own (in a restarted box, a marked member kept without"
+            " retyping is ON_HOLD; other members follow the box if allowed to run)"
+        ),
     }
     rows: dict[str, list[str]] = defaultdict(list)
     for kind in ("changed", "added", "removed"):

@@ -1765,13 +1765,17 @@ def test_box_restart_is_outermost_and_removed_boxes_stay_stopped(short_root: Pat
             assert {effect["job"]: effect["action"] for effect in view["effects"]}["BX"] == (
                 "remove" if remove else "restart_box"
             )
+            assert [
+                effect["job"] for effect in view["effects"] if effect["action"] == "restart_box"
+            ] == ([] if remove else ["BX"])
+            assert "INNER" in view["stop"]
             if not remove:
                 assert len(view["added"]) + len(view["changed"]) + view["unchanged"] == len(
                     candidate.catalog.jobs
                 )
                 assert {effect["job"]: effect["action"] for effect in view["effects"]}[
                     "INNER"
-                ] == "restart_box"
+                ] == "restart"
             plan = reread(
                 engine.update.live(),
                 short_root / "run" / "plans",
@@ -1857,7 +1861,7 @@ def test_box_restart_preserves_replacement_run_ownership(short_root: Path, case)
         view = roundtrip(socket, {"cmd": "reread", "v": 4})["preview"]
         if case != "retype":
             assert {item["job"]: item["action"] for item in view["effects"]}["MOVER"] == (
-                "hold" if marked else "rerun"
+                "hold" if marked else "restart" if case == "move_in" else "rerun"
             )
             assert view["stop"] == ["BX", "MOVER", "STAY"]
         applied = roundtrip(
@@ -1921,7 +1925,7 @@ def test_box_restart_preserves_replacement_run_ownership(short_root: Path, case)
             "restart",
             [
                 {"job": "BX", "action": "restart_box"},
-                {"job": "INNER", "action": "restart_box"},
+                {"job": "INNER", "action": "restart"},
                 {"job": "KEEP", "action": "restart"},
                 {"job": "MEMBER", "action": "restart"},
             ],
@@ -1929,12 +1933,12 @@ def test_box_restart_preserves_replacement_run_ownership(short_root: Path, case)
         (
             "in_place",
             "changed",
-            "rerun",
+            "restart",
             [
                 {"job": "BX", "action": "restart_box"},
-                {"job": "INNER", "action": "restart_box"},
+                {"job": "INNER", "action": "restart"},
                 {"job": "KEEP", "action": "restart"},
-                {"job": "MEMBER", "action": "rerun"},
+                {"job": "MEMBER", "action": "restart"},
             ],
         ),
         (
@@ -1943,7 +1947,7 @@ def test_box_restart_preserves_replacement_run_ownership(short_root: Path, case)
             "hold",
             [
                 {"job": "BX", "action": "restart_box"},
-                {"job": "INNER", "action": "restart_box"},
+                {"job": "INNER", "action": "restart"},
                 {"job": "KEEP", "action": "restart"},
                 {"job": "MEMBER", "action": "hold"},
             ],
@@ -1955,6 +1959,7 @@ def test_box_restart_preserves_replacement_run_ownership(short_root: Path, case)
             [
                 {"job": "BX", "action": "restart_box"},
                 {"job": "KEEP", "action": "restart"},
+                {"job": "INNER", "action": "restart"},
                 {"job": "MEMBER", "action": "restart"},
             ],
         ),
@@ -1966,6 +1971,7 @@ def test_box_restart_preserves_replacement_run_ownership(short_root: Path, case)
                 {"job": "BX", "action": "restart_box"},
                 {"job": "KEEP", "action": "restart"},
                 {"job": "MEMBER", "action": "hold"},
+                {"job": "INNER", "action": "restart"},
             ],
         ),
         (
@@ -1974,7 +1980,7 @@ def test_box_restart_preserves_replacement_run_ownership(short_root: Path, case)
             "rerun",
             [
                 {"job": "BX", "action": "restart_box"},
-                {"job": "INNER", "action": "restart_box"},
+                {"job": "INNER", "action": "restart"},
                 {"job": "KEEP", "action": "restart"},
                 {"job": "MEMBER", "action": "rerun"},
             ],
@@ -1985,7 +1991,7 @@ def test_box_restart_preserves_replacement_run_ownership(short_root: Path, case)
             "hold",
             [
                 {"job": "BX", "action": "restart_box"},
-                {"job": "INNER", "action": "restart_box"},
+                {"job": "INNER", "action": "restart"},
                 {"job": "KEEP", "action": "restart"},
                 {"job": "MEMBER", "action": "hold"},
             ],
@@ -2080,6 +2086,9 @@ def test_box_restart_marks_unchanged_members(
                 if kind == "config" and body.get("event") == "applied" and body["rev"] == 2
             ]
             assert len(recorded) == 1 and recorded[0]["stopped"] == stopped
+        if case in {"held", "finished_held"}:
+            member_row = ask("status")["jobs"]["MEMBER"]
+            assert member_row["on_hold"] and member_row["run_number"] == 1
         assert not any(row.get("reread") for row in ask("status")["jobs"].values())
 
 
@@ -2143,6 +2152,553 @@ def test_box_restart_holds_before_starts_in_name_order(short_root: Path, nested:
                 ("ON_HOLD", "Z_HELD"),
                 *[("FORCE_STARTJOB", name) for name in (["ZB"] if nested else ["AB", "ZB"])],
             ]
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "case", ["moved_box", "unchanged_box", "in_place_running", "in_place_finished", "move_in"]
+)
+def test_dl490_forecast_labels_follow_candidate_membership(short_root: Path, monkeypatch, case):
+    from dsl41.reread_worker import preview
+    from dsl41.runner_control import ControlServer
+
+    member = JOB.replace("A", "MEMBER")
+    old = (
+        "insert_job: BX\njob_type: b\ninsert_job: INNER\njob_type: b\nbox_name: BX\n"
+        + JOB.replace("A", "INNER_KEEP")
+        + "box_name: INNER\n"
+        + JOB.replace("A", "KEEP")
+        + "box_name: BX\n"
+        + member
+        + ("" if case == "move_in" else "box_name: INNER\n")
+    )
+    path = estate_file(short_root)
+    jil = short_root / "a.jil"
+    jil.write_text(old)
+    initial = main.prepare(path)
+
+    async def scenario():
+        engine = start_run(
+            initial.catalog,
+            short_root / "run",
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        server = ControlServer(engine, short_root / "run" / "control.sock")
+        try:
+            for name in ["BX", "MEMBER"] if case == "move_in" else ["BX"]:
+                engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": name}))
+            await engine.run_until_quiescent(T0)
+            if case == "in_place_finished":
+                engine.inject(
+                    Event(at=T0, kind="STATUS", payload={"job": "MEMBER", "status": "SUCCESS"})
+                )
+                await engine.run_until_quiescent(T0)
+            new = old + JOB.replace("A", "NEW") + "box_name: BX\n"
+            if case == "moved_box":
+                new = new.replace("job_type: b\nbox_name: BX\n", "job_type: b\n")
+            elif case.startswith("in_place"):
+                new = new.replace(member, member.replace("true", "false"))
+            elif case == "move_in":
+                new = new.replace(member, member + "box_name: INNER\n")
+            jil.write_text(new)
+            candidate = main.prepare(path)
+            live = engine.update.live()
+            before = list(engine.journal.store.read_from(0))
+
+            async def prepare(*, update):
+                assert not update
+                return {"ok": True, "preview": preview(candidate, live)}
+
+            monkeypatch.setattr(server, "_prepare_reload", prepare)
+            view = (await server._reread({"v": 4, "cmd": "reread"}))["preview"]
+            effects = [("BX", "restart_box")]
+            marks = {"BX": {"change": "changed", "action": "restart_box"}}
+            if case == "moved_box":
+                effects += [("INNER_KEEP", "rerun"), ("KEEP", "restart"), ("MEMBER", "rerun")]
+                marks["INNER"] = {"change": "changed", "action": None}
+            else:
+                effects += [
+                    ("INNER", "restart"),
+                    ("INNER_KEEP", "restart"),
+                    ("KEEP", "restart"),
+                    ("MEMBER", "restart"),
+                ]
+                marks["INNER"] = {
+                    "change": "changed" if case == "move_in" else "unchanged",
+                    "action": "restart",
+                }
+                marks["INNER_KEEP"] = {"change": "unchanged", "action": "restart"}
+                marks["MEMBER"] = {
+                    "change": "unchanged" if case == "unchanged_box" else "changed",
+                    "action": "restart",
+                }
+            marks["KEEP"] = {"change": "unchanged", "action": "restart"}
+            assert view["effects"] == [{"job": name, "action": action} for name, action in effects]
+            assert view["stop"] == [
+                name for name, _ in effects if name != "MEMBER" or case != "in_place_finished"
+            ]
+            jobs = (await server._dispatch({"cmd": "status"}))["jobs"]
+            assert {name: row["reread"] for name, row in jobs.items() if "reread" in row} == marks
+            assert list(engine.journal.store.read_from(0)) == before
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "case", ["cmd_root", "fw_running", "fw_finished", "outside", "fw_finished_moved_out"]
+)
+def test_dl490_retyped_jobs_follow_the_new_box_scope(short_root: Path, case):
+    from dsl41.reload_diff import diff
+    from dsl41.reload_plan import box_scope, root_starts
+    from dsl41.reread_worker import preview
+
+    path = config_file(short_root, estate='non_idempotent = "marked.toml"\n')
+    marked = short_root / "marked.toml"
+    marked.write_text("[jobs]\n")
+    boxes = "insert_job: BX\njob_type: b\n"
+    keep = JOB.replace("A", "KEEP") + "box_name: BX\n"
+    watcher = f"insert_job: MEMBER\njob_type: f\nwatch_file: {short_root}/watched\n"
+    finished = JOB.replace("A", "A_FINISHED") + "box_name: BX\n" if case == "fw_finished" else ""
+    old = (
+        JOB.replace("A", "BX")
+        if case == "cmd_root"
+        else boxes + keep + watcher + ("" if case == "outside" else "box_name: BX\n") + finished
+    )
+    jil = short_root / "a.jil"
+    jil.write_text(old)
+    initial = main.prepare(path)
+
+    async def scenario():
+        engine = start_run(
+            initial.catalog,
+            short_root / "run",
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None), "FW": FakeAdapter(default=None)},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        try:
+            for name in ["BX", "MEMBER"] if case == "outside" else ["BX"]:
+                engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": name}))
+            await engine.run_until_quiescent(T0)
+            name = "BX" if case == "cmd_root" else "MEMBER"
+            if case.startswith("fw_finished"):
+                engine.inject(
+                    Event(at=T0, kind="STATUS", payload={"job": name, "status": "SUCCESS"})
+                )
+                if finished:
+                    engine.inject(
+                        Event(
+                            at=T0, kind="STATUS", payload={"job": "A_FINISHED", "status": "SUCCESS"}
+                        )
+                    )
+                await engine.run_until_quiescent(T0)
+            row = engine.oracle.store.job[name]
+            assert row.status == ("SUCCESS" if case.startswith("fw_finished") else "RUNNING")
+            assert row.run_number == 1
+            before = engine.journal.store.last_seq()
+            if case == "cmd_root":
+                new = boxes + JOB.replace("A", "NEW") + "box_name: BX\n"
+            else:
+                marked.write_text('[jobs]\nMEMBER = "synthetic effect"\n')
+                new = boxes + keep + JOB.replace("A", "MEMBER")
+                if case not in {"outside", "fw_finished_moved_out"}:
+                    new += "box_name: BX\n"
+                new += finished
+            jil.write_text(new)
+            candidate = main.prepare(path)
+            live = engine.update.live()
+            changes = diff(live.catalog, candidate.catalog, live.settings, candidate.settings)
+            assert name in changes.added and name in changes.removed
+            scope = box_scope(changes, live, candidate.catalog)
+            forecast = preview(candidate, live)
+            action = (
+                "restart_box"
+                if case == "cmd_root"
+                else "remove"
+                if case == "outside"
+                else None
+                if case == "fw_finished_moved_out"
+                else "restart"
+            )
+            assert forecast["marks"][name] == {"change": "removed", "action": action}
+            expected_effects = (
+                [{"job": name, "action": action}]
+                if case in {"cmd_root", "outside"}
+                else [
+                    {"job": "BX", "action": "restart_box"},
+                    {"job": "KEEP", "action": "restart"},
+                ]
+                if case == "fw_finished_moved_out"
+                else [
+                    {"job": "BX", "action": "restart_box"},
+                    {"job": "KEEP", "action": "restart"},
+                    {"job": "MEMBER", "action": "restart"},
+                ]
+            )
+            if finished:
+                expected_effects.append({"job": "A_FINISHED", "action": "restart"})
+            assert forecast["effects"] == expected_effects
+            assert [
+                effect["job"] for effect in forecast["effects"] if effect["action"] == "restart_box"
+            ] == root_starts(scope, candidate.catalog, candidate.metadata["non_idempotent"])
+            assert (name in forecast["stop"]) == (not case.startswith("fw_finished"))
+            plan = reread(live, short_root / "run" / "plans", candidate=candidate, start=T0)
+            answer = engine.request_update(
+                UpdateRequest(plan.token, 1, engine.baseline_id, "retyped-forecast")
+            )
+            await engine.run_until_quiescent(T0)
+            body = answer.result().applied.result()
+            assert engine.config_rev == 2
+            if not case.startswith("fw_finished"):
+                assert [name, "none"] in body["stopped"]
+            else:
+                assert name not in dict(body["stopped"])
+            row = engine.oracle.store.job[name]
+            assert not row.on_hold
+            outside = case in {"outside", "fw_finished_moved_out"}
+            assert row.status == ("INACTIVE" if outside else "RUNNING")
+            assert row.run_number == (1 if outside else 2)
+            if finished:
+                assert engine.oracle.store.job["A_FINISHED"].run_number == 2
+            records = list(engine.journal.store.read_from(before))
+            inputs = [
+                (record.payload.get("kind"), record.payload.get("payload", {}).get("job"))
+                for _, record in records
+                if record.kind == "input"
+            ]
+            forced = [job for kind, job in inputs if kind == "FORCE_STARTJOB"]
+            assert forced == ([] if case == "outside" else ["BX"])
+            if case == "cmd_root":
+                assert ("KILLJOB", "BX") in inputs
+                assert engine.oracle.catalog.jobs["BX"].job_type == "BOX"
+                assert engine.oracle.store.job["NEW"].status == "RUNNING"
+                assert inputs.index(("KILLJOB", "BX")) < inputs.index(("FORCE_STARTJOB", "BX"))
+            else:
+                dispatched = [
+                    record.payload
+                    for _, record in records
+                    if record.kind == "dispatch" and record.payload["job"] == name
+                ]
+                assert len(dispatched) == (0 if outside else 1)
+                if dispatched:
+                    assert dispatched[0]["run_number"] == 2
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(scenario())
+
+
+def test_dl490_a_removed_name_cannot_be_marked(short_root: Path):
+    from dsl41.reload_plan import RereadRefused
+
+    path = config_file(short_root, estate='non_idempotent = "marked.toml"\n')
+    (short_root / "a.jil").write_text(JOB)
+    marked = short_root / "marked.toml"
+    marked.write_text('[jobs]\nA = "synthetic effect"\n')
+    assert main.prepare(path).metadata["non_idempotent"] == {"A": "synthetic effect"}
+    (short_root / "a.jil").write_text(JOB.replace("A", "OTHER"))
+    with pytest.raises(RereadRefused, match="estate does not define"):
+        main.prepare(path)
+
+
+@pytest.mark.parametrize("kind", ["BOX", "CMD"])
+def test_dl490_moved_out_terminator_ends_without_its_own_kill_or_start(short_root: Path, kind):
+    from dsl41.reread_worker import preview
+
+    mover = (
+        "insert_job: MOVER\njob_type: b\n" if kind == "BOX" else JOB.replace("A", "MOVER")
+    ) + "job_terminator: 1\n"
+    old = (
+        "insert_job: BX\njob_type: b\n"
+        + JOB.replace("A", "KEEP")
+        + "box_name: BX\n"
+        + mover
+        + "box_name: BX\n"
+        + (JOB.replace("A", "CHILD") + "box_name: MOVER\n" if kind == "BOX" else "")
+    )
+    path = estate_file(short_root)
+    jil = short_root / "a.jil"
+    jil.write_text(old)
+    initial = main.prepare(path)
+
+    async def scenario():
+        engine = start_run(
+            initial.catalog,
+            short_root / "run",
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        try:
+            engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "BX"}))
+            await engine.run_until_quiescent(T0)
+            row = engine.oracle.store.job["MOVER"]
+            assert row.status == "RUNNING" and row.run_number == 1
+            before = engine.journal.store.last_seq()
+            jil.write_text(old.replace(mover + "box_name: BX\n", mover))
+            candidate = main.prepare(path)
+            live = engine.update.live()
+            forecast = preview(candidate, live)
+            # BUG-69: the forecast does not read the old box's terminator cascade.
+            assert forecast["marks"]["MOVER"] == {
+                "change": "changed",
+                "action": None if kind == "BOX" else "rerun",
+            }
+            assert forecast["stop"] == (
+                ["BX", "CHILD", "KEEP"] if kind == "BOX" else ["BX", "KEEP", "MOVER"]
+            )
+            assert forecast["effects"] == (
+                [
+                    {"job": "BX", "action": "restart_box"},
+                    {"job": "CHILD", "action": "rerun"},
+                    {"job": "KEEP", "action": "restart"},
+                ]
+                if kind == "BOX"
+                else [
+                    {"job": "BX", "action": "restart_box"},
+                    {"job": "KEEP", "action": "restart"},
+                    {"job": "MOVER", "action": "rerun"},
+                ]
+            )
+            plan = reread(live, short_root / "run" / "plans", candidate=candidate, start=T0)
+            answer = engine.request_update(
+                UpdateRequest(plan.token, 1, engine.baseline_id, "moved-terminator")
+            )
+            await engine.run_until_quiescent(T0)
+            assert answer.result().applied.done() and engine.config_rev == 2
+            row = engine.oracle.store.job["MOVER"]
+            assert row.status == "TERMINATED" and row.run_number == 1
+            assert engine.oracle.catalog.jobs["MOVER"].box.box_name is None
+            records = list(engine.journal.store.read_from(before))
+            inputs = [
+                (record.payload.get("kind"), record.payload.get("payload", {}).get("job"))
+                for _, record in records
+                if record.kind == "input"
+            ]
+            assert ("KILLJOB", "BX") in inputs and ("FORCE_STARTJOB", "BX") in inputs
+            assert ("KILLJOB", "MOVER") not in inputs
+            assert ("FORCE_STARTJOB", "MOVER") not in inputs
+            assert not [
+                record
+                for _, record in records
+                if record.kind == "dispatch" and record.payload["job"] == "MOVER"
+            ]
+            if kind == "CMD":
+                assert ["MOVER", "none"] in answer.result().applied.result()["stopped"]
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(scenario())
+
+
+def test_dl490_moved_out_box_keeps_its_run(short_root: Path):
+    old = (
+        "insert_job: BX\njob_type: b\ninsert_job: INNER\njob_type: b\nbox_name: BX\n"
+        + JOB.replace("A", "MEMBER")
+        + "box_name: INNER\n"
+        + JOB.replace("A", "KEEP")
+        + "box_name: BX\n"
+    )
+    path = estate_file(short_root)
+    jil = short_root / "a.jil"
+    jil.write_text(old)
+    initial = main.prepare(path)
+
+    async def scenario():
+        engine = start_run(
+            initial.catalog,
+            short_root / "run",
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        try:
+            engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "BX"}))
+            await engine.run_until_quiescent(T0)
+            row = engine.oracle.store.job["INNER"]
+            assert row.status == "RUNNING" and row.run_number == 1
+            before = engine.journal.store.last_seq()
+            jil.write_text(old.replace("job_type: b\nbox_name: BX\n", "job_type: b\n"))
+            plan = reread(
+                engine.update.live(),
+                short_root / "run" / "plans",
+                candidate=main.prepare(path),
+                start=T0,
+            )
+            answer = engine.request_update(
+                UpdateRequest(plan.token, 1, engine.baseline_id, "moved-box")
+            )
+            await engine.run_until_quiescent(T0)
+            assert answer.result().applied.done() and engine.config_rev == 2
+            assert engine.oracle.catalog.jobs["INNER"].box.box_name is None
+            row = engine.oracle.store.job["INNER"]
+            assert row.status == "RUNNING" and row.run_number == 1
+            inputs = [
+                (record.payload.get("kind"), record.payload.get("payload", {}).get("job"))
+                for _, record in engine.journal.store.read_from(before)
+                if record.kind == "input"
+            ]
+            assert ("KILLJOB", "BX") in inputs and ("FORCE_STARTJOB", "BX") in inputs
+            assert ("KILLJOB", "INNER") not in inputs
+            assert ("FORCE_STARTJOB", "INNER") not in inputs
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("case", ["in_place_running", "in_place_finished", "move_in"])
+def test_dl490_changed_member_opens_a_new_box_run(short_root: Path, case):
+    member = JOB.replace("A", "MEMBER")
+    old = (
+        "insert_job: BX\njob_type: b\n"
+        + JOB.replace("A", "KEEP")
+        + "box_name: BX\n"
+        + member
+        + ("" if case == "move_in" else "box_name: BX\n")
+    )
+    path = estate_file(short_root)
+    jil = short_root / "a.jil"
+    jil.write_text(old)
+    initial = main.prepare(path)
+
+    async def scenario():
+        engine = start_run(
+            initial.catalog,
+            short_root / "run",
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        try:
+            for name in ["BX", "MEMBER"] if case == "move_in" else ["BX"]:
+                engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": name}))
+            await engine.run_until_quiescent(T0)
+            if case == "in_place_finished":
+                engine.inject(
+                    Event(at=T0, kind="STATUS", payload={"job": "MEMBER", "status": "SUCCESS"})
+                )
+                await engine.run_until_quiescent(T0)
+            row = engine.oracle.store.job["MEMBER"]
+            assert row.status == ("SUCCESS" if case == "in_place_finished" else "RUNNING")
+            assert row.run_number == 1
+            before = engine.journal.store.last_seq()
+            new = (
+                old + "box_name: BX\n"
+                if case == "move_in"
+                else old.replace(member, member.replace("true", "false"))
+                + JOB.replace("A", "NEW")
+                + "box_name: BX\n"
+            )
+            jil.write_text(new)
+            plan = reread(
+                engine.update.live(),
+                short_root / "run" / "plans",
+                candidate=main.prepare(path),
+                start=T0,
+            )
+            answer = engine.request_update(
+                UpdateRequest(plan.token, 1, engine.baseline_id, "changed-member")
+            )
+            await engine.run_until_quiescent(T0)
+            assert answer.result().applied.done() and engine.config_rev == 2
+            row = engine.oracle.store.job["MEMBER"]
+            assert row.status == "RUNNING" and row.run_number == 2
+            assert engine.oracle.store.job["BX"].run_number == 2
+            records = list(engine.journal.store.read_from(before))
+            inputs = [
+                (record.payload.get("kind"), record.payload.get("payload", {}).get("job"))
+                for _, record in records
+                if record.kind == "input"
+            ]
+            assert (("KILLJOB", "MEMBER") in inputs) == (case != "in_place_finished")
+            assert ("FORCE_STARTJOB", "BX") in inputs
+            assert ("FORCE_STARTJOB", "MEMBER") not in inputs
+            dispatches = [
+                record.payload
+                for _, record in records
+                if record.kind == "dispatch" and record.payload["job"] == "MEMBER"
+            ]
+            assert len(dispatches) == 1
+            assert dispatches[0]["run_number"] == 2 and dispatches[0].get("after") is None
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(scenario())
+
+
+def test_dl490_box_kills_include_removed_and_queued_members_in_order(short_root: Path):
+    resource = "resources: (LOCK, QUANTITY=1)\n"
+    removed = JOB.replace("A", "REMOVED") + "box_name: ZB\n"
+    old = (
+        "insert_resource: LOCK\nres_type: R\namount: 1\n"
+        + JOB.replace("A", "HOLDER")
+        + resource
+        + "insert_job: ZB\njob_type: b\ninsert_job: AB\njob_type: b\nbox_name: ZB\n"
+        + JOB.replace("A", "MEMBER")
+        + "box_name: AB\n"
+        + removed
+        + JOB.replace("A", "WAITER")
+        + "box_name: AB\n"
+        + resource
+    )
+    path = estate_file(short_root)
+    jil = short_root / "a.jil"
+    jil.write_text(old)
+    initial = main.prepare(path)
+
+    async def scenario():
+        engine = start_run(
+            initial.catalog,
+            short_root / "run",
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        try:
+            for name in ("HOLDER", "ZB"):
+                engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": name}))
+                await engine.run_until_quiescent(T0)
+            assert engine.oracle.store.job["WAITER"].status == "QUE_WAIT"
+            assert engine.oracle.store.job["AB"].status == "RUNNING"
+            before = engine.journal.store.last_seq()
+            jil.write_text(old.replace(removed, ""))
+            plan = reread(
+                engine.update.live(),
+                short_root / "run" / "plans",
+                candidate=main.prepare(path),
+                start=T0,
+            )
+            answer = engine.request_update(
+                UpdateRequest(plan.token, 1, engine.baseline_id, "kill-order")
+            )
+            await engine.run_until_quiescent(T0)
+            assert answer.result().applied.done() and engine.config_rev == 2
+            kills = [
+                record.payload["payload"]["job"]
+                for _, record in engine.journal.store.read_from(before)
+                if record.kind == "input" and record.payload.get("kind") == "KILLJOB"
+            ]
+            assert kills == ["ZB", "AB", "REMOVED", "MEMBER", "WAITER"]
         finally:
             await engine.shutdown()
             engine.journal.close()

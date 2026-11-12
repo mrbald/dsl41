@@ -491,3 +491,5 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-487 | The UPDATE chart declares the box stop: STOPPING holds WAITING and ENDING_BOXES | [docs/blocks/update.md](blocks/update.md), [docs/state-machines.md](state-machines.md) |
 | DL-488 | The UPDATE chart's apply row names the whole sequence after the box stop | [docs/blocks/update.md](blocks/update.md), [docs/state-machines.md](state-machines.md) |
 | DL-489 | An update's intent records its box roots, and recovery restarts those boxes | [docs/blocks/update.md](blocks/update.md), [docs/control-protocol.md](control-protocol.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |
+| DL-490 | The reread forecast labels a box restart as the update carries it out | [docs/blocks/update.md](blocks/update.md), [docs/control-protocol.md](control-protocol.md) |
+| DL-491 | Behavior is read from charts and pure functions; a case can occur only from validated input | [docs/agent-workflow.md](agent-workflow.md), [docs/agents/coordination.md](agents/coordination.md), [docs/agents/review.md](agents/review.md) |
