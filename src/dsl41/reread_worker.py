@@ -26,8 +26,10 @@ from dsl41.reload_plan import (
     RereadRefused,
     preflight_items,
     box_members,
+    box_scope,
+    marked_holds,
     reread,
-    restart_boxes,
+    root_starts,
     stop_set,
 )
 
@@ -149,17 +151,16 @@ def preview(
 ) -> dict[str, Any]:
     """A passive diff and the forecast at reread time, never an admission (DL-463)."""
     plan = diff(live.catalog, candidate.catalog, live.settings, candidate.settings)
-    roots = restart_boxes(plan, live, candidate.catalog)
-    members = box_members(live.catalog, roots) | box_members(candidate.catalog, roots)
+    scope = box_scope(plan, live, candidate.catalog)
     marked = candidate.metadata["non_idempotent"]
     boxes = {
         name
-        for name in set(roots) | members
+        for name in set(scope.roots) | scope.members
         if name in live.catalog.jobs
         and live.catalog.jobs[name].job_type == "BOX"
         and live.status.get(name) == "RUNNING"
     }
-    stops = sorted(set(stop_set(plan, live, candidate.catalog)) | boxes)
+    stops = sorted(set(stop_set(plan, live, candidate.catalog, scope=scope)) | boxes)
     changed: list[dict[str, Any]] = [
         {"name": item.name, "reason": item.reason} for item in plan.changed
     ]
@@ -185,17 +186,11 @@ def preview(
         effects.append({"job": name, "action": action})
     effects += [
         {"job": name, "action": "hold"}
-        for name in sorted(members & set(marked))
-        if name not in stops and live.status.get(name) not in (None, "INACTIVE")
+        for name in marked_holds(scope, marked, live.status)
+        if name not in stops
     ]
     actions = {item["job"]: item["action"] for item in effects}
-    restarting = [
-        box
-        for box in roots
-        if box in candidate.catalog.jobs
-        and candidate.catalog.jobs[box].job_type == "BOX"
-        and box not in marked
-    ]
+    restarting = root_starts(scope, candidate.catalog, marked)
     unchanged = box_members(candidate.catalog, restarting) & set(plan.unchanged) - {
         item["name"] for item in changed
     }

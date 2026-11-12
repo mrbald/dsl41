@@ -1299,6 +1299,7 @@ def test_live_update_selects_the_attempt_of_each_admitted_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from dsl41.runner_update import open_plan
+    from dsl41.reload_plan import BoxScope
 
     async def scenario() -> None:
         engine = _engine(tmp_path, _jil({"a": "x", "b": "x"}))
@@ -1315,7 +1316,12 @@ def test_live_update_selects_the_attempt_of_each_admitted_run(
             monkeypatch.setattr(engine, "attempt_of_run", select)
             admitted = Admitted(token, ("a", "b"), frozenset({"a", "b"}), (("a", 3), ("b", 5)))
             update = engine.update
-            update._begin(UpdateRequest(token, 1, engine.baseline_id, "u"), opened, admitted)
+            update._begin(
+                UpdateRequest(token, 1, engine.baseline_id, "u"),
+                opened,
+                admitted,
+                BoxScope((), frozenset()),
+            )
             assert selected == [("a", 3), ("b", 5)]
             assert update._attempts == {"a": "a-attempt", "b": None}
             assert update._cleaning == {} and update._moved == {"b"}

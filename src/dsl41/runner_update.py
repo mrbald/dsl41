@@ -52,6 +52,7 @@ from dsl41.engine_charts import UPDATE_STOP, AttemptOutcome
 from dsl41.idempotence import Exceptions
 from dsl41.ir import CatalogIR
 from dsl41.reload_plan import (
+    BoxScope,
     Estate,
     Live,
     RereadRefused,
@@ -59,7 +60,9 @@ from dsl41.reload_plan import (
     estate_settings,
     read_plan,
     box_members,
-    restart_boxes,
+    box_scope,
+    marked_holds,
+    root_starts,
 )
 from dsl41.reload_diff import catalog_hash_v2, diff
 from dsl41.reload_update import (
@@ -258,8 +261,7 @@ class EngineUpdate:
         #: each cancelled task is taken up again, by job (`_choose_follow_ups`)
         self._chosen: dict[str, FollowUp] = {}
         self._takes_up: dict[str, bool] = {}
-        self._box_roots: tuple[str, ...] = ()
-        self._box_members: set[str] = set()
+        self._box_scope = BoxScope((), frozenset())
         #: the jobs the dispatch filter held while the update stopped, released after it
         self._held: frozenset[str] = frozenset()
         #: called with each applied plan once the update applied live (the control server's
@@ -388,12 +390,15 @@ class EngineUpdate:
                 Admitted(request.token, (), frozenset()),
                 unchanged={"rev": engine.config_rev, "catalog_hash": applied.catalog_hash},
             )
+        live = self.live()
+        scope = box_scope(plan_of(opened.plan, live.catalog), live, opened.estate.catalog)
         decision = admission_data(
             opened.plan,
-            live=self.live(),
+            live=live,
             candidate=opened.estate.catalog,
+            scope=scope,
         )
-        self._begin(request, opened, decision)
+        self._begin(request, opened, decision, scope)
         answer = self._answer = UpdateAnswer(decision)
         answer.applied = asyncio.get_running_loop().create_future()
         self._post(lambda tier: tier.admit(decision))
@@ -409,9 +414,11 @@ class EngineUpdate:
     def _no_application(admitted: Admitted) -> Application:
         raise AssertionError(f"a refused update {admitted.token} reached its application")
 
-    def _begin(self, request: UpdateRequest, opened: OpenedPlan, admitted: Admitted) -> None:
+    def _begin(
+        self, request: UpdateRequest, opened: OpenedPlan, admitted: Admitted, scope: BoxScope
+    ) -> None:
         attempts = {job: self.engine.attempt_of_run(job, run) for job, run in admitted.stop_runs}
-        self._install(request, opened, admitted, attempts, {})
+        self._install(request, opened, admitted, attempts, {}, scope)
 
     def _install(
         self,
@@ -420,7 +427,7 @@ class EngineUpdate:
         admitted: Admitted,
         attempts: dict[str, str | None],
         cleaning: dict[str, str],
-        box_roots: tuple[str, ...] | None = None,
+        scope: BoxScope,
     ) -> None:
         """Install the update and its selected attempts before creating its tier (DL-432)."""
         engine = self.engine
@@ -429,18 +436,10 @@ class EngineUpdate:
         self._moved = frozenset(engine.marked ^ set(opened.marked.names))
         self._held = admitted.dispatch_filter
         self._admitted = admitted
-        self._set_box_scope(opened, box_roots)
+        self._box_scope = scope
         self._attempts = attempts
         self._cleaning = cleaning
         self.tier = UpdateTier(self, self._prepare)
-
-    def _set_box_scope(self, opened: OpenedPlan, roots: tuple[str, ...] | None = None) -> None:
-        old, new = self.engine.oracle.catalog, opened.estate.catalog
-        # DL-489: admission and keyless recovery compute roots; keyed recovery keeps them.
-        self._box_roots = (
-            restart_boxes(plan_of(opened.plan, old), self.live(), new) if roots is None else roots
-        )
-        self._box_members = box_members(old, self._box_roots) | box_members(new, self._box_roots)
 
     def _post(self, post: Callable[[UpdateTier], object]) -> None:
         assert self.tier is not None
@@ -524,7 +523,14 @@ class EngineUpdate:
         # an attempt whose outcome is in while its cleanup was cut short is down once the
         # catch-up's cleanup step has finished it (`cleaned`)
         cleaning = {run_id: job for job, run_id in still.items() if table[run_id].closing}
-        self._install(request, opened, admitted, attempts, cleaning, update_box_roots(intent))
+        live = self.live()
+        scope = box_scope(
+            plan_of(opened.plan, live.catalog),
+            live,
+            opened.estate.catalog,
+            roots=update_box_roots(intent),
+        )
+        self._install(request, opened, admitted, attempts, cleaning, scope)
         # the request's own answer: a retry under its id while it still stops waits on it
         self._answer = UpdateAnswer(admitted)
         self._answer.applied = asyncio.get_running_loop().create_future()
@@ -605,7 +611,7 @@ class EngineUpdate:
                 for job in stop_set
             ],
             "filter": sorted(self._held),
-            "restart_boxes": list(self._box_roots),
+            "restart_boxes": list(self._box_scope.roots),
             "stop_running": True,
             "request_id": request.request_id,
             "fingerprint": request.fingerprint,
@@ -641,8 +647,8 @@ class EngineUpdate:
         assert self._opened is not None
         old = self.engine.oracle.catalog.jobs
         new = self._opened.estate.catalog
-        inside = box_members(new, self._box_roots)
-        names = set(self._box_roots) | self._box_members
+        inside = box_members(new, self._box_scope.roots)
+        names = set(self._box_scope.roots) | self._box_scope.members
 
         def order(name: str) -> tuple[bool, int, str]:
             depth, parent = 0, old[name].box.box_name
@@ -656,7 +662,7 @@ class EngineUpdate:
                 name
                 for name in names
                 if name in old
-                and (name in self._box_roots or name in inside or name not in new.jobs)
+                and (name in self._box_scope.roots or name in inside or name not in new.jobs)
                 and self.engine.oracle.store.job[name].status in {"RUNNING", "STARTING", "QUE_WAIT"}
             ),
             key=order,
@@ -665,24 +671,9 @@ class EngineUpdate:
     def box_starts(self) -> list[tuple[Any, str]]:
         """Hold every non-INACTIVE marked member before an outer box starts (DL-463)."""
         engine = self.engine
-        members = (
-            self._box_members
-            | box_members(engine.oracle.catalog, self._box_roots)
-            | set(self._box_roots)
-        )
-        held = sorted(
-            name
-            for name in members & set(engine.marked)
-            if name in engine.oracle.store.job
-            and engine.oracle.store.job[name].status != "INACTIVE"
-        )
-        starts = [
-            box
-            for box in self._box_roots
-            if box in engine.oracle.catalog.jobs
-            and engine.oracle.catalog.jobs[box].job_type == "BOX"
-            and box not in engine.marked
-        ]
+        status = {name: row.status for name, row in engine.oracle.store.job.items()}
+        held = marked_holds(self._box_scope, engine.marked, status)
+        starts = root_starts(self._box_scope, engine.oracle.catalog, engine.marked)
         return [("ON_HOLD", name) for name in held] + [("FORCE_STARTJOB", box) for box in starts]
 
     def _prepare(self, _admitted: Admitted) -> Application:

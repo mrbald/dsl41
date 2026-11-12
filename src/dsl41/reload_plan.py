@@ -28,7 +28,7 @@ recomputed from the parts and the live revision is the directory's name.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -256,13 +256,56 @@ def restart_boxes(plan: Plan, live: Live, candidate: CatalogIR) -> tuple[str, ..
     return tuple(sorted(boxes - nested))
 
 
-def stop_set(plan: Plan, live: Live, candidate: CatalogIR | None = None) -> tuple[str, ...]:
+@dataclass(frozen=True)
+class BoxScope:
+    """The admitted roots and descendants from both catalogs (DL-463, DL-489)."""
+
+    roots: tuple[str, ...]
+    members: frozenset[str]
+
+
+def box_scope(
+    plan: Plan, live: Live, candidate: CatalogIR, roots: tuple[str, ...] | None = None
+) -> BoxScope:
+    """Use admitted roots when supplied, including an empty tuple (DL-489)."""
+    roots = restart_boxes(plan, live, candidate) if roots is None else roots
+    return BoxScope(
+        roots, frozenset(box_members(live.catalog, roots) | box_members(candidate, roots))
+    )
+
+
+def marked_holds(scope: BoxScope, marked: Collection[str], status: Mapping[str, str]) -> list[str]:
+    """Hold marked non-INACTIVE rows before starting any root (DL-463)."""
+    return sorted(
+        name
+        for name in (scope.members | set(scope.roots)) & set(marked)
+        if status.get(name) not in (None, "INACTIVE")
+    )
+
+
+def root_starts(scope: BoxScope, catalog: CatalogIR, marked: Collection[str]) -> list[str]:
+    """Start retained unmarked BOX roots in admission order (DL-463)."""
+    return [
+        name
+        for name in scope.roots
+        if name in catalog.jobs and catalog.jobs[name].job_type == "BOX" and name not in marked
+    ]
+
+
+def stop_set(
+    plan: Plan,
+    live: Live,
+    candidate: CatalogIR | None = None,
+    *,
+    scope: BoxScope | None = None,
+) -> tuple[str, ...]:
     """Changed or removed jobs with a process that is up, sorted. A box has none (spec-reload
     step 5). `reread` previews it and the update's admission finds it again."""
     names = {change.name for change in plan.changed} | set(plan.removed)
-    if candidate is not None:
-        roots = restart_boxes(plan, live, candidate)
-        names |= box_members(live.catalog, roots) | box_members(candidate, roots)
+    if scope is None and candidate is not None:
+        scope = box_scope(plan, live, candidate)
+    if scope is not None:
+        names |= scope.members
     return tuple(
         sorted(
             name

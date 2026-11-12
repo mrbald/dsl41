@@ -167,6 +167,60 @@ def test_a_member_added_to_an_idle_box_is_planned(tmp_path: Path) -> None:
     assert _reread(estate, live, tmp_path / "plans").plan.added == ("M2",)
 
 
+def test_box_scope_keeps_both_catalogs_and_admitted_roots(tmp_path: Path) -> None:
+    from copy import deepcopy
+    from dataclasses import replace
+    from dsl41.reload_diff import diff
+
+    old = _BOX + _member("MOVED") + _member("REMOVED")
+    estate = _tiny(tmp_path, old)
+    live = _live(estate, status={"BX": "RUNNING", "MOVED": "RUNNING", "REMOVED": "STARTING"})
+    (estate / "a.jil").write_text(
+        "insert_machine: m1\ntype: a\nnode_name: localhost\n"
+        + _BOX
+        + _member("ADDED")
+        + _member("MOVED").replace("box_name: BX\n", "")
+    )
+    candidate = prepare_estate(estate).catalog
+    plan = diff(live.catalog, candidate, live.settings, live.settings)
+    before = deepcopy((plan, live, candidate))
+    scope = reload_plan.box_scope(plan, live, candidate)
+    assert scope == reload_plan.BoxScope(("BX",), frozenset({"MOVED", "REMOVED", "ADDED"}))
+    assert reload_plan.stop_set(plan, live, candidate, scope=scope) == ("MOVED", "REMOVED")
+    assert reload_plan.stop_set(plan, live, candidate) == ("MOVED", "REMOVED")
+    ended = replace(live, status={"BX": "TERMINATED"})
+    assert reload_plan.box_scope(plan, ended, candidate, roots=scope.roots) == scope
+    assert reload_plan.box_scope(plan, ended, candidate).roots == ()
+    assert reload_plan.box_scope(plan, live, candidate, roots=()) == reload_plan.BoxScope(
+        (), frozenset()
+    )
+    assert (plan, live, candidate) == before
+
+
+def test_box_selectors_filter_missing_inactive_retyped_and_marked_names(tmp_path: Path) -> None:
+    from copy import deepcopy
+
+    estate = _tiny(tmp_path, _BOX + _BOX.replace("BX", "MARKED") + _member("RETYPED"))
+    catalog = prepare_estate(estate).catalog
+    scope = reload_plan.BoxScope(
+        ("BX", "MARKED", "REMOVED", "RETYPED"),
+        frozenset({"RUNNING", "FINISHED", "INACTIVE", "MISSING"}),
+    )
+    marked = {"MARKED", "RUNNING", "FINISHED", "INACTIVE", "MISSING", "OUTSIDE"}
+    status = {
+        "MARKED": "TERMINATED",
+        "RUNNING": "RUNNING",
+        "FINISHED": "SUCCESS",
+        "INACTIVE": "INACTIVE",
+        "OUTSIDE": "RUNNING",
+    }
+    before = deepcopy((scope, catalog, marked, status))
+    for _ in range(2):
+        assert reload_plan.marked_holds(scope, marked, status) == ["FINISHED", "MARKED", "RUNNING"]
+        assert reload_plan.root_starts(scope, catalog, marked) == ["BX"]
+    assert (scope, catalog, marked, status) == before
+
+
 def test_a_changed_running_box_with_the_same_members_stops_nothing(tmp_path: Path) -> None:
     estate = _tiny(tmp_path, _BOX + _member("M1"))
     live = _live(estate, status={"BX": "RUNNING", "M1": "RUNNING"})
