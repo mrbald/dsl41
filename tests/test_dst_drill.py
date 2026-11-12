@@ -123,6 +123,39 @@ def test_dst_drill_workflow_runs_every_scenario() -> None:
     assert "if: always()" in text and "upload-artifact" in text
 
 
+@pytest.mark.parametrize(
+    "name,speed", [("newyork-spring", 1), ("newyork-spring", 60), ("clock-step", 1)]
+)
+@pytest.mark.parametrize(
+    "verb",
+    [
+        ("engine", "stop", "--wait"),
+        ("sendevent", "SET_GLOBAL", "-G", "DRILL_STEP=1"),
+    ],
+)
+def test_dst_drill_control_verbs_keep_their_reply_budget_in_real_time(
+    name: str, speed: int, verb: tuple[str, ...], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = []
+
+    def run(args: list[str], **kwargs: object) -> object:
+        calls.append((args, kwargs["timeout"]))
+        return drill.subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(drill.subprocess, "run", run)
+    leg = drill.Leg(BY_NAME[name], tmp_path, speed)
+    try:
+        args = ("dsl41", *verb, "--socket", str(leg.root / "control.sock"))
+        leg.call("control verb", 0, *args)
+        assert calls == [(list(args), 300)]
+        assert leg.clock.command(*args)[0] == str(
+            drill.FT_STEP if name == "clock-step" else drill.FT
+        )
+        assert all(row.ok for row in leg.rows)
+    finally:
+        leg.log.close()
+
+
 # ----------------------------------------------------- against the virtual clock
 
 
@@ -579,6 +612,29 @@ def test_dst_drill_launch_check_bounds_the_dispatch_after_its_tick(
         assert compare.max_launch_lag(rows.values()) == 3.5
 
 
+@pytest.mark.parametrize("missing", ["job", "run_number", "started_at"])
+def test_dst_drill_incomplete_dispatch_is_a_failed_row(missing: str) -> None:
+    record = _dispatch("DD_KILL", "2026-03-29T00:58:01")
+    del record[missing]
+    rows = compare.launch_rows(
+        compare.parse_trace(TRACE), [record], timedelta(seconds=45), timedelta(seconds=6)
+    )
+    failed = [row for row in rows if not row.ok]
+    assert any(missing in row.got and "dispatch" in row.got and "run " in row.got for row in failed)
+    assert any(row.job == ("?" if missing == "job" else "DD_KILL") for row in failed)
+
+
+def test_dst_drill_missing_dispatch_stamp_does_not_shift_the_next_run() -> None:
+    trace = compare.parse_trace(_starts("J", "2026-03-29T01:00:00", "2026-03-29T02:00:00"))
+    records = [
+        {"rec": "dispatch", "job": "J", "run_number": 1},
+        _dispatch("J", "2026-03-29T02:00:01") | {"run_number": 2},
+    ]
+    rows = compare.launch_rows(trace, records, timedelta(seconds=45), timedelta(seconds=6))
+    assert any(not row.ok and "run 1" in row.got for row in rows)
+    assert any(row.check == "launch" and row.ok and row.got == "+1.0s" for row in rows)
+
+
 def test_dst_drill_the_median_launch_catches_a_clock_that_makes_every_launch_late() -> None:
     def median_row(late_s: list[float]) -> object:
         ticks = [f"2026-03-29T0{i}:00:00" for i in range(len(late_s))]
@@ -590,7 +646,7 @@ def test_dst_drill_the_median_launch_catches_a_clock_that_makes_every_launch_lat
                 "run_number": i,
                 "started_at": (_at(t) + timedelta(seconds=s)).isoformat(),
             }
-            for i, (t, s) in enumerate(zip(ticks, late_s, strict=True))
+            for i, (t, s) in enumerate(zip(ticks, late_s, strict=True), start=1)
         ]
         rows = compare.launch_rows(trace, records, timedelta(seconds=45), timedelta(seconds=6))
         return rows[-1]
@@ -646,6 +702,45 @@ def test_dst_drill_kill_check_needs_an_oracle_kill_stop_and_a_signaled_command(
     trace = compare.parse_trace(TRACE)
     (row,) = compare.kill_rows(trace, records, timedelta(seconds=6))
     assert row.ok is ok
+
+
+def test_dst_drill_complete_kill_record_requires_a_stopped_outcome() -> None:
+    record = _outcome(outcome="unobservable")
+    (row,) = compare.kill_rows(compare.parse_trace(TRACE), [record], timedelta(seconds=6))
+    assert row == compare.Row(
+        "kill applied",
+        "DD_KILL",
+        "signaled +0..6s",
+        "run 1: unobservable; signaled +1.2s",
+        False,
+    )
+
+
+@pytest.mark.parametrize("status", [{}, None])
+def test_dst_drill_unobservable_kill_is_a_failed_row(status: object) -> None:
+    record = _outcome(
+        at="2026-03-29T01:03:05.751275",
+        attempt="synthetic-kill-attempt",
+        outcome="unobservable",
+        status=status,
+    )
+    (row,) = compare.kill_rows(compare.parse_trace(TRACE), [record], timedelta(seconds=6))
+    assert not row.ok and row.check == "kill applied" and row.job == "DD_KILL"
+    assert "run 1" in row.got and "unobservable" in row.got and "wrapper end" in row.got
+
+
+@pytest.mark.parametrize("missing", ["job", "run_number", "outcome", "ended_at", "wrapper_outcome"])
+def test_dst_drill_incomplete_kill_outcome_is_a_failed_row(missing: str) -> None:
+    record = _outcome()
+    if missing in ("ended_at", "wrapper_outcome"):
+        status = record["status"]
+        assert isinstance(status, dict)
+        del status[missing]
+    else:
+        del record[missing]
+    rows = compare.kill_rows(compare.parse_trace(TRACE), [record], timedelta(seconds=6))
+    assert rows and all(not row.ok for row in rows)
+    assert any(missing in row.got and "run " in row.got for row in rows)
 
 
 STEP_LOG = (
@@ -749,8 +844,12 @@ def test_dst_drill_chain_rows_want_a_success_and_one_follow_on() -> None:
 
     assert differ(ok) == []
     assert differ(_trace()) == ["run ends", "follow-on count"]
+    row = compare.chain_rows(_trace(), "P", at, "F", before)[0]
+    assert row.job == "P" and row.got == "run at 00:12:00: no run" and not row.ok
     stuck = _trace(_start("P", "2026-07-15T00:12:00"), _start("F", "2026-07-15T00:12:00", "engine"))
     assert differ(stuck) == ["run ends"]
+    row = compare.chain_rows(stuck, "P", at, "F", before)[0]
+    assert row.job == "P" and row.got == "run at 00:12:00: open" and not row.ok
     failed = _trace(
         _start("P", "2026-07-15T00:12:00"),
         _end("P", "2026-07-15T00:12:00", "FAILURE"),

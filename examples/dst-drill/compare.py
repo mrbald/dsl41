@@ -147,6 +147,14 @@ def _stamp(text: object) -> datetime:
     return datetime.fromisoformat(str(text)).replace(tzinfo=None)
 
 
+def _record_failure(check: str, record: Mapping[str, object], problem: str) -> Row:
+    """An incomplete record identifies the job, run and available outcome."""
+    job = str(record.get("job", "?"))
+    number = record.get("run_number", "?")
+    outcome = record.get("outcome", record.get("rec", "?"))
+    return Row(check, job, "complete record", f"run {number}: {outcome}; {problem}", False)
+
+
 def launch_rows(
     real: Trace,
     records: Iterable[Mapping[str, object]],
@@ -163,35 +171,41 @@ def launch_rows(
     and then moves only the largest one.
 
     The nth start of a job in `numbering` (the whole trace, default `real`)
-    is the nth run number the job's dispatch records carry; `real` may be
-    the clipped part of it. A replacement attempt of a run repeats its run
-    number, so only the first dispatch of each counts."""
+    pairs with dispatch run number n: the oracle increments `run_number`
+    once per start. `real` may be the clipped part of `numbering`.
+    A replacement attempt of a run repeats its run number, so only the
+    first dispatch of each counts."""
     numbering = real if numbering is None else numbering
     first: dict[tuple[str, int], datetime] = {}
+    rows = []
     for record in records:
         if record.get("rec") != "dispatch":
             continue
-        first.setdefault(
-            (str(record["job"]), int(str(record["run_number"]))), _stamp(record["started_at"])
-        )
-    dispatched: dict[str, list[datetime]] = {}
-    for (job, _), at in sorted(first.items()):
-        dispatched.setdefault(job, []).append(at)
+        missing = [key for key in ("job", "run_number", "started_at") if record.get(key) is None]
+        if missing:
+            rows.append(_record_failure("launch", record, f"missing {', '.join(missing)}"))
+            continue
+        try:
+            key = (str(record["job"]), int(str(record["run_number"])))
+            at = _stamp(record["started_at"])
+        except ValueError:
+            rows.append(_record_failure("launch", record, "invalid run_number or started_at"))
+            continue
+        first.setdefault(key, at)
     nth: dict[tuple[str, datetime], int] = {}
     seen: dict[str, int] = {}
     for run in sorted(numbering.runs, key=_at):
-        nth[(run.job, run.at)] = seen.get(run.job, 0)
         seen[run.job] = seen.get(run.job, 0) + 1
-    rows = []
+        nth[(run.job, run.at)] = seen[run.job]
     lates = []
     for run in real.runs:
         if run.made_by != "scheduler":
             continue
-        launched = dispatched.get(run.job, [])
-        index = nth[(run.job, run.at)]
-        late = launched[index] - run.at if index < len(launched) else None
+        number = nth[(run.job, run.at)]
+        launched = first.get((run.job, number))
+        late = launched - run.at if launched is not None else None
         ok = late is not None and timedelta(0) <= late <= tolerance
-        got = "no dispatch" if late is None else f"+{late.total_seconds():.1f}s"
+        got = f"run {number}: no dispatch" if late is None else f"+{late.total_seconds():.1f}s"
         rows.append(Row("launch", run.job, f"{_when(run.at)} +0..{_secs(tolerance)}s", got, ok))
         lates += [] if late is None else [late]
     if lates:
@@ -209,26 +223,39 @@ def kill_rows(
     """A row per `term_run_time` kill: the job's `outcome` record is an
     `oracle_kill` stop, and the wrapper's status in it shows the command
     signaled 0 to `tolerance` after the deadline."""
-    kills = sorted(
-        (
-            (_stamp(status["ended_at"]), r)
-            for r in records
-            if r.get("rec") == "outcome"
-            and r.get("cause") == "oracle_kill"
-            and isinstance(status := r.get("status"), dict)
-        ),
-        key=lambda pair: pair[0],
-    )
-    used: set[int] = set()
     rows = []
+    kills = []
+    for record in records:
+        if record.get("rec") != "outcome" or record.get("cause") != "oracle_kill":
+            continue
+        status = record.get("status")
+        ended = None
+        if isinstance(status, dict) and status.get("ended_at") is not None:
+            try:
+                ended = _stamp(status["ended_at"])
+            except ValueError:
+                pass
+        missing = [key for key in ("job", "run_number", "outcome") if record.get(key) is None]
+        problem = f"missing {', '.join(missing)}" if missing else None
+        if problem is None and ended is None:
+            problem = "no wrapper end (status.ended_at missing or invalid)"
+        if problem is None and isinstance(status, dict) and status.get("wrapper_outcome") is None:
+            problem = "missing status.wrapper_outcome"
+        if record.get("job") is None:
+            rows.append(_record_failure("kill applied", record, problem or "missing job"))
+            continue
+        kills.append((ended, record, problem))
+    used: set[int] = set()
     for timer in real.timers:
         if timer.what != "term_run_time kill":
             continue
         found = next(
             (
-                (i, ended, r)
-                for i, (ended, r) in enumerate(kills)
-                if i not in used and r.get("job") == timer.job and ended >= timer.at
+                (i, ended, r, problem)
+                for i, (ended, r, problem) in enumerate(kills)
+                if i not in used
+                and r.get("job") == timer.job
+                and (ended is None or ended >= timer.at)
             ),
             None,
         )
@@ -237,14 +264,22 @@ def kill_rows(
             rows.append(Row("kill applied", timer.job, want, "no oracle_kill outcome", False))
             continue
         used.add(found[0])
+        if found[3] is not None:
+            rows.append(_record_failure("kill applied", found[2], found[3]))
+            continue
+        assert found[1] is not None
         late = found[1] - timer.at
         status = found[2]["status"]
         assert isinstance(status, dict)
         outcome = status.get("wrapper_outcome")
-        ok = outcome == "signaled" and late <= tolerance
-        rows.append(
-            Row("kill applied", timer.job, want, f"{outcome} +{late.total_seconds():.1f}s", ok)
-        )
+        ok = found[2].get("outcome") == "stopped" and outcome == "signaled" and late <= tolerance
+        got = f"run {found[2]['run_number']}: {found[2]['outcome']}; {outcome} +{late.total_seconds():.1f}s"
+        rows.append(Row("kill applied", timer.job, want, got, ok))
+    rows += [
+        _record_failure("kill applied", record, problem)
+        for i, (_, record, problem) in enumerate(kills)
+        if i not in used and problem is not None
+    ]
     return rows
 
 
@@ -464,12 +499,13 @@ def chain_rows(
     time (DL-493)."""
     runs = [r for r in trace.runs if r.job == producer and r.at == at]
     status = runs[0].status if runs else None
+    got = status or ("open" if runs else "no run")
     rows = [
         Row(
             "run ends",
             producer,
             f"{_when(at)} SUCCESS",
-            f"{_when(at)} {status}",
+            f"run at {_when(at)}: {got}",
             status == "SUCCESS",
         )
     ]
