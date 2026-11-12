@@ -2776,3 +2776,137 @@ def test_box_restart_ends_boxes_before_done_sibling_can_start(short_root: Path):
             engine.journal.close()
 
     asyncio.run(scenario())
+
+
+def test_launch_policy_from_main_config_and_shell_update(tmp_path):
+    import resource
+    import shutil
+    from datetime import datetime
+    from dsl41.runner_adapters import LocalCommandAdapter
+    from dsl41.runner_clock import RealClock
+    from dsl41.runner_preflight import preflight
+    from test_engine_stops import _finish, _start_jobs, _until
+
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("real bash unavailable")
+    hard = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
+    if hard != resource.RLIM_INFINITY and hard < 64:
+        pytest.skip("hard descriptor limit below witness")
+    site, profile = tmp_path / "site's profile", tmp_path / "job's profile"
+    site.write_text("export ORDER=site\n")
+    profile.write_text('export ORDER="$ORDER:job"\n')
+    output = tmp_path / "observed"
+    output.write_text("old\n")
+    command = (
+        'if [ -n "${BASH_VERSION-}" ] && ! shopt -oq posix; '
+        "then native=bash; else native=sh; fi; "
+        'printf "%s:%s:%s:%s\\n" "$native" "$ORDER" "$(ulimit -n)" "$DSL41_ATTEMPT"; '
+        'test "$DSL41_ATTEMPT" -eq 2'
+    )
+    (tmp_path / "a.jil").write_text(
+        f"insert_job: A\njob_type: c\ncommand: {command}\nprofile: {profile}\n"
+        f'ulimit: n="64,64"\nstd_out_file: {output}\nn_retrys: 1\n'
+    )
+
+    def config(shell):
+        return config_file(
+            tmp_path,
+            engine=(
+                f"job_shell = {json.dumps(shell)}\njob_profile = {json.dumps(str(site))}\n"
+                'std_file_mode = "truncate"\n'
+            ),
+        )
+
+    path = config(bash)
+    initial = main.prepare(path)
+    assert not main.policy_report(initial)[1].by_code("known-unsupported")
+    findings = preflight(
+        initial.catalog, job_shell=bash, job_profile=str(site), std_file_mode="truncate"
+    )
+    assert not [f for f in findings if f.code == "known-unsupported" or f.severity == "ERROR"]
+    root = tmp_path / "run"
+
+    async def scenario():
+        engine = start_run(
+            initial.catalog,
+            root,
+            clock=RealClock(),
+            adapters={"CMD": LocalCommandAdapter()},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+            hold_open=True,
+        )
+        engine.launch_settings = initial.metadata["launch"]
+        loop = asyncio.create_task(engine.run_until_quiescent(datetime.max))
+        try:
+            _start_jobs(engine, "A")
+            await _until(lambda: engine.oracle.store.job["A"].status == "SUCCESS")
+            assert output.read_text() == "bash:site:job:64:2\n"
+            assert (root / "runs/A.1/2/status.json").exists()
+            config("/bin/sh")
+            candidate = main.prepare(path)
+            assert not main.policy_report(candidate)[1].by_code("known-unsupported")
+            plan = reread(engine.update.live(), root / "plans", candidate=candidate)
+            assert not [
+                f
+                for f in json.loads((root / "plans" / plan.token / "plan.json").read_text())[
+                    "lint_findings"
+                ]
+                if f["code"] == "known-unsupported"
+            ]
+            answer = await engine.request_update(
+                UpdateRequest(plan.token, 1, engine.baseline_id, "launch-shell")
+            )
+            assert isinstance(answer.decision, Admitted)
+            await answer.applied
+            _start_jobs(engine, "A")
+            await _until(
+                lambda: (
+                    engine.oracle.store.job["A"].run_number == 2
+                    and engine.oracle.store.job["A"].status == "SUCCESS"
+                )
+            )
+            assert output.read_text() == "sh:site:job:64:2\n"
+            assert engine.profile.job_shell == "/bin/sh"
+        finally:
+            await _finish(engine, loop)
+
+    asyncio.run(scenario())
+
+
+def test_shell_removed_after_preflight_is_recorded_spawn_failure(tmp_path):
+    from datetime import datetime
+    from dsl41.runner_adapters import LocalCommandAdapter
+    from dsl41.runner_clock import RealClock
+    from test_engine_stops import _finish, _start_jobs, _until
+
+    shell = tmp_path / "sh"
+    shell.symlink_to("/bin/sh")
+    path = estate_file(tmp_path, engine=f'job_shell = "{shell}"\n')
+    estate = main.prepare(path)
+    root = tmp_path / "run"
+
+    async def scenario():
+        engine = start_run(
+            estate.catalog,
+            root,
+            clock=RealClock(),
+            adapters={"CMD": LocalCommandAdapter()},
+            launched=main.profile_of(estate),
+            source_capture=main.encoded_parts(estate),
+            hold_open=True,
+        )
+        shell.unlink()
+        loop = asyncio.create_task(engine.run_until_quiescent(datetime.max))
+        try:
+            _start_jobs(engine, "A")
+            await _until(lambda: engine.oracle.store.job["A"].status == "FAILURE")
+            status = json.loads((root / "runs/A.1/1/status.json").read_text())
+            assert status["outcome"] == "spawn_failed" and str(shell) in status["error"]
+            assert not (root / "runs/A.1/1/spawn.json").exists()
+            assert not loop.done()
+        finally:
+            await _finish(engine, loop)
+
+    asyncio.run(scenario())

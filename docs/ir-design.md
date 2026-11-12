@@ -555,7 +555,8 @@ classifications in `lint.py`; their presence does not imply a supported UC outpu
 | L025 | error | `non-idempotent.toml` names a job the estate does not define, or a box or a file watcher ("names a box or a file watcher; only command jobs can be declared"), which have no attempt to interrupt; the finding names the name. Inert without the sidecar | DL-424 |
 | known-unsupported | warn | an attribute requests behavior this release does not apply; descriptions and neutral values stay quiet. Registered for `lint.ignore` and `lint.refuse`; preflight uses the same check | DL-466 |
 
-Engine shell/profile settings warn once when configured; truncate mode warns once.
+The engine shell, site profile, default stream mode and CMD `ulimit` take
+effect at launch and produce no `known-unsupported` warning (DL-492).
 Restart reports active captured warnings without applying lint refusal policy.
 Reread records `known-unsupported` in the main-config plan's `lint_findings` (DL-486).
 

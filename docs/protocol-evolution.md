@@ -206,7 +206,9 @@ Reload plans refuse an absent discriminator as retired version 1 (DL-486).
 Unread or mismatched restart evidence is quarantined under DL-433;
 missing evidence follows the interruption rule, not a guessed outcome.
 
-The wrapper input schema is frozen (DL-150). Its field/type restrictions
+The wrapper input schema is frozen (DL-150). Optional `shell` and `limits`
+fields extend version 1 (DL-492). Their absence selects `/bin/sh` and no
+child limits. Unknown fields still refuse. Its field/type restrictions
 remain [wrapper protocol §2](wrapper-protocol.md#2-wrapper-input-spec-frozen).
 The adapter launches the wrapper by file path; the wrapper reads stdin
 once and replaces it with `/dev/null`. A refused spec writes no spawn

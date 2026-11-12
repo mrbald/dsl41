@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import resource
+import shlex
 import signal
 import stat
 import subprocess
@@ -39,14 +40,14 @@ from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from dsl41.runner_environment import expand_path, inherited_environment, resolve_streams
+from dsl41.runner_environment import inherited_environment, resolve_streams
 from typing import Any, Final, Protocol, cast, get_args, runtime_checkable
 
 
 from dsl41 import runner_procid as _procid
 from dsl41 import runner_wrapper as _wrapper
-from dsl41.runner_wrapper import ProcessInput, ProcessStream, WrapperOutcome
-from dsl41.runtime_policy import LIMIT_RESOURCES, ResourceLimit, StreamMode, stream_target
+from dsl41.runner_wrapper import WrapperOutcome
+from dsl41.runtime_policy import LIMIT_RESOURCES, StreamMode, job_limits, stream_target
 from dsl41.canon import (
     ARTIFACT_FORMAT_VERSION,
     CanonError,
@@ -97,6 +98,9 @@ class AdapterContext:
     env: dict[str, str] = field(default_factory=dict)
     paths: dict[str, str | None] | None = None
     startup_env: dict[str, str] | None = None
+    shell: str = "/bin/sh"
+    site_profile: str | None = None
+    std_file_mode: StreamMode = "append"
 
 
 class AttemptObserver(Protocol):
@@ -320,59 +324,6 @@ def status_payload(result: AdapterResult, *, where: str) -> dict[str, object]:
     raise EngineError(f"{where} returned {result!r}")
 
 
-def prepare_process_input(
-    job_ir: JobIR,
-    *,
-    shell: str,
-    site_profile: str | None,
-    mode: StreamMode,
-    limits: tuple[ResourceLimit, ...],
-    env: Mapping[str, str],
-    cwd: Path,
-    defaults: Mapping[str, str],
-) -> tuple[ProcessInput, set[str]]:
-    """Prepare a process input from already admitted policy, before profiles run."""
-    spec = job_ir.exec_
-    if not isinstance(spec, ExecSpec):
-        raise EngineError(f"{job_ir.name!r}: CMD dispatch without an ExecSpec")
-    paths: dict[str, str | None] = {}
-    modes: dict[str, StreamMode | None] = {}
-    references: set[str] = set()
-    for name in ("std_in_file", "std_out_file", "std_err_file"):
-        text = getattr(spec, name)
-        if text is None:
-            paths[name] = defaults.get(name)
-            modes[name] = None if name == "std_in_file" else mode
-        else:
-            target, modes[name] = stream_target(job_ir.name, name, text, mode)
-            paths[name], names = expand_path(job_ir.name, name, target, env)
-            references.update(names)
-        path = paths[name]
-        if path is not None and not os.path.isabs(path):
-            paths[name] = os.path.join(str(cwd), path)
-    out, err = paths["std_out_file"], paths["std_err_file"]
-    out_mode, err_mode = modes["std_out_file"], modes["std_err_file"]
-    if out is None or err is None or out_mode is None or err_mode is None:
-        raise EngineError("command dispatch requires output paths and modes")
-    normalized_limits = tuple(
-        (getattr(resource, LIMIT_RESOURCES[item.resource][0]), item.soft, item.hard)
-        for item in limits
-    )
-    return (
-        ProcessInput(
-            shell=shell,
-            site_profile=site_profile,
-            job_profile=spec.profile,
-            command=spec.command,
-            stdin_path=paths["std_in_file"],
-            stdout=ProcessStream(out, out_mode),
-            stderr=ProcessStream(err, err_mode),
-            limits=normalized_limits,
-        ),
-        references,
-    )
-
-
 def _build_run_spec(
     job_ir: JobIR,
     run_number: int,
@@ -380,11 +331,7 @@ def _build_run_spec(
     *,
     grace_seconds: float,
 ) -> tuple[Path, dict[str, Any]]:
-    """The run_dir, log-path and wrapper-spec construction shared by the tethered
-    CMD path (LocalCommandAdapter): everything the wrapper
-    input spec needs EXCEPT lifeline_fd, which each caller fills from the end that owns the pipe's
-    write side. One function keeps the run-dir layout, profile composition and log targets of the
-    two paths identical (ss6a)."""
+    """Build the live CMD wrapper input except the caller's lifeline_fd (ss6a, DL-492)."""
     if ctx.run_root is None:
         raise EngineError("command dispatch needs a run_root (real domain only)")
     spec_ir = job_ir.exec_
@@ -392,9 +339,17 @@ def _build_run_spec(
         raise EngineError(f"{job_ir.name!r}: CMD dispatch without an ExecSpec")
     if os.sep in job_ir.name or job_ir.name in (".", ".."):
         raise EngineError(f"job name {job_ir.name!r} is not a safe run-directory name")
-    command = spec_ir.command
-    if spec_ir.profile:
-        command = f". {spec_ir.profile} && {command}"  # PENDING: E5
+    # DL-492: profile failure exits the whole script. PENDING: E5 vendor parity.
+    command = "; ".join(
+        [
+            *(
+                f". {shlex.quote(profile)} || exit $?"
+                for profile in (ctx.site_profile, spec_ir.profile)
+                if profile is not None
+            ),
+            spec_ir.command,
+        ]
+    )
     run_dir = (
         ctx.spool
         if ctx.spool is not None
@@ -425,22 +380,31 @@ def _build_run_spec(
         "job": job_ir.name,
         "run_number": run_number,
         "command": command,
+        "shell": ctx.shell,
         "run_dir": str(run_dir),
         "stdout_path": paths["std_out_file"],
         "stderr_path": paths["std_err_file"],
         "stdin_path": paths["std_in_file"],
         "grace_seconds": grace_seconds,
     }
+    limits = job_limits(job_ir)
+    if limits:
+        spec["limits"] = [
+            [getattr(resource, LIMIT_RESOURCES[item.resource][0]), item.soft, item.hard]
+            for item in limits
+        ]
     if ctx.env:
         spec["env"] = dict(ctx.env)
     return run_dir, spec
 
 
-def _prepare_output_files(job_ir: JobIR, spec: Mapping[str, Any]) -> None:
-    """Truncate explicit > regular-file targets before each launch (DL-460)."""
+def _prepare_output_files(
+    job_ir: JobIR, spec: Mapping[str, Any], mode: StreamMode = "append"
+) -> None:
+    """Prepare explicit regular-file outputs under the selected mode (DL-460, DL-492)."""
     for attribute, key in (("std_out_file", "stdout_path"), ("std_err_file", "stderr_path")):
         text = getattr(job_ir.exec_, attribute)
-        if text is None or stream_target(job_ir.name, attribute, text, "append")[1] != "truncate":
+        if text is None or stream_target(job_ir.name, attribute, text, mode)[1] != "truncate":
             continue
         try:
             fd = os.open(
@@ -462,12 +426,14 @@ class LocalCommandAdapter:
     spawn.json and status.json, the sole outcome channel. No retries (the engine's attempt
     plan owns them, DL-485), no timeouts (term_run_time is the oracle's timer), no classification.
 
-    stdout/stderr append unless the source path starts with >, which prepares a truncated
-    regular file before launch; >> explicitly appends (DL-460). Unset outputs append to
-    <run_root>/logs/<job>.<run_number>.{out,err}; std_in_file when set, else /dev/null. `profile`
-    sources first: ``. <profile> && <command>``, and a failing profile fails the job with sh's
-    exit code (PENDING: E5). DL-39 [?] verbatim carry applies: the command string is passed to
-    /bin/sh exactly as the IR holds it.
+    Explicit outputs use the applied default mode; > truncates and >> appends.
+    Unset outputs always append to <run_root>/logs/<job>.<run_number>.{out,err}.
+    The wrapper opens streams before the shell starts (DL-460, DL-492).
+    The script joins the site profile, job profile and verbatim command with semicolons
+    on one line. Each profile part exits on failure. Profiles cannot rewrite the command
+    through aliases; their exports reach every command part (DL-492). The selected shell
+    runs it with -c; the child applies job limits before exec.
+    PENDING: E5 vendor parity for profile failure.
 
     The attempt tier stops the command (`stop_ladder`, `Launch.abort`). A cancel before the spec
     reaches the wrapper SIGKILLs the wrapper, which has launched nothing. The lifeline write end
@@ -491,7 +457,7 @@ class LocalCommandAdapter:
         run_dir, spec = _build_run_spec(job_ir, run_number, ctx, grace_seconds=self.grace_seconds)
         if not launch.aborted:
             try:
-                _prepare_output_files(job_ir, spec)
+                _prepare_output_files(job_ir, spec, ctx.std_file_mode)
             except OSError as exc:
                 launch.observer.spawn_failed(f"output preparation failed: {exc}")
                 return

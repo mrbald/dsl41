@@ -1237,19 +1237,19 @@ def test_restart_prints_and_journals_authoritative_warnings_once(short_root: Pat
     with cli_engine(path, force_unsupported_shell=True):
         pass
     first_log = (short_root / "cli-engine.log").read_text()
-    assert first_log.count("preflight WARN [shell]") == 1
+    assert first_log.count("preflight WARN [shell]") == 0
     assert first_log.count("preflight WARN [machine-mixed]") == 1
     (root / "leader.lock").unlink()
     with cli_engine(path, force_unsupported_shell=True):
         pass
     restart_log = (short_root / "cli-engine.log").read_text()
-    assert restart_log.count("preflight WARN [shell]") == 1
+    assert restart_log.count("preflight WARN [shell]") == 0
     assert restart_log.count("preflight WARN [machine-mixed]") == 1
     records = [body for _, kind, body in rows(root) if kind == "preflight"]
     assert len(records) == 2
     for record in records:
         codes = [item["code"] for item in record["items"]]
-        assert codes.count("shell") == 1 and codes.count("machine-mixed") == 1
+        assert codes.count("shell") == 0 and codes.count("machine-mixed") == 1
 
 
 @pytest.mark.usefixtures("k_bourne_account")

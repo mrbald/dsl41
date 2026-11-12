@@ -516,14 +516,9 @@ def test_a_preflight_warning_goes_into_plan_json(tmp_path: Path) -> None:
     result = _reread(estate, live, tmp_path / "plans")
     document = read_plan(tmp_path / "plans", result.token)
     assert document is not None
-    from dsl41.runtime_policy import resolve_job_shell
-
-    _, shell_warning = resolve_job_shell(None)
     assert not any(w["code"] == "known-unsupported" for w in document["preflight_warnings"])
     assert any(v["code"] == "known-unsupported" for v in document["lint_findings"])
-    assert document["preflight_warnings"] == (
-        [] if shell_warning is None else [{"code": "shell", "job": None, "message": shell_warning}]
-    )
+    assert document["preflight_warnings"] == []
 
 
 def test_a_job_with_envvars_that_run_refuses_is_refused(tmp_path: Path) -> None:

@@ -22,7 +22,7 @@ library.
   "run_id": "uuid4 string identifying this attempt, from its dispatch (DL-428, DL-429)",
   "job": "job name",
   "run_number": 3,
-  "command": "exact /bin/sh -c command line (profile already composed)",
+  "command": "shell script (profiles already composed)",
   "run_dir": "/abs/path/runs/<job>.<run_number>/<ordinal>",
   "lifeline_fd": 3,
   "stdout_path": "/abs/path (opened APPEND)",
@@ -48,11 +48,18 @@ same directory agree.
   one process, the spawner** (fd-hygiene invariant, leak-tested). EOF on
   this fd means that the parent died, `kill -9` included.
 - `stdin_path: null` means /dev/null. The wrapper opens stdout and stderr
-  for append, as AutoSys appends to std_out_file and std_err_file (vendor
-  parity).
+  for append after adapter preparation of truncating explicit outputs
+  (DL-460, DL-492).
 - `grace_seconds`: the SIGTERM→SIGKILL escalation window for the
   parent-loss kill. Ordinary spawner stops use their command grace; KILLJOB
   uses the selected signal list at five-second intervals (DL-462).
+- `shell`, optional: an absolute path without NUL, default `/bin/sh`. The child
+  runs `[shell, "-c", command]` (DL-492).
+- `limits`, optional: a list of `[resource, soft, hard]` triples. `resource`
+  is the host's integer `RLIMIT_*` number. Soft and hard values are integers
+  or null for unlimited; booleans are refused. An absent list applies no
+  limits. The child restores signals, then sets these limits before exec
+  (DL-492). Profiles can lower them.
 - `env`, optional: an object of strings the command gets on top of the
   wrapper's environment, the invocation the attempt's `dispatch` record
   holds. Any other value is the spec refusal.
@@ -66,10 +73,11 @@ startup environment, excluding `AUTOSERV`, `AUTOSYS`, `AUTOUSER` and
 That overlay also supplies `AUTO_JOB_NAME`, `AUTORUN=S-N` and the existing
 `DSL41_*` invocation values. The startup environment also excludes inherited
 `DSL41_SOCKET`; the overlay supplies it only when the engine has a socket
-(DL-459). The frozen input shape and version stay 1.
+(DL-459). The input version stays 1 (DL-492).
 
 Every key in the JSON example is required; the spawner fills
-`lifeline_fd` (DL-150). `env` is optional (DL-428). `version`, `run_number` and `lifeline_fd` are integers,
+`lifeline_fd` (DL-150). `env` is optional (DL-428); `shell` and `limits`
+are optional (DL-492). `version`, `run_number` and `lifeline_fd` are integers,
 never booleans. `run_id`, `job`, `command`, `run_dir`, `stdout_path` and
 `stderr_path` are strings. `stdin_path` is a string or null.
 `grace_seconds` is a **finite** number, representable as a double, zero
@@ -164,7 +172,7 @@ Each attempt has at most one `status.json`, and it holds exactly one outcome:
 | `exited`      | `exit_code`         | the command exited on its own              |
 | `signaled`    | `signal`            | the command was killed by a signal that the wrapper did not send |
 | `terminated`  | `cause`, `observed` | the wrapper killed the group (`cause: "parent lost"`, or a spawn-record write failure). `observed` carries the forensic exit detail |
-| `spawn_failed`| `error`             | the wrapper could not open the command's stdin, stdout or stderr, or could not spawn /bin/sh (DL-150) |
+| `spawn_failed`| `error`             | the wrapper could not open the command's stdin, stdout or stderr, could not execute the selected shell, or could not set a child limit (DL-150, DL-492) |
 
 No outcome of a command that ran is written as an absent file. The
 **absence** of `status.json` means one of four things: the recorder itself
@@ -262,7 +270,8 @@ the process group decide.
    own process group (`setpgid(0,0)` equivalent at spawn). The child
    restores the default signal dispositions before exec. SIG_IGN is
    inherited across exec, so without the reset the command would ignore a
-   graceful SIGTERM.
+   graceful SIGTERM. It then applies the input limits and executes
+   `[shell, "-c", command]` (DL-492).
 2. The wrapper ignores SIGTERM, SIGINT, SIGHUP, SIGQUIT, SIGUSR1 and
    SIGUSR2. SIGKILL, SIGABRT, any other signal whose default action
    terminates and that the wrapper does not ignore, or machine death
@@ -289,14 +298,15 @@ the process group decide.
    before anything spawns. It refuses a `version` that is absent or is not
    the integer 1 (`true` and `1.0` are refused), a present `lifeline_fd`
    that is not an integer, and a present `grace_seconds` that is not a
-   finite number of zero or more. A boolean is not a number (DL-229).
+   finite number of zero or more. It also refuses mistyped `shell` or
+   `limits` (§2, DL-492). A boolean is not a number (DL-229).
    Readable JSON that is not an object is a spec refusal and exits 2 before
    any durable effect (DL-444). Malformed JSON exits 1 before any record. So does a
    spec that lacks a key the wrapper reads with no default: `run_id`,
    `job`, `run_number`, `command`, `run_dir`, `lifeline_fd`,
-   `stdout_path`, `stderr_path` (DL-150). The wrapper has two defaults of
-   its own: `stdin_path` (null, meaning /dev/null) and `grace_seconds`
-   (10.0). status.json is the sole data
+   `stdout_path`, `stderr_path` (DL-150). The wrapper defaults are
+   `stdin_path` (null, meaning /dev/null), `grace_seconds` (10.0), `shell`
+   (`/bin/sh`) and `limits` (empty, DL-492). status.json is the sole data
    channel, and its absence reads the same way whatever the exit code was.
 
 Citation pointers:
