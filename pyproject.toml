@@ -54,7 +54,7 @@ dev = [
     # coverage.report] says which modules and why). `[toml]` extra so the
     # config can live in pyproject with its reasoning beside it.
     "coverage[toml]>=7",
-    "ruff>=0.6",
+    "ruff>=0.17.4",
     "mypy>=1.10",
     "textual>=8",
     "textual-serve==1.1.3",
