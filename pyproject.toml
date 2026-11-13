@@ -62,7 +62,7 @@ dev = [
     # webkit/firefox. Dev-only -- the package keeps its three runtime deps, and
     # the browsers themselves are a separate `playwright install` (absent = the
     # test skips), so a plain `pytest -q` needs neither.
-    "playwright>=1.50",
+    "playwright>=1.64.1",
 ]
 
 [project.urls]
