@@ -26630,3 +26630,20 @@ relitigate an entry; append a new one.
   enforced (BUG-77). The rule is in lowering, not in the IR model: a catalog read from
   saved JSON (`ir.load_catalog`) or from a store is not checked, so the report's sentinel
   still widens past a job name (DL-175).
+- DL-495 A job's name is its subject without block comments (2026-11-13; owner "BUG-79 is
+  nasty, fix it"; operator ruling; closes BUG-79; `ir.py`, jil-statement-syntax rule 4)
+  THE RULE. Lowering reads a job's name from the subject of its statement without its
+  closed `/*...*/` spans and without the blanks around what is left. So
+  `insert_job: j /* c */ job_type: c` is the job `j`. A span with name text on both sides
+  of it (`j /* c */ tail`) is a lowering error that names the comment: the name cannot be
+  read. A subject with no comment lowers as before. The scanner does not change: the span
+  stays subject text in the AST, and preserve-mode rendering returns the line's bytes (F1).
+  THE REASON. Whether the vendor strips a comment before it splits pairs is not known
+  (jil-statement-syntax rule 4), and for this input the answer does not matter: a name
+  that holds `/*` is no AutoSys name, so JIL that AutoSys loaded can only have meant the
+  name without the comment.
+  THE CAUSE. The comment became part of the lowered name: the job was `j /* c */`, a
+  reference to `j` did not reach it, and since DL-494 lowering refused the name for its `/`.
+  NOT BUILT. The vendor's whole character set and its length limit for a job name, a
+  blank in a name included (BUG-77). A closed comment inside an attribute value stays
+  value text (rule 5).

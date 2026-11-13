@@ -56,7 +56,7 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 - **BUG-76**: The engine's `stale_plan` and `update_in_progress` refusals cannot fire through the server, whose one preparation slot and STOPPING check exclude both. Only tests that call the engine reach them (`src/dsl41/runner_control.py:804-820`).
 - **BUG-77**: Lowering does not enforce the vendor's character set or its length limit for a job name; its directory-component check only refuses names containing `/` or a NUL byte, or equal to `.` or `..`; a catalog read from saved JSON or from a store is not checked (DL-494).
 - **BUG-78**: `engine stop --wait` run by an unprivileged user other than the engine's cannot confirm the exit and ends with status 2: `leader.lock` is created with mode 0600 (`src/dsl41/runner_procid.py:79`). No operator document says so.
-- **BUG-79**: A block comment between the job name and an inline `job_type:` on the `insert_job` line becomes part of the lowered job name; lowering then refuses the name for its `/` (DL-494), where AutoSys reads the name without the comment.
+- **BUG-80**: Canonical rendering is not a fixpoint for a subcommand line whose subject is only a block comment before an inline `job_type:` (`insert_job: /* c */ job_type: c`): the first pass prints two spaces after the colon and the second prints one (F2). The line has no job name and lowering refuses it.
 
 #### Tests, tooling and docs
 

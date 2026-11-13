@@ -82,6 +82,9 @@ default there.
    not known, and it decides one input: `command: a /* c */b: x` is one value here and would
    be two attributes to a stripping engine. The scanner follows rule 4b's own wording, which
    reads the source line.
+   Lowering reads a job's name without surrounding closed block comments and refuses a comment
+   with name text on both sides (DL-495). A marker glued to the name (`j/* c */`) opens no
+   comment and stays part of the name, which DL-494 refuses for its `/`.
 4b. **Attribute lines carry ONE pair** (DL-30): the Broadcom syntax rules permit several
    `attribute: value` statements on one line (whitespace-separated) and require escapes (`\:`)
    or quotes for colons *inside* values. As a result, a second unescaped, unquoted,

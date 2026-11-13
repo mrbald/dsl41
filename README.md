@@ -123,6 +123,8 @@ verbatim instead. Every command that loads a catalog takes it, except
 files before parsing.
 
 Lowering refuses a job name containing `/` or a NUL byte, or equal to `.` or `..` (DL-494).
+Lowering reads a job's name without surrounding closed block comments and refuses a comment with name text on both sides (DL-495).
+A marker glued to the name (`j/* c */`) opens no comment and stays part of the name, which DL-494 refuses for its `/`.
 
 ### Resolve estate templating
 
