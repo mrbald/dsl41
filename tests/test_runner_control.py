@@ -2695,19 +2695,24 @@ def test_the_cli_maps_every_mutation_outcome_including_the_two_transport_ones(
     from dsl41.cli_control import _mutate
     from dsl41.runner_control import ControlClientError
 
-    request = {"cmd": "sendevent", "request_id": "req-7"}
+    request = control_mod.command(
+        "STARTJOB", {"job": "j"}, key="job:j", revision=1, baseline_id="b", request_id="req-7"
+    )
+    not_connected = ControlClientError("no such file")
+    not_connected.__cause__ = FileNotFoundError()
     cases: list[tuple[object, int, bool]] = [
         ({"ok": True, "index": 3}, 0, False),
         ({"ok": False, "refused": True, "error": "no expect"}, 2, False),
         ({"ok": False, "decision": "rejected", "index": 4}, 3, False),
         ({"ok": False, "error": "no decision within 5.0s"}, 4, True),
-        (ControlClientError("no such file"), 2, False),
+        (not_connected, 2, False),
         (ControlClientError("engine hung up", delivered=True), 4, True),
     ]
     for answer, code, names_the_id in cases:
 
         def fake_roundtrip(_path, _request, *, answer=answer, **_kw):
-            _kw["before_send"]()
+            if answer is not not_connected:
+                _kw["before_send"]()
             if isinstance(answer, Exception):
                 raise answer
             return answer
@@ -2722,8 +2727,12 @@ def test_the_cli_maps_every_mutation_outcome_including_the_two_transport_ones(
         # no other outcome may. The bare flag is no longer the signal: since
         # DL-217 the pre-send line prints it before every mutation, as a
         # record, whatever the outcome
-        assert ("retry ONLY as --request-id req-7" in err) is names_the_id, answer
-        assert "sending: --request-id req-7" in err, answer
+        assert (
+            "retry ONLY as --request-id req-7 --expect 1 --baseline b" in err
+        ) is names_the_id, answer
+        assert ("sending: --request-id req-7 --expect 1 --baseline b" in err) is (
+            answer is not not_connected
+        ), answer
 
 
 _SEAL_JIL = "insert_job: seal_flight_job\njob_type: c\ncommand: x\nmachine: m1\n"

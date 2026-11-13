@@ -246,13 +246,17 @@ def test_delivered_permission_error_keeps_the_unknown_outcome(
         )
 
     monkeypatch.setattr(runner_control, "roundtrip", lost)
-    assert command_outcome(short_root / "control.sock", {"request_id": "r"}) == 4
+    request = runner_control.command(
+        "STARTJOB", {"job": "j"}, key="job:j", revision=1, baseline_id="b", request_id="r"
+    )
+    assert command_outcome(short_root / "control.sock", request) == 4
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err.splitlines() == [
-        "sending: --request-id r",
+        "sending: --request-id r --expect 1 --baseline b",
         "answer lost",
-        "no decision: this command may still apply. Re-read, then retry ONLY as --request-id r",
+        "no decision: this command may still apply. Re-read, then retry ONLY as "
+        "--request-id r --expect 1 --baseline b",
     ]
 
 

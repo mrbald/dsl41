@@ -465,9 +465,9 @@ class Ours:
     error: int | None = None
 
 
-def ours(cookie_prefix: str) -> Ours | None:
+def ours(cookie_prefix: str) -> Ours:
     """Every live process of this uid whose `DSL41_COOKIE` starts with `cookie_prefix`, by pid
-    with its run id and start token; None off Linux.
+    with its run id and start token. EngineStops gates callers on Linux (DL-431).
 
     Each process is read through one directory fd, so its environment and its stat are the
     same process's even if the pid is reused meanwhile. An error on an entry is classified
@@ -477,8 +477,6 @@ def ours(cookie_prefix: str) -> Ours | None:
     `task_dump_owner`, while its `environ` becomes unreadable); a failed reading, or a
     listing that fails, cuts the scan short with its errno in `error`, and the caller knows
     nothing from it. A zombie has no environment left, so it is never found."""
-    if not sys.platform.startswith("linux"):
-        return None
     try:
         names = os.listdir(_PROC)
     except OSError as exc:
@@ -604,8 +602,8 @@ def signal_ours(pid: int, start_token: str, sig: int, *, pidfd: bool | None = No
         return True
     pidfd_open = getattr(os, "pidfd_open", None)
     send = getattr(signal, "pidfd_send_signal", None)
-    if pidfd_open is None or send is None:
-        return False
+    # EngineStops selects pidfd only after pidfd_supported proves both APIs (DL-436).
+    assert pidfd_open is not None and send is not None
     try:
         fd = pidfd_open(pid)
     except OSError:

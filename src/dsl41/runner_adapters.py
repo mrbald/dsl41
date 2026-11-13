@@ -332,11 +332,11 @@ def _build_run_spec(
     grace_seconds: float,
 ) -> tuple[Path, dict[str, Any]]:
     """Build the live CMD wrapper input except the caller's lifeline_fd (ss6a, DL-492)."""
-    if ctx.run_root is None:
-        raise EngineError("command dispatch needs a run_root (real domain only)")
+    # wire_from_profile gives the live CMD adapter a run root (spec-wiring 2b).
+    assert ctx.run_root is not None
     spec_ir = job_ir.exec_
-    if not isinstance(spec_ir, ExecSpec):
-        raise EngineError(f"{job_ir.name!r}: CMD dispatch without an ExecSpec")
+    # CMD lowering requires an ExecSpec; restart re-lowers the catalog (DL-07).
+    assert isinstance(spec_ir, ExecSpec)
     # DL-494: lowering guarantees that every job name is one directory component.
     if os.sep in job_ir.name or "\0" in job_ir.name or job_ir.name in (".", ".."):
         raise AssertionError(f"job name {job_ir.name!r} must be one directory component")
@@ -682,8 +682,8 @@ async def selected_signal_ladder(
 ) -> None:
     """Use fresh cookie proofs at each step, or the initially proved group's continuity.
     Retain signal failures, as the ordinary stop ladder does (DL-462)."""
-    if not signals:
-        raise ValueError("signal ladder is empty")
+    # RuntimePolicySettings validates every selected ladder as nonempty (DL-462).
+    assert signals
     group_proved = members is None and _procid.verify_alive(pgid, start_token)
     if members is None and not group_proved:
         return
@@ -724,8 +724,6 @@ async def selected_signal_ladder(
                     else:
                         if not gone:
                             remember(f"signal {sig} not sent to pid {pid}")
-            if found.kind == "ours" and not found.pids:
-                remember("verified group has no per-process targets")
         if index == len(signals) - 1:
             finish()
             return

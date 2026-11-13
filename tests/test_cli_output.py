@@ -896,7 +896,9 @@ def test_r3_reload_transport_errors_keep_their_detail(monkeypatch):
     from dsl41 import runner_control
 
     def fail(*a, **kw):
-        raise runner_control.ControlClientError("synthetic transport failure")
+        raise runner_control.ControlClientError("synthetic transport failure") from OSError(
+            "connect failed"
+        )
 
     monkeypatch.setattr(runner_control, "roundtrip", fail)
     with pytest.raises(cli_reload.SendFailed, match="synthetic transport failure"):

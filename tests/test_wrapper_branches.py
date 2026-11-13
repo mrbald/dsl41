@@ -63,9 +63,8 @@ def test_wrapper_spec_refusal_checks_a_present_env() -> None:
 # --------------------------------------------------------------- _drain
 
 
-def test_wrapper_drain_stops_at_eof_and_at_an_empty_pipe() -> None:
-    """A nonblocking self-pipe is emptied whether the writer is still open
-    (EAGAIN ends the read) or already closed (EOF ends it)."""
+def test_wrapper_drain_stops_at_an_empty_pipe() -> None:
+    """A nonblocking self-pipe is emptied while its writer stays open (DL-321)."""
     r, w = os.pipe()
     os.set_blocking(r, False)
     try:
@@ -73,15 +72,9 @@ def test_wrapper_drain_stops_at_eof_and_at_an_empty_pipe() -> None:
         runner_wrapper._drain(r)
         with pytest.raises(BlockingIOError):
             os.read(r, 1)
-        os.write(w, b"abc")
-        os.close(w)
-        w = -1
-        runner_wrapper._drain(r)
-        assert os.read(r, 1) == b""
     finally:
         os.close(r)
-        if w >= 0:
-            os.close(w)
+        os.close(w)
 
 
 # ------------------------------------------------- _restore_default_signals

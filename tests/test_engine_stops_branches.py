@@ -493,7 +493,6 @@ def test_a_stop_that_cannot_be_carried_out_is_noted_and_shown(tmp_path: Path) ->
         assert facts.note == "ladder failed: EPERM"
         engine.stops.command_survived(RUN_ID)
         assert facts.note == COMMAND_SURVIVED
-        engine.stops.kill_wrapper(RUN_ID)  # a restart's attempt has no wrapper of ours
         engine.attempts.stop(RUN_ID, "engine_stop")
         view = engine.attempt_view("j")
         assert view is not None and (view["state"], view["note"]) == ("STOPPING", COMMAND_SURVIVED)
@@ -527,7 +526,7 @@ def test_a_timer_fault_stops_the_loop(tmp_path: Path, monkeypatch: pytest.Monkey
 
 def test_attempt_view_and_plan_bookkeeping_branches(tmp_path: Path) -> None:
     """The view is shown only for the job's current run while its attempt is unsettled; a plan
-    that is gone or done changes nothing; an attempt is forgotten once its plan is done and
+    that is done settles its attempt; an attempt is forgotten once its plan is done and
     its wrapper has exited."""
 
     async def scenario() -> None:
@@ -539,8 +538,6 @@ def test_attempt_view_and_plan_bookkeeping_branches(tmp_path: Path) -> None:
         await engine.run_until_quiescent(T0)
         assert engine.attempt_view("j") is not None
         engine._step_done("no such plan")
-        engine.perform_plan("no such plan")
-        engine._plan_finished("unknown attempt")
         engine._forget_if_over("unknown attempt")
         engine.attempts.wrapper_exited(RUN_ID, None)  # unobservable: plan rerun, recorded
         # the rerun is dispatched at once (no other attempt of the job is unsettled), so the

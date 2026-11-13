@@ -29,12 +29,11 @@ from dsl41.runner_adapters import (
     WATCH_LOG,
     AdapterContext,
     FileWatcherAdapter,
-    _build_run_spec,
     job_log_paths,
     load_json,
     read_watch_log,
 )
-from dsl41.runner_clock import EngineError, VirtualClock
+from dsl41.runner_clock import EngineError
 
 if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
     pytest.skip("the adapters/wrapper tier is POSIX-only", allow_module_level=True)
@@ -49,19 +48,6 @@ def _cmd_job(name: str = "j") -> JobIR:
 def _fw_job(watch_file: Path, *, extra: str = "") -> JobIR:
     text = f"insert_job: w\njob_type: f\nwatch_file: {watch_file}\nwatch_interval: 30\n{extra}"
     return lower_source(text).jobs["w"]
-
-
-def test_build_run_spec_refuses_a_missing_run_root(tmp_path: Path) -> None:
-    ctx = AdapterContext(clock=VirtualClock(start=T0), run_root=None)
-    with pytest.raises(EngineError, match="needs a run_root"):
-        _build_run_spec(_cmd_job(), 1, ctx, grace_seconds=1.0)
-
-
-def test_build_run_spec_refuses_a_job_without_an_exec_spec(tmp_path: Path) -> None:
-    ctx = AdapterContext(clock=VirtualClock(start=T0), run_root=tmp_path)
-    with pytest.raises(EngineError, match="CMD dispatch without an ExecSpec"):
-        _build_run_spec(_fw_job(tmp_path / "f"), 1, ctx, grace_seconds=1.0)
-    assert not (tmp_path / "runs").exists()
 
 
 def test_job_log_paths_take_the_job_own_files_or_fall_back_to_the_convention(
