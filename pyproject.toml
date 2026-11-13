@@ -39,10 +39,8 @@ dependencies = [
 [project.optional-dependencies]
 # ss11 TUI: the core package keeps its three runtime deps (runner-design ss11).
 # textual floor = the family the TUI is developed and tested against (DL-46);
-# textual-serve floor = the version paired with that textual and verified
-# against it (DL-47) -- claiming untested floors is how UIs break at install
-# time.
-ui = ["textual>=8", "textual-serve>=1.1"]
+# textual-serve is exact because serve_people uses Server._make_app (DL-499).
+ui = ["textual>=8", "textual-serve==1.1.3"]
 dev = [
     # pytest floor = 8.2, the release that took `reason=` on importorskip
     # (tests/test_viz_explore_browser.py explains its skip with one).
@@ -59,7 +57,7 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.10",
     "textual>=8",
-    "textual-serve>=1.1",
+    "textual-serve==1.1.3",
     # DL-77: the explore page's cross-engine smoke test drives a real chromium/
     # webkit/firefox. Dev-only -- the package keeps its three runtime deps, and
     # the browsers themselves are a separate `playwright install` (absent = the
@@ -223,6 +221,8 @@ include = [
     # authorization guard whose false arm nothing takes is an untested
     # refusal, which on this module means an untested DENIAL path
     "src/dsl41/runner_access.py",
+    # DL-499: the person-aware browser admission shares the perimeter's coverage gate.
+    "src/dsl41/runner_web.py",
     "src/dsl41/runner_adapters.py",
     "src/dsl41/runner_admission.py",
     # the attempt and engine lifecycle tiers and the engine's side of them (DL-426)

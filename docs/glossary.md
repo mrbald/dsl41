@@ -124,11 +124,18 @@ See [the interruption rule](#interruption-rule) and [DL-424](decision-log.md).
 ### perimeter
 
 The access gate on `control.sock`. With an access map, it authenticates an
-OS peer, assigns read, ops or adm, and writes access receipts separately
+OS peer, accepts a one-request person from the engine's account through `as`
+(DL-499), assigns read, ops or adm, and writes access receipts separately
 from engine decisions. Served TUI children use the same gate.
 See [the boundary](access-model.md#2-the-boundary),
 [receipts](access-model.md#6-receipts-the-perimeter-journal) and
 [the web tier](access-model.md#9-the-web-tier).
+
+### person
+
+The application user id and roles stated by an authorized `as` wrapper for
+one request. Its principal is `app/<user>`. The connection retains its OS
+principal. See [the web tier](access-model.md#9-the-web-tier) and [DL-499](decision-log.md).
 
 ### plan token
 

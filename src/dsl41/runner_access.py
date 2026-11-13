@@ -29,7 +29,7 @@ from enum import IntEnum
 from pathlib import Path
 from typing import Any
 
-from dsl41.canon import is_wire_int
+from dsl41.canon import is_scalar_string, is_wire_int
 from dsl41.runner_procid import fsync_dir
 
 __all__ = [
@@ -95,8 +95,8 @@ _TIER_BY_NAME = {"read": Tier.READ, "ops": Tier.OPS, "adm": Tier.ADM}
 
 @dataclass(frozen=True)
 class Principal:
-    """(realm, name, groups), fixed at connection accept (ss3). The realm keeps a web `root`
-    from matching the OS `root` (ss1)."""
+    """(realm, name, groups), for a connection or one `as` request (DL-499). The realm keeps
+    a web `root` from matching the OS `root` (ss1)."""
 
     realm: str
     name: str
@@ -106,6 +106,21 @@ class Principal:
     def spelling(self) -> str:
         """The actor spelling that replaces `claimed_actor` in journaled records (ss3)."""
         return f"{self.realm}/{self.name}"
+
+
+def validate_person(value: object) -> Principal:
+    """Check the gate and UI's person spelling without coercion (DL-499, ss9)."""
+    if not isinstance(value, dict) or value.keys() != {"user", "roles"}:
+        raise ValueError("person must be an object with exactly user and roles (access-model ss9)")
+    user, roles = value["user"], value["roles"]
+    if not isinstance(user, str) or not user.strip() or not is_scalar_string(user):
+        raise ValueError("user must be a non-blank scalar string (access-model ss9)")
+    if not isinstance(roles, list) or any(
+        not isinstance(role, str) or not role.strip() or not is_scalar_string(role)
+        for role in roles
+    ):
+        raise ValueError("roles must be a list of non-blank scalar strings (access-model ss9)")
+    return Principal("app", user, frozenset(roles))
 
 
 @dataclass(frozen=True)

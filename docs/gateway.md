@@ -27,8 +27,8 @@ stay the contracts.
   ([runner-design §11](runner-design.md#11-ui--one-textual-app-terminal-and-web-e3)).
 - The estate is armed group-open: each gateway account is in
   `socket_group` ([access-model §8](access-model.md#8-filesystem-modes))
-  and the role map grants it its tier, as for the web tier
-  ([access-model §9](access-model.md#9-the-web-tier)). Otherwise the
+  and the role map grants it its tier
+  ([access-model §4](access-model.md#4-the-role-map)). Otherwise the
   gateway refuses to start (§7, criterion 11).
 - The proxy authenticates the browser and routes the session to its
   tier's gateway (§7). Every route is mounted in every tier: the engine's
@@ -237,10 +237,9 @@ With a map armed, the engine overwrites `claimed_actor` with the gateway's
 account ([access-model §3](access-model.md#3-local-authentication-kernel-peer-credentials)).
 The store names `os/svc-dsl41-gw-ops`; a perimeter receipt names realm `os`,
 principal `svc-dsl41-gw-ops`. **Neither names the human: a known limit of
-this version.** Per-human attribution by the engine needs the deferred
-seam `web-session-principal-v2`
-([access-model §9](access-model.md#9-the-web-tier),
-[§11](access-model.md#11-non-goals-and-deferred-seams)).
+this proposed gateway.** The built person-aware TUI uses `as` under the engine's
+own account ([access-model §9](access-model.md#9-the-web-tier), DL-499).
+This gateway proposal uses separate service accounts and does not state persons.
 
 - **The gateway access log** joins a human to a command. It is
   append-only, one line per request: time, proxy user, tier, route,
@@ -295,9 +294,9 @@ seam `web-session-principal-v2`
 ### 8. Out of scope
 
 The web application, several engines per gateway, HA, and log file serving.
-The seal flow resolves to [DL-424](decision-log.md). Access-model §9 makes log visibility an explicit
-per-tier deployment grant to the web tier's service account, read by the
-TUI child; the gateway serves no log file.
+The seal flow resolves to [DL-424](decision-log.md). The person-aware TUI reads
+logs as the engine's account ([access-model §9](access-model.md#9-the-web-tier),
+DL-499). This proposed gateway serves no log file.
 
 ### 9. Acceptance tests
 
