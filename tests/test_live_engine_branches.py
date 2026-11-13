@@ -25,7 +25,7 @@ from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import Envelope
 from dsl41.runner_clock import VirtualClock
 from dsl41.runner_config import EngineSettings
-from dsl41.runner_control import roundtrip
+from dsl41.runner_control import ControlClientError, roundtrip
 from dsl41.runner_journal import decode_snapshot, open_reader
 from dsl41.runner_startup import resume_run, start_run
 
@@ -133,15 +133,18 @@ async def _cli(path):
             yield client, child
         finally:
             if child.poll() is None:
-                with contextlib.suppress(OSError):
-                    await client.ask("engine_stop")
-                (root.parent / "child.exit").touch()
                 try:
-                    await asyncio.to_thread(child.wait, timeout=10)
-                except subprocess.TimeoutExpired:
-                    child.kill()
-                    await asyncio.to_thread(child.wait, timeout=5)
-                    pytest.fail(log_path.read_text())
+                    # An engine that is already leaving may close a connection without a reply.
+                    with contextlib.suppress(OSError, ControlClientError):
+                        await client.ask("engine_stop")
+                    (root.parent / "child.exit").touch()
+                finally:
+                    try:
+                        await asyncio.to_thread(child.wait, timeout=10)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        await asyncio.to_thread(child.wait, timeout=5)
+                        pytest.fail(log_path.read_text())
             assert child.returncode in (0, -signal.SIGKILL), log_path.read_text()
 
 
