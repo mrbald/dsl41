@@ -252,8 +252,8 @@ Per request:
 6. Admitted: stamp the authenticated principal and continue to the
    dispatcher unchanged.
 
-Enforcement is outside the wire contract. It adds no envelope field, no
-v4, no dialect event and no tombstone. Refusals use the
+Enforcement is outside the wire contract. It adds no envelope field or
+control dialect (DL-146). Refusals use the
 `ok: false, refused: true` vocabulary.
 
 ## 6. Receipts: the perimeter journal

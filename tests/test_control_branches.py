@@ -747,7 +747,7 @@ def test_the_blocking_stream_yields_a_line_that_only_mentions_ok_unless_it_is_a_
     path = short_root / "mention.sock"
     server = _RawServer(path, ack + b"".join(lines))
     try:
-        stream = subscribe_lines(path, {"cmd": "subscribe", "v": 3})
+        stream = subscribe_lines(path, {"cmd": "subscribe", "v": 5})
         got = [next(stream) for _ in range(1 + len(lines))]
         stream.close()
     finally:

@@ -25844,6 +25844,8 @@ relitigate an entry; append a new one.
   in runner-design and wrapper-protocol, and the control-protocol and protocol-evolution doors.
   THE REASON. Jobs can rely on AutoSys kill signals while engine lifecycle cleanup keeps its
   existing policy. A versioned request prevents an older server silently dropping an override.
+  NARROWED BY DL-498: one dialect, v5, carries `kill_signals`; the dual reader and the
+  default-v3 writer are retired. The KILLJOB ladder and its selection rules stand.
 - DL-463 Socket-owned reread and update (2026-11-04; extends DL-462;
   cli_reload.py, reread_worker.py, runner_control.py, runner_update.py)
   THE RULE. Reread reports the current main launch config and its current glob matches through
@@ -25883,6 +25885,7 @@ relitigate an entry; append a new one.
   descendants is a TODO candidate if demonstrated; this item does not close that window.
   A reread that finishes while an update applies can store stale marks. This is a TODO
   candidate; this item does not add revision fencing to the memory-only view.
+  NARROWED BY DL-498: v5 carries reread and the tokenless update; the v3 exception is gone.
 - DL-465 Five-day dependency cooldown (2026-11-04; owner ruling; README Release)
   uv excludes registry artifacts younger than five days through
   `[tool.uv] exclude-newer = "5 days"`. Both Dependabot ecosystems, uv and
@@ -26686,3 +26689,27 @@ relitigate an entry; append a new one.
   `/bin/sh` qualifies its own jobs under it.
   THE CAUSE. The per-shell cases skipped wherever a shell was absent: about twenty on CI's
   Linux lanes, where no Korn shell is installed, so they ran on a developer's machine only.
+- DL-498 The control socket speaks one dialect, v5; v1 to v4 are refused by name
+  (2026-11-13; owner's plan for delegated control, its one pre-production protocol change;
+  `runner_admission.py`, `runner_control.py`, `cli_control.py`, `cli_reload.py`;
+  control-protocol §2, protocol-evolution §§1, 2 and 6; narrows DL-462 and DL-463)
+  THE RULE. Every request names `"v": 5`. v5 is what v4 was: `reread`, the tokenless
+  `update` and KILLJOB's `kill_signals` belong to the one dialect. Every bundled client
+  takes the version from one stamp (`versioned`); no file under `src/dsl41/` names another.
+  The engine keeps a registry of retired versions beside its door: v1 (DL-90), v2
+  (DL-118), v3 and v4 (this entry). A retired version is refused by name with its entry:
+  `control protocol v4 is retired (DL-498); this engine speaks v5`. Any other value (none,
+  a string, a bool, 6) is refused as unknown, with its own text. Both refusals keep the code
+  `unsupported_version`, stay headerless and leave the connection open. The socket's door
+  and the envelope's door answer from one function.
+  THE REASON. The change that follows binds a principal on the connection, so every
+  client must speak first; two readers and a default-v3 writer would double each door it
+  adds. The route is protocol-evolution §2's wire case: nothing durable holds the dialect,
+  and every client ships in the engine's package, so v3 and v4 retire in the release that
+  brings v5. One dialect costs one coordinated restart.
+  THE ROLLOUT. The engine and every client change together. There is no dual reader, no
+  downgrade and no fallback. A v5 client that meets an older engine prints that engine's
+  refusal. A terminal UI or a served UI started from an older build is refused by name and
+  is started again.
+  UNCHANGED. Answer shapes, subscription records, the other refusal codes, fingerprints,
+  journal records, snapshots, golden traces and the state version.

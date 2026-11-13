@@ -40,7 +40,7 @@ stay the contracts.
 
 One route per control `cmd`. The set is the read- and ops-tier `cmd` entries of the verb table
 ([access-model §10](access-model.md#10-the-verb-table)). The gateway stamps
-`"v": 3` and `cmd` on every upstream request.
+`"v": 5` and `cmd` on every upstream request (DL-498).
 
 | `cmd` | route | arguments |
 | --- | --- | --- |

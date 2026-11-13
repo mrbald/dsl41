@@ -775,8 +775,8 @@ def test_engine_stop_over_the_socket_drains_and_shows_the_attempt(
             _start_jobs(engine, "j")
             await _spawned(run_root, "j")
             await _until(lambda: engine.attempt_view("j") is not None)
-            answer = await client.request({"cmd": "engine_stop", "v": 3})
-            status = await client.request({"cmd": "status", "job": "j", "v": 3})
+            answer = await client.request({"cmd": "engine_stop", "v": 5})
+            status = await client.request({"cmd": "status", "job": "j", "v": 5})
         finally:
             await client.close()
         await _finish(engine, loop)

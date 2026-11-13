@@ -67,7 +67,7 @@ def cli_engine(path: Path, *, force_unsupported_shell: bool = False):
 
             def ask(command="catalog"):
                 nonlocal stopped
-                answer = roundtrip(socket, {"v": 3, "cmd": command}, timeout=3)
+                answer = roundtrip(socket, {"v": 5, "cmd": command}, timeout=3)
                 stopped |= answer.get("engine") in ("DRAINING", "STOPPED")
                 return answer
 
@@ -1554,7 +1554,7 @@ def test_reload_uses_latest_launch_config_but_drift_uses_applied_capture(short_r
     with cli_engine(other) as ask:
         assert ask("status")["spec_drift"] is False
         assert ask()["catalog"]["jobs"]["A"]["exec_"]["command"] == "true"
-        result = roundtrip(socket, {"v": 4, "cmd": "reread"})
+        result = roundtrip(socket, {"v": 5, "cmd": "reread"})
         assert result["ok"] and result["source"]["path"] == str(other)
         assert result["preview"]["changed"] == [{"name": "A", "reason": None}]
     path.write_text("broken original config")
@@ -1562,4 +1562,4 @@ def test_reload_uses_latest_launch_config_but_drift_uses_applied_capture(short_r
         status = ask("status")
         assert status["spec_drift"] is True
         assert "reread" not in status["jobs"]["A"]
-        assert roundtrip(socket, {"v": 4, "cmd": "reread"})["ok"]
+        assert roundtrip(socket, {"v": 5, "cmd": "reread"})["ok"]
