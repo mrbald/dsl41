@@ -33,8 +33,8 @@ revision per committed input" is a transaction guarantee, not a row.
 
 The executor raises hard errors, in production too, among them `AmbiguousTransition` (§3),
 `ReentrantDispatch` (§5) and `UnhandledEvent` (§10). Each is a bug that would corrupt state, not
-a check to note. No machine reports a broken transition: DL-292's violation channel is retired
-(DL-353), and a broken transition is a statechart error the executor raises.
+a check to note. No machine reports a broken transition: a broken transition is a statechart
+error the executor raises. DL-353 retires DL-292's violation channel.
 `dsl41 run --on-transition-violation` is accepted, prints one deprecation line and changes
 nothing; the next major release removes it (DL-353).
 
@@ -340,7 +340,7 @@ not re-entrance. Supervisor and anchor ownership are outside this contract
 The oracle runs one composite `job` machine per job, with named regions for its status, its flags
 and its holding, its box variant as rows and its writes through `RuntimeState` (§16).
 
-DL-337 declares that machine in `src/dsl41/job_chart.py`: one chart `job` with the regions
+That machine is declared in `src/dsl41/job_chart.py` (DL-337): one chart `job` with the regions
 `status`, `flags` and `holding`, the box as rows guarded by the job type, and ids whose hundred
 names the region: `job.1NN` and `job.4NN` status, `job.2NN` flags, `job.3NN` holding. It is
 registered in `machines.MACHINES`, and is the one declaration of a job's moves (DL-353).
@@ -488,7 +488,7 @@ decisions at a box start and the completion of a box run that left no member in 
 `window pass`: a box started inside another's pass registers with it, and the outermost pass
 decides them all. The parent's recompute after an operator's INACTIVE is `after inject`. The
 `PERIOD_OPENING` path gives a removed job's held units back (`job.308`);
-that path remains dormant in the engine (DL-425). Each payload computes its
+that path is dormant in the engine (DL-425). Each payload computes its
 facts where the rule reads them. A box rule's target is the chart's choice.
 
 A RUNNING box's completion door is RUNNING's region `door` (DL-371): `settled` between items, and
@@ -554,19 +554,19 @@ released item as its own macrostep.
 The admission decision is final at the gate: `expect` and the preconditions run there, and
 release does not re-check them. The entry that first makes a machine defer a control input
 amends the admission rule (DL-89) and [control-protocol §3](control-protocol.md#3-mutating-verb-sendevent)'s
-meaning of `applied` for that input, and says so. A released event that no
-longer fits takes its declared row.
+meaning of `applied` for that input, and says so. A released event that does
+not fit the new configuration takes its declared row.
 
 The representation of a deferred queue inside the oracle (its place in the store's inventory and
 projection, [runner-design §7](runner-design.md#7-journal-and-recovery-e1-prod-grade)), its dry apply, and the handling of a fault at
 release under DL-292 and DL-320 are ruled by the entry that first makes an oracle machine defer.
-That entry narrows the admission rule (DL-89), DL-292 and DL-320 and says so. DL-292's violation channel
-is retired (DL-353). No oracle machine defers until that entry exists. A fork of the state owner
+That entry narrows the admission rule (DL-89), DL-292 and DL-320 and says so. DL-353 retires
+DL-292's violation channel. No oracle machine defers until that entry exists. A fork of the state owner
 carries its deferred queues into DL-320's dry apply, so an event the trial releases is released on
 the twin only (DL-339).
 
-`STATE_MACHINE_VERSION` and the artifact formats are reviewed on every slice that changes a
-derivation (the VERSIONS paragraph of DL-320).
+`STATE_MACHINE_VERSION` and the artifact formats are reviewed on every change to a derivation
+(the VERSIONS paragraph of DL-320).
 
 ## 13. Coverage and the completeness test
 
@@ -646,12 +646,17 @@ The registry contains eight charts (`machines.MACHINES`):
 | `subscription` | `runner_journal.py` (DL-329) | One per feed on the engine executor, join to end. |
 | `engine_lifecycle` | `engine_charts.py` (DL-426) | One per engine start, including restart catch-up (DL-433). |
 | `attempt` | `engine_charts.py` (DL-426) | One per command attempt; settlement includes plan completion and cleanup (DL-429, DL-431). |
-| `update` | `reload_update.py` (DL-432) | One on the update tier's executor; unfinished intent restores STOPPING. |
+| `update` | `reload_update.py` (DL-432) | One on the update tier's executor. STOPPING holds WAITING and ENDING_BOXES; an unfinished intent restores STOPPING at WAITING (DL-487). The apply row names the steps after the box stop (DL-488). |
 
 The declarations' generated references are in
 [state-machines.md](state-machines.md) and
 [chart-lifecycles.md](chart-lifecycles.md). These generated views own the
 states and rows; this inventory does not copy them.
+
+Two flat charts outside the registry run on this executor: `file_archive` and
+`file_process` in `file_processing_charts.py`. They are the state vocabulary of
+the file-processing building block, and their caller persists their state
+(DL-404).
 
 Subscription's contract is [blocks/subscription.md](blocks/subscription.md):
 a bounded buffer in both phases, not a deferral. A statechart error in a
@@ -698,11 +703,10 @@ the timers), `oracle_cascade.py` (the cascade's moments), `oracle_writers.py` (e
 writes and the status writes) and `oracle.py` (the inputs, the hook and the checks), with the
 payloads in `oracle_facts.py` and `oracle_intents.py`. The engine, every replay, preflight and
 equiv build it (DL-351). The golden digests (`tests/oracle_goldens.py`, over the inputs in
-`tests/oracle_inputs.py`) hold the answers of the decision code the chart replaced, over the
-sample of the harness that compared the two (DL-338). Neither that code nor that harness is in the
-tree (DL-352). The oracle reproduces the digests; a golden that changes is a DL-235 decision. The
-job has no transition table, the store checks no write against one, and the chart is registered
-(DL-353). Each row that carries the `unreachable` mark (§13) states its reason, and
+`tests/oracle_inputs.py`) hold the expected answers over a fixed sample of inputs (DL-338).
+The replaced code and the comparing harness are not in the tree (DL-352). The oracle
+reproduces the digests; a golden that changes is a DL-235 decision. The job has no transition table, the store checks no write
+against one, and the chart is registered (DL-353). Each row that carries the `unreachable` mark (§13) states its reason, and
 `docs/state-machines.md` lists them all. Among them are job.312, since the admission the oracle
 builds carries no previous end, and job.314, since a live status never stands on held units
 (DL-353).
@@ -713,9 +717,9 @@ builds carries no previous end, and job.314, since a live status never stands on
 - A transient state is left by its completion transition, whose payload is the completing
   microstep's (§4, §8).
 - A wait state awaits a reply or a time event (§9). Deferral is optional.
-- New prose calls SEM-33's `run_window` deferral a "window-postponed start" (DL-324). Existing
-  prose, such as `docs/autosys-semantics.md`'s SEM-33 and `docs/simulation-coverage.md`, still
-  calls it a deferred start. Its identifiers, its cause strings and the `RUN_WINDOW_DEFER` trace
+- New prose calls SEM-33's `run_window` deferral a "window-postponed start" (DL-324).
+  `docs/autosys-semantics.md`'s SEM-33 and `docs/simulation-coverage.md` call it a deferred
+  start. Its identifiers, its cause strings and the `RUN_WINDOW_DEFER` trace
   line keep their names, because they are the trace contract.
 
 Citation pointers:

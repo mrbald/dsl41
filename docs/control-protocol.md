@@ -165,8 +165,12 @@ to settle. A second stop moves the drain's deadline to now. The engine
 then records `clean_shutdown` or `unclean_shutdown` and exits 0; its
 socket goes with it. A stop the loop does not take within the decision
 window answers `decision_timeout`.
+`dsl41 engine stop --wait` reads the engine's pid from the socket's peer credentials
+and its start token from the process table, on the connection that carries the stop,
+before its first write (`roundtrip`'s `peer`). It returns when that process is gone. Where the socket gives
+no peer pid, or no connection is made, it waits on `leader.lock` (DL-496).
 
-**Reread and update (DL-463, extending DL-462).**
+**Reread and update (DL-462, DL-463).**
 
 The ADM request `{"v":5,"cmd":"reread","claimed_actor":null}` reports current
 inputs from the main config the engine was last started with (DL-486).
@@ -176,6 +180,7 @@ Runtime state never refuses a diff. Broken input returns `invalid_argument`
 with the reason no diff is available; worker failures return `engine_error`.
 Success adds `live_rev`, `source: {kind, path}` and `preview` to the read header.
 Preview has added/changed/removed names, unchanged count, stops, restored flags,
+the stops marked non-idempotent with their reasons (`non_idempotent`; DL-463, DL-482),
 source changes, diagnostics, lint findings and per-job effects (`rerun`, `hold`,
 `remove`, `restart_box` or `restart`). Effects use the first matching rule:
 `hold` for a marked job the plan keeps, neither removed nor retyped, that is a
@@ -211,7 +216,7 @@ update state observed when reread finishes. Existing diagnostic findings are
 counted rather than copied. This is a passive forecast, not an admission.
 `sources_changed` compares candidate input fingerprints with applied inputs,
 or is null when unavailable; it does not establish configuration equality.
-Older clients may ignore the field; no version step is needed (DL-217).
+A client may ignore the field; no version step is needed (DL-217).
 
 The optional `preview.lint_summary` contains the policy line, findings grouped
 from their objects, then the host-launch and preflight lines (DL-483).
@@ -235,10 +240,11 @@ request returns `invalid_argument` without preparing or submitting new work.
 Request-ID reuse and retention follow §3. The CLI prints the ID before writing.
 
 Admission returns `decision: admitted`, `request_id`, `stop` and `application`.
-With wait, the existing `update_window_s` applies after preparation; timeout
+With wait, the `update_window_s` of §4's `status` applies after preparation; timeout
 returns `pending: true`. Application has rev, catalog_hash, added, changed,
 removed, restored and stopped choices. Public replies contain no artifact key.
-Refusals include names and the existing stale/in-progress/draining codes.
+Refusals carry `names`. Their codes include `stale_plan`, `update_in_progress`
+and `engine_draining`.
 
 An equal candidate adds `unchanged: {rev, catalog_hash}` to the successful
 answer, with `decision: admitted`, `stop: []` and `application: null` (DL-478).
@@ -247,14 +253,14 @@ marks and reasons, captured bytes and mapping, and the live runtime profile.
 Nothing is admitted or recorded, no revision advances, and nothing stops.
 The prepared plan directory is removed when possible; cleanup errors are tolerated.
 Wait returns at once (DL-478).
-Comments, whitespace and settings edits still apply their changed capture;
-changed lowering still applies with unchanged sources (DL-468).
+An edit to comments, whitespace or settings is applied with its changed capture.
+A change in lowering is applied with unchanged sources (DL-468).
 
 Ordinary stopped jobs rerun as another attempt of the same run, are held when
 marked, or get no follow-up when removed. Structural box updates stop running
 members through the ordinary TERM ladder. Their KILLJOB inputs commit before
 application so kept outcomes cannot dispatch old-run replacements. After the
-swap, marked non-INACTIVE members, including previously finished members, get
+swap, marked non-INACTIVE members, including members that finished earlier, get
 ON_HOLD before outermost retained boxes get FORCE_STARTJOB. Removed boxes stay
 stopped. Normal box starts open new runs and successors can see old-run ends.
 Jobs of both catalogs inside a restarting root in the candidate follow its new
@@ -279,10 +285,12 @@ changes no job definition and stops no job. Later KILLJOB effects take the new
 list; a ladder already started keeps its captured list (DL-462).
 
 Preparation uses the engine's startup cwd/environment and an isolated Python
-worker. The server deadline is 120 seconds; the client allows 130 seconds plus
-update decision/application time. Cancellation terminates, allows two seconds,
+worker. The server deadline is 120 seconds. The `reread` client waits 130
+seconds: the deadline plus its own 10. The `update` client adds the 5-second
+decision window and, with `wait`, the `update_window_s` it reads from `status`
+before it sends. Cancellation terminates, allows two seconds,
 then kills and reaps. OS process creation/reap has no unconditional deadline.
-Host-setting edits still require restart before update. A JIL-only launch
+A host-setting edit requires a restart before update. A JIL-only launch
 refuses both commands; changing its definitions requires a fresh run root.
 
 **No controller lease,** by choice (DL-41a). `sendevent` is multi-writer
@@ -403,7 +411,7 @@ Every string a payload carries must be a **Unicode scalar string**. An
 unpaired surrogate is refused at the door (DL-228). The rule covers
 the strings a verb reads. A field the verb does not read is never copied
 or recorded in the store.
-PR-10a's seal obligation resolves to DL-424; scalar validation remains DL-228's rule.
+PR-10a's seal obligation resolves to DL-424; scalar validation is DL-228's rule.
 
 `DISARM` (DL-158) clears the job's SEM-32 armed latch and does nothing else:
 no status move, no start, no wake, no timer touched. A target with no
@@ -474,9 +482,10 @@ not yet decided carries no `original_decision`.
 
 **Recovering a lost answer.** The fingerprint covers `baseline_id` and
 `expect`. A retry must place the values its original placed, not values
-re-read after the loss. `dsl41 sendevent` prints the id and those two
-values on stderr before the first write, as the flags `--request-id`,
-`--expect` and `--baseline`, and repeats them in the exit-4 advice. Re-running the original arguments with
+re-read after the loss. `dsl41 sendevent` prints the id, those two
+values and the actor claim on stderr before the first write, as the flags
+`--request-id`, `--expect`, `--baseline` and `--claimed-actor` (DL-391), and
+repeats them in the exit-4 advice. Re-running the original arguments with
 them gives these answers:
 
 - the original was decided: the retry is answered from that decision and
@@ -608,7 +617,7 @@ as the preview's effects, with the first-match rule in §2's reread forecast
 It is the cached forecast
 at the last reread, not a live plan. New or failed reread replaces it; applied
 update and engine restart clear it. It is absent for unmarked rows. CLI and TUI
-append an annotation; existing clients may ignore this additive answer field.
+append an annotation; a client may ignore this additive answer field.
 
 `{"ok": true, "jobs": {<name>: {…}}, "spec_drift": bool|null}`. Omitting
 `job` returns every catalog job unioned with every store row, so
@@ -721,14 +730,19 @@ tier (DL-432):
 "revision": int, "status": {<job>: <status>}, "runs": {<job>: int},
 "tombstones": {<job>: [flags]}, "launch": {…}}`. `catalog` is the running catalog's
 canonical JSON value, `catalog_hash` its hash, `settings` the estate
-settings it runs under (`timezone`, `timezone_aliases`, `semantics`,
-`external_instances`, and nondefault `fw_default_interval_s` under DL-469), `revision` the configuration rev, `status` and
+settings it runs under, `revision` the configuration rev, `status` and
 `runs` each row's status and run number, and `tombstones` the flags each
 removed job's tombstone kept (`ON_HOLD`, `ON_ICE`, `ON_NOEXEC`), for the
 removed names that kept any. `launch` reports the main-config engine location
 and host settings (`run_root`, `as_machine`, `machine_policy`, `access_map`,
 `status_hook`, `status_hook_long_running_s`), or an empty object for a
 legacy engine (DL-437).
+
+`settings` holds `timezone`, `timezone_aliases`, `semantics`,
+`external_instances` and, for OPS and ADM, `job_env` (DL-447). It holds the runtime-policy
+settings with their defaults, such as `job_shell`, `job_profile` and
+`std_file_mode` (DL-492) and `kill_signals` (DL-462). It holds
+`fw_default_interval_s` only when that is not the default (DL-469).
 
 For OPS/ADM, `environment_view: "ops"` accompanies the applied
 `settings.job_env` map (DL-447).

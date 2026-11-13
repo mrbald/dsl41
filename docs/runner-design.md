@@ -32,7 +32,7 @@ does not do. Prod grade does not mean highly available.
 
 Lifecycle stance (DL-41a): the default is **tethered**. Engine death
 terminates all jobs, and the record is durable even under `kill -9` (§6a).
-The detached supervisor tier (§6a Tier 1) is retired (DL-424).
+There is no detached supervisor tier (§6a Tier 1, DL-424).
 
 ## 2. Position in the pipeline
 
@@ -277,7 +277,9 @@ case-sensitive), then the instance's ujo_timezones table supplied as
 `--timezone-map` (the `autotimezone -l` listing; Alias/City entries chain
 at most five reads, the vendor's own bound), then -- only without a map --
 the unique-zoneinfo-city default (Zurich -> Europe/Zurich, a preflight
-WARN). POSIX fixed offsets (`GMT+5`, `IST-5:30`) resolve west-positive;
+WARN). Zone names whose zone data are identical count as one city candidate;
+names with different data stay ambiguous (DL-477). POSIX fixed offsets
+(`GMT+5`, `IST-5:30`) resolve west-positive;
 POSIX strings with dst rules refuse. On a one-hour DST change at 02:00
 local, `start_times` and `start_mins` follow the `dst-start-times` switch
 (§8a, DL-260). The default is the vendor's rules. A start time in the
@@ -336,6 +338,12 @@ before the cancellation finishes.
 **LocalCommandAdapter** (CMD): an engine-side task that spawns the per-run
 **wrapper** (§6a) and awaits it. The wrapper runs `<shell> -c <script>`.
 The applied `engine.job_shell` selects the shell, default `/bin/sh` (DL-492).
+The setting is an absolute path whose final name is `sh`, `dash`, `bash` or `ksh`;
+the config refuses any other value. Preflight refuses one that is not an executable
+file (code `shell`). The engine executes the shell under that path and hands it
+`-c` and the composed line; what the line does is the shell's behavior, and a site
+that sets a shell other than `/bin/sh` checks its own jobs under it (DL-497).
+`engine.job_profile` is one literal absolute path, with no `$` and no NUL.
 The adapter composes one line: `. <quoted site path> || exit $?; . <quoted job path> || exit $?; <command>`.
 Each profile part is present only when set, site `engine.job_profile` first,
 then job `profile`. Paths use shell quoting. The shell reads the line before
@@ -362,7 +370,8 @@ keeps the lifeline open until the existing spawn observation starts its ladder.
 The attempt stays unsettled while that launch is pending. A broken wrapper
 that stays alive without writing its spawn record can hold the attempt; the
 ordinary drain deadline still bounds engine exit (DL-462).
-The detached-SPAWN cancellation rule is retired (DL-424; DL-359).
+No spawn is detached from the engine, so no separate cancellation rule exists
+for one (DL-424; DL-359).
 Stream paths resolve before profile execution (DL-447). The resolver
 substitutes `$VAR` and `${VAR}` once and literally, with no recursive,
 shell, glob or tilde expansion. Relative paths anchor at dispatch cwd.
@@ -404,6 +413,11 @@ preflight has no symbolic socket value. A stream path referencing
 `$DSL41_SOCKET` or `${DSL41_SOCKET}` therefore refuses startup, resume,
 and update, even when an inherited value exists; reread reports the error
 beside a diff (DL-463).
+
+The names `__job_name`, `__machine`, `__run_machine`, `__box_name` and
+`__max_exit_success` are reserved job attribute variables. `job_env` cannot set
+them, and a stream path that names one refuses as `runtime-variable`, whatever
+the settings.
 
 When `std_out_file` / `std_err_file` are set, stdout/stderr append to
 them by default. An unprefixed explicit output uses the applied
@@ -492,15 +506,16 @@ status is gone forever. No tagging scheme recovers it. The fix is
 structural: a process that cannot miss the observation writes it to a
 durable location. Prior art: containerd-shim, Slurm's slurmstepd, and
 HTCondor's starter. Every serious scheduler keeps a small local process
-that reaps and reports after the control daemon disconnects. There are
-three tiers, outermost first; Tier 1 is retired (DL-424):
+that reaps and reports after the control daemon disconnects. The tiers,
+outermost first, are Tier 2 and Tier 0; there is no Tier 1 (DL-424):
 
 **Tier 2 — init-system backstop** (deployment note, not code): run the
 runner under systemd (Linux) / launchd (macOS). On Linux the unit's
 cgroup contains the whole estate; containment of one run is its process
 group, and the escapee that leaves it is a stated limit (DL-403, below).
 
-**Tier 1 — supervisor** is retired, including its socket, lease and verbs (DL-424; DL-129, DL-150, DL-289, DL-396).
+**Tier 1 — supervisor** is not part of the design: there is no supervisor process,
+socket, lease or verb (DL-424; DL-129, DL-150, DL-289, DL-396).
 
 The engine socket (§10) has no lease: the single-writer loop serializes
 sendevent (DL-42).
@@ -570,7 +585,7 @@ other process silently disables parent-loss detection for that wrapper.
 Python's default non-inheritable fds enforce this rule: the engine's
 adapter passes only the read end by `pass_fds`. Tests hold it for this
 path (test_lifeline_write_end_leaks_nowhere,
-test_sigkill_engine_midrun_then_resume). The supervisor spawn path is retired (DL-424).
+test_sigkill_engine_midrun_then_resume).
 
 **Containment honesty:** pgid kill does not catch `setsid`/double-fork
 escapees (`sh -c 'daemon & '`). On Linux the process cookie (§7) does,
@@ -632,7 +647,9 @@ pruning its record ends that retry horizon.
 **Runs and attempts.** A run is the oracle's `(job, run_number)`.
 A run can have several command attempts through interruption or a failing
 exit retry (DL-424, DL-426, DL-429, DL-485). Each attempt has its own uuid4 `run_id`, ordinal and spool:
-`runs/<job>.<run_number>/<ordinal>/`. The invocation variables
+`runs/<job>.<run_number>/<ordinal>/`. A job name is therefore one directory
+component: lowering refuses a name with `/` or NUL, and the names `.` and `..`,
+for every job type (DL-494). The invocation variables
 `DSL41_JOB`, `DSL41_RUN_NUMBER` and `DSL41_SCHEDULED_AT` remain stable across
 replacement attempts. `DSL41_ATTEMPT` and `DSL41_COOKIE` identify the attempt.
 A CMD's own SEM-09 verdict decides which natural exits fail (§6, DL-485).
@@ -738,7 +755,16 @@ non-idempotent marks. Main-config rows also hold captured source bytes and
 mapping (DL-437). Reread and update require a main-config candidate. Reload plan
 version 1, including an absent version, refuses as retired (DL-486), including
 restart of an open update before writes or signals. `reread -S SOCKET` passively reports current launch-config inputs. `update -S SOCKET`
-prepares current inputs itself (DL-463). Ordinary jobs keep the interruption rule:
+prepares current inputs itself (DL-463).
+The engine prepares both candidates in a separate interpreter, `reread_worker.py`.
+It terminates and reaps the worker on timeout or cancellation (DL-463). A failed
+preparation carries the last 8192 bytes of the worker's error output (DL-475).
+Reread's `preview.definition_changes` has a 1 MiB budget (`DIFFERENCE_BYTE_BUDGET`, DL-482).
+An update whose prepared candidate equals the applied configuration (catalog hash,
+job order, runtime profile, marks, captured bytes and mapping) and the live profile
+admits nothing: no intent, revision, configuration record or stop. Its answer
+carries `unchanged: {rev, catalog_hash}` (DL-478).
+Ordinary jobs keep the interruption rule:
 stop, swap, then choose rerun/hold/none under the new catalog. Structural running-box
 changes stop members, commit KILLJOBs before application to prevent old-run replacement,
 then hold every marked non-INACTIVE member (including finished members) before a new
@@ -896,11 +922,7 @@ ERROR:
 - `owner` set and not the invoking user.
 - `envvars` set on a CMD job's `ExecSpec`: the adapter never applies it to
   the child environment (DL-240). `run` only; rehearse spawns no process.
-- a non-BOX job whose `var_sites` name a field of its exec spec (command,
-  std_in_file, envvars, profile, std_out_file, std_err_file, machine,
-  owner; watch_file on FW): global substitution is not implemented, so the
-  literal `$$NAME` text would be used as-is (DL-240) -- on `command`, for
-  example, the shell would read `$$` as its own PID. `run` only; rehearse
+- the execution-policy rules in the table below. `run` only; rehearse
   spawns no process.
 - a non-BOX job whose `passthrough` carries `chk_files`: the pre-start
   disk-space gate is never evaluated (DL-240). `run` only; rehearse spawns
@@ -942,6 +964,30 @@ ERROR:
   Refused in BOTH run and rehearse
   (resource semantics gate the oracle in either clock domain).
 - Oracle construction failure (surfaces IR-level refusals unchanged).
+
+The execution-policy rules (`runner_preflight.execution_policy_preflight`, with
+`runtime_policy.job_policy`) are one boundary for startup, restart, admission and
+dispatch.
+Each finding names the job, the attribute, the reason and the alternative. A job
+gets at most one finding from `job_policy`, the first rule it fails.
+
+| Code | Refuses |
+| --- | --- |
+| `owner` | The engine's effective account is missing from the passwd database (every job), or `owner` names another account or a malformed `user@host`. |
+| `shell` | `engine.job_shell` that is not an executable `sh`, `dash`, `bash` or `ksh`, or a JIL `shell` attribute. |
+| `job-class`, `permission`, `auto-delete` | The JIL attribute of that name. |
+| `global-substitution` | `$$` in any execution field: AutoSys global substitution and the JIL PID shorthand are unsupported, so the shell would read `$$` as its own PID (DL-240). The alternative is a single-dollar shell variable in a command or `engine.job_env` in a path. |
+| `external-instance` | A `condition`, `box_success` or `box_failure` atom that names another instance. |
+| `n-retrys` | `n_retrys` that is not an integer from 0 through 20. |
+| `fw-execution` | `profile`, `std_in_file`, `std_out_file` or `std_err_file` on an FW job. |
+| `watch-pattern` | An FW `watch_file` pattern other than `*` or `?` in the final component (brackets, braces, backslash, `**`, NUL or empty). |
+| `notification-unsupported` | A nonempty `notification_template` or `notification_alarm_types`. |
+| `heartbeat-unsupported` | A nonzero `heartbeat_interval`. |
+| `notification-hook` | `send_notification` enabled with no `engine.status_hook` (§4). |
+| `runtime-attribute` | A malformed integer or y/n value in a runtime attribute (`heartbeat_interval`, `send_notification`, `min_run_alarm`, `max_run_alarm`, `alarm_if_fail`, `alarm_if_terminated`). |
+| `profile` | On a CMD job, a site or job profile that is not a literal nonempty path to a readable regular file. |
+| `std-file` | An output prefix on `std_in_file`, a target that is empty, starts with whitespace after the prefix, or holds NUL (§6). |
+| `ulimit` | A malformed pair list, an unsupported or repeated resource, a soft limit above the hard limit, a value the host cannot represent, a hard limit the account cannot reach, or `ulimit` on a job that is not CMD. |
 
 WARN:
 - `run_calendar` whose eligible day set (run minus exclude) is empty, or
@@ -1076,11 +1122,11 @@ its default; only a short allow-list of static callers may.
 
 | Switch | Values | Default | Documented AutoSys | Why this default |
 | --- | --- | --- | --- | --- |
-| `ice-lookback` | `true`, `ordinary` | `true` | `true` | A condition atom with a lookback qualifier whose predecessor is on ice. `true`: the atom is true, lookback ignored. `ordinary`: the qualifier is dropped and the ordinary on-ice table applies (s, d, n true; f, t, exitcode false). The "condition Attribute" page (AutoSys 24.2) says "If the predecessor job being evaluated for the look-back condition is currently in an ON_ICE status, it always evaluates to true. That is, any look-back evaluation is ignored." `ordinary` extends the Start Conditions on-ice table (SEM-20), which does not separate lookback atoms, to the lookback atom. Q10 stays open. |
-| `renewable-free` | `Y`, `A` | `Y` | `Y` | A renewable resource request (`res_type: R` or none) that states no FREE. `Y`: the units are freed only when the run ends SUCCESS; after FAILURE or TERMINATED the job holds them until `RELEASE_RESOURCE` or its next run. `A`: the units are freed on every completion. The "resources Attribute" page (AutoSys 24.2) gives FREE's default: "Default: Y", where "Y -- Frees the units only if the job completes successfully". An explicit FREE is not affected. Qr1 is decided. |
-| `queued-recheck` | `0`, `1`, `2` | `0` | `1` | A job that can queue (it names a resource, or a positive priority makes it check machine load) and leaves QUE_WAIT. The values are the vendor's EvaluateQueuedJobStarts (Administrating > Configure a Scheduler, AutoSys 24.2). `0`: it starts without a recheck. `1`: its `condition`, `run_window` and `exclude_calendar` are checked again, but not `run_calendar`, `days_of_week`, `start_times` or `start_mins`. `2`: `run_calendar` or `days_of_week` is checked for the day too. A job that fails goes INACTIVE without starting, its arm is cleared, and its next start time starts it; a member of a running box that fails its condition waits and keeps the box running, the vendor's ACTIVATED. A `run_window` failure takes DL-246's disposition at that instant (the skip, or one deferral to the opening), and a day failure of a job with no start times of its own is deferred to its next eligible window opening, so no job waits for a tick that never comes. The vendor's default is `1`. dsl41 keeps `0`: a queued job met its conditions when it started. Qr6 is decided (DL-50, DL-257). The day and window checks use the oracle's zone, which DL-253 aligns with the scheduler's base zone. |
+| `ice-lookback` | `true`, `ordinary` | `true` | `true` | A condition atom with a lookback qualifier whose predecessor is on ice. `true`: the atom is true, lookback ignored. `ordinary`: the qualifier is dropped and the ordinary on-ice table applies (s, d, n true; f, t, exitcode false). The "condition Attribute" page (AutoSys 24.2) says "If the predecessor job being evaluated for the look-back condition is currently in an ON_ICE status, it always evaluates to true. That is, any look-back evaluation is ignored." `ordinary` extends the Start Conditions on-ice table (SEM-20), which does not separate lookback atoms, to the lookback atom. Q10 is open. |
+| `renewable-free` | `Y`, `A` | `Y` | `Y` | A renewable resource request (`res_type: R` or none) that states no FREE. `Y`: the units are freed only when the run ends SUCCESS; after FAILURE or TERMINATED the job holds them until `RELEASE_RESOURCE` or its next run. `A`: the units are freed on every completion. The "resources Attribute" page (AutoSys 24.2) gives FREE's default: "Default: Y", where "Y -- Frees the units only if the job completes successfully". An explicit FREE is not affected. This row settles Qr1. |
+| `queued-recheck` | `0`, `1`, `2` | `0` | `1` | A job that can queue (it names a resource, or a positive priority makes it check machine load) and leaves QUE_WAIT. The values are the vendor's EvaluateQueuedJobStarts (Administrating > Configure a Scheduler, AutoSys 24.2). `0`: it starts without a recheck. `1`: its `condition`, `run_window` and `exclude_calendar` are checked again, but not `run_calendar`, `days_of_week`, `start_times` or `start_mins`. `2`: `run_calendar` or `days_of_week` is checked for the day too. A job that fails goes INACTIVE without starting, its arm is cleared, and its next start time starts it; a member of a running box that fails its condition waits and keeps the box running, the vendor's ACTIVATED. A `run_window` failure takes DL-246's disposition at that instant (the skip, or one deferral to the opening), and a day failure of a job with no start times of its own is deferred to its next eligible window opening, so no job waits for a tick that never comes. The vendor's default is `1`. dsl41 keeps `0`: a queued job met its conditions when it started. This row settles Qr6 (DL-50, DL-257). The day and window checks use the oracle's zone, which DL-253 aligns with the scheduler's base zone. |
 | `fw-existence` | `stable`, `immediate` | `stable` | `immediate` | What an FW job with no `watch_file_min_size` does once the watched file exists. `stable`: wait for two stable qualifying polls under §6: size for exact paths, five metadata fields per pathname for wildcards and previously sampled runs (DL-467), like a job with a positive minimum size — dsl41's own choice, because a file still being written is not complete. `immediate`: complete only if the original first poll qualifies, `watch_interval` ignored for that poll — the vendor reading. The "watch_interval Attribute" page (AutoSys 24.2) says "If you are monitoring for the existence of a file (not the size) and the file already exists when the job runs, the job completes immediately. The watch_interval attribute is ignored." The "watch_file_min_size Attribute" page says "If you do not specify the watch_file_min_size attribute in your job definition, the job completes if the file exists (the default)." A job with a minimum size is unaffected by this switch either way (§6, E6). |
-| `wekr-first-week` | `first-full`, `partial` | `first-full` | unknown | Where week 1 of a WEKR token's year starts (SEM-37). A WEKR token selects a week of the year whose weeks start on the anchor day. `first-full`: week 1 starts on the first anchor day on or after January 1, and the days before it are in no week, as in the C library's `%U`/`%W` numbering. `partial`: week 1 runs from January 1 to the day before that anchor day. The vendor text does not say; its example, "consider full weeks as those that start on a Monday", supports `first-full`. Both readings agree when January 1 falls on the anchor day, and both count `Mnn` back from the week that holds December 31. The switch reaches every job whose `run_calendar` or `exclude_calendar` has a WEKR token. Q11 is closed (DL-259). |
+| `wekr-first-week` | `first-full`, `partial` | `first-full` | unknown | Where week 1 of a WEKR token's year starts (SEM-37). A WEKR token selects a week of the year whose weeks start on the anchor day. `first-full`: week 1 starts on the first anchor day on or after January 1, and the days before it are in no week, as in the C library's `%U`/`%W` numbering. `partial`: week 1 runs from January 1 to the day before that anchor day. The vendor text does not say; its example, "consider full weeks as those that start on a Monday", supports `first-full`. Both readings agree when January 1 falls on the anchor day, and both count `Mnn` back from the week that holds December 31. The switch reaches every job whose `run_calendar` or `exclude_calendar` has a WEKR token. This row settles Q11 (DL-259). |
 | `dst-start-times` | `vendor`, `fold0` | `vendor` | `vendor` | `start_times` and `start_mins` on a one-hour DST change at 02:00 local, the shape DL-249 detects. `vendor`: a start time in the repeated 01:00-01:59 runs once, in the second (standard time) pass. `start_mins` run in both passes. A start time in the missing 02:00-02:59 runs in the first minute of 03:00, its minute read as seconds (2:05 at 3:00:05), and only the first such start time runs. `start_mins` ticks in the missing hour do not exist. `fold0`: the PEP 495 fold=0 reading. A repeated time runs once, in the first pass, and each missing time runs past the gap (2:05 at 3:05). "Standard Time Changes" and "Daylight Time Changes" (AutoSys 12.1 and 24.2) document the vendor rules. Other change shapes use fold=0 under both values; that is unverified. The scheduler and the oracle read the same value: the runtime profile reads it back from the scheduler, so a disagreeing scheduler is refused before anything durable is written, and the engine refuses one as a backstop. |
 | `off-ice-in-running-box` | `next-run`, `same-run` | `next-run` | `next-run` | A job inside a box, taken off ice while its box runs and before it ran in that run. `next-run`: it sits the run out. A plain start of it is refused, the box completes without it while it reads INACTIVE (a terminal status given to it votes, DL-360), FORCE_STARTJOB still starts it, and the box waits while that forced start is queued; the box's next run clears the mark. "Start Conditions" (AutoSys 24.2 and 12.0) says "If a job is contained in a running box when it is taken off ice, the scheduler does not restart the job until the following run of the box, even if its starting conditions recur during the existing run of the box." `same-run`: it re-enters the run and may start on its condition's next edge, and the box waits for it; the reading of the AutoSys 24.0 Web UI help. SEM-20. |
 | `box-terminator-on-terminated` | `true`, `false` | `true` | `true` | A box member with `box_terminator`, a subbox included, that ends TERMINATED: killed, given the status, killed while queued, or ended by `term_run_time`. `true`: it terminates its running box, as a FAILURE does. "Force the Job or the Box to Stop Running" (AutoSys 12.1 and 24.2) says "if the job completes with a FAILURE or TERMINATED status, the box terminates." `false`: only a FAILURE does, the reading of the value line of the 24.2 `box_terminator` reference page. SEM-14. |
@@ -1151,6 +1197,8 @@ The control plane is a Unix domain socket in the run directory, mode 0600
 (0660 to a named `socket_group` when the DL-146 access perimeter is armed —
 `docs/access-model.md` §8), with a JSON-lines protocol. Every request names v5.
 Retired control dialects refuse by name (DL-498).
+The engine's own account may wrap one request in `as` to state the person who
+acts; §11 names the client and access-model §9 owns the rule (DL-499).
 
 Every CLI command taking `--socket` uses `DSL41_SOCKET` when the option
 is omitted (DL-459). An explicit option wins; missing both is an argument
@@ -1159,7 +1207,8 @@ path limit. A relative bind beneath a deep cwd can succeed while the
 exported absolute path is too long for a client to connect.
 
 Mutations are `sendevent`, `engine_stop` and `update` (DL-429, DL-432).
-The socket also serves queries and streaming `subscribe`. `docs/control-protocol.md` is the
+`reread` prepares and reports a candidate and changes no revision or record
+(DL-463). The socket also serves queries and streaming `subscribe`. `docs/control-protocol.md` is the
 frozen inventory; what follows is what each is for.
 
 - **sendevent parity** (maps 1:1 onto oracle EventKind): STARTJOB,
@@ -1179,7 +1228,10 @@ frozen inventory; what follows is what each is for.
   tick, due-ordered (DL-65); `due` is nullable (DL-68): live
   filewatches join as trailing rows with `due: null` (they fire on a
   file, not a clock), `global <name>` / `globals <names>` — a named
-  global's value and its revision, inserting nothing (DL-87), and `plan`
+  global's value and its revision, inserting nothing (DL-87), `catalog` —
+  the running catalog, its hash, settings, revision, each row's status and
+  run number, and the tombstones' flags, with environment values removed below
+  the OPS tier (DL-432, DL-447), and `plan`
   (acyclic estates only). The
   status response also carries per-job `job_type`/`box_name` (the §11
   tree), `started_by` — the trace cause of the most recent actual start
@@ -1308,8 +1360,7 @@ The [deployment recipe](deploy.md#serve-people-behind-the-authenticating-proxy)
 gives its trust boundary and limits.
 
 Scope fence (DL-42): the dashboard of *meaning* — conditions, boxes,
-explain, sendevent — is dsl41's and stays here. The supervisor dashboard
-scope rule is retired (DL-424).
+explain, sendevent — is dsl41's and lives here.
 
 ## 12. Non-goals
 
@@ -1321,12 +1372,13 @@ DL-56; the SEM-36..39 extended-calendar freeze is interpreted, DL-57; open
 composition corners run on pinned defaults, DL-59; only doc-defective
 tokens stay materialize-on-a-live-instance).
 Also retries in play and rehearse, and BOX/FW retries (DL-485).
-Also non-child orphan adoption (E4).
-The supervisor reattachment rule is retired (DL-424).
+Also non-child orphan adoption and reattachment to jobs after engine death
+(E4, DL-424).
 Mail and pager integrations remain site-owned. The optional best-effort status
 hook is §4's notification boundary (DL-446); delivery guarantees and durable
 alarm delivery are non-goals. An alarm is never a store record of its own.
-Also cgroup/scope containment (documented Linux hardening path, §6a).
+Also per-run cgroup or scope containment: a stated limit, not a hardening to
+build, and no `--scope` option exists (§6a, DL-403).
 Resource/load management is single-node (DL-50): the oracle honors it as
 capacity buckets, and preflight refuses the unmodelable. Out of scope:
 DEPLETABLE replenishment (mid-run `update_resource` = SEM-16), and
@@ -1362,7 +1414,7 @@ a distributed concern, DL-49).
    details, triggers, pane geometry, the log pager. There is no visual
    snapshot suite.
 
-## 14. Module layout and phasing
+## 14. Module layout
 
 The house layout is flat, with no `runner` subpackage.
 Sibling modules own separate responsibilities. Each module owns one seam (DL-74, DL-78);
@@ -1373,7 +1425,7 @@ the split cannot decay into a second name for one file.
 - `status_hook.py`: the §4 site notification worker and independent failure helper (DL-446).
 - `runner_control.py`: the §10 control plane, the socket server, its wire
   vocabulary, and both clients; frozen in `docs/control-protocol.md`, the
-  control contract. The supervisor protocol is retired (DL-424).
+  control contract.
   The server owns its own file (DL-78): every query handler is a pure
   projection, and what it shares with the loop is the loop's *task*, not
   its single-writer invariant.
@@ -1404,14 +1456,22 @@ the split cannot decay into a second name for one file.
 - `runner_history.py`: the offline `dsl41 runs` projection (DL-113).
 - `runner_access.py`: the control-socket access perimeter
   (`docs/access-model.md`).
-
+- `runner_config.py`: the runtime profile, the engine settings and the
+  configuration row (DL-424).
+- `runner_environment.py`: the job environment and the stream-path resolver (DL-447).
+- `runtime_policy.py`: the execution policy: shell, profile, stream mode, kill
+  signals, `ulimit` and the §8 attribute refusals (DL-492).
+- `runner_web.py`: the person-aware browser service of §11 (DL-499).
+- `start_refusals.py`: the scheduler refusal counts that §9 and §11 show.
+- `display_time.py`: the host-local display time of §11 (DL-473).
 - `runner_store.py`: SQLite transactions, configuration rows and snapshots (DL-428).
 - `runner_attempts.py` and `runner_stops.py`: interruption plans and process cleanup (DL-429).
 - `engine_charts.py`: attempt and engine lifecycle declarations (DL-426).
 - `reload_update.py` and `runner_update.py`: update declaration and wiring (DL-432).
 - `main_config.py`, `reload_plan.py` and `cli_reload.py`: main config,
   captured candidates, `reread` and `update` (DL-437).
-
+- `reload_diff.py`: the catalog diff and the catalog hash.
+- `reread_worker.py`: the separate interpreter that prepares a candidate (DL-463).
 
 The CLI keeps one module per domain (DL-137). `cli.py` builds the app and
 registers every verb; `cli_common.py` holds the shared options and exit-code
@@ -1420,7 +1480,9 @@ estates use these:
 
 - `cli_run.py`: `run`, `rehearse`, `journal`, `runs`.
 - `cli_control.py`: `sendevent`, `off-hold-all`, `ui`, `serve`,
-  `query`. The `supervise` verbs are retired (DL-424).
+  `query`, `engine stop`.
+- `cli_reload.py`: `reread`, `update`.
+- `cli_output.py`: the focused text of `query status`, `reread` and `update` (DL-482).
 
 ## 15. Open questions (E-series)
 
@@ -1429,8 +1491,8 @@ code. None is guess-resolved. A settled entry keeps its token and states
 its rule, with the entry or section that holds it.
 
 - **E4** — on the tethered path, engine death terminates jobs and resume
-  uses §7's reconciliation ladder (DL-41a, DL-424). The supervisor
-  reattachment rule is retired (DL-424; DL-48, DL-396).
+  uses §7's reconciliation ladder (DL-41a, DL-424). No supervisor
+  reattaches to running jobs (DL-424; DL-48, DL-396).
 - **E5** — a failing site or job profile exits the whole script with the
   profile's status (§6, DL-492). Vendor parity remains unverified [?].
 - **E6** — FW steady-size semantics are the `fw-existence` switch (§8a,
@@ -1525,7 +1587,7 @@ its rule, with the entry or section that holds it.
   materialization horizon (KB 14195) drops a yearly job whose next
   occurrence lies more than 366 days out (KB 442457); the generator
   computes occurrences directly and does not.
-- **E12** to **E15** — withdrawn with the HA plan (DL-189). Not open.
+- **E12** to **E15** — not open: HA is a non-goal (§12, DL-189).
 - **E16** — outside the engine contract; see DL-424 for the period,
   seal and follower exclusions.
 - **E17** — outside the engine contract; see DL-424 for the period,
@@ -1552,10 +1614,10 @@ its rule, with the entry or section that holds it.
 - Inherited from the dossier (DL-57, DL-58): Q8b/Q8c/Q8d, the remaining
   extended-calendar generation corners, each a pinned deterministic
   default in `autocal.py` (`# PENDING: Q8x`). Refusals apply only for
-  doc-defective tokens (DL-59). Q8a and Q8e are closed by citation
-  (DL-58). Q9 is closed at the [F] tier (DL-60): the export format is
+  doc-defective tokens (DL-59). Q8a and Q8e are settled by citation
+  (DL-58). Q9 is settled at the [F] tier (DL-60): the export format is
   pinned in SEM-36, and both record spellings are accepted on input. The
-  rest closes mechanically against a live autocal date-set diff
+  other corners are open; a live autocal date-set diff settles them
   (docs/live-instance-runbook.md has the protocols).
 
 Citation pointers:

@@ -30,7 +30,7 @@ Run the commands below as the service account for its owner-only socket and
 run-root files. Use root or the site's journal-reading account for systemd
 output. With an access map, your own account needs `read` for queries and
 `ops` for interventions; a socket tier grants no filesystem access.
-[Stop and update require adm](access-model.md#10-the-verb-table).
+[Stop, reread and update require adm](access-model.md#10-the-verb-table).
 Replace `NAME`, `REV`, `EVENT` and `N` with the job, its revision, the chosen
 verb and the last trace sequence read. Use `0` for a fresh trace read.
 
@@ -104,6 +104,9 @@ A filtered summary row is `job CMD INACTIVE - 0 - - - 1`; `REV` is last.
 | Test job success from a script | `"$DSL41" query is-success --job NAME -S "$S"` |
 | Test job failure from a script | `"$DSL41" query is-failed --job NAME -S "$S"` |
 | `autostatus -G` / `autorep -G` | `"$DSL41" query global -N GLOBAL -S "$S"` |
+| All globals at once | `"$DSL41" query globals -S "$S"`; add `-N GLOBAL`, repeated, to name them |
+| Follow journal records as they happen | `"$DSL41" query subscribe --since N -S "$S"` |
+| Watch the jobs in a terminal | `"$DSL41" ui -S "$S"` |
 | `autorep -q` | `"$DSL41" query spec --job NAME -S "$S"` |
 | Run history (`autorep -r`) | `"$DSL41" runs "$RUN_ROOT" --job NAME` |
 | `job_depends -c` | `"$DSL41" query deps --job NAME -S "$S"`; `"$DSL41" query explain --job NAME -S "$S"` |
@@ -125,6 +128,11 @@ an answer, not job success. The predicates print the current status and exit
 0 on a match or 1 otherwise. `is-failed` matches FAILURE or TERMINATED.
 Queries exit 2 on an error. `runs` reads run-root files only; it needs no
 socket or running engine and exits 0 on success or 2 on a read error.
+`query subscribe` prints the acknowledgement, then journal records as JSON lines.
+`--since N` sends only records after sequence `N`. It exits 0 at your interrupt
+and 2 when the engine closes the stream; resubscribe with `--since` set to the
+last sequence read. `ui` exits 2 on a denied status read, a missing `ui` extra or
+an unreachable socket. Quitting it leaves the run alone.
 The [intervention procedure](#send-the-intervention) explains sendevent's
 0/2/3/4 outcomes and recovery after an unknown result.
 
@@ -235,9 +243,11 @@ Job logs can hold credentials. Check their contents before sharing them.
    ```
 
 Default logs are `$RUN_ROOT/logs/<job>.<run>.out` and `.err`.
-Unprefixed `std_out_file` and `std_err_file` paths, and paths prefixed with
-`>>`, append. A leading `>` truncates a regular file before each launch,
-including a replacement attempt after restart (DL-460). Earlier-attempt
+Paths prefixed with `>>` append. A leading `>` truncates a regular file before
+each launch, including a replacement attempt after restart (DL-460). An
+unprefixed `std_out_file` or `std_err_file` path appends under the default
+`engine.std_file_mode = "append"` and truncates before each launch under
+`"truncate"` ([deploy](deploy.md#what-the-main-config-selects), DL-492). Earlier-attempt
 output can therefore be absent. See [output preparation](runner-design.md#6-adapters)
 for interruption limits.
 The site rotates those external files between runs.

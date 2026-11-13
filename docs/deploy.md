@@ -226,6 +226,7 @@ Read the unit in these groups:
 | --- | --- |
 | `[Unit]`, `Description`, `RequiresMountsFor` | Name the service and require the run root's filesystem before starting. An absent mount must not look like a fresh root. |
 | `Wants`, `After` | Order startup after `time-sync.target`; the host must enable the synchronization waiter described above. |
+| `OnFailure` | Start the failure unit `dsl41-engine-down.service` when the engine unit fails. The failure unit is `Type=oneshot` as `dsl41` with `UMask=0077`, `TimeoutStartSec=7` and `KillMode=control-group`. It runs the site's status hook with literal arguments (DL-446). |
 | `StartLimitIntervalSec`, `StartLimitBurst` | Allow at most five starts in 300 seconds, then leave a repeated crash failed. |
 | `[Service]`, `Type`, `User`, `Group` | Run the engine directly as `dsl41:dsl41`. |
 | `ExecStart` | Read the main config. A root containing `engine.db` resumes its stored active catalog. |
@@ -268,7 +269,9 @@ The proxy must overwrite the identity header and protect every library route.
    This example uses `/etc/dsl41/web-access.toml`, owned by `dsl41` with mode `0600`.
    Its parent must satisfy [access §4](access-model.md#4-the-role-map).
    In the engine's main config, set `access_map = "/etc/dsl41/web-access.toml"`
-   under `[engine]`, then restart the engine.
+   under `[engine]`, then restart the engine. After that, replace the file by
+   rename and send the engine `SIGHUP` to load new contents without a restart
+   ([access §7](access-model.md#7-reload-and-revocation)).
    `user:os/dsl41` needs adm so the engine unit's stop command can drain the engine.
 
    ```toml
@@ -440,7 +443,8 @@ Apply edits with `reread` and `update`; a restart uses the applied revision.
 The setting is revisioned and excluded from job-definition hashes. Its update stops no
 watch: an in-flight watch keeps its interval until it ends or the engine restarts.
 A resumed or new watch uses the applied default. Explicit job intervals take precedence.
-A restart reads `engine.kill_signals` from the current configuration on disk.
+A restart reads `engine.kill_signals` from the current configuration on disk;
+its default is `[2, 9]`.
 An edit only to `job_env` advances the revision without stopping jobs,
 including while boxes run (DL-447). Later dispatches and replacements use
 the new map; attempts already running keep their recorded environment.
@@ -633,6 +637,9 @@ STARTING during restart catch-up and DRAINING during a stop.
 update is in progress. See the [status contract](control-protocol.md#4-query-verbs-frozen-response-shapes)
 for field meanings.
 
+`--style neutral` selects the neutral text layout, and `--brief` the neutral
+table with per-job revisions.
+
 Exit 0 means the engine answered, even if a job failed.
 Exit 2 means refusal or failure to reach the engine.
 Run socket commands as the service user with this unit's owner-only socket.
@@ -642,6 +649,12 @@ A member of `socket_group` who may stop the engine can confirm its process exit 
 Without a peer pid, the stop is still sent, and confirmation uses `leader.lock`; an unreadable lock produces status 2.
 Hidden process details reduce confirmation to pid disappearance; pid reuse can prolong the wait.
 For AutoSys task equivalents, use the [operator command table](incident-triage.md#read-the-jobs-state).
+
+`dsl41 serve --socket S` serves the terminal UI to a browser and starts one
+`dsl41 ui` process per session. `--host` defaults to `127.0.0.1` and `--port` to
+8000. The server has no authentication of its own: keep the loopback default, or
+put an authenticating proxy or tunnel in front of it. Per-person access is in
+[Serve people behind the authenticating proxy](#serve-people-behind-the-authenticating-proxy).
 
 ## Drain the engine
 
@@ -654,8 +667,8 @@ To keep it down, run this step as root:
    systemctl stop dsl41-engine.service
    ```
 
-   Systemd runs the drain through the unit's
-   [ExecStop](../examples/nightbank/deploy/dsl41-engine.service#L30).
+   Systemd runs the drain through the `ExecStop` line of the
+   [engine unit](../examples/nightbank/deploy/dsl41-engine.service).
 
 For a foreground engine, request the drain directly:
 
@@ -683,7 +696,8 @@ Without `--wait`, exit 0 means it took the stop request.
 Exit 2 means refusal or a communication failure; a lost reply can leave
 the outcome unknown. Read status before retrying.
 Do not retry while status says DRAINING unless you intend to cut the grace:
-a [second stop moves the deadline to now](../src/dsl41/engine_charts.py#L205).
+a second stop moves the deadline to now (`_deadline_now` in
+[engine_charts.py](../src/dsl41/engine_charts.py)).
 
 Neither stop exit 0 nor `run` exit 0 proves a clean drain.
 Read `engine stopped: ...` in the [unit's journal](#read-the-engines-output),
@@ -695,8 +709,10 @@ or in the foreground terminal. The stored record says how the stop ended:
 | `unclean_shutdown` | The drain deadline passed with unsettled attempts retained for restart. |
 | `shutdown_during_startup` | The operator stopped restart catch-up; the next restart takes the remaining steps. This stop exits 0. |
 
-The [shutdown actions](../src/dsl41/engine_charts.py#L213) define these
-records; [catch-up handling](../src/dsl41/runner.py#L687) retains the work.
+The shutdown actions in [engine_charts.py](../src/dsl41/engine_charts.py)
+(`_clean_shutdown`, `_unclean_shutdown`, `_shutdown_during_startup`) define these
+records. `_drop_catch_up` in [runner.py](../src/dsl41/runner.py) drops the
+catch-up steps not taken, and the next restart takes them again.
 
 The TUI does not show the drain, its deadline, the stored plan or the
 interruption evidence. Use `dsl41 query status` and the exit status of
@@ -1079,20 +1095,23 @@ result. Without an exit record, the outcome is `unobservable` with cause
 Restart does not wait for an old wrapper or a late exit record.
 When the wrapper records termination after losing its parent, the attempt
 has `kind: stopped` and `cause: lifeline`. See the
-[wrapper's parent-loss record](../src/dsl41/runner_wrapper.py#L39) and its
-[outcome mapping](../src/dsl41/engine_charts.py#L369).
+[wrapper's parent-loss record](../src/dsl41/runner_wrapper.py) (step 6 of its
+module docstring) and its outcome mapping, `outcome_of` in
+[engine_charts.py](../src/dsl41/engine_charts.py).
 
 The interruption rule reruns an interrupted job as a new attempt of the
 same run, holds a job marked in `non-idempotent.toml` or at the attempt limit,
 or takes no action
 when the run already ended or the job left the catalog.
-The [attempt limit](../src/dsl41/runner_attempts.py#L79) is:
+The attempt limit (`MAX_ATTEMPTS_PER_RUN` in
+[runner_attempts.py](../src/dsl41/runner_attempts.py)) is:
 
 5 plus the CMD job's applied `n_retrys` count; never more than 25 attempts per run (DL-485).
 
 An interruption at that limit or above holds even an unmarked job.
 Its `interrupted` evidence carries that applied limit, as set by the
-[interruption rule](../src/dsl41/runner_attempts.py#L368).
+interruption rule (`follow_up_plan` in
+[runner_attempts.py](../src/dsl41/runner_attempts.py)).
 See the [job author's interruption contract](authoring.md#62-write-every-job-to-survive-interruption) before
 deciding which jobs may rerun.
 Unreadable or mismatched attempt records hold affected jobs with evidence.
@@ -1161,8 +1180,9 @@ and DL-433 in the [decision log](decision-log.md) for the restart rule.
 
    Look for `engine: STARTING` during catch-up, then `engine: RUNNING`.
    A fast restart may already report RUNNING on the first query.
-   The [status response](../src/dsl41/runner_control.py#L860) reads the
-   [engine lifecycle](../src/dsl41/engine_charts.py#L251).
+   The status response (`_status` in
+   [runner_control.py](../src/dsl41/runner_control.py)) reads the engine
+   lifecycle (`engine_lifecycle` in [engine_charts.py](../src/dsl41/engine_charts.py)).
 
 ## Exercise the unit before site use
 
@@ -1183,8 +1203,15 @@ synthetic estate; they do not qualify a production workload.
    ```
 
 The scripts print a result for each row and stop on failure. They cover
-install, start, restart, container reboot, engine kill, drain, reload,
-process leaks, destructive restore, startup refusal, start limit, malformed TOML and executable upgrade.
+install, start, clock, storage, restart, container reboot, destructive restore,
+engine kill, drain, reload, process leaks, restart faults, startup refusal,
+start limit, malformed TOML and executable upgrade. `drill-steps.sh --list`
+prints the rows in order.
+The `clock` row checks the installed time-sync waiters and the serving Python
+interpreter (`clock-drill.sh`, `clock-unsynced.c`). The `storage` row checks that a
+frozen engine still excludes a second one, that a full filesystem gives an
+`UNKNOWN` outcome, and exact recovery after it (`storage_probe.py`). The `restart-faults` row runs the installed
+restart fault orderings (`restart_faults.py`).
 The refusal row requires `engine_refused` and `engine_down`; crash-loop
 exhaustion requires `engine_down`; normal stop requires no `engine_down`.
 Malformed TOML requires the independent helper's `engine_down` and no

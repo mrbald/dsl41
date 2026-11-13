@@ -25,7 +25,8 @@ Each row has one of four classes.
 - `refused`: the behaviour is refused loudly; the citation is the refusing
   site.
 - `passthrough`: the input is carried verbatim; the effect column names what
-  is not implemented.
+  is not implemented. Lint raises the warning `known-unsupported` when an input
+  asks for that behaviour (DL-466). The effect column says when a row stays quiet.
 
 A row id is `surface:member`. A sub-behaviour of a member adds `#facet`. The
 `bound` column gives the limit of a bounded search, and the effect repeats

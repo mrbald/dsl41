@@ -19,6 +19,7 @@ ESTATE is a JIL file, a Python DSL module or package directory, or a TOML estate
 Python input executes its source through the same loader as `dsl41 build`.
 Use `--param NAME=VALUE` for a Python module's Params bindings.
 Use `-p FILE` for JIL properties and `--environment NAME` for a manifest environment.
+A Python estate refuses `-p` and `--environment`, and a JIL file or manifest refuses `--param`; each is a usage error.
 The [author guide](authoring.md) covers those inputs and their bindings.
 The TOML input here is an `estate.toml` manifest, not the engine's
 `dsl41.toml` main config. A manifest with declared environments requires
@@ -73,7 +74,8 @@ A path's first line has an empty atom.
 
 `--json` returns a list of names, including an empty list when nothing matches.
 For `show`, it returns an object with `name` and `definition` strings.
-JSON keeps that shape when combined with `--explain`.
+With `--explain`, a list verb prints the same name list, without atoms.
+`show` with `--explain` is a usage error.
 `--permit-unknown` accepts unknown attributes using the compiler's passthrough lane.
 
 | Exit | Meaning |
@@ -81,6 +83,15 @@ JSON keeps that shape when combined with `--explain`.
 | 0 | Query succeeded; an empty neighborhood is a success |
 | 1 | Job or requested path was not found |
 | 2 | Usage error or estate could not be loaded |
+
+A usage error exits 2 before any estate loads. These are usage errors:
+
+- an unknown verb;
+- `path` without two job names, or any other verb without exactly one;
+- `--depth` with a negative number or with a verb other than `ancestors` or `descendants`;
+- `--deep` with a verb other than `children`;
+- `--all` with `box`, `children`, `siblings` or `show`; it needs `fanins`, `fanouts`, `ancestors`, `descendants` or `path`;
+- `--explain` with `show`.
 
 Errors go to stderr.
 Navigation does not run jobs or contact a running engine.

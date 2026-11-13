@@ -102,8 +102,9 @@ the candidate's evidence for the reviewer. Repeat an affected check after a
 relevant edit.
 
 Inspect current CI at session start and before a completion or release claim.
-Match the run's full candidate identity and required jobs; report local and CI
-results separately. A cancelled job needs its log and timeout inspected before
+A new commit on a pull request cancels that pull request's older in-progress
+`tests` (`ci.yml`) run (DL-471); the drill workflows are not cancelled, and a push to `main` is not cancelled. Match the run's full candidate
+identity and required jobs; report local and CI results separately. A cancelled job needs its log and timeout inspected before
 it can be diagnosed as infrastructure. Route unexplained failures through
 [coordination](agents/coordination.md#workflow-rules).
 
@@ -116,6 +117,13 @@ A docs-only change touches only `README.md`, `CLAUDE.md`, `TODO.md`, `docs/**/*.
 `examples/**/*.md` or `.claude/skills/**/*.md` (DL-434, DL-471). For that change, run
 `uv run python scripts/prepush_checks.py --docs` instead of the suite.
 Also run the lint, format and type checks listed below. Review requirements still apply.
+
+`scripts/prepush_checks.py` takes the paths changed since the merge base with
+`--base REF` (default `origin/main`), plus the working tree. `--docs` runs the docs
+gate only. `--dry-run` prints the steps and runs nothing. `--classify` prints
+`code=true` or `code=false` for those paths; CI's `classify` job runs it with
+`--base` to decide whether a pull request needs the suite. Exit 2 means git is
+missing or the base does not resolve.
 
 For other changes, run the full local gates before claiming completion:
 

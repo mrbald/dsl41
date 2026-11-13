@@ -19,7 +19,7 @@ stay the contracts.
 
 - One gateway process per exposed tier, read and ops, each under its own
   OS service account (`svc-dsl41-gw-read`, `svc-dsl41-gw-ops`). The proposal
-  exposes read and ops only. Adm's `engine_stop` and `update` verbs are
+  exposes read and ops only. Adm's `engine_stop`, `reread` and `update` verbs are
   outside this proposed API ([access-model §1](access-model.md#1-the-model)).
 - The gateway is a client of `control.sock`, never in-process with the
   engine. The engine's perimeter tells tiers apart by kernel credential;
@@ -132,10 +132,12 @@ the control protocol stays transport-neutral:
 | 428 | `expect_required` |
 | 500 | `internal_error`, `engine_error`, `apply_faulted`, `engine_apply_faulted` |
 | 502 | `peer_unauthenticated`, `malformed_request`, `unsupported_version`, `unknown_cmd` |
-| 503 | `engine_shutting_down` |
+| 503 | `engine_shutting_down`, `engine_draining` |
 | 504 | `decision_timeout` |
 
-An unknown code on a mutation maps by rules 2 and 3. `no_journal` and
+`engine_draining` is a stored rejection: the engine logs a mutation admitted
+after a stop request with it, and an exact retry returns it. Its `503` says to
+wait for the restart. An unknown code on a mutation maps by rules 2 and 3. `no_journal` and
 `backfill_refused` arrive only as stream frames (§5). Every rejected code is
 stored with its decision, and an exact retry is answered from that record
 (control-protocol §2). Some stored answers never reach a first request:

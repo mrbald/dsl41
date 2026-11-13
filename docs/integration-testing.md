@@ -106,17 +106,21 @@ changes an expectation.
 This section owns lane routing: triggers, path filters, matrices, timeouts
 and evidence uploads. The [workflow guide](agent-workflow.md#verify-a-change)
 and [release procedure](../README.md#make-a-release) link here.
-The workflows on main at `102abec` implement DL-441 in the
-[decision log](decision-log.md). The required check is not yet active.
-The operator activates `workflow-examples-required` after the configuration-order
+The four workflow files (`ci.yml`, `workflow-examples.yml`, `service-drill.yml` and
+`dst-drill.yml`) implement DL-441 in the
+[decision log](decision-log.md). Read them at the candidate being tested.
+`workflow-examples-required` is not a required check on `main`.
+The operator activates it after the configuration-order
 slice and green integrated code and docs-only PR evidence. Service and DST
 checks are not globally required. The failure procedure in §4 governs merge blocking.
+A new commit on a pull request cancels that pull request's older in-progress
+`ci.yml` run (DL-471). Other events use a group of their own run and are not cancelled.
 
 | Lane | As built on main | Job timeout | Evidence |
 | --- | --- | --- | --- |
 | `U`: ordinary source checks | Existing `ci.yml` gates remain: code checks on Python 3.12/3.13, coverage on 3.14, golden replay and explore-page browser checks; docs gate on every change | Test/goldens/docs 15 min; coverage 25 min; explore-page 30 min | Job output, coverage/transition results and golden verdict; these are not rehearsal archives |
 | `W`: workflow examples | Code PRs call `workflow-examples.yml` through `classify`; manual dispatch and nightly on main at 01:17 UTC | Lane 40 min; classifier and required-result job 5 min each | Always upload `workflow-evidence` and JUnit; missing files are an error |
-| `S`: installed service | Ubuntu 24.04 and Rocky Linux 8 matrix; manual dispatch, nightly at 01:37 UTC and selected PR paths | 30 min per image | Always attempt `service-evidence-<image>` upload; missing files warn |
+| `S`: installed service | Ubuntu 24.04 and Rocky Linux 8 matrix; manual dispatch, nightly at 01:37 UTC and selected PR paths | 30 min per image | Always attempt `service-evidence-<image>` upload, after a step that makes the `restart-faults` evidence directory readable; missing files warn |
 | `D`: clock/DST | Manual dispatch, nightly at 02:17 UTC and selected PR paths; three isolated matrix lanes | 45 min per lane | Always pack and upload `dst-drill-evidence-<lane>`, including scenario exits; missing archive warns |
 | `M`: manual or opt-in only | Wargame shell and installed CLI/TUI qualification recipes | Declare a run budget before starting | Retain the exact commands, candidate and outputs; manual availability is not CI scheduling |
 | `—`: no runnable v2 lane | Gaps in the inventory | None | No execution or qualification claim |
@@ -181,7 +185,7 @@ belong to a lane that does not run them.
    selecting a lane. Record a changed budget as a reviewed change.
 6. Retain the exit status, elapsed time, commands, stdout/stderr, driver
    diagnostics, fixture/settings hashes and expected/actual comparison.
-   For a service failure keep systemd state and journal. For a clock failure
+   For a service failure keep systemd state and journal, and the `restart-faults` directory of the evidence. For a clock failure
    keep both traces, lint output, scenario exits and the stopped run root.
    For a workflow failure keep the provider record, database dump and run
    volume under the recipe's cleanup rules. Keep stores and attempt spools
@@ -189,8 +193,9 @@ belong to a lane that does not run them.
 7. Give the operator the failed assertion and evidence. The operator triages
    nightly failures and blocks affected merges until resolved. Before each
    merge train, the operator checks all nightly results, including missing
-   runs, and records a fix and owner for failures. At rollout the operator
-   verifies the schedule actor's native failure notifications and receipt.
+   runs, and records a fix and owner for failures. The operator
+   verifies the schedule actor's native failure notifications and receipt when
+   a workflow is first scheduled.
    The boss resolves semantic disputes, exceptions and tolerance changes. Preserve a
    failed run; a green rerun does not explain it.
 
