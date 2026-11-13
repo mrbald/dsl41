@@ -431,7 +431,10 @@ def _lock_held(path: Path) -> bool:
     return False
 
 
-def ui(socket_path: Path = SOCKET_OPT) -> None:
+def ui(
+    socket_path: Path = SOCKET_OPT,
+    web_principal: str | None = typer.Option(None, "--web-principal", hidden=True),
+) -> None:
     """Open the terminal UI against a running engine.
 
     The UI shows the jobs table, an explain pane with each condition
@@ -440,13 +443,23 @@ def ui(socket_path: Path = SOCKET_OPT) -> None:
     the run alone. 'run --ui' is different; there the terminal owns the
     run.
 
-    Exit codes: 0 the viewer quit; 2 the ui extra is not installed or
-    the socket cannot be reached.
+    Exit codes: 0 the viewer quit; 2 a bad person, denied status,
+    missing ui extra or unreachable socket (DL-499).
     """
     # Design: ss11
+    import json
+
+    from dsl41.runner_access import validate_person
+
+    person = None
+    if web_principal is not None:
+        try:
+            person = validate_person(json.loads(web_principal))
+        except (ValueError, RecursionError) as exc:
+            raise typer.Exit(refuse(f"invalid web principal: {exc}")) from exc
     runner_tui = import_tui_or_exit_2()
     check_control_socket(socket_path)
-    app = runner_tui.RunnerApp(socket_path)
+    app = runner_tui.RunnerApp(socket_path, person=person)
     app.run()
     if app.return_code:
         # textual's fatal-error path returns normally with return_code set

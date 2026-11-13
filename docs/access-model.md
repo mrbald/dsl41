@@ -6,16 +6,15 @@ Deployment procedures are in [deploy.md](deploy.md).
 
 Status: **frozen (DL-231).** Design DL-146; rules from DL-147, DL-148,
 DL-149, DL-150, DL-151, DL-152, DL-158, DL-256, DL-272, DL-275, DL-311,
-DL-314, DL-421, DL-422 and DL-423. This
+DL-314, DL-421, DL-422, DL-423 and DL-499. This
 document is the design of record for `runner_access.py`, the control-plane
 gate and the served web TUI. A change to a frozen item requires a
 decision-log entry, as in `docs/control-protocol.md`. The authentication
-half of the web session (§9) is a named seam, not a frozen item.
+half of the web session (§9) uses a site lookup and an authenticating proxy (DL-499).
 
 `docs/runner-design.md` §1 and §12 leave access control to this document.
 This document closes the authorization half of control-protocol §7 gap 2.
-It closes the authentication half for local peers only. The web session
-keeps a named seam (§9).
+Local peers use kernel credentials. The engine's own account may state a person for one request (§9).
 
 ## 0. The problem
 
@@ -57,8 +56,8 @@ ADM `reread` compiles the configured inputs under the engine identity (DL-463).
 DL-427 defines update admission; DL-424 rules the excluded anchor, prune and reclaim surfaces.
 
 A **principal** is `(realm, name, groups)`. The realm names the identity
-source: `os` for a peer the kernel authenticates, anything else for a
-future asserted source (§9). Realms keep a web user named `root` from ever
+source: `os` for a peer the kernel authenticates, `app` for a person
+stated by the engine's own account in an `as` wrapper (§9, DL-499). Realms keep a web user named `root` from ever
 matching the OS user `root`.
 
 ## 2. The boundary
@@ -73,7 +72,7 @@ Not guarded, by ruling:
   say what a verb means, and they enforce nothing. The exemption covers
   the filesystem path only. A CLI request that arrives through
   `control.sock` passes the same gate as every other client (§5). The
-  gate knows no client identity, only the peer credential.
+  gate uses the peer credential and, for an authorized `as`, its stated person (§9).
 - The supervisor socket and its access rules are retired (DL-424).
 - The DL-412 and DL-421 release-service door resolves to DL-424.
 
@@ -96,8 +95,9 @@ kernel: `SO_PEERCRED` on Linux, `LOCAL_PEERCRED` on macOS. The gate uses
   `peer_unauthenticated` (DL-272). One narrowing is deliberate: a gid with
   no group name is dropped from the group set, not refused. A nameless
   gid can match no named `group:` row.
-- The principal is fixed at accept time. It does not change for the life
-  of the connection. A change to OS groups takes effect on reconnect;
+- The OS principal is fixed at accept time for the life of the connection.
+  An authorized `as` uses its person for one request only (§9, DL-499).
+  The next plain request uses the OS principal. A change to OS groups takes effect on reconnect;
   that is an administrative fact, not a reload defect (§7).
 - **No credential: the connection is refused** when access control is
   configured, with the same code `peer_unauthenticated`. The gate fails
@@ -105,7 +105,7 @@ kernel: `SO_PEERCRED` on Linux, `LOCAL_PEERCRED` on macOS. The gate uses
 
 `claimed_actor` stays a wire field but carries no authority. When access
 is configured, the server **overwrites** the actor with the canonical
-authenticated spelling (`os/<name>`) before anything is fingerprinted or
+spelling (`os/<name>` or `app/<user>` for an authorized `as`) before anything is fingerprinted or
 logged. Mutation fingerprints contain the actor (control-protocol §3),
 so the fingerprint carries *identity*, never
 *tier*. A role-map edit changes no fingerprint, so an admitted retry still
@@ -233,7 +233,10 @@ reaches neither the policy nor the perimeter journal.
 
 Per request:
 
-1. Take the connection's fixed principal (from accept).
+1. Start from the connection's fixed OS principal. After the version door,
+   unwrap one authorized `as` and take its person (§9, DL-499).
+   Wrapper refusals are headerless, carry `refused: true`, leave the connection
+   open and write no receipt. The ordinary gate then sees only the inner request.
 2. Take one immutable policy snapshot (§7) with its generation number.
 3. Classify `cmd` against the closed table (§10). An unknown or unlisted
    `cmd` is denied. The verb inside `sendevent` is deliberately
@@ -252,8 +255,8 @@ Per request:
 6. Admitted: stamp the authenticated principal and continue to the
    dispatcher unchanged.
 
-Enforcement is outside the wire contract. It adds no envelope field or
-control dialect (DL-146). Refusals use the
+The gate leaves the inner envelope and control dialect unchanged
+(DL-146, DL-499). `as` is a request wrapper (§9). Refusals use the
 `ok: false, refused: true` vocabulary.
 
 ## 6. Receipts: the perimeter journal
@@ -305,7 +308,8 @@ the schema depends on the kind:
   - A later successful reload may reuse the same generation number,
     because a failed reload does not consume it. That later line stands
     (§7).
-- The §9 web records join this list when that seam lands.
+An `as` wrapper has no receipt of its own (DL-499). Its inner request uses
+the same decision records, with the person's `app` realm and unqualified id.
 
 Durability depends on the kind, and each rule is deliberate:
 
@@ -499,33 +503,68 @@ Further rules:
 
 ## 9. The web tier
 
-The web tier is **one serve instance per tier**. Each exposed tier gets
-one `textual-serve` under its own OS service account
-(`svc-dsl41-web-read`, `svc-dsl41-web-ops`). The corporate proxy
-authenticates the browser, with PAM, LDAP, Entra, client certificates or
-whatever the estate runs. It routes the session to the tier's instance.
-The engine sees an OS peer like any other, under the same map and the
-same gate. There is no new channel to spoof, and the proxy integration
-needs no core code.
+`dsl41 serve` is an OS-account service. The engine sees that account as the
+peer, and receipts name it. Its backend must be reachable only through the
+proxy; bare loopback is not enough on a shared host. Log reading for its
+account is an explicit deployment grant.
 
-Consequences:
+The proxy authenticates the browser. `serve_people` in `runner_web.py` serves
+one UI process per tab under the engine's own account (DL-499).
+The site supplies a synchronous `resolve(email)` returning `(user_id, roles)` or
+None. The service calls it in a thread. An exception, no answer or an invalid
+person refuses the tab with HTTP 403 before WebSocket preparation or process creation.
+Two tabs opening together call `resolve` from two threads; it must be safe for that.
 
-- Each web backend must be unreachable except through the proxy. On a
-  shared host, bare loopback TCP is not enough. Bind the backend where
-  only the proxy can reach it.
-- The TUI child reads log files directly (`runner_tui`), and §8 keeps
-  those files owner-only. So log visibility for a web tier is an explicit
-  deployment grant. Either give the tier's service account read access to
-  the log destinations (a group on the log files in the run directories,
-  or external `std_out_file` paths it may read), or grant nothing. With
-  no grant, the TUI's log panes refuse, and status, trace and the rest
-  still serve. The perimeter never widens logs itself. The OS account is
-  the containment; grant per tier.
-- Receipts identify the tier's service account, not the human in the
-  browser. That loss is accepted; the proxy's own log records the human.
-  The deferred seam is named **`web-session-principal-v2`**: a
-  per-session principal asserted by a broker over an explicitly trusted
-  channel (reference design in DL-146). No code anticipates it.
+`public_url` is an HTTP or HTTPS origin: scheme, host and optional port only.
+A path or trailing slash refuses at startup. Every WebSocket requires an `Origin`
+exactly equal to it and exactly one non-empty `X-DSL41-Email` header.
+The authenticating proxy overwrites that header and protects the whole site.
+The backend listens on a Unix socket accessible to that proxy.
+The library owns the index, static files and downloads.
+
+The hidden `dsl41 ui --web-principal <JSON>` option takes exactly `user` and
+`roles`. `user` is a non-blank string of Unicode scalar values.
+`roles` is a list of such strings; it may be empty.
+There are no further size bounds in dsl41. A bad value exits 2 before connecting.
+The UI's actor text is `app/<user>`.
+Every request and subscription from its `ControlClient` carries the wrapper:
+
+```json
+{"v":5,"cmd":"as","user":"alice","roles":["operators"],"request":{"cmd":"status"}}
+```
+
+Only an armed estate accepts `as`, and only when the connection's kernel uid
+is the engine's effective uid. An unarmed estate answers `access_denied`:
+`as needs an access file (access-model ss9)`.
+Another uid answers `access_denied`:
+`only the engine's own account may use as (access-model ss9)`.
+These checks precede wrapper validation.
+
+The outer keys are exactly `v`, `cmd`, `user`, `roles` and `request`.
+The person follows the rule above and `request` is an object.
+The inner `v` is absent or the same integer as the outer `v`.
+A malformed wrapper answers `invalid_argument`, with text naming the bad field.
+These refusals have `refused: true`, no read header and no receipt.
+The connection stays open. The outer version door runs first (§5).
+
+The gate unwraps once. It decides, stamps, fingerprints and dispatches only the
+inner request as `Principal("app", user, frozenset(roles))`.
+A nested `as` is an ordinary unlisted command and the gate denies it (§10).
+The connection keeps its OS principal. A wrapped subscription registers the person
+for policy-reload revocation (§7). Roles do not enter mutation fingerprints.
+An exact retry by the same person still matches when its roles differ, if admitted.
+Another person's reuse of the retained request id answers `request_id_reused` (§3).
+
+A detached UI exits 2 when status answers `ok: false` with `access_denied`.
+It prints the engine's text on stderr and asks for no trace.
+A detached viewer finishes its first refresh before starting its subscription.
+Other faults keep the visible-query-fault behavior (DL-187 item 6).
+`run --ui`, which owns the engine, keeps that behavior for every status fault.
+`dsl41 serve` uses the OS account of its UI children; it states no person.
+Synchronous CLI clients state no person either.
+
+The [deployment recipe](deploy.md#serve-people-behind-the-authenticating-proxy)
+gives the unit, proxy, access file, start script and limits L1 to L8.
 
 ## 10. The verb table
 
@@ -574,9 +613,8 @@ courtesy. The server's refusal is the authority either way.
 - No fourth tier and no per-verb exceptions (§1).
 - No LDAP, OIDC or PAM client in core, ever. Integration is the proxy's
   job.
-- No plugin API. The seams are the role map and, later, the asserted
-  principal. They are protocol seams, not loader seams.
-- `web-session-principal-v2` (§9): per-session web identity.
+- No plugin API. The role map and the one-request `as` wrapper are protocol
+  seams. The site imports `serve_people` with its own lookup (§9, DL-499).
 - The supervisor socket and its deferred gate are retired (DL-424).
 - The CLI `seal` staging/commit seam resolves to DL-424.
 
@@ -617,3 +655,13 @@ Tests are named `test_access_*`. These obligations hold (DL-146):
     (`[tool.coverage.report]`). A test exercises every refusal arm; no
     arm is only claimed.
 12. The DL-421 release-service action-list obligation resolves to DL-424.
+13. `as`: the READ/OPS/ADM matrix covers user and role bindings, catalog projection,
+    actor stamping, retries, malformed wrappers and one-request scope (DL-499).
+    An unarmed estate or another uid refuses without a receipt.
+    Wrapped streams lose READ on policy reload and close under the person's name.
+14. Person-aware UI paths use `ControlClient` for every request and subscription.
+    A denied detached status read exits 2 before trace; other faults and `run --ui`
+    retain DL-187 item 6. Bad principal JSON exits before connection.
+15. The real pinned web application runs on a Unix socket. Refused upgrades start
+    no process. Concurrent tabs keep separate persons and shell metacharacters
+    arrive literally. One tab reaches an armed engine; an unmapped person is denied.

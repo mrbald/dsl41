@@ -248,6 +248,173 @@ This resets the failed state and start counter; it does not start the engine.
 Then follow [recovery](#recover-after-the-engine-or-box-dies).
 See [systemctl reset-failed](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html#reset-failed%20%5BPATTERN%E2%80%A6%5D).
 
+## Serve people behind the authenticating proxy
+
+For the Packager: this synthetic example serves `https://control.example.invalid`
+under the engine account `dsl41` (DL-499). Install the same release with the
+`[ui]` extra for the engine and web service. The [access model §9](access-model.md#9-the-web-tier)
+owns the wrapper rules. `dsl41 serve` remains an OS-account service.
+
+Any process under `dsl41`, including a batch job, can state any person and roles.
+Protect the start script, lookup code, release environment and access file.
+The proxy must overwrite the identity header and protect every library route.
+
+1. Create the OS group `dsl41-web` and add nginx's worker account to it using
+   the site's account tools. Keep other accounts out. Restart nginx after a
+   group-membership change. The web service uses this group for its socket;
+   the engine's control socket can remain owner-only.
+
+2. Add the `app` rows below to the site's access file and keep its `os` rows.
+   This example uses `/etc/dsl41/web-access.toml`, owned by `dsl41` with mode `0600`.
+   Its parent must satisfy [access §4](access-model.md#4-the-role-map).
+   In the engine's main config, set `access_map = "/etc/dsl41/web-access.toml"`
+   under `[engine]`, then restart the engine.
+   `user:os/dsl41` needs adm so the engine unit's stop command can drain the engine.
+
+   ```toml
+   format_version = 1
+   unmapped = "deny"
+
+   [[binding]]
+   subject = "user:os/dsl41"
+   tier = "adm"
+
+   [[binding]]
+   subject = "group:app/observers"
+   tier = "read"
+
+   [[binding]]
+   subject = "group:app/operators"
+   tier = "ops"
+
+   [[binding]]
+   subject = "group:app/administrators"
+   tier = "adm"
+   ```
+
+3. Supply an importable `site_people.resolve(email)` in the release environment.
+   It returns `(user_id, roles)` or None. Roles are a list of non-blank scalar
+   strings. For a synthetic smoke check it can return `("alice", ["operators"])`
+   for `alice@example.invalid` and None for every other email.
+   Two tabs opening together call `resolve` from two threads; it must be safe for that.
+   The production lookup owns its finite database timeouts.
+   The web service adds no timeout, cache or retry.
+   Spell `public_url` as a browser sends `Origin` (lowercase ASCII host, no
+   default port); any other spelling refuses every tab with 403.
+   Write this root-owned start script at `/etc/dsl41/serve-people.py`:
+
+   ```python
+   from dsl41.runner_web import serve_people
+   from site_people import resolve
+
+   serve_people(
+       resolve,
+       socket_path="/run/dsl41-web/web.sock",
+       public_url="https://control.example.invalid",
+       control_socket="/srv/dsl41/runs/example/control.sock",
+   )
+   ```
+
+4. Install `/etc/systemd/system/dsl41-web.service` as root. Substitute the
+   selected release version. The runtime directory and umask grant nginx's
+   group access to the socket. They grant no access to the engine's files.
+
+   ```ini
+   [Unit]
+   Description=dsl41 person-aware web UI
+   After=dsl41-engine.service
+
+   [Service]
+   User=dsl41
+   Group=dsl41-web
+   RuntimeDirectory=dsl41-web
+   RuntimeDirectoryMode=0750
+   UMask=0007
+   ExecStart=/opt/dsl41/releases/<version>/bin/python /etc/dsl41/serve-people.py
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+   systemd's default control-group kill mode ends remaining UI children at
+   service stop, with TERM followed by KILL. The service has no custom shutdown
+   timeout. The web process keeps aiohttp's signal handling.
+
+5. Configure oauth2-proxy for the site's identity provider with
+   `--set-xauthrequest`. In nginx's TLS server for `control.example.invalid`,
+   put the library's whole site behind authentication. The root location covers
+   `/`, `/ws`, `/static/` and `/download/`. These lines belong in that server:
+
+   ```nginx
+   location = /oauth2/auth {
+       internal;
+       proxy_pass http://127.0.0.1:4180/oauth2/auth;
+       proxy_pass_request_body off;
+       proxy_set_header Content-Length "";
+       proxy_set_header X-Original-URL $scheme://$host$request_uri;
+       proxy_set_header Host $host;
+   }
+
+   location /oauth2/ {
+       proxy_pass http://127.0.0.1:4180;
+       proxy_set_header Host $host;
+       proxy_set_header X-Real-IP $remote_addr;
+       proxy_set_header X-Auth-Request-Redirect $scheme://$host$request_uri;
+   }
+
+   location / {
+       auth_request /oauth2/auth;
+       error_page 401 = /oauth2/sign_in;
+       auth_request_set $dsl41_email $upstream_http_x_auth_request_email;
+       proxy_set_header X-DSL41-Email $dsl41_email;
+       proxy_set_header Host $host;
+       proxy_http_version 1.1;
+       proxy_set_header Upgrade $http_upgrade;
+       proxy_set_header Connection "upgrade";
+       proxy_pass http://unix:/run/dsl41-web/web.sock:;
+   }
+   ```
+
+6. As root, verify and start the service, then reload the checked nginx config:
+
+   ```sh
+   systemd-analyze verify /etc/systemd/system/dsl41-web.service
+   systemctl daemon-reload
+   systemctl enable --now dsl41-web.service
+   nginx -t
+   systemctl reload nginx
+   ```
+
+   Open a new tab as the synthetic person. Check the engine's perimeter journal
+   for `realm: "app"`, `principal: "alice"` on a mutation. An unmapped person
+   must get a closed tab and a denial under that person's name.
+
+The service has these limits (DL-499):
+
+- **L1.** Every process under the engine's account can state any person and role.
+  With the engine's account at adm, a job gains no new command, only the means
+  to put a person's name on what it does. If the account is unmapped, a job
+  gains the levels granted to application roles, up to adm.
+  It already has the account's filesystem rights, including the access file.
+- **L2.** Roles are read once per tab. Reconnecting to the engine retains them.
+  Logout or role removal does not end an open tab. A new tab reads them again.
+- **L3.** An admitted READ request writes no receipt. A denial does, as does
+  an admitted higher-tier request.
+- **L4.** A UI process that hangs after its tab closes can remain until systemd
+  stops the service's whole control group.
+- **L5.** Every admitted person can read job logs through the UI, which reads
+  files as the engine's account. Losing READ ends the UI on its next status denial.
+- **L6.** Recovery hints give shell commands. A browser user cannot run them.
+  An administrator using a shell acts under the administrator's own name.
+  If the engine still retains the person's request, the administrator's retry
+  is refused because the actor differs. Otherwise the administrator's command
+  may be admitted as the administrator's own.
+- **L7.** The person travels in one process argument. The OS argument-size limit
+  can prevent a tab with an extreme number of roles from starting.
+- **L8.** An older unarmed engine answers `as` with `unknown_cmd`. The UI shows
+  the fault and keeps asking; no command runs. Install the engine and web service
+  together and restart the engine to complete the upgrade.
+
 ## What the main config selects
 
 The main config selects these JIL files directly, not `estate.toml`.

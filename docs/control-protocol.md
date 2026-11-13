@@ -51,6 +51,8 @@ the wire vocabulary, and the three clients.
 - **async client** (`ControlClient`): one persistent request/response
   connection, plus a separate connection for each `subscribe`. Drives the
   TUI of runner-design §11 (`dsl41 run --ui`, `dsl41 ui`, `dsl41 serve`).
+  `ControlClient(path, person=None)` wraps requests and subscriptions in `as`
+  when given a person (DL-499). It returns the inner answer unchanged.
 - **sync client** (`roundtrip`): one-shot blocking request/response for
   callers outside an event loop. Drives `dsl41 sendevent`, `dsl41 query`
   and `dsl41 off-hold-all` (DL-423).
@@ -107,7 +109,7 @@ CLI's job.
   engine's applied admission index, not a configuration revision or the
   SQLite journal seq. The header is stamped after routing
   (DL-148). Headerless answers are the pre-routing malformed-line,
-  version, credential and access refusals, the internal-error answer of
+  version, credential, `as` wrapper and access refusals, the internal-error answer of
   a handler that raised, and every line `subscribe` writes (§5).
   DL-117's period identity and PR-03's lineage proof under DL-133 resolve to DL-424.
 - A malformed line answers `{"ok": false, "code": "malformed_request",
@@ -135,6 +137,22 @@ cleans up a stale socket file and is a second refusal door: it refuses
 to start when a live engine answers it.
 
 **The version handshake** is the per-request version door above (DL-90, DL-498).
+
+**One-request person (`as`, DL-499).** After the outer version check, the gate
+accepts `{"v":5,"cmd":"as","user":"alice","roles":["operators"],"request":{...}}`
+only on an armed estate from the engine's effective uid.
+Otherwise it answers `access_denied`, naming the missing access file or required
+account and citing access-model §9. Outer keys must be exactly those shown.
+`user` and each role must be non-blank scalar strings; `roles` is a list, possibly
+empty. `request` must be an object. Its `v` is absent or the same integer as the
+outer version; malformed wrappers answer `invalid_argument`.
+All wrapper refusals carry `refused: true`, have no read header or receipt and
+leave the connection open. The wrapper itself writes no receipt.
+The inner request takes the outer version and the person's `app/<user>` principal.
+Only it reaches access decisions, actor stamping and dispatch.
+There is one unwrap; a nested `as` meets the ordinary closed command table.
+The connection keeps its OS principal for the next plain request.
+[Access §9](access-model.md#9-the-web-tier) owns authentication and role rules.
 
 **Stopping the engine** is `{"cmd": "engine_stop", "v": 5}`, the
 `dsl41 engine stop` verb, at the `adm` tier (`docs/access-model.md` §10).
@@ -320,7 +338,7 @@ The client action says what a client does next:
 | `peer_unauthenticated` | refused | access control is armed and the peer has no kernel credential | operator |
 | `malformed_request` | refused | the line is not a JSON object | fix the request |
 | `unsupported_version` | refused | `v` is not integer `5`; v1 through v4 refuse by name with their retiring entries, other values as unknown (DL-498) | fix the request |
-| `access_denied` | refused | the perimeter denies this principal the `cmd`; it classifies by `cmd` alone (`docs/access-model.md` §5, §10) | operator |
+| `access_denied` | refused | the perimeter denies this principal the `cmd`, or the peer may not use `as`; it classifies the inner `cmd` alone (`docs/access-model.md` §5, §10) | operator |
 | `internal_error` | unknown | a handler raised | re-read; retry a mutation only under the same request_id |
 | `unknown_cmd` | refused | `cmd` names no command | fix the request |
 | `invalid_argument` | refused, query or stream | a field is absent or has the wrong shape or type, a `kill_signals` list is invalid or attached to another verb, or a `request_id` begins with the reserved prefix `engine:` (§3); `error` names the field | fix the request |
@@ -490,9 +508,9 @@ no leader term.
 no authentication at this tier (§7), so it is recorded as the caller's
 claim about itself and is never treated as a principal. With an access
 map configured (DL-147), the server authenticates the peer by kernel
-credential. It overwrites this field with the canonical spelling
-`os/<name>` before anything is fingerprinted or logged
-(`docs/access-model.md` §3, DL-146). Without an access map the field
+credential. It stamps ordinary requests with `os/<name>` and admitted `as`
+requests with `app/<user>` before anything is fingerprinted or logged
+(`docs/access-model.md` §§3, 9; DL-146, DL-499). Without an access map the field
 stays a claim.
 
 **The response is the decision, not the receipt:**
@@ -1028,6 +1046,8 @@ what it missed.
 
 ## 6. Client obligations
 
+- A person-aware `ControlClient` wraps every request and subscription, including
+  after reconnect. Synchronous transports do not wrap (DL-499).
 - Any transport error must drop the connection. Reusing a connection
   after a **cancelled** exchange hands the unread response line to the
   next request and offsets every reply after it (DL-46). `ControlClient`
@@ -1081,9 +1101,8 @@ each open item (`docs/decision-log.md` DL-78).
    authentication: kernel peer credentials, one principal→tier map, a
    closed verb table (access-model §10) gated in `_handle`, and denials answered in the
    `refused` vocabulary, with attempted receipts in a perimeter journal.
-   The envelope does not change. The web session's per-user identity
-   stays open under the named seam `web-session-principal-v2`
-   (access-model §9).
+   The inner envelope does not change. An authorized `as` states a person for
+   one request (access-model §9, DL-499). The site proxy authenticates the browser.
 3. **Unix-domain only.** There is no network transport, so the
    single-engine guarantee rests on a local `flock` (§2, DL-100).
    A non-local controller would need both a transport and a replacement

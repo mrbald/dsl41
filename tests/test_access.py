@@ -207,7 +207,8 @@ def test_access_map_refuses_bad_files(tmp_path: Path) -> None:
 
 def test_access_verb_table_completeness_gate() -> None:
     """ss10/ss12.4: every cmd door has a row -- the `_dispatch` chain AND
-    any pre-dispatch door in `_handle` (subscribe today). A new door in
+    any business-command door in `_handle` (subscribe). The `as` wrapper
+    unwraps before classification (DL-499). A new command door in
     either fails here until it is classified; at runtime an unlisted cmd
     is default-denied, but only when access is armed, so the loud gate
     is this test."""
@@ -221,7 +222,9 @@ def test_access_verb_table_completeness_gate() -> None:
     doors = set(re.findall(r'get\("cmd"\) == "(\w+)"', handle_src))
     assert dispatched, "the completeness gate lost sight of the dispatcher"
     assert "subscribe" in doors, "the completeness gate lost sight of _handle's doors"
-    assert dispatched | doors == set(REQUIRED_TIER)
+    # DL-499: as unwraps before classification and has no tier of its own.
+    assert "as" in doors
+    assert dispatched | (doors - {"as"}) == set(REQUIRED_TIER)
     assert required_tier("no-such-cmd") is None
     assert required_tier(None) is None
 
