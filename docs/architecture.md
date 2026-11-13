@@ -28,7 +28,8 @@ Supervisor, detached mode, remote relay, shared multihost store, follower
 mode, `standby check` and the multi-executor rig resolve to
 [DL-424](decision-log.md); the follower proposal is indexed by DL-230.
 The HTTP/WebSocket proposal resolves through [gateway](gateway.md) and DL-273.
-The web proxy supplies authentication; dsl41 supplies none.
+The web proxy authenticates the browser. `serve_people` resolves its person
+and the control gate authorizes each wrapped request (DL-499, [access §9](access-model.md#9-the-web-tier)).
 
 ## 2. Context
 
@@ -84,7 +85,7 @@ flowchart TB
     wr["wrapper<br/>runner_wrapper.py"]
     cmd["command"]
     tui["TUI<br/>dsl41 ui"]
-    web["browser backend<br/>dsl41 serve"]
+    web["browser backend<br/>dsl41 serve, runner_web.py"]
     cli["headless clients<br/>dsl41 query, dsl41 sendevent, dsl41 update, dsl41 engine stop"]
     read["preview client<br/>dsl41 reread"]
     off["offline readers<br/>dsl41 journal, dsl41 runs"]
@@ -117,7 +118,10 @@ own the run. Quitting a separately attached `dsl41 ui` detaches the viewer.
 `dsl41 serve --socket PATH` starts a UI process per browser session.
 Its default host is `127.0.0.1`; loopback alone is not an access boundary
 on a shared host. [Access §9](access-model.md#9-the-web-tier) requires
-backend isolation and describes tier service accounts and log grants.
+backend isolation. `runner_web.serve_people` listens on a Unix socket under
+the engine's account and starts a person-aware UI for each authenticated tab
+(DL-499). The [deployment recipe](deploy.md#serve-people-behind-the-authenticating-proxy)
+gives its unit and proxy settings.
 
 `engine.db` holds the journal, configuration history, snapshots and store
 identity. Command spools use `runs/<job>.<run_number>/<ordinal>/`.
@@ -193,7 +197,8 @@ held with failure evidence. CMD failing exits retry within the live run when `n_
 Where runner §7's record list differs, DL-428 and DL-433 govern the store
 and restart rules.
 
-With an access map, the perimeter stamps the OS principal and enforces
+With an access map, the perimeter stamps the OS principal, or the person
+in an authorized one-request `as` wrapper (DL-499), and enforces
 read, ops and adm. `engine_stop` and `update` require adm; socket authority
 does not grant filesystem authority. [Access §§1–2](access-model.md#1-the-model)
 owns the tiers. SIGHUP reloads the map contents; an answering socket proves

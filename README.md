@@ -499,6 +499,17 @@ proxy layer. dsl41 has none of its own here. The control socket is mode
 only reaches what its own user can already reach directly. It does not
 widen access; it makes existing access reachable from a browser.
 
+For a person's own roles and audit name, the site imports
+`runner_web.serve_people(resolve, socket_path=..., public_url=..., control_socket=...)`
+(DL-499). Its backend runs under the engine's account on a Unix socket.
+The proxy authenticates the browser and overwrites `X-DSL41-Email`.
+The lookup supplies each tab's user id and roles. Its UI wraps every request
+so the engine decides and records it as `app/<user>`.
+A denied status read ends the detached viewer with exit 2.
+See [the deployment recipe and limits](docs/deploy.md#serve-people-behind-the-authenticating-proxy)
+and [the access contract](docs/access-model.md#9-the-web-tier).
+`dsl41 serve` continues to act as its own OS account.
+
 ### Run history
 
 ```sh
@@ -785,6 +796,8 @@ Runner:
 - `src/dsl41/runner_procid.py`: the durable-write sequence (fsync, rename,
   fsync) and process identity (boot id, pid plus start time, group kill)
   shared by the wrapper and the engine. The supervisor tier is retired (DL-424).
+- `src/dsl41/runner_web.py`: `serve_people`, the person-aware Unix-socket
+  service behind a site proxy, with one lookup and UI child per tab (DL-499).
 - `src/dsl41/runner_tui.py`: the Textual TUI, a thin client of the control
   socket. Every view comes from the idempotent queries; subscribe is only
   a wake-up signal.
@@ -1034,6 +1047,12 @@ Runner:
   the console parser, ControlClient against a real server, the pilot
   smokes, the log pager, and the safety suite (table-scoped verb keys,
   confirmations, quit posture, help panel).
+- `tests/test_control_as.py`: real-engine person tiers, catalog projection,
+  request scope, actor records, retry identity, malformed wrappers, stream
+  revocation, UI wrapping and denied-status exit (DL-499).
+- `tests/test_runner_web.py`: the pinned application on a Unix socket,
+  actual UI children against an armed engine, refusals before process creation,
+  concurrent persons, literal shell characters and startup validation.
 - `tests/test_runner_serve.py`: the `serve` and `ui` CLIs: missing socket
   and missing extra, the constructed textual-serve command, loopback bind,
   bind failure, and TUI exit-code propagation. The real server is

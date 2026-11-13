@@ -26713,3 +26713,42 @@ relitigate an entry; append a new one.
   is started again.
   UNCHANGED. Answer shapes, subscription records, the other refusal codes, fingerprints,
   journal records, snapshots, golden traces and the state version.
+- DL-499 The engine's own account states the person who acts, one request at a time
+  (2026-11-13; owner's agreed design for delegated control; `runner_control.py`,
+  `runner_access.py`, `runner_tui.py`, `cli_control.py`, `runner_web.py`; access-model §§3
+  and 9, control-protocol §2, deploy "Serve people behind the authenticating proxy")
+  THE RULE. A request may be wrapped: `{"v":5,"cmd":"as","user":"<id>","roles":[...],
+  "request":{...}}`. On an estate with an access file, when the kernel says the sender is
+  the engine's own account, the engine decides and records the inner request as the person
+  `app/<id>`, with the roles as that person's groups. The person holds for that one
+  request; the next request on the connection is the connection's own account again. Any
+  other `as` is refused with `access_denied`: another account, or no access file. A
+  malformed one is refused with `invalid_argument`. Both refusals are headerless, write no
+  receipt and leave the connection open. The wrapper has exactly the keys `v`, `cmd`,
+  `user`, `roles` and `request`. The id and each role are non-blank scalar strings; the
+  role list may be empty; an inner `v` is absent or equal to the outer one. The engine
+  unwraps once. Only the inner request reaches the access decision, the actor overwrite,
+  the fingerprint and dispatch.
+  `ControlClient` takes an optional person and then wraps every request and its
+  subscription. `dsl41 ui` takes the person as the hidden `--web-principal`. A detached UI
+  ends with status 2 when a status answer is `access_denied`. `serve_people` in
+  `runner_web.py` serves the library's application on a Unix socket: it compares the
+  browser's `Origin` with `public_url`, reads the one `X-DSL41-Email` header, calls the
+  site's `resolve(email)` and starts that tab's UI with the answer. A refusal answers 403
+  before any process starts. `textual-serve` is pinned exactly, because `serve_people`
+  uses one private name of it.
+  THE REASON. People who reach the UI through an authenticating proxy are not OS users;
+  the site's own lookup gives each an id and roles. The host's inside is one trusted
+  application, so the engine's own account vouches for the person, and no second account
+  and no helper service is added. A statement made per request leaves no state for a
+  reconnect to forget.
+  THE LIMITS. Anything that runs under the engine's account can state any person and any
+  role; that includes every batch job. Where that account is unmapped, a job gains
+  whatever level the site's roles are given. Roles are read once per tab. An admitted READ
+  request leaves no receipt, as before. `deploy.md` lists all eight limits.
+  NOT BUILT. A `bind` request and a person held by a connection, which DL-498 expected; a
+  `delegates` policy field and a ceiling; new refusal codes; a receipt for the wrapper
+  itself; size bounds of ours; a timeout, cache or retry around the lookup; any option on
+  `dsl41 serve`, which is unchanged.
+  UNCHANGED. Answer shapes, journal and receipt shapes, fingerprints, snapshots, golden
+  traces, the state version and every other command.

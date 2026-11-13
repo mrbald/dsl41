@@ -2,7 +2,7 @@
 
 Status: **normative (DL-138).** Entries that rule parts of it include
 DL-144, DL-146, DL-147, DL-150, DL-151, DL-157, DL-158, DL-168, DL-170,
-DL-217, DL-227, DL-252, DL-263, DL-401, DL-438 and DL-498. A change to what this document
+DL-217, DL-227, DL-252, DL-263, DL-401, DL-438, DL-498 and DL-499. A change to what this document
 fixes requires a decision-log entry. Each entry is cited where it applies.
 
 For the architect: this page fixes format tolerance, version entry and
@@ -61,7 +61,7 @@ a row.
 | Reload plans | update preparation → `read_plan` and update | `plan_format_version = 2`; `artifact_format_version` (PR-08d) | Ignored | Version 1 and an absent plan version refuse as retired (DL-486); other unsupported versions refuse; malformed plans return no plan. Unsupported artifact version makes `read_plan` return no plan; absent artifact version passes | Retained plan; an interrupted update requires it |
 | Main-config input mapping | `main_config.prepare` → `from_parts` | `format_version = 1` in `main-inputs.json` | Ignored | Unsupported or absent refuses (DL-437) | Retained plan or stored capture |
 | Main config | Site → `load_config` | `format_version = 1` | Refused; restart host loading has the limit below | Unsupported or absent refuses (DL-437) | Site's config file |
-| Control socket | Client → `ControlServer` | Integer `v = 5` on every request (DL-498) | Ignored except strict reread/update envelopes | v1 to v4 refuse by name with their retiring entries; other unsupported or absent values refuse as unknown. Connection stays open; every bundled writer stamps 5, no fallback | One request; `subscribe` lasts to hangup |
+| Control socket | Client → `ControlServer` | Integer `v = 5` on every request (DL-498) | Ignored except strict `as` wrappers and reread/update envelopes | v1 to v4 refuse by name with their retiring entries; other unsupported or absent values refuse as unknown. Connection stays open; every bundled writer stamps 5, no fallback | One request; `subscribe` lasts to hangup |
 
 A durable format can retire only when no retained instance needs its reader
 (§3). Wire retirement needs the door to refuse the old dialect. SQLite
@@ -218,7 +218,10 @@ The adapter launches the wrapper by file path; the wrapper reads stdin
 once and replaces it with `/dev/null`. A refused spec writes no spawn
 record. A spec-version change requires coordinating the adapter and wrapper.
 
-**Socket additions.** Unknown answer fields are ignored. An added field
+**Socket additions.** `as` is a one-request wrapper in dialect 5 (DL-499).
+An older engine refuses the unknown command; no client falls back to a plain
+request. The wrapper changes no inner envelope or durable format.
+Unknown answer fields are ignored. An added field
 that leaves reply classification unchanged needs no new dialect (DL-217).
 A field that changes classification needs a new dialect. Version is per
 request, not per connection: a refusal ends one request, then the next line

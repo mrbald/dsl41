@@ -92,7 +92,15 @@ from dsl41.oracle_state import (
     JobStatus,
 )
 from dsl41.runner import Engine
-from dsl41.runner_access import AccessControl, Tier, peer_credentials, peer_principal
+from dsl41.runner_access import (
+    AccessControl,
+    Principal,
+    Tier,
+    peer_credentials,
+    peer_principal,
+    peer_uid,
+    validate_person,
+)
 from dsl41.runner_adapters import LINE_LIMIT
 from dsl41.runner_admission import (
     PROTOCOL_VERSION,
@@ -464,7 +472,7 @@ class ControlServer:
         try:
             principal = None
             if self.access is not None:
-                # access-model ss3: the principal is fixed at accept; no resolvable
+                # access-model ss3: the OS principal is fixed at accept; no resolvable
                 # credential refuses the connection
                 sock = writer.get_extra_info("socket")
                 principal = peer_principal(sock) if sock is not None else None
@@ -512,29 +520,77 @@ class ControlServer:
                         ),
                     )
                     continue
+                acting = principal
+                if request.get("cmd") == "as":
+                    # DL-499: unwrap once, after the version door and before any receipt.
+                    if self.access is None:
+                        await self._send(
+                            writer,
+                            _failure(
+                                "access_denied",
+                                "as needs an access file (access-model ss9)",
+                                refused=True,
+                            ),
+                        )
+                        continue
+                    try:
+                        uid = peer_uid(writer.get_extra_info("socket"))
+                    except OSError:
+                        uid = None
+                    if uid != os.geteuid():
+                        await self._send(
+                            writer,
+                            _failure(
+                                "access_denied",
+                                "only the engine's own account may use as (access-model ss9)",
+                                refused=True,
+                            ),
+                        )
+                        continue
+                    try:
+                        if request.keys() != {"v", "cmd", "user", "roles", "request"}:
+                            raise ValueError(
+                                "as needs exactly v, cmd, user, roles and request (access-model ss9)"
+                            )
+                        acting = validate_person(
+                            {"user": request["user"], "roles": request["roles"]}
+                        )
+                        inner = request["request"]
+                        if not isinstance(inner, dict):
+                            raise ValueError("as request must be an object (access-model ss9)")
+                        if "v" in inner and (
+                            not is_wire_int(inner["v"]) or inner["v"] != request["v"]
+                        ):
+                            raise ValueError("inner v must equal outer v (access-model ss9)")
+                    except ValueError as exc:
+                        await self._send(
+                            writer, _failure("invalid_argument", str(exc), refused=True)
+                        )
+                        continue
+                    request = {**inner, "v": request["v"]}
                 authority = Tier.ADM
-                if self.access is not None and principal is not None:
+                if self.access is not None and acting is not None:
                     # access-model ss5: one decision per request, before the
                     # cmd split -- the one place subscribe and _respond share
                     # (the DL-90 lesson, applied the second time). A denial
                     # consumes no engine index and advances no engine time.
                     allowed, why = self.access.decide(
-                        principal, request.get("cmd"), request.get("verb")
+                        acting, request.get("cmd"), request.get("verb")
                     )
                     if not allowed:
                         await self._send(writer, _failure("access_denied", why, refused=True))
                         continue
                     # ss3: the authenticated spelling replaces the claim
-                    request["claimed_actor"] = principal.spelling
-                    granted = self.access.policy.resolve(principal)
+                    request["claimed_actor"] = acting.spelling
+                    granted = self.access.policy.resolve(acting)
                     assert granted is not None
                     authority = granted
                 if request.get("cmd") == "subscribe":
-                    if self.access is not None and principal is not None:
+                    if self.access is not None and acting is not None:
                         # ss7: reload revokes exactly the live streams that lost read, so
                         # the perimeter tracks the writer AND the handler task (parked on
                         # queue.get(); a close alone never wakes it on a quiet estate)
-                        self.access.streams[writer] = (principal, task)
+                        self.access.streams[writer] = (acting, task)
                         try:
                             await self._subscribe(writer, request)
                         finally:
@@ -1598,9 +1654,9 @@ def command(
 def claimed_actor() -> str:
     """What this process says it is (concurrency-model ss6). A CLAIM, never an
     authorization: without an access map the socket's mode is the whole boundary and this
-    is a breadcrumb in the log; on an armed estate the server overwrites it with the
-    kernel-authenticated principal before anything is fingerprinted or journaled
-    (access-model ss3, DL-146)."""
+    is a breadcrumb in the log. On an armed estate the server stamps ordinary requests
+    with `os/<name>` and admitted `as` requests with `app/<user>` before anything is
+    fingerprinted or journaled (access-model ss3/ss9, DL-146, DL-499)."""
     try:
         user = getpass.getuser()
     except Exception:  # no passwd entry (containers): the claim is still useful
@@ -1614,8 +1670,9 @@ class ControlClient:
     subscription owns its connection until hangup (ss10). Any transport error drops the
     connection so the next request reconnects, and the client outlives engine restarts."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, person: Principal | None = None) -> None:
         self.path = path
+        self.person = person
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._lock = asyncio.Lock()
@@ -1623,7 +1680,7 @@ class ControlClient:
     async def request(self, payload: dict[str, Any]) -> dict[str, Any]:
         # serialized before the writer is touched, so an unencodable request fails as itself,
         # not as a transport outcome (DL-216)
-        encoded = _frame(payload)
+        encoded = _frame(self._as_person(payload))
         async with self._lock:
             #: whether a write of this request was ATTEMPTED, set just before `write()`: a
             #: failing drain may fail after the kernel took every byte, so every failure
@@ -1689,6 +1746,19 @@ class ControlClient:
                 raise ControlClientError("response is not a JSON object", delivered=True)
             return response
 
+    def _as_person(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Every request, including reconnects and subscriptions, states its person (DL-499)."""
+        if self.person is None:
+            return payload
+        request = versioned(payload)
+        return {
+            "v": request["v"],
+            "cmd": "as",
+            "user": self.person.name,
+            "roles": sorted(self.person.groups),
+            "request": request,
+        }
+
     async def subscribe(self, since: int | None = None) -> AsyncIterator[dict[str, Any]]:
         """Yield journal records until the engine hangs up. Raises ControlClientError if the
         connection fails or the engine refuses (a journal-less run)."""
@@ -1701,7 +1771,7 @@ class ControlClient:
             request = versioned({"cmd": "subscribe"})
             if since is not None:
                 request["since"] = since
-            writer.write(_frame(request))
+            writer.write(_frame(self._as_person(request)))
             await writer.drain()
             ack_line = await reader.readline()
             if (why := _subscribe_refusal(ack_line)) is not None:

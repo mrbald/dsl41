@@ -1253,7 +1253,9 @@ FORCE_STARTJOB from a key confirm first, showing the target, its box
 members, and the revision the request will name, frozen when the modal
 opens (DL-187). Escape cancels a console line. F1 toggles the help panel.
 A refused query is reported in the console and the subtitle, never shown
-as an empty estate.
+as an empty estate. A detached `dsl41 ui` exits 2 on a status answer with
+`ok: false` and `access_denied`, before asking for trace (DL-499).
+It prints the engine's text on stderr. `run --ui` keeps the query-fault display.
 The console prints the first scheduler-origin `START_REFUSED` for each job and cause.
 It counts identical repeats silently.
 Before that job's next different entry, it prints one dim summary.
@@ -1288,11 +1290,22 @@ to an engine already running, from another terminal; quitting detaches the
 viewer and leaves the run alone. The footer says which: `q` reads "stop
 run" and confirms under `run --ui`, "detach" under `dsl41 ui`. A crashed
 TUI exits non-zero in both postures (DL-187).
+A hidden `dsl41 ui --web-principal <JSON>` option sets the UI's person (DL-499).
+Its `ControlClient` wraps every request and subscription in `as`.
+The actor text is `app/<user>`. [Access §9](access-model.md#9-the-web-tier)
+owns validation and the one-request scope. `run --ui` takes no such option.
+
 `dsl41 serve --socket <path>` wraps textual-serve around the same app. Web
 posture (E3): textual-serve ships no auth. Deploy it behind a reverse
 proxy or an SSH tunnel; the README's deployment notes show both, and
 `docs/access-model.md` §9 is the web tier. dsl41 builds no web
 authentication of its own.
+
+`runner_web.serve_people` is the person-aware
+service behind a site proxy. It calls the site's lookup in a thread and
+uses the pinned textual-serve application on a Unix socket (DL-499).
+The [deployment recipe](deploy.md#serve-people-behind-the-authenticating-proxy)
+gives its trust boundary and limits.
 
 Scope fence (DL-42): the dashboard of *meaning* — conditions, boxes,
 explain, sendevent — is dsl41's and stays here. The supervisor dashboard

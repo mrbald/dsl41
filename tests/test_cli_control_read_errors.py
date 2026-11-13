@@ -275,7 +275,7 @@ def test_ui_connects_to_a_write_only_socket(
     monkeypatch.setattr(
         cli_control,
         "import_tui_or_exit_2",
-        lambda: SimpleNamespace(RunnerApp=lambda _path: app_stub),
+        lambda: SimpleNamespace(RunnerApp=lambda _path, person=None: app_stub),
     )
     with socket.socket(socket.AF_UNIX) as server:
         server.bind(str(path))

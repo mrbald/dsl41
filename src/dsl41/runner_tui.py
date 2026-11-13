@@ -131,6 +131,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover -- exercised via CLI guar
     ) from exc
 
 from dsl41.display_time import format_local_at
+from dsl41.runner_access import Principal
 from dsl41.start_refusals import RefusalKey, scheduler_refusal_counts
 from dsl41.runner_admission import addressed_key
 from dsl41.runner_clock import EngineError
@@ -1255,7 +1256,9 @@ class RunnerApp(App[None]):
         Binding("{", "resize('table', -1)", "table-", show=False),
     ]
 
-    def __init__(self, socket_path: Path, owns_run: bool = False) -> None:
+    def __init__(
+        self, socket_path: Path, owns_run: bool = False, person: Principal | None = None
+    ) -> None:
         super().__init__()
         self.socket_path = Path(socket_path)
         #: True under `dsl41 run --ui`, where quitting stops the run; False for `dsl41 ui`, where
@@ -1267,7 +1270,7 @@ class RunnerApp(App[None]):
             Binding("q", "quit", "stop run" if self.owns_run else "detach")
         ]
         self.sub_title = str(self.socket_path)
-        self._client = ControlClient(self.socket_path)
+        self._client = ControlClient(self.socket_path, person)
         self._selected: str | None = None
         self._rows: set[str] = set()  # DataTable row keys we created
         self._trace_seq = 0
@@ -1290,7 +1293,7 @@ class RunnerApp(App[None]):
         #: `_jobs_snapshot` were read from, so an `expect` cannot name a re-baselined run root's
         #: number
         self._baseline = ""
-        self._claimed_actor = claimed_actor()
+        self._claimed_actor = person.spelling if person is not None else claimed_actor()
         self._filter = ""  # space-separated substrings, AND'd, case-insensitive
         self._view_mode = 0  # index into _VIEW_MODES
         self._collapsed: set[str] = set()  # box rows folded shut
@@ -1347,12 +1350,21 @@ class RunnerApp(App[None]):
         self.query_one("#explain-box").border_title = "explain"
         self.query_one("#console", RichLog).border_title = "events"
         table.focus()
-        self.run_worker(self._refresh(), group="refresh", exclusive=False)
-        self.run_worker(self._follow_journal(), group="journal", exclusive=True)
+        if self.owns_run:
+            self.run_worker(self._refresh(), group="refresh", exclusive=False)
+            self.run_worker(self._follow_journal(), group="journal", exclusive=True)
+        else:
+            self.run_worker(self._start_detached(), group="refresh", exclusive=False)
         self.set_interval(2.0, self._poll)
         self.set_interval(0.5, self._tail_step)
 
     # ------------------------------------------------------- state refresh
+
+    async def _start_detached(self) -> None:
+        # DL-499: the first denied status ends a detached tab before it subscribes.
+        await self._refresh()
+        if self.return_code != 2:
+            self.run_worker(self._follow_journal(), group="journal", exclusive=True)
 
     def _poll(self) -> None:
         self.run_worker(self._refresh(), group="refresh", exclusive=False)
@@ -1383,7 +1395,7 @@ class RunnerApp(App[None]):
             while True:
                 self._dirty = False
                 try:
-                    status = await self._client.request({"cmd": "status"})
+                    status = await self._read_status({"cmd": "status"})
                     trace = await self._client.request({"cmd": "trace", "since": self._trace_seq})
                 except ControlClientError as exc:
                     self._set_connected(False, str(exc))
@@ -1438,6 +1450,18 @@ class RunnerApp(App[None]):
             return  # app teardown unmounted the widgets mid-refresh
         finally:
             self._refreshing = False
+
+    async def _read_status(self, request: dict[str, Any]) -> dict[str, Any]:
+        """A denied status ends a detached viewer and its current operation (DL-499)."""
+        response = await self._client.request(request)
+        if (
+            not self.owns_run
+            and response.get("ok") is False
+            and response.get("code") == "access_denied"
+        ):
+            self.exit(message=Text(str(response.get("error", ""))), return_code=2)
+            raise asyncio.CancelledError
+        return response
 
     def _refresh_subtitle(self) -> None:
         base = str(self.socket_path)
@@ -1892,7 +1916,7 @@ class RunnerApp(App[None]):
         radius, DL-65), source from `spec`, and a short local log tail."""
         try:
             spec = await self._client.request({"cmd": "spec", "job": job})
-            status = await self._client.request({"cmd": "status", "job": job})
+            status = await self._read_status({"cmd": "status", "job": job})
             deps = await self._client.request({"cmd": "deps", "job": job})
             timers = await self._client.request({"cmd": "timers"})
         except ControlClientError as exc:
@@ -2219,7 +2243,12 @@ class RunnerApp(App[None]):
         row = self._jobs_snapshot.get(name) if namespace == "job" else None
         if row is not None and isinstance(row.get("state_rev"), int):
             return self._baseline, row["state_rev"]
-        read = await self._client.request(read_for(key))
+        request = read_for(key)
+        read = (
+            await self._read_status(request)
+            if request["cmd"] == "status"
+            else await self._client.request(request)
+        )
         return str(read.get("baseline_id") or ""), revision_in(read, key)
 
     def _console_write(self, text: Text) -> None:

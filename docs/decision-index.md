@@ -198,7 +198,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-184 | (2026-08-31) the DL-182 open items, ruled after a two-round fresh-context adversarial design review (plan and findings on file in the session scratchpad; every... | [docs/blocks/engine-loop.md](blocks/engine-loop.md), [docs/runner-design.md](runner-design.md) |
 | DL-185 | the DL-75 review over arch-review/2026-08-28..HEAD -- the DL-184 window |  |
 | DL-186 | shared Codex and Claude harness instructions |  |
-| DL-187 | operator TUI review follow-up | [docs/runner-design.md](runner-design.md) |
+| DL-187 | operator TUI review follow-up | [docs/access-model.md](access-model.md), [docs/runner-design.md](runner-design.md) |
 | DL-188 | the DL-75 review over arch-review/2026-08-31..HEAD -- the DL-187 window |  |
 | DL-189 | the decommission review: four cuts, one test gap, eleven scope rows deferred | [docs/citation-index.md](citation-index.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md) |
 | DL-190 | the explore page collapses boxes, and its focus items trace through them |  |
@@ -500,3 +500,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-496 | `engine stop --wait` confirms the exit by the engine's process, not by its lock | [docs/deploy.md](deploy.md) |
 | DL-497 | The launch tests prove which shell runs and what it is handed, not each shell | [docs/deploy.md](deploy.md) |
 | DL-498 | The control socket speaks one dialect, v5; v1 to v4 are refused by name | [README.md](../README.md), [docs/blocks/update.md](blocks/update.md), [docs/control-protocol.md](control-protocol.md), [docs/deploy.md](deploy.md), [docs/gateway.md](gateway.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |
+| DL-499 | The engine's own account states the person who acts, one request at a time | [README.md](../README.md), [docs/access-model.md](access-model.md), [docs/architecture.md](architecture.md), [docs/control-protocol.md](control-protocol.md), [docs/deploy.md](deploy.md), [docs/gateway.md](gateway.md), [docs/glossary.md](glossary.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |
