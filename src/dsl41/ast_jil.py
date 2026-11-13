@@ -43,6 +43,7 @@ Scanner rules, each pinned by a fixture or unit test:
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Literal, NamedTuple
 
@@ -337,6 +338,15 @@ def _mask_closed_blocks(value: str, *, in_quote: bool = False, at_start: bool = 
     glued to a rule-12 blob closer's `>` (DL-245).
     """
     out = list(value)
+    for begin, end in closed_block_spans(value, in_quote=in_quote, at_start=at_start):
+        out[begin:end] = [_MASK_FILL] * (end - begin)
+    return "".join(out)
+
+
+def closed_block_spans(
+    value: str, *, in_quote: bool = False, at_start: bool = True
+) -> Iterator[tuple[int, int]]:
+    """The rule-4/4b detector's closed comment spans, as half-open offsets (DL-151)."""
     in_q = in_quote
     i = 0
     n = len(value)
@@ -354,11 +364,10 @@ def _mask_closed_blocks(value: str, *, in_quote: bool = False, at_start: bool = 
                 # reachable only on a rule-6 continuation line, which is carried verbatim; an
                 # attribute value cannot keep an unclosed marker (rule 5, DL-161)
                 break
-            out[i : close + 2] = [_MASK_FILL] * (close + 2 - i)
+            yield i, close + 2
             i = close + 2
             continue
         i += 1
-    return "".join(out)
 
 
 class _Scanner:

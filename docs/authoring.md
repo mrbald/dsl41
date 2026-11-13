@@ -178,6 +178,8 @@ In Python, `build(permit_unknown=True)` selects that permission.
 The [entity contract](ir-design.md#4-ir-f-entities) defines the passthrough routes.
 Lowering also refuses duplicate job names.
 Lowering refuses a job name containing `/` or a NUL byte, or equal to `.` or `..` (DL-494).
+Lowering reads a job's name without surrounding closed block comments and refuses a comment with name text on both sides (DL-495).
+A marker glued to the name (`j/* c */`) opens no comment and stays part of the name, which DL-494 refuses for its `/`.
 New input accepts `term_run_time` from 0 through 527040 minutes; zero means no limit
 (DL-469). A main-config engine's stored catalog with an out-of-range value keeps running
 and restarting.
