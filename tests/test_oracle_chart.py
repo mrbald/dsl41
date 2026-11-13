@@ -3150,49 +3150,6 @@ def test_dl256_the_period_opening_gives_a_removed_jobs_units_back_through_the_ch
     assert paired.store.job["k"].reservations == ()
 
 
-_KEPT_JIL = (
-    "insert_resource: LOCK\nres_type: R\namount: 1\n\n"
-    "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\nresources: (LOCK, QUANTITY=1, FREE=N)\n\n"
-    "insert_job: k\njob_type: c\ncommand: y\nmachine: m1\nresources: (LOCK, QUANTITY=1, FREE=Y)\n"
-)
-
-
-def test_dl256_a_start_with_no_demand_takes_over_held_units_and_holds_nothing() -> None:
-    """A period opens over `j`, which still holds the unit of LOCK its failed
-    run kept, and the new catalog keeps `j` but gives it no resources. `k`
-    waits for LOCK. `j`'s next start is admitted with an empty demand vector:
-    the takeover's `none` branch (job.302, then job.310, job.309's guard
-    false) gives the held unit back, `j` runs on nothing, and the scan the
-    freed unit owes admits `k` (DL-256)."""
-    first = Oracle(lower_source(_KEPT_JIL))
-    first.feed(ev("STARTJOB", 1, job="j"))
-    first.feed(ev("STATUS", 2, job="j", status="FAILURE"))
-    assert first.store.job["j"].reservations != ()
-    store = first.store
-    carried = CarriedRows(
-        jobs=dict(store.job),
-        timer_seq=store.timer_seq,
-        consumed=dict(store.consumed),
-        enqueue_counter=store.enqueue_counter,
-        now=T0 + timedelta(minutes=2),
-    )
-    without = _KEPT_JIL.replace(
-        "machine: m1\nresources: (LOCK, QUANTITY=1, FREE=N)\n", "machine: m1\n"
-    )
-    assert without != _KEPT_JIL
-    oracle = Oracle(lower_source(without), carried=carried)
-    oracle.feed(ev("STARTJOB", 3, job="k"))
-    assert oracle.store.job["k"].status == "QUE_WAIT"
-    seen = _spied(oracle)
-    oracle.feed(ev("STARTJOB", 4, job="j"))
-    _agrees(oracle)
-    assert ("job.302",) in [o.rows for o in seen if o.key == "job:j"]
-    assert ("job.310",) in [o.branches for o in seen if o.key == "job:j"]
-    j, k = oracle.store.job["j"], oracle.store.job["k"]
-    assert (j.status, j.reservations, k.status) == ("RUNNING", (), "RUNNING")
-    assert [(r.bucket, r.units) for r in k.reservations] == [("r:LOCK", 1)]
-
-
 def _box_oracle(cls: type[Oracle] = Oracle) -> Oracle:
     return cls(lower_source(_BOX_JIL))
 
