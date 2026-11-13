@@ -104,12 +104,13 @@ from dsl41.ir import (
     FwSpec,
     JobIR,
     LoweringError,
+    job_name_from_subject,
     lower_catalog,
     unquote_jil_value,
 )
 from dsl41.minify_rules import (
     BOX_JOB_TYPES,
-    JOB_SUBCOMMANDS,
+    JOB_DEFINITION_SUBCOMMANDS,
     SUBJECT_NAMESPACE,
     Klass,
     classify,
@@ -328,9 +329,13 @@ def _box_membership(files: Iterable[JilFile]) -> tuple[set[str], dict[str, str]]
     job_boxes: dict[str, str] = {}
     for jf in files:
         for stmt in jf.statements:
-            if stmt.subcommand.lower() not in JOB_SUBCOMMANDS:
+            if stmt.subcommand.lower() not in JOB_DEFINITION_SUBCOMMANDS:
                 continue
-            name = unescape_job_name(stmt.subject.strip())
+            try:
+                name = job_name_from_subject(stmt.subject)
+            except ValueError:
+                # DL-495: transformation collects unreadable subjects with the other refusals.
+                continue
             if not name:
                 continue
             if _job_type_of(stmt) in BOX_JOB_TYPES:
@@ -566,7 +571,11 @@ def _transform_statement(
     subject = stmt.subject.strip()
     out.needles.add(subject)
     if namespace == "job":
-        new_subject = alloc.job(unescape_job_name(subject))
+        try:
+            new_subject = alloc.job(job_name_from_subject(subject))
+        except ValueError as exc:
+            refusals.append(f"{stmt.span.at}: {exc}")
+            return None
     else:
         new_subject = alloc.simple(namespace, unquote_jil_value(subject))
     if new_subject not in alloc.allocated:

@@ -36,7 +36,8 @@ from typing import Any, cast
 
 from dsl41.ast_jil import JilFile, render_statement
 from dsl41.canon import ARTIFACT_FORMAT_VERSION, CanonError, canonical_bytes, decode
-from dsl41.ir import CatalogIR
+from dsl41.ir import CatalogIR, job_name_from_subject
+from dsl41.minify_rules import JOB_SUBCOMMANDS
 from dsl41.reload_diff import Plan, catalog_hash_v2, diff, plan_token, running_boxes
 from dsl41.runner_preflight import PreflightItem, preflight
 from dsl41.runner_config import MachinePolicy
@@ -229,13 +230,19 @@ def _plan_document(
 
 def spec_texts(parsed: Sequence[JilFile], catalog: CatalogIR) -> dict[str, str]:
     """job -> its preserve-rendered statements, in file order (the control socket's `spec`
-    verb, DL-64): every statement whose subject is a catalog job, `insert_job` and any later
-    `update_job` or `delete_job`."""
+    verb, DL-64): job statements use the semantic name (DL-39, DL-495), with unreadable
+    subjects skipped."""
     texts: dict[str, str] = {}
     for jil_file in parsed:
         for stmt in jil_file.statements:
-            if stmt.subject in catalog.jobs:
-                texts[stmt.subject] = texts.get(stmt.subject, "") + render_statement(stmt)
+            if stmt.subcommand.lower() not in JOB_SUBCOMMANDS:
+                continue
+            try:
+                name = job_name_from_subject(stmt.subject)
+            except ValueError:
+                continue
+            if name in catalog.jobs:
+                texts[name] = texts.get(name, "") + render_statement(stmt)
     return texts
 
 

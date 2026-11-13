@@ -168,15 +168,18 @@ _RENAME: dict[str, str] = {
     "box_failure": "cond",
 }
 
-#: subcommand -> the namespace its subject belongs to. An absent subcommand is refused:
+#: Statement kinds whose subjects name jobs (DL-39, DL-495).
+JOB_SUBCOMMANDS = frozenset(
+    {"insert_job", "update_job", "delete_job", "override_job", "rename_job", "delete_box"}
+)
+#: Minify's membership pre-pass reads definitions, not rename or box-deletion statements.
+JOB_DEFINITION_SUBCOMMANDS = JOB_SUBCOMMANDS - {"rename_job", "delete_box"}
+
+#: subcommand -> the namespace minify can rewrite. An absent subcommand is refused:
 #: `rename_job`, the blob/glob/monbro/job_type/connectionprofile classes and new ones carry
 #: subjects this module cannot map.
 SUBJECT_NAMESPACE: dict[str, str] = {
-    "insert_job": "job",
-    "update_job": "job",
-    "delete_job": "job",
-    "override_job": "job",
-    "delete_box": "job",
+    **dict.fromkeys(JOB_SUBCOMMANDS - {"rename_job"}, "job"),
     "insert_machine": "machine",
     "update_machine": "machine",
     "delete_machine": "machine",
@@ -196,7 +199,6 @@ SUBJECT_NAMESPACE: dict[str, str] = {
 
 _MACHINE_SUBCOMMANDS = frozenset({"insert_machine", "update_machine", "delete_machine"})
 _CALENDAR_SUBCOMMANDS = frozenset({"calendar", "extended_calendar", "ext_calendar", "cycle"})
-JOB_SUBCOMMANDS = frozenset({"insert_job", "update_job", "delete_job", "override_job"})
 #: The BOX spellings `ir._JOB_TYPE_MAP` accepts, re-stated not imported (DL-74).
 BOX_JOB_TYPES = frozenset({"b", "box"})
 _JOB_TYPES = frozenset({"c", "cmd", "f", "fw"}) | BOX_JOB_TYPES

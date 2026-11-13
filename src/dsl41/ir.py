@@ -50,7 +50,7 @@ from typing import Annotated, Literal, cast, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from dsl41.ast_jil import JilFile, JilStatement, RawAttr, SourceSpan
+from dsl41.ast_jil import JilFile, JilStatement, RawAttr, SourceSpan, closed_block_spans
 from dsl41.ast_jil import parse as parse_jil
 from dsl41.canon import is_scalar_json, is_scalar_string
 from dsl41.conditions import Cond, ConditionParseError, parse_condition, unescape_job_name
@@ -773,6 +773,22 @@ def unquote_jil_value(value: str) -> str:
     return v
 
 
+def job_name_from_subject(subject: str) -> str:
+    """Read one nonblank name piece between closed comments (DL-495), then unescape (DL-39)."""
+    spans = list(closed_block_spans(subject))
+    pieces: list[str] = []
+    start = 0
+    for begin, end in spans:
+        pieces.append(subject[start:begin].strip())
+        start = end
+    pieces.append(subject[start:].strip())
+    candidates = [i for i, piece in enumerate(pieces) if piece]
+    if len(candidates) > 1:
+        begin, end = spans[candidates[0]]
+        raise ValueError(f"job name cannot be read across comment {subject[begin:end]!r} (DL-495)")
+    return unescape_job_name(pieces[candidates[0]] if candidates else "")
+
+
 #: An exit code or lo-hi range with a negative end: `-1`, `-5-3`, `-5--1`, `1--3`. Other
 #: malformed tokens do not match and get the ordinary malformed-token message.
 _NEGATIVE_CODE_RE = re.compile(r"-\d+(?:--?\d+)?|\d+--\d+")
@@ -944,7 +960,11 @@ class _Lowerer:
         return attrs if ok else None
 
     def _subject(self, stmt: JilStatement, what: str) -> str | None:
-        name = stmt.subject.strip()
+        try:
+            name = job_name_from_subject(stmt.subject) if what == "job" else stmt.subject.strip()
+        except ValueError as exc:
+            self.err(str(exc), stmt.span)
+            return None
         if not name:
             self.err(f"{stmt.subcommand}: missing {what} name", stmt.span)
             return None
@@ -1081,8 +1101,6 @@ class _Lowerer:
     def _lower_job(self, stmt: JilStatement) -> None:
         name = self._subject(stmt, "job")
         if name is not None:
-            # DL-39: the catalog key is the semantic name, `\:` unescaped as in condition refs
-            name = unescape_job_name(name)
             if "/" in name or "\0" in name or name in (".", ".."):
                 self.err(f"job name {name!r} must be one directory component (DL-494)", stmt.span)
         if name is not None and name in self.jobs:

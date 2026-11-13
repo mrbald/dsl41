@@ -306,6 +306,10 @@ class CatalogIR(BaseModel):  # the compilation unit
 
 Lowering rules:
 - A job name containing `/` or a NUL byte, or equal to `.` or `..`, is a lowering error (DL-494).
+- Lowering reads a job's name without surrounding closed block comments and refuses a comment
+  with name text on both sides (DL-495).
+  A marker glued to the name (`j/* c */`) opens no comment and stays part of the name, which
+  DL-494 refuses for its `/`.
 - `passthrough` is the only place an unmodeled attribute may go. Three routes reach it, and
   only three: an attribute on the allow-list of known-inert attributes; an exec-shaped
   attribute that is inert on this job's type (a box does not execute, SEM-10); and the SEM-30
