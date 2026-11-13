@@ -605,7 +605,7 @@ def test_sendevent_k_validation_and_version(monkeypatch, value, verb, valid):
     assert result.exit_code == (0 if valid else 2), result.output
     if valid:
         [request] = requests
-        assert request["v"] == (3 if value is None else 4)
+        assert request["v"] == 5
         assert request["payload"] == {
             "job": "j",
             **({} if value is None else {"kill_signals": [int(v) for v in value.split(",")]}),
@@ -622,7 +622,7 @@ def test_reload_old_engine_has_no_fallback(monkeypatch, cli_env, verb, code):
     calls = []
 
     def reply(path, request, **kwargs):
-        calls.append(request)
+        calls.append(runner_control.versioned(request))
         if request["cmd"] == "status":
             return {"ok": True, "baseline_id": "test"}
         return {"ok": False, "refused": True, "code": code, "error": "old engine"}
@@ -632,7 +632,7 @@ def test_reload_old_engine_has_no_fallback(monkeypatch, cli_env, verb, code):
     assert result.exit_code == 2, result.output
     assert "old engine" in result.output
     assert len([r for r in calls if r["cmd"] == verb]) == 1
-    assert calls[-1]["v"] == 4
+    assert calls[-1]["v"] == 5
 
 
 def test_reload_help_has_no_legacy_route(cli_env):

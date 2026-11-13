@@ -827,7 +827,7 @@ CLI and scripts:
 - `src/dsl41/reread_worker.py`: isolated engine-owned preparation and passive forecast (DL-463).
 - `src/dsl41/cli_reload.py`: the 2.x `reread` and `update` verbs: their
   rendering and exit codes, with the engine reached through one function
-  bound to the control socket's v4 `reread` and `update` verbs (DL-463).
+  bound to the control socket's v5 `reread` and `update` verbs (DL-463, DL-498).
   Both use `-S` or `DSL41_SOCKET`. Reread is passive; update prepares current inputs.
   JIL-only launches refuse reload. Status annotates the last reread forecast.
   `--style focused|neutral` chooses the text layout; focused is the default (DL-482).

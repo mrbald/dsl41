@@ -1,5 +1,5 @@
-"""The one-line `decision` record, the `dispatch` record after it, and control protocol v3
-(DL-118).
+"""The one-line `decision` record, the `dispatch` record after it, and control protocol v5
+(DL-118, DL-498).
 
 Normative spec: `docs/runner-design.md` ss7 (journal before effect); `docs/control-protocol.md`
 ss2 and ss5 (the version handshake, and what the subscribe stream promises about which records).
@@ -14,7 +14,7 @@ The properties, and the contrast that makes each non-vacuous:
   * **Identity at birth.** A `dispatch` record names a uuid4 run_id, and an attempt's spool
     evidence must name it.
   * **The stream and the wire.** `decision` crosses the backfill/live seam exactly once, as
-    every record does, and a v2 request is refused naming v3.
+    every record does, and retired dialects are refused by name (DL-498).
 """
 
 from __future__ import annotations
@@ -376,11 +376,9 @@ def test_subscribe_forwards_decision_once_across_the_seam(short_root: Path) -> N
 
 def test_cli_query_subscribe_names_the_version_and_streams(short_root: Path) -> None:
     """`dsl41 query subscribe` opens a raw socket of its own rather than going
-    through `roundtrip`, and from v2 to v3 it sent no `v` at all: the server
-    refused it, the refusal does not close the connection, and the command
-    printed one refusal line and hung. Run as a real subprocess against a live
-    server, the first line out must be the ack and a decision must follow --
-    which is the only place the CLI's stamp site is exercised."""
+    through `roundtrip`. It must stamp v5 (DL-498). A refusal leaves the
+    connection open, so a missing stamp would print one refusal line and hang.
+    Against a live server, the first line must be the ack and a decision must follow."""
     text = "insert_job: sub_job\njob_type: c\ncommand: x\nmachine: m1\n"
     run_root = short_root / "run"
 
@@ -420,31 +418,29 @@ def test_cli_query_subscribe_names_the_version_and_streams(short_root: Path) -> 
     asyncio.run(scenario())
 
 
-def test_v2_request_is_refused_naming_v3() -> None:
-    """control-protocol ss2, DL-118 on DL-90's precedent: v2 is gone, not
-    deprecated. The subscribe stream's records changed shape, so a v2 client
-    waiting on `rec == "effect"` would silently stop seeing intents -- which
-    is not an additive change, and a compatibility projection would be a
-    second record shape for one fact.
-
-    The refusal NAMES the version this engine speaks, because a client told
-    only "refused" has nothing to migrate to."""
-    assert PROTOCOL_VERSION == 3
+@pytest.mark.parametrize(
+    "version, entry", [(1, "DL-90"), (2, "DL-118"), (3, "DL-498"), (4, "DL-498")]
+)
+def test_retired_envelope_versions_refuse_by_name(version: int, entry: str) -> None:
+    """The envelope door names each retired dialect and its entry (DL-498)."""
     request = {
-        "v": 2,
+        "v": version,
         "baseline_id": "the-log",
         "request_id": "r1",
         "verb": "ON_HOLD",
         "payload": {"job": "j"},
         "expect": {"job:j": 1},
     }
-    with pytest.raises(EnvelopeError, match="this engine speaks v3"):
+    with pytest.raises(EnvelopeError) as caught:
         parse_envelope(request, addressed="job:j", baseline_id="the-log")
-    for version in (3, 4):
-        parsed = parse_envelope({**request, "v": version}, addressed="job:j", baseline_id="the-log")
-        assert parsed.request_id == "r1"
-    with pytest.raises(EnvelopeError, match="this engine speaks v3 and v4"):
-        parse_envelope({**request, "v": 5}, addressed="job:j", baseline_id="the-log")
+    assert caught.value.code == "unsupported_version"
+    assert str(caught.value) == (
+        f"control protocol v{version} is retired ({entry}); this engine speaks v5"
+    )
+    parsed = parse_envelope(
+        {**request, "v": PROTOCOL_VERSION}, addressed="job:j", baseline_id="the-log"
+    )
+    assert parsed.request_id == "r1"
 
 
 def test_an_unknown_field_on_a_control_request_is_ignored() -> None:

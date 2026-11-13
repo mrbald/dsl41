@@ -92,7 +92,7 @@ def test_bug57_unchanged_update_cli(tmp_path, monkeypatch, wait, cleanup):
             for n in range(2):
                 submitted.clear()
                 request = {
-                    "v": 4,
+                    "v": 5,
                     "cmd": "update",
                     "wait": wait,
                     "baseline_id": engine.baseline_id,
@@ -126,7 +126,7 @@ def test_bug57_unchanged_update_cli(tmp_path, monkeypatch, wait, cleanup):
                         before_send()
                     if wire["cmd"] == "status":
                         return {"ok": True, "baseline_id": engine.baseline_id}
-                    assert wire["v"] == 4 and wire["wait"] is wait
+                    assert "v" not in wire and wire["wait"] is wait
                     return {**answer, "request_id": wire["request_id"]}
 
                 monkeypatch.setattr(runner_control, "roundtrip", roundtrip)
@@ -183,7 +183,7 @@ def test_bug57_unchanged_update_preserves_marks_until_next_reread(tmp_path, monk
         try:
             await engine.run_until_quiescent(T0)
             (tmp_path / "a.jil").write_text(JOB.replace("true", "echo changed"))
-            assert (await server._reread({"v": 4, "cmd": "reread"}))["ok"]
+            assert (await server._reread({"v": 5, "cmd": "reread"}))["ok"]
             assert server._status({})["jobs"]["A"]["reread"]["change"] == "changed"
             marks = dict(engine.reread_marks)
             (tmp_path / "a.jil").write_text(JOB)
@@ -200,7 +200,7 @@ def test_bug57_unchanged_update_preserves_marks_until_next_reread(tmp_path, monk
             assert pending.result().unchanged is not None
             assert engine.reread_marks == marks
             assert server._status({})["jobs"]["A"]["reread"] == marks["A"]
-            assert (await server._reread({"v": 4, "cmd": "reread"}))["ok"]
+            assert (await server._reread({"v": 5, "cmd": "reread"}))["ok"]
             assert engine.reread_marks == {}
             assert "reread" not in server._status({})["jobs"]["A"]
         finally:
@@ -1221,7 +1221,7 @@ def test_socket_reload_preview_update_retry_and_marker(short_root: Path) -> None
 
         async def ask(cmd, **fields):
             return await asyncio.to_thread(
-                roundtrip, server.path, {"v": 4, "cmd": cmd, **fields}, timeout=10
+                roundtrip, server.path, {"v": 5, "cmd": cmd, **fields}, timeout=10
             )
 
         try:
@@ -1858,7 +1858,7 @@ def test_box_restart_preserves_replacement_run_ownership(short_root: Path, case)
         if case != "retype":
             wait_for(lambda: ask("status")["jobs"]["MOVER"]["status"] == "RUNNING")
         (short_root / "a.jil").write_text(new)
-        view = roundtrip(socket, {"cmd": "reread", "v": 4})["preview"]
+        view = roundtrip(socket, {"cmd": "reread", "v": 5})["preview"]
         if case != "retype":
             assert {item["job"]: item["action"] for item in view["effects"]}["MOVER"] == (
                 "hold" if marked else "restart" if case == "move_in" else "rerun"
@@ -1868,7 +1868,7 @@ def test_box_restart_preserves_replacement_run_ownership(short_root: Path, case)
             socket,
             {
                 "cmd": "update",
-                "v": 4,
+                "v": 5,
                 "wait": True,
                 "request_id": "ownership",
                 "baseline_id": ask("status")["baseline_id"],
@@ -2052,7 +2052,7 @@ def test_box_restart_marks_unchanged_members(
         elif case == "in_place":
             replacement = replacement.replace(member, member.replace("sleep 30", "sleep 31"))
         jil.write_text(replacement)
-        answer = roundtrip(socket, {"v": 4, "cmd": "reread"})
+        answer = roundtrip(socket, {"v": 5, "cmd": "reread"})
         assert answer["ok"], answer
         view = answer["preview"]
         effects = {item["job"]: item["action"] for item in view["effects"]}
@@ -2067,7 +2067,7 @@ def test_box_restart_marks_unchanged_members(
         applied = roundtrip(
             socket,
             {
-                "v": 4,
+                "v": 5,
                 "cmd": "update",
                 "wait": True,
                 "request_id": "restart-marks",
@@ -2217,7 +2217,7 @@ def test_dl490_forecast_labels_follow_candidate_membership(short_root: Path, mon
                 return {"ok": True, "preview": preview(candidate, live)}
 
             monkeypatch.setattr(server, "_prepare_reload", prepare)
-            view = (await server._reread({"v": 4, "cmd": "reread"}))["preview"]
+            view = (await server._reread({"v": 5, "cmd": "reread"}))["preview"]
             effects = [("BX", "restart_box")]
             marks = {"BX": {"change": "changed", "action": "restart_box"}}
             if case == "moved_box":

@@ -1978,7 +1978,7 @@ def runs(
 
     Exit codes: 0 history printed; 2 a root could not be read.
     """
-    # Design: DL-113; not a control-protocol verb, which stays frozen at v3
+    # Design: DL-113; not a control-protocol verb
     from dsl41.runner_history import RunHistoryError, read_run_roots
 
     since_at = None if since is None else _naive_utc_arg(since, "--since")

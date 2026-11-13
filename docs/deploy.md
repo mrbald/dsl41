@@ -39,6 +39,11 @@ the instant engine time resumes at and the gap in seconds in the
 [engine's output](#read-the-engines-output). `dsl41 query status` shows the
 hold; its JSON answer carries `clock_hold` (DL-493).
 
+The engine and every client must change together (DL-498).
+Restart every terminal UI from the selected build. A terminal UI started from
+an old build is refused by name. Restart the served UI with the engine too.
+See the [control dialect](control-protocol.md) for version refusals.
+
 1. As root, create the release environment and install the selected version.
    Substitute a concrete version for `<version>` in every command and in
    the unit. The [package instructions](../README.md#install) describe extras.
@@ -676,6 +681,10 @@ those definitions; the old root's state is not migrated.
 
 ## Upgrade the engine
 
+Change the engine and every client together (DL-498).
+Restart terminal UIs and the served UI from the selected build.
+An old UI is refused by name and must be restarted.
+
 Only select a release documented as compatible with the existing store and
 state-machine version. The stored active estate must match what that release
 can interpret. Compatibility is allocated per release; arbitrary upgrades
@@ -707,6 +716,7 @@ does not select the runtime.
 Choose a quiet window: restart serves the stored estate until an update applies.
 Keep the release that wrote the root and a whole-root backup available.
 Do not replace engine files while the service runs.
+This variant follows the same [engine and client rollout rule](#upgrade-the-engine).
 
 1. As root, drain and stop the service:
 

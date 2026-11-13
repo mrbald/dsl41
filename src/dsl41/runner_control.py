@@ -43,13 +43,12 @@ drives; `roundtrip` is the one-shot blocking client the typer CLI drives outside
 event loop. Both speak one protocol, raise ControlClientError, and know nothing of
 typer or textual.
 
-Protocol v3 (DL-118; DL-90 introduced v2; docs/control-protocol.md is the frozen
-text):
+Protocol v5 (DL-498; docs/control-protocol.md is the frozen text):
 
-- **Every request names `"v": 3`.** control-protocol ss2 refuses a request that
-  names none or another version (DL-90, DL-118); there is no unversioned fallback.
-  The check sits in `_handle`, ahead of the subscribe branch. Under v3, `result`
-  and standalone `effect` are one `decision`.
+- **Every request names v5.** control-protocol ss2 refuses a request that names
+  none or another version (DL-498); there is no unversioned fallback.
+  The check sits in `_handle`, ahead of the subscribe branch. Subscriptions
+  carry each command's decision and effects in one `decision` record (DL-118).
 - **A mutation carries the concurrency-model ss6 envelope and is answered with its
   decision.** The request is `verb` + `payload` plus the required `request_id` and
   `expect`. The handler awaits: ss4 emits `command_committed` at step 4 and
@@ -97,14 +96,13 @@ from dsl41.runner_access import AccessControl, Tier, peer_credentials, peer_prin
 from dsl41.runner_adapters import LINE_LIMIT
 from dsl41.runner_admission import (
     PROTOCOL_VERSION,
-    SUPPORTED_PROTOCOL_VERSIONS,
     AdmissionRefused,
     ApplyResult,
     EnvelopeError,
     RequestCollision,
     addressed_key,
     parse_envelope,
-    unsupported_version,
+    version_refusal,
 )
 from dsl41.runner_clock import EngineError
 from dsl41.runner_codes import UNKNOWN_OUTCOME_CODES, Code
@@ -298,7 +296,7 @@ class ControlServer:
     ({"ok": bool, ...}), except `subscribe`, which streams journal records until the
     client hangs up.
 
-    Every request names `"v": 3` (DL-90, DL-118). Queries: status [job], trace [since],
+    Every request names v5 (DL-498). Queries: status [job], trace [since],
     explain job, spec job, deps job, timers, plan, global name, globals names; and
     subscribe [since]. An answer that passed routing and the lineage proof carries the
     concurrency-model ss6 read header (`baseline_id`, `applied_index`), so a
@@ -499,9 +497,9 @@ class ControlServer:
                         writer, _failure("malformed_request", f"bad request: {exc}", refused=True)
                     )
                     continue
-                if request.get("v") not in tuple(SUPPORTED_PROTOCOL_VERSIONS):
+                if (error := version_refusal(request.get("v"))) is not None:
                     # control-protocol ss2 refuses a request naming no version or another
-                    # (DL-90, DL-118), checked HERE so subscribe, which never reaches
+                    # (DL-498), checked HERE so subscribe, which never reaches
                     # _respond, is not an unversioned door (DL-90). It carries `refused`
                     # because a MUTATION can hit this door, and every ok:false it can get,
                     # except the no-decision timeout, must say nothing was admitted (DL-92)
@@ -509,7 +507,7 @@ class ControlServer:
                         writer,
                         _failure(
                             "unsupported_version",
-                            unsupported_version(request.get("v")),
+                            error,
                             refused=True,
                         ),
                     )
@@ -646,11 +644,9 @@ class ControlServer:
         if cmd == "catalog":
             return self._catalog(authority=authority)
         if cmd == "update":
-            if request.get("v") == 4:
-                return await self._update(request)
+            return await self._update(request)
         if cmd == "reread":
-            if request.get("v") == 4:
-                return await self._reread(request)
+            return await self._reread(request)
         return _failure("unknown_cmd", f"unknown cmd {cmd!r}", refused=True)
 
     async def _prepare_reload(self, *, update: bool) -> dict[str, Any]:
@@ -994,7 +990,7 @@ class ControlServer:
         if not isinstance(payload, dict):
             return _failure("invalid_argument", f"payload must be an object, got {payload!r}")
         signals: tuple[int, ...] | None = None
-        if request.get("v") == 4 and "kill_signals" in payload:
+        if "kill_signals" in payload:
             from dsl41.runtime_policy import RuntimePolicySettings
 
             if verb != "KILLJOB" or not isinstance(payload["kill_signals"], list):
@@ -1473,8 +1469,9 @@ class StreamLineTooLong(ControlClientError):
 
 
 def versioned(request: dict[str, Any]) -> dict[str, Any]:
-    """Stamp `v` unless the caller already did. The clients implement the protocol, so
-    query sites do not repeat the version; a caller that names one keeps it, which makes
+    """Stamp the current control dialect (DL-498) unless the caller already did.
+
+    Query sites do not repeat the version; a caller that names one keeps it, which makes
     the server's refusal testable. Public because the CLI's raw subscribe socket is a
     client too and must stamp `v` or hang on the server's refusal."""
     return request if "v" in request else {**request, "v": PROTOCOL_VERSION}
@@ -1522,7 +1519,7 @@ def revision_in(response: Mapping[str, Any], key: str) -> int:
     return int(response["jobs"][name]["state_rev"])
 
 
-#: the four things a v2 command answer can mean; `ok: False` covers three outcomes with
+#: The four things a command answer can mean; `ok: False` covers three outcomes with
 #: three different next moves, and a client that cannot tell them apart guesses when
 #: guessing is most expensive (DL-92)
 APPLIED, REFUSED, REJECTED, UNKNOWN = "applied", "refused", "rejected", "unknown"
@@ -1701,7 +1698,7 @@ class ControlClient:
         except OSError as exc:
             raise ControlClientError(str(exc)) from exc
         try:
-            request: dict[str, Any] = {"cmd": "subscribe", "v": PROTOCOL_VERSION}
+            request = versioned({"cmd": "subscribe"})
             if since is not None:
                 request["since"] = since
             writer.write(_frame(request))

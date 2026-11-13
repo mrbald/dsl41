@@ -252,7 +252,7 @@ def test_authenticated_catalog_view_ignores_claimed_authority(
                 assert "INHERITED_PRIVATE_NAME" not in str(answer) and "explicit-value" not in str(
                     answer
                 )
-                refused = await _call(server.path, {"v": 4, "cmd": "reread"})
+                refused = await _call(server.path, {"v": 5, "cmd": "reread"})
                 assert refused["ok"] is False and refused["code"] == "access_denied"
             else:
                 assert answer["settings"]["job_env"] == {"LOG_DIR": "explicit-value"}

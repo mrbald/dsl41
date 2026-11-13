@@ -4,7 +4,7 @@ For architects tracing control requests, replies and retry guarantees.
 The architect track under [Documents](../README.md#documents) supplies the wider design.
 Deployment procedures are in [deploy.md](deploy.md).
 
-Status: frozen at **v3** (DL-118), with additive **v4** extensions (DL-462). Entries that rule parts of it include
+Status: frozen at **v5** (DL-498). Entries that rule parts of it include
 DL-133, DL-135, DL-146, DL-147, DL-148, DL-150, DL-151, DL-158, DL-172,
 DL-189, DL-216, DL-217, DL-228, DL-233, DL-256, DL-264, DL-267, DL-272,
 DL-274, DL-292, DL-295, DL-297 and DL-353. This document is normative for
@@ -12,21 +12,21 @@ the control plane of `docs/runner-design.md` §10. A change to a frozen item
 requires a decision-log
 entry. Each entry is cited where it applies.
 
-Every request names its protocol version (DL-90). The version door in §2
-refuses an absent or unsupported version, v1 and v2 included.
-Every retained v3 command keeps its meaning at v4, including mutations and `subscribe`.
-DL-463 retires the token-based v3 update in favor of the v4 request below.
+The control socket speaks one dialect, v5 (DL-498). Every request names it.
+Versions v1 (DL-90), v2 (DL-118), v3 and v4 (DL-498) are retired.
+The version door in §2 refuses each by name with its retiring entry.
+Other values, including an absent version, are refused as unknown.
 
-**V4 adds:**
+ADM `reread` reports current inputs. Tokenless ADM `update` prepares and applies them.
+Status may carry a reread annotation (DL-463).
+KILLJOB accepts optional `payload.kill_signals`, an ordered array of supported
+positive integer signals ending in KILL (9). `sendevent -k 2,9` supplies it
+for that command and its causal kills (DL-462).
 
-- ADM `reread`, tokenless ADM `update`, and an optional status reread annotation (DL-463).
-- KILLJOB accepts optional `payload.kill_signals`, an ordered array of supported
-  positive integer signals ending in KILL (9). `sendevent -k 2,9` supplies it
-  for that command and its causal kills. V3 ignores the unknown field (DL-462).
-
-Clients default to v3. Requests using a v4 addition explicitly name v4.
-An older server refuses that request with `unsupported_version`; the client
-never falls back to v3. Responses and subscription records keep their shapes.
+Every bundled client stamps v5. The engine and every client change together.
+A terminal UI started from an old build is refused by name and must be restarted.
+An older engine's refusal is printed by the client, without fallback (DL-498).
+Responses and subscription records use the shapes below.
 
 The control protocol speaks in semantic terms (conditions, boxes,
 statuses, sendevent verbs), which runner-design §11's scope fence assigns
@@ -88,7 +88,7 @@ CLI's job.
   attempt on as an unknown outcome (`delivered`), never as "not sent".
   Only a failure before any write, such as a refused connect, is
   undelivered.
-- **The engine accepts v3 and v4** (DL-462). Every request carries `v`,
+- **The engine accepts only v5** (DL-498). Every request carries `v`,
   including queries and `subscribe`.
   The check runs before the request is routed. So `subscribe`, which owns
   its connection and never reaches the response path, is not an
@@ -134,9 +134,9 @@ opens anything, so the probe runs after the lock is held. The probe
 cleans up a stale socket file and is a second refusal door: it refuses
 to start when a live engine answers it.
 
-**The version handshake** is the per-request version door above (DL-90, DL-462).
+**The version handshake** is the per-request version door above (DL-90, DL-498).
 
-**Stopping the engine** is `{"cmd": "engine_stop", "v": 3}`, the
+**Stopping the engine** is `{"cmd": "engine_stop", "v": 5}`, the
 `dsl41 engine stop` verb, at the `adm` tier (`docs/access-model.md` §10).
 It is a step of the engine's single writer, as SIGTERM is: every mutation
 is admitted wholly before it, or after it and rejected with
@@ -150,7 +150,7 @@ window answers `decision_timeout`.
 
 **Reread and update (DL-463, extending DL-462).**
 
-The ADM request `{"v":4,"cmd":"reread","claimed_actor":null}` reports current
+The ADM request `{"v":5,"cmd":"reread","claimed_actor":null}` reports current
 inputs from the main config the engine was last started with (DL-486).
 Engines without a main config refuse reread and update (DL-463). It runs preparation
 in an owned worker; it admits no engine mutation and publishes no retained plan.
@@ -204,12 +204,10 @@ Reread clients print `lint_summary` when present, otherwise `lint_messages`
 verbatim. Update preparation omits `lint_summary`. No version step is needed
 (DL-217).
 
-The ADM update request is `{"v":4,"cmd":"update","baseline_id":"...",
+The ADM update request is `{"v":5,"cmd":"update","baseline_id":"...",
 "request_id":"...","claimed_actor":null,"wait":false,"retry_only":false}`.
 Only the listed fields are accepted. No token, source path, consent or `expect` is accepted. The engine prepares
 current inputs itself and checks the captured revision before effects.
-V3 `update` returns `unknown_cmd` after authorization; retirement of that
-command is the stated exception to DL-462's old-command compatibility rule.
 
 The fingerprint binds operation, baseline and actor, excluding source bytes,
 artifact identity, prepared revision, wait and retry_only. Lookup happens before
@@ -321,11 +319,11 @@ The client action says what a client does next:
 |---|---|---|---|
 | `peer_unauthenticated` | refused | access control is armed and the peer has no kernel credential | operator |
 | `malformed_request` | refused | the line is not a JSON object | fix the request |
-| `unsupported_version` | refused | `v` is absent or is neither `3` nor `4` | fix the request |
+| `unsupported_version` | refused | `v` is not integer `5`; v1 through v4 refuse by name with their retiring entries, other values as unknown (DL-498) | fix the request |
 | `access_denied` | refused | the perimeter denies this principal the `cmd`; it classifies by `cmd` alone (`docs/access-model.md` §5, §10) | operator |
 | `internal_error` | unknown | a handler raised | re-read; retry a mutation only under the same request_id |
 | `unknown_cmd` | refused | `cmd` names no command | fix the request |
-| `invalid_argument` | refused, query or stream | a field is absent or has the wrong shape or type, a v4 `kill_signals` list is invalid or attached to another verb, or a `request_id` begins with the reserved prefix `engine:` (§3); `error` names the field | fix the request |
+| `invalid_argument` | refused, query or stream | a field is absent or has the wrong shape or type, a `kill_signals` list is invalid or attached to another verb, or a `request_id` begins with the reserved prefix `engine:` (§3); `error` names the field | fix the request |
 | `plan_cycle` | query | the AND-success skeleton has a cycle, so `plan` is disabled | operator |
 | `unknown_job` | query, or refused on a mutation | the job is not in the catalog (for `status`: in neither the catalog nor the store) | fix the request |
 | `no_journal` | stream | the run has no store to stream | operator |
@@ -355,7 +353,7 @@ engine drains is refused with `engine_draining`, and nothing is logged.
 ## 3. Mutating verb: sendevent
 
 ```json
-{"cmd": "sendevent", "v": 3, "baseline_id": "…",
+{"cmd": "sendevent", "v": 5, "baseline_id": "…",
  "request_id": "…", "verb": "CHANGE_STATUS",
  "payload": {"job": "nightly", "status": "SUCCESS"},
  "expect": {"job:nightly": 12}, "claimed_actor": "alice@host"}
@@ -379,7 +377,7 @@ tier or higher writes a receipt there, best effort (DL-146).
 | verb | `payload` | notes |
 |---|---|---|
 | job verbs | `job` | `STARTJOB`, `FORCE_STARTJOB`, `KILLJOB`, `ON_ICE`, `OFF_ICE`, `ON_HOLD`, `OFF_HOLD`, `ON_NOEXEC`, `OFF_NOEXEC`, `DISARM` *(DL-158)*, `RELEASE_RESOURCE` *(DL-256)* |
-| `KILLJOB` at v4 | `job`, optional `kill_signals` array | The v4 addition above; without it the current engine policy applies (DL-462). |
+| `KILLJOB` | `job`, optional `kill_signals` array | Without an override the current engine policy applies (DL-462, DL-498). |
 | `SET_GLOBAL` | `name` (a non-empty string), `value` (a string) | the empty string is a legal value: `v(G) = ""` is a legal condition, so an operator must be able to satisfy it |
 | `CHANGE_STATUS` | `job`, `status`, optional int `exit_code` | injected as `STATUS`, keeping overwrite parity |
 
@@ -739,9 +737,8 @@ exclusive.
 
 Refusals may also carry `start_source` (the input's source), `run_number`
 (the job's run when refused), and `refused_status` (its status when refused).
-Unset fields are omitted. These are optional answer fields for v3 and v4
-under DL-217. Missing provenance means an unknown origin; clients must not
-infer it from `cause`.
+Unset fields are omitted. These are optional answer fields under DL-217.
+Missing provenance means an unknown origin; clients must not infer it from `cause`.
 
 Under DL-432, the `trace`
 answer may hold lines that name no job (`"job": ""`) and move no state.
@@ -810,7 +807,7 @@ never that a particular name does not.
 
 ## 5. Streaming verb: subscribe
 
-`{"cmd": "subscribe", "v": 3, "since": <int>?}`. A subscription **owns
+`{"cmd": "subscribe", "v": 5, "since": <int>?}`. A subscription **owns
 its connection** until hangup, so a client opens a separate connection
 for it.
 
@@ -819,7 +816,7 @@ then streams the store's wire records (`docs/runner-design.md` §7 record kinds)
 raw lines. The ack's `since` is the stream's cursor (DL-267): the
 request's `since` when it named one, otherwise the admission frontier
 sampled for the seam below. Every seq'd record the stream owes is above
-it. It is an additive answer field, which a v3 client ignores
+it. It is an additive answer field, which clients may ignore
 (`docs/protocol-evolution.md` §1, DL-217). A run with no store is
 refused with `{"ok": false, "code": "no_journal", "error": "this run has
 no journal"}`.
@@ -874,7 +871,7 @@ the run history DL-428's snapshot keeps, each retained run carries it as
 the store must use the binary's state version. `dsl41 runs` reads every run under that rev and
 never under a dispatch's.
 
-**Attempt and recovery fields** (DL-426), each additive, so a v3 client that
+**Attempt and recovery fields** (DL-426), each additive, so a client that
 does not read them keeps working (§2):
 
 - `dispatch` carries `after` on a replacement attempt: the cause of the
@@ -1070,8 +1067,8 @@ gaps: each names the rule that covers it, and keeps its number for
 citations. Adding a second host or a non-local controller has to address
 each open item (`docs/decision-log.md` DL-78).
 
-1. **Version handshake.** Every request names its version (§2; DL-90,
-   DL-118).
+1. **Version handshake.** Every request names v5 (§2; DL-90,
+   DL-118, DL-498).
 2. **No authentication or authorization — on an estate with no access
    map.** There the socket's `0600` mode plus filesystem ownership is the
    entire access-control model. Any process running as the invoking user

@@ -1,4 +1,4 @@
-"""Mandatory preconditions and protocol v2 (stage S3).
+"""Mandatory preconditions and control protocol v5 (DL-498).
 
 Normative spec: docs/concurrency-model.md ss0 (the invariant), ss4 (the
 admission order), ss6 (the envelope and the reads); docs/control-protocol.md
@@ -97,7 +97,7 @@ def _engine(jil: str = _SOLO_JIL, **kwargs: object) -> Engine:
 
 
 def _request(**fields: object) -> dict:
-    """A well-formed v2 command, for the refusal tests to spoil one field of
+    """A well-formed v5 command (DL-498), for the refusal tests to spoil one field of
     at a time. Every refusal below differs from THIS by exactly one thing."""
     return {
         "v": PROTOCOL_VERSION,
@@ -178,11 +178,11 @@ def test_a_request_id_is_required() -> None:
 
 
 def test_an_unversioned_or_wrongly_versioned_request_is_refused() -> None:
-    for bad in (None, 1, 2, "3", 5):
+    for bad in (None, 6, "5", True, 5.0):
         request = _request(v=bad)
         if bad is None:
             del request["v"]
-        with pytest.raises(EnvelopeError, match="this engine speaks v3"):
+        with pytest.raises(EnvelopeError, match="protocol version .*: this engine speaks v5"):
             parse_envelope(request, addressed="job:j", baseline_id="the-log")
 
 
@@ -791,12 +791,12 @@ def test_every_door_refuses_an_unversioned_caller(short_root: Path) -> None:
                 {"cmd": "subscribe", "since": 0},
                 {"cmd": "status", "v": 1},
                 {"cmd": "status", "v": 2},  # gone, not deprecated (DL-118)
-                {"cmd": "status", "v": 5},
+                {"cmd": "status", "v": 6},
             ):
                 answer = await _call(server.path, request)
                 assert answer["ok"] is False
                 assert answer["code"] == "unsupported_version"
-                assert "this engine speaks v3" in answer["error"]
+                assert "this engine speaks v5" in answer["error"]
             # the connection stays usable: a refusal is not a hangup
             good = await _call(server.path, {"cmd": "status", "v": PROTOCOL_VERSION})
             assert good["ok"] is True

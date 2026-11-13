@@ -226,8 +226,6 @@ def sendevent(
         request_id=request_id,
         claimed_actor=claimed_actor() if actor is None else actor,
     )
-    if kill_signals is not None:
-        request["v"] = 4
     _mutate(socket_path, request)
 
 

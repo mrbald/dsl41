@@ -100,7 +100,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-87 | every entity carries a revision, and one input moves it at most once | [docs/blocks/job-lifecycle.md](blocks/job-lifecycle.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md), [docs/state-machines.md](state-machines.md) |
 | DL-88 | the capacity pool gets its own module |  |
 | DL-89 | admission lands: one order for every input, and the log becomes a ledger | [docs/blocks/subscription.md](blocks/subscription.md), [docs/citation-index.md](citation-index.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md), [docs/statechart-engine.md](statechart-engine.md) |
-| DL-90 | preconditions become mandatory, and the wire breaks once | [docs/access-model.md](access-model.md), [docs/blocks/admission.md](blocks/admission.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md) |
+| DL-90 | preconditions become mandatory, and the wire breaks once | [docs/access-model.md](access-model.md), [docs/blocks/admission.md](blocks/admission.md), [docs/control-protocol.md](control-protocol.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |
 | DL-91 | architecture review | [docs/ir-design.md](ir-design.md) |
 | DL-92 | the operator gets the vocabulary S3 built |  |
 | DL-93 | how S5 is built, and where host state lives | [docs/citation-index.md](citation-index.md) |
@@ -128,7 +128,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-115 | the directory is not the baseline |  |
 | DL-116 | the lineage fence |  |
 | DL-117 | `baseline_id` is the period's, and derived | [docs/control-protocol.md](control-protocol.md) |
-| DL-118 | the atomic `decision` record and control-protocol v3 | [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/attempts.md](blocks/attempts.md), [docs/blocks/fw-observation.md](blocks/fw-observation.md), [docs/blocks/subscription.md](blocks/subscription.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md), [docs/state-machines.md](state-machines.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
+| DL-118 | the atomic `decision` record and control-protocol v3 | [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/attempts.md](blocks/attempts.md), [docs/blocks/fw-observation.md](blocks/fw-observation.md), [docs/blocks/subscription.md](blocks/subscription.md), [docs/control-protocol.md](control-protocol.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md), [docs/state-machines.md](state-machines.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
 | DL-119 | the seal artifact and the canonical form | [docs/citation-index.md](citation-index.md), [docs/jil-statement-syntax.md](jil-statement-syntax.md) |
 | DL-120 | capacity decomposed | [docs/blocks/capacity.md](blocks/capacity.md), [docs/ir-design.md](ir-design.md), [docs/state-machines.md](state-machines.md) |
 | DL-121 | `run_id` is minted in the effect; SPAWN idempotency is durable; FW has a spool |  |
@@ -499,3 +499,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-495 | A job's name is its subject without block comments | [README.md](../README.md), [docs/authoring.md](authoring.md), [docs/ir-design.md](ir-design.md), [docs/jil-statement-syntax.md](jil-statement-syntax.md) |
 | DL-496 | `engine stop --wait` confirms the exit by the engine's process, not by its lock | [docs/deploy.md](deploy.md) |
 | DL-497 | The launch tests prove which shell runs and what it is handed, not each shell | [docs/deploy.md](deploy.md) |
+| DL-498 | The control socket speaks one dialect, v5; v1 to v4 are refused by name | [README.md](../README.md), [docs/blocks/update.md](blocks/update.md), [docs/control-protocol.md](control-protocol.md), [docs/deploy.md](deploy.md), [docs/gateway.md](gateway.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |

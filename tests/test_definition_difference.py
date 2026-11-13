@@ -285,7 +285,7 @@ def test_whole_difference_budget_for_5000_jobs_and_300_settings(short_root, cli_
     with cli_engine(path):
         write_inputs("new")
         answer = roundtrip(
-            short_root / "run" / "control.sock", {"v": 4, "cmd": "reread"}, timeout=15
+            short_root / "run" / "control.sock", {"v": 5, "cmd": "reread"}, timeout=15
         )
         assert answer["ok"] is True, answer
     view = answer["preview"]

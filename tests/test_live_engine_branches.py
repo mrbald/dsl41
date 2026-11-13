@@ -85,7 +85,7 @@ class _Client:
 
     async def ask(self, cmd, **fields):
         return await asyncio.to_thread(
-            roundtrip, self.socket, {"v": 4, "cmd": cmd, **fields}, timeout=10
+            roundtrip, self.socket, {"v": 5, "cmd": cmd, **fields}, timeout=10
         )
 
     async def event(self, verb, job="j", *, rid=None, **payload):

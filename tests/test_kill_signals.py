@@ -336,7 +336,7 @@ def test_non_killjob_stops_keep_term(short_root, stop, owned_processes):
                 server = ControlServer(engine, root / "control.sock")
                 await server.start()
                 try:
-                    answer = await _control_call(server.path, {"cmd": "engine_stop", "v": 4})
+                    answer = await _control_call(server.path, {"cmd": "engine_stop", "v": 5})
                     assert answer["ok"] and answer["engine"] in {"DRAINING", "STOPPED"}
                 finally:
                     await server.close()

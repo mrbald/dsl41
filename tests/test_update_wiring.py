@@ -1195,13 +1195,13 @@ def test_reread_and_update_over_the_control_socket(short_root: Path) -> None:
 def _spec(run_root: Path, job: str) -> dict[str, Any]:
     from dsl41.runner_control import roundtrip
 
-    return roundtrip(run_root / "control.sock", {"cmd": "spec", "job": job, "v": 3})
+    return roundtrip(run_root / "control.sock", {"cmd": "spec", "job": job, "v": 5})
 
 
 def _status(run_root: Path) -> dict[str, Any]:
     from dsl41.runner_control import roundtrip
 
-    return roundtrip(run_root / "control.sock", {"cmd": "status", "v": 3})
+    return roundtrip(run_root / "control.sock", {"cmd": "status", "v": 5})
 
 
 def test_while_an_update_stops_a_retry_waits_for_it_and_another_update_is_refused(
@@ -1388,7 +1388,7 @@ def test_the_update_verb_refuses_a_malformed_request_and_answers_a_slow_applicat
     answers: dict[str, dict[str, Any]] = {}
 
     def ask(**fields: Any) -> dict[str, Any]:
-        return roundtrip(run_root / "control.sock", {"cmd": "update", "v": 4, **fields})
+        return roundtrip(run_root / "control.sock", {"cmd": "update", "v": 5, **fields})
 
     async def scenario() -> None:
         engine = start_run(

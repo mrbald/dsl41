@@ -269,7 +269,7 @@ def test_spec_serves_original_source_at_startup_and_after_applied_update(
     source.write_text(before)
     socket = short_root / "run/control.sock"
     with cli_engine(config) as ask:
-        reply = roundtrip(socket, {"v": 3, "cmd": "spec", "job": name})
+        reply = roundtrip(socket, {"v": 5, "cmd": "spec", "job": name})
         assert reply["ok"] and reply["jil"] == before
         source.write_text(after)
         preview = runner.invoke(app, ["reread", "-S", str(socket)])
@@ -277,7 +277,7 @@ def test_spec_serves_original_source_at_startup_and_after_applied_update(
         applied = runner.invoke(app, ["update", "-S", str(socket), "--wait"])
         assert applied.exit_code == 0, applied.output
         assert ask()["revision"] == 2
-        reply = roundtrip(socket, {"v": 3, "cmd": "spec", "job": name})
+        reply = roundtrip(socket, {"v": 5, "cmd": "spec", "job": name})
         assert reply["ok"] and reply["jil"] == after
 
 

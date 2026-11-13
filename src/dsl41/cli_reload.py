@@ -116,13 +116,12 @@ def socket_send(socket_path: Path, *, request_id: str | None = None, timeout: fl
 
     def send(verb: str, args: Mapping[str, object]) -> object:
         if verb == "reread":
-            return ask({"v": 4, "cmd": "reread", "claimed_actor": claimed_actor()}, timeout + 120)
+            return ask({"cmd": "reread", "claimed_actor": claimed_actor()}, timeout + 120)
         header = ask({"cmd": "status"})
         if not header.get("ok") or not header.get("baseline_id"):
             raise SendFailed(str(header.get("error", "status has no baseline_id")))
         rid = request_id or str(uuid.uuid4())
         request = {
-            "v": 4,
             "cmd": "update",
             "wait": bool(args.get("wait")),
             "retry_only": request_id is not None,

@@ -84,7 +84,7 @@ def call(root: Path, cmd: str, **fields: Any) -> dict[str, Any]:
     with socket.socket(socket.AF_UNIX) as conn:
         conn.settimeout(2)
         conn.connect(str(root / "run/control.sock"))
-        conn.sendall(json.dumps({"v": 3, "cmd": cmd, **fields}).encode() + b"\n")
+        conn.sendall(json.dumps({"v": 5, "cmd": cmd, **fields}).encode() + b"\n")
         with conn.makefile("rb") as stream:
             return json.loads(stream.readline())
 

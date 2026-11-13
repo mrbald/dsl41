@@ -79,18 +79,25 @@ from dsl41.state_machine import (
 )
 from dsl41.state_machine import Event as ChartEvent
 
-#: The wire version of the ss6 envelope. ss0 refuses a caller that does not name a version, and
-#: accepting an older request "for compatibility" is the opt-out ss0 forbids. DL-90 dropped v1 and
-#: DL-118 dropped v2; a compatibility projection of the subscribe stream would be a second record
-#: shape for one fact.
-PROTOCOL_VERSION = 3
-SUPPORTED_PROTOCOL_VERSIONS = frozenset({3, 4})
+#: The control socket accepts only v5, including reread, tokenless update and KILLJOB
+#: kill_signals. Every bundled client uses the same stamp (DL-498).
+PROTOCOL_VERSION = 5
+
+#: Retired control dialects refuse by name at both doors (protocol-evolution ss6, DL-498).
+RETIRED_PROTOCOL_VERSIONS = {1: "DL-90", 2: "DL-118", 3: "DL-498", 4: "DL-498"}
 
 
-def unsupported_version(version: object) -> str:
-    """The shared wire door's refusal; default writers stay on v3 (DL-462)."""
-    versions = " and ".join(f"v{v}" for v in sorted(SUPPORTED_PROTOCOL_VERSIONS))
-    return f"protocol version {version!r}: this engine speaks {versions}"
+def version_refusal(version: object) -> str | None:
+    """Accept v5; name retired dialects and keep unknown values distinct (DL-498)."""
+    if is_wire_int(version):
+        if version == PROTOCOL_VERSION:
+            return None
+        if version in RETIRED_PROTOCOL_VERSIONS:
+            return (
+                f"control protocol v{version} is retired ({RETIRED_PROTOCOL_VERSIONS[version]});"
+                f" this engine speaks v{PROTOCOL_VERSION}"
+            )
+    return f"protocol version {version!r}: this engine speaks v{PROTOCOL_VERSION}"
 
 
 #: Sources whose events are engine-made completions and pass the stale gate. Externally injected
@@ -198,10 +205,9 @@ def parse_envelope(request: Mapping[str, Any], *, addressed: str, baseline_id: s
     The mandate lives here, not in the socket server, so no transport writes it differently.
     In-process callers holding the `Engine` are its own trust domain and do not come through
     here."""
-    version = request.get("v")
-    if version not in tuple(SUPPORTED_PROTOCOL_VERSIONS):
+    if (error := version_refusal(request.get("v"))) is not None:
         raise EnvelopeError(
-            unsupported_version(version),
+            error,
             code="unsupported_version",
         )
     named_baseline = request.get("baseline_id")
