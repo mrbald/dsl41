@@ -26668,3 +26668,21 @@ relitigate an entry; append a new one.
   whatever its tier, could keep a stopped engine from starting, make `--wait` wait on a
   lock no engine holds, and keep that grip after the group left the access map (Opus and
   Astra diff reviews).
+- DL-497 The launch tests prove which shell runs and what it is handed, not each shell
+  (2026-11-13; owner; `tests/test_launch_policy.py`, deploy; narrows the tests of DL-492)
+  THE RULE. The engine's part of a CMD launch is to execute the configured shell under its
+  own path and hand it one composed line (DL-492). `tests/test_launch_policy.py` proves
+  that part. A recording executable at another path shows that the configured
+  `engine.job_shell` is the one executed, with `-c` and the line; a shell reached through
+  another path shows that it is started under that path; an unset setting runs `/bin/sh`.
+  What the line does (a failing profile, a profile's alias, `noclobber`, closed
+  descriptors, stream modes, limits, the umask) is tested under `/bin/sh` only. No test in
+  that file needs a second shell family. One live test of the main config still sets the
+  host's bash (`tests/test_main_config_update.py`).
+  THE REASON. What a shell does with the line is the shell's behavior, not the engine's.
+  `/bin/sh` is dash on Ubuntu and bash on macOS and on EL, so the suite still meets two
+  families. The allow-list of `engine.job_shell` (sh, dash, bash, ksh) rests on the
+  engine's part of the line being POSIX shell text; a site that sets a shell other than
+  `/bin/sh` qualifies its own jobs under it.
+  THE CAUSE. The per-shell cases skipped wherever a shell was absent: about twenty on CI's
+  Linux lanes, where no Korn shell is installed, so they ran on a developer's machine only.
