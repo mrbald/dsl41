@@ -39,7 +39,7 @@ from test_runner_control import _control_call
 from dsl41 import runner_procid, runner_startup, runner_stops
 from dsl41.ir import lower_source
 from dsl41.oracle_state import Event
-from dsl41.runner import Engine
+from dsl41.runner import Engine, plan_record
 from dsl41.runner_adapters import FakeAdapter, JobAdapter, LocalCommandAdapter
 from dsl41.runner_clock import Clock, EngineError, RealClock, VirtualClock
 from dsl41.runner_config import EngineSettings
@@ -196,9 +196,29 @@ def test_every_open_attempt_is_instantiated_before_the_loop_s_first_step(tmp_pat
     run_root = tmp_path / "run"
     text = _jil("a", "b")
     first, second = _open(run_root, text, ["a", "b"])
-    body = {"attempt": second["attempt"], "job": "b", "run_number": 1, "status": {}}
+    body = {
+        "attempt": second["attempt"],
+        "job": "b",
+        "run_number": 1,
+        "status": {
+            "exit_code": 0,
+            "wrapper_outcome": "exited",
+            "launched": True,
+            "started_at": T0.isoformat(),
+            "ended_at": T0.isoformat(),
+        },
+    }
     body |= {"at": T0.isoformat(), "outcome": "natural", "ladder": "running"}
     append(run_root, "outcome", body, at=T0)
+    plan = plan_record(
+        second["attempt"],
+        "b",
+        1,
+        "complete",
+        [{"step": "feed", "payload": {"job": "b", "run_number": 1, "exit_code": 0}}],
+        T0,
+    )
+    append(run_root, plan.kind, plan.payload, at=T0)
     before = rows(run_root)
 
     async def scenario() -> tuple[str, str, str | None, str]:
@@ -850,8 +870,29 @@ def test_a_closing_attempt_whose_spawn_record_does_not_read_is_cleaned_by_its_co
     [dispatch] = _open(run_root, text, ["j"])
     run_id = dispatch["attempt"]
     _write(dispatch, "spawn.json", run_id="00000000-0000-4000-8000-00000000beef")
-    body = {"attempt": run_id, "job": "j", "run_number": 1, "status": {}, "at": T0.isoformat()}
+    body = {
+        "attempt": run_id,
+        "job": "j",
+        "run_number": 1,
+        "status": {
+            "exit_code": 0,
+            "wrapper_outcome": "exited",
+            "launched": True,
+            "started_at": T0.isoformat(),
+            "ended_at": T0.isoformat(),
+        },
+        "at": T0.isoformat(),
+    }
     append(run_root, "outcome", {**body, "outcome": "natural", "ladder": "running"}, at=T0)
+    plan = plan_record(
+        run_id,
+        "j",
+        1,
+        "complete",
+        [{"step": "feed", "payload": {"job": "j", "run_number": 1, "exit_code": 0}}],
+        T0,
+    )
+    append(run_root, plan.kind, plan.payload, at=T0)
     _restart(run_root, text)
     assert "spawn.json reports run_id" in capfd.readouterr().err
     assert _seq(run_root, "follow_up", event="ladder_done", attempt=run_id)
@@ -868,9 +909,29 @@ def test_the_first_reading_terms_what_is_owed_and_reports_the_rest(
     run_root = tmp_path / "run"
     text = _jil("a", "b")
     first, second = _open(run_root, text, ["a", "b"])
-    body = {"attempt": second["attempt"], "job": "b", "run_number": 1, "status": {}}
+    body = {
+        "attempt": second["attempt"],
+        "job": "b",
+        "run_number": 1,
+        "status": {
+            "exit_code": 0,
+            "wrapper_outcome": "exited",
+            "launched": True,
+            "started_at": T0.isoformat(),
+            "ended_at": T0.isoformat(),
+        },
+    }
     body |= {"at": T0.isoformat(), "outcome": "natural", "ladder": "running"}
     append(run_root, "outcome", body, at=T0)
+    plan = plan_record(
+        second["attempt"],
+        "b",
+        1,
+        "complete",
+        [{"step": "feed", "payload": {"job": "b", "run_number": 1, "exit_code": 0}}],
+        T0,
+    )
+    append(run_root, plan.kind, plan.payload, at=T0)
     gone = "00000000-0000-4000-8000-0000000000aa"
     append(
         run_root,
@@ -889,6 +950,15 @@ def test_the_first_reading_terms_what_is_owed_and_reports_the_rest(
         at=T0,
     )
     append(run_root, "outcome", {**body, "attempt": gone, "job": "a"} | {"ladder": None}, at=T0)
+    plan = plan_record(
+        gone,
+        "a",
+        1,
+        "complete",
+        [{"step": "feed", "payload": {"job": "a", "run_number": 1, "exit_code": 0}}],
+        T0,
+    )
+    append(run_root, plan.kind, plan.payload, at=T0)
     _set_cookie(run_root)  # the first reading reads each attempt through its cookie
     found = {
         11: (first["attempt"], "ticks:11"),
