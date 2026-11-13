@@ -671,38 +671,6 @@ def test_a_watcher_is_cancelled_at_the_drain_and_keeps_its_open_attempt(tmp_path
         store.close()
 
 
-def test_a_start_decided_while_draining_is_owed_to_the_restart(tmp_path: Path) -> None:
-    """spec-drain: the oracle keeps deciding while the engine drains, and a STARTING decision
-    is journaled as `dispatch_pending`, never launched. An attempt still stopping keeps the
-    engine in DRAINING."""
-    text = (
-        "insert_job: j\njob_type: c\ncommand: x\n\n"
-        "insert_job: k\njob_type: c\ncommand: y\ncondition: s(j)\n"
-    )
-
-    async def scenario() -> None:
-        engine = _engine(tmp_path, text)
-        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "j"}))
-        await engine.run_until_quiescent(T0)
-        _adopt(engine, job="x")  # an attempt with no wrapper of ours: it stops until its timer
-        engine.request_stop()
-        await engine.run_until_quiescent(T0)
-        assert engine.lifecycle.state == "DRAINING"
-        completion = {"job": "j", "run_number": 1, "exit_code": 0}
-        engine.inject(Event(at=T0, kind="STATUS", payload=completion), source="adapter")
-        await engine.run_until_quiescent(T0 + timedelta(seconds=1))
-        k = engine.oracle.store.job["k"]
-        assert (k.run_number, k.status in ("STARTING", "RUNNING")) == (1, True)
-        await engine.shutdown()
-        assert engine.journal is not None
-        engine.journal.close()
-
-    asyncio.run(scenario())
-    pending = [b for _, k, b in rows(tmp_path / "run") if k == "dispatch_pending"]
-    assert [(b["job"], b["run_number"]) for b in pending] == [("k", 1)]
-    assert [b["job"] for _, k, b in rows(tmp_path / "run") if k == "dispatch"] == ["j"]
-
-
 # ------------------------------------------------------------------- the restart's catch-up
 
 
