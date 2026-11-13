@@ -1732,3 +1732,29 @@ def test_peer_uid_reads_the_xucred_uid_on_macos(monkeypatch: pytest.MonkeyPatch)
     sock = _CredSocket(struct.pack("=II", 0, 777) + bytes(68))
     assert runner_access.peer_uid(sock) == 777  # type: ignore[arg-type]
     assert sock.args == (0, 1, 76)
+
+
+def test_peer_credentials_reads_the_xucred_uid_and_peer_pid_on_macos(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DL-496: macOS reads the uid and requested pid through separate socket options."""
+    import struct
+    from types import SimpleNamespace
+
+    from dsl41 import runner_access
+
+    replies = {
+        (0, 1, 76): struct.pack("=II", 0, 777) + bytes(68),
+        (0, 2, 4): struct.pack("i", 4242),
+    }
+    calls = []
+
+    def getsockopt(*args: int) -> bytes:
+        calls.append(args)
+        return replies[args]
+
+    monkeypatch.setattr(runner_access, "socket_mod", SimpleNamespace(SOL_SOCKET=1))
+    monkeypatch.setattr(runner_access, "sys", SimpleNamespace(platform="darwin"))
+    sock = SimpleNamespace(getsockopt=getsockopt)
+    assert runner_access.peer_credentials(sock, include_pid=True) == (4242, 777)
+    assert calls == [(0, 1, 76), (0, 2, 4)]

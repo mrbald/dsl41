@@ -38,28 +38,42 @@ __all__ = [
     "Principal",
     "Tier",
     "load_policy",
+    "peer_credentials",
     "peer_principal",
     "required_tier",
 ]
 
 
-def peer_uid(sock: socket_mod.socket) -> int | None:
-    """The connecting peer's uid for the same-uid gate, or None where the platform has
-    no credential (Linux SO_PEERCRED, macOS LOCAL_PEERCRED)."""
+def peer_credentials(
+    sock: socket_mod.socket, *, include_pid: bool = False
+) -> tuple[int | None, int | None]:
+    """The socket peer's (pid, uid); absent credentials are None (DL-496, access-model ss3).
+
+    Linux returns both from SO_PEERCRED. macOS reads LOCAL_PEERCRED for the uid and,
+    when requested, LOCAL_PEERPID for the pid. The uid gate does not need a peer pid.
+    """
     if hasattr(socket_mod, "SO_PEERCRED"):  # Linux
         data = sock.getsockopt(
             socket_mod.SOL_SOCKET, socket_mod.SO_PEERCRED, struct.calcsize("iII")
         )
-        _pid, uid, _gid = struct.unpack("iII", data)
-        return int(uid)
+        pid, uid, _gid = struct.unpack("iII", data)
+        return int(pid), int(uid)
     if sys.platform == "darwin":
         sol_local, local_peercred = 0, 0x001
         # struct xucred: u_int cr_version; uid_t cr_uid; short cr_ngroups;
         # gid_t cr_groups[16] -> 76 bytes; cr_uid is the second u_int
         raw = sock.getsockopt(sol_local, local_peercred, 76)
         _version, cr_uid = struct.unpack("=II", raw[:8])
-        return int(cr_uid)
-    return None  # pragma: no cover -- POSIX-only tier
+        pid = None
+        if include_pid:
+            pid = struct.unpack("i", sock.getsockopt(sol_local, 0x002, struct.calcsize("i")))[0]
+        return pid, int(cr_uid)
+    return None, None  # pragma: no cover -- POSIX-only tier
+
+
+def peer_uid(sock: socket_mod.socket) -> int | None:
+    """The peer uid for the same-uid gate, without requiring its pid (access-model ss3)."""
+    return peer_credentials(sock)[1]
 
 
 class AccessError(Exception):

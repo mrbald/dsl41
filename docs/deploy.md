@@ -224,7 +224,7 @@ Read the unit in these groups:
 | `StartLimitIntervalSec`, `StartLimitBurst` | Allow at most five starts in 300 seconds, then leave a repeated crash failed. |
 | `[Service]`, `Type`, `User`, `Group` | Run the engine directly as `dsl41:dsl41`. |
 | `ExecStart` | Read the main config. A root containing `engine.db` resumes its stored active catalog. |
-| `ExecStop` | Ask for a drain with `engine stop --wait`. Wait for the socket to stop answering and `leader.lock` to become free. |
+| `ExecStop` | Ask for a drain with `engine stop --wait`. Wait for the engine process identified on that connection to exit. Without a connection or peer pid, confirmation uses `leader.lock` (DL-496). |
 | `TimeoutStopSec` | Give the stop 45 seconds with the default graces. Revisit this if you change the engine's grace settings. |
 | `Restart`, `RestartSec` | Restart after any exit, including 0, after five seconds. A CLI stop outside systemd therefore comes back on the same root. A systemd stop keeps the service down. |
 | `RestartPreventExitStatus` | Keep exits 2, 6 and 7 down: startup refusal, a time-half fault before an engine input was logged, or a statechart assertion failure. Read the error before starting again. |
@@ -463,6 +463,9 @@ Exit 2 means refusal or failure to reach the engine.
 Run socket commands as the service user with this unit's owner-only socket.
 For a configured access map, follow the [access model](access-model.md);
 stop, reread and update require its `adm` tier.
+A member of `socket_group` who may stop the engine can confirm its process exit with `engine stop --wait` when the peer pid is available (DL-496).
+Without a peer pid, the stop is still sent, and confirmation uses `leader.lock`; an unreadable lock produces status 2.
+Hidden process details reduce confirmation to pid disappearance; pid reuse can prolong the wait.
 For AutoSys task equivalents, use the [operator command table](incident-triage.md#read-the-jobs-state).
 
 ## Drain the engine

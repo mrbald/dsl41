@@ -21,7 +21,7 @@ State handled outside a state machine and duplicated logic make the whole system
 In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get one pass that proves or dismisses each.
 
 - **BUG-10**: Restart ignores unknown `[engine]` keys such as `machine_polcy` and uses defaults until reread refuses them (DL-437).
-- **BUG-13**: The engine prints `clean_shutdown` before it exits; TERM in that window ends it with -15. `engine stop --wait` does not wait for process exit, which exposes systemd ExecStop.
+- **BUG-13**: The engine prints `clean_shutdown` before it exits; TERM in that window ends it with -15. With no socket while the lock is held, or with no peer pid from the socket, `engine stop --wait` waits for lock release rather than process exit, which exposes systemd ExecStop (DL-496).
 - **BUG-20**: Bounds and per-input scan cost of the live oracle's `_emitted` and `_kill_emissions` histories are unqualified (`src/dsl41/oracle_writers.py:135`, `src/dsl41/oracle.py:361-365`).
 - **BUG-48**: Update plan directories accumulate, even after stale refusals. Define their retention separately from attempt records (`src/dsl41/reread_worker.py:158`, `src/dsl41/runner_update.py:91`).
 - **BUG-50**: Retention for per-attempt `runs/<job>.<run>/<n>/` records (`spawn.json`, `status.json`) is undefined and unverified; they consume inodes. Keep it separate from job-output archiving.
@@ -46,7 +46,6 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 - **BUG-26**: Operator docs omit `dsl41: cookie scan signalling: <primitive>`, and the [file-processing README](examples/file_processing/README.md) hides it with `tail -n 2` (DL-436).
 - **BUG-32**: The engine process scan can miss a process during exec, such as setsid then exec; it still finds group members (PR #311).
 - **BUG-33**: A hook exiting cleanly near its 5 s deadline with a TERM-resistant child is logged as delivery failed. A full-length hook also runs `ps` about 500 times on macOS (PR #315).
-- **BUG-34**: Before a stop, `engine stop --wait` reports a socket permission error when `leader.lock` is unreadable (PR #314 R3-1).
 - **BUG-39**: `dsl41 lint --timezone-map` treats an empty file as no map, untested (PR #313).
 - **BUG-46**: Unchanged members of a nested box moved out of a restarting box get no status marker (`src/dsl41/reread_worker.py:75-89`).
 - **BUG-49**: Pilot guidance does not explain the effects of `lint.ignore` and `lint.refuse` (`src/dsl41/lint.py` `rule_known_unsupported`, `src/dsl41/runner_preflight.py:903-915`).
@@ -55,9 +54,9 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 - **BUG-75**: A plan step's run id read back at a restart is first checked in `dispatch_record`, after `spawn` changed memory. `_check_steps` checks the step count and `DSL41_SCHEDULED_AT`, but not the run id (`src/dsl41/runner_journal.py:1377`, `src/dsl41/runner_journal.py:247`).
 - **BUG-76**: The engine's `stale_plan` and `update_in_progress` refusals cannot fire through the server, whose one preparation slot and STOPPING check exclude both. Only tests that call the engine reach them (`src/dsl41/runner_control.py:804-820`).
 - **BUG-77**: Lowering does not enforce the vendor's character set or its length limit for a job name; its directory-component check only refuses names containing `/` or a NUL byte, or equal to `.` or `..`; a catalog read from saved JSON or from a store is not checked (DL-494).
-- **BUG-78**: `engine stop --wait` run by an unprivileged user other than the engine's cannot confirm the exit and ends with status 2: `leader.lock` is created with mode 0600 (`src/dsl41/runner_procid.py:79`). No operator document says so.
 - **BUG-80**: Canonical rendering is not a fixpoint for a subcommand line whose subject is only a block comment before an inline `job_type:` (`insert_job: /* c */ job_type: c`): the first pass prints two spaces after the colon and the second prints one (F2). The line has no job name and lowering refuses it.
 - **BUG-81**: The status hook observes store rows that have no catalog job. `sendevent CHANGE_STATUS --job other^INS` creates a row for a cross-instance name; with `status_hook_long_running_s` set, the long-running check then sends `job_long_running` for it, and a FAILURE status sends `job_failure`, though no process runs. Decided: hook observations skip a row with no catalog job (owner, 2026-11-13). Not built.
+- **BUG-82**: On macOS the wrapper reads its own and the command's start token with `ps` after it has started the command and before it writes the spawn record (`src/dsl41/runner_wrapper.py:462`). Where `ps` cannot be executed, the wrapper ends with an uncaught `PermissionError`, the attempt is `unobservable`, and five such attempts hold the job. Seen only inside a sandbox that denies `ps`; Linux reads `/proc`.
 
 #### Tests, tooling and docs
 
