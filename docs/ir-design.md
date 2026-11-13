@@ -34,7 +34,8 @@ The flow shows compiler representations and their consumers; it leaves out runne
 
 Graph consumers take IR-F and derive IR-G beside it: `to_mermaid(catalog, graph)` and
 `decompile(catalog, graph)` need the faithful layer. The linter has the same shape:
-L001–L007, L015–L020 and L023–L025 read IR-F; L008–L014, L021 and L022 read IR-G next to it.
+L001–L007, L015–L020, L023–L025 and `known-unsupported` read IR-F; L008–L014, L021 and L022
+read IR-G next to it.
 
 The three representations have three contracts:
 
@@ -98,7 +99,12 @@ Notes:
 - The models carry more than the sketch above: every layout detail preserve mode needs rides
   on the same rows (`pre_blank_lines`, `indent`, `sep`, `post`, `inline_gap`, `inline_key`,
   `inline_sep`, `eof_blank_lines`, `final_newline`, `JilFile.file`). They are trivia to the
-  reader and required by F1.
+  reader and required by F1. Two more fields carry rendering rules: `Comment.trailing_block`
+  marks the rule-5 opener of a value's multi-line trailing comment (DL-161), and
+  `RawAttr.literal_prefix_lines` counts the leading lines that a literal blob region owns
+  verbatim (rule 12, DL-245).
+- `ast_jil.closed_block_spans` finds the closed `/*...*/` spans of rule 4/4b. The scanner and
+  lowering's job-name reading (§4) both use it.
 - There are four fidelity tests, F1–F4, defined in `jil-statement-syntax.md`. F1 is
   preserve-mode identity on the whole test corpus. F2 is the canonical-mode fixpoint. F3 is
   fuzz over generated JIL-shaped text and raw character soups: where parse succeeds, F1 holds.
@@ -310,8 +316,19 @@ Lowering rules:
   with name text on both sides (DL-495).
   A marker glued to the name (`j/* c */`) opens no comment and stays part of the name, which
   DL-494 refuses for its `/`.
+- A repeated attribute line is a lowering error (`duplicate attribute`), with one exception:
+  repeated `ulimit` lines are joined into one value with a comma.
+- `n_retrys` that is not a non-negative integer is a lowering error coded `[n-retrys]`.
+  Lowering does not check the upper bound. The runner's preflight refuses a count above 20
+  with code `n-retrys` (`runtime_policy.job_policy`, DL-469).
+- `term_run_time` outside 0..527040 minutes is a lowering error (DL-469).
+- `std_in_file` and `envvars` on an FW job are lowering errors coded `[fw-execution]`; on a
+  BOX they are inert (DL-32).
+- `ir.jil_boolean_value` is the one boolean parser for lowering and lint (DL-466).
 - `passthrough` is the only place an unmodeled attribute may go. Three routes reach it, and
-  only three: an attribute on the allow-list of known-inert attributes; an exec-shaped
+  only three: an attribute on the allow-list of known-inert attributes
+  (`ir.PASSTHROUGH_ALLOWED`, which includes `shell`; the runner's preflight refuses `shell`
+  and some other allow-listed attributes); an exec-shaped
   attribute that is inert on this job's type (a box does not execute, SEM-10); and the SEM-30
   dead time cluster (the time attributes plus the falsy `date_conditions` switch itself),
   carried so L005 can see it. Anything else needs `--permit-unknown`. An unknown attribute
@@ -332,8 +349,8 @@ Lowering rules:
 `derive.py` retains E/A/R classes and M-row identifiers as analysis metadata (DL-12,
 DL-73, DL-153). They classify edges, OR shapes and redesign flags; they do not select an
 output backend. `derive.py` defines the surviving assignments and assumption text.
-The migration rules behind these labels are recorded in the [decision log](decision-log.md);
-DL-424 excludes the UC backend.
+The [decision log](decision-log.md) holds the migration rules behind these labels; DL-424
+excludes the UC backend.
 
 ```python
 EdgeClass = Literal["exact", "assumed", "redesign"]  # E/A/R analysis labels
@@ -480,6 +497,10 @@ class Oracle:                             # one concrete interpreter, no protoco
     def trace(self) -> list[TraceEntry]          # ordered (at, job, transition, cause)
 ```
 
+A `TraceEntry` has three more optional fields, `start_source`, `run_number` and
+`refused_status`. The oracle sets them on the `START_REFUSED` line of an input's own start
+(DL-484).
+
 `Event`, `TraceEntry`, `RuntimeState` and its rows live in `oracle_state.py`; the interpreter
 in `oracle.py` imports them and `oracle_state.py` imports nothing from it (DL-91).
 
@@ -501,6 +522,9 @@ in `oracle.py` imports them and `oracle_state.py` imports nothing from it (DL-91
   status). The oracle admits it later, in deterministic order, on the terminal release of a
   holder. Non-goals: definition-time mutations (SEM-16, including mid-run resource
   replenishment) and agent failures.
+- When a status hook is configured, the live engine has the oracle record status
+  observations (`StatusObservation`) for the hook: `job_failure`, `job_terminated`, `job_hold` and the two alarms. They stay
+  in memory; they are never events, trace entries or stored rows (DL-446).
 
 ## 8. Serialization & identity
 
@@ -527,9 +551,14 @@ in `oracle.py` imports them and `oracle_state.py` imports nothing from it (DL-91
 ## 9. Linter architecture (findings, not treatments)
 
 `Violation(code, severity, message, jobs, span, detail)`, with stable codes,
-`exit_code(strict)`, and `--strict`. The rule inventory follows; each rule is traceable to a
-SEM rule or a decision-log entry. Some rules retain migration-oriented messages and
-classifications in `lint.py`; their presence does not imply a supported UC output (DL-424):
+`exit_code(strict)`, and `--strict`. `--suppress CODE` leaves a rule out of the report and the
+exit code (DL-23). `dsl41 lint --config PATH` lints the estate of a main config under its
+`[lint]` policy and exits 1 when the policy blocks on a finding (DL-437). A main-config start
+and `dsl41 reread` print errors and blocking findings in full and count the rest
+(`lint.lint_summary_lines`, DL-483); `dsl41 lint` prints every finding.
+The rule inventory follows; each rule is traceable to a
+SEM rule or a decision-log entry. Some rule messages and classifications in `lint.py` speak
+of migration; they do not imply a supported UC output (DL-424):
 
 | code | severity | rule | source |
 |---|---|---|---|

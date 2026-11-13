@@ -82,9 +82,17 @@ default there.
    not known, and it decides one input: `command: a /* c */b: x` is one value here and would
    be two attributes to a stripping engine. The scanner follows rule 4b's own wording, which
    reads the source line.
+   One function, `closed_block_spans` in `src/dsl41/ast_jil.py`, finds the closed spans for
+   rule 4, rule 4b and lowering (DL-151, DL-495).
    Lowering reads a job's name without surrounding closed block comments and refuses a comment
    with name text on both sides (DL-495). A marker glued to the name (`j/* c */`) opens no
    comment and stays part of the name, which DL-494 refuses for its `/`.
+   The comment read applies to job-subject statements only: `insert_job`, `update_job`,
+   `delete_job`, `override_job`, `rename_job` and `delete_box`. `JOB_SUBCOMMANDS` in
+   `src/dsl41/minify_rules.py` is the one list of them. The engine's `spec` texts select job
+   statements by the full list. Minify uses it without `rename_job`, which it refuses.
+   Lowering reads the `insert_job` subject the same way. In lowering, every other subject
+   keeps its whitespace-stripped text.
 4b. **Attribute lines carry ONE pair** (DL-30): the Broadcom syntax rules permit several
    `attribute: value` statements on one line (whitespace-separated) and require escapes (`\:`)
    or quotes for colons *inside* values. As a result, a second unescaped, unquoted,

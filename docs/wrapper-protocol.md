@@ -48,8 +48,11 @@ same directory agree.
   one process, the spawner** (fd-hygiene invariant, leak-tested). EOF on
   this fd means that the parent died, `kill -9` included.
 - `stdin_path: null` means /dev/null. The wrapper opens stdout and stderr
-  for append after adapter preparation of truncating explicit outputs
-  (DL-460, DL-492).
+  for append, mode 0600 when it creates them (DL-66). Before the wrapper
+  starts, the adapter truncates each explicit output whose mode is truncate
+  (`>`, or no prefix under `engine.std_file_mode = "truncate"`) when it
+  opens as a regular file. A failed open and a target that is not a regular
+  file are left to the wrapper's own open (DL-460, DL-492).
 - `grace_seconds`: the SIGTERM→SIGKILL escalation window for the
   parent-loss kill. Ordinary spawner stops use their command grace; KILLJOB
   uses the selected signal list at five-second intervals (DL-462).
@@ -68,17 +71,24 @@ The adapter supplies absolute stream paths resolved before dispatch
 commit; the wrapper consumes them literally (DL-447). It performs no
 environment substitution in these paths. Relative job paths anchor at
 dispatch cwd. The adapter starts the wrapper with the engine's captured
-startup environment, excluding `AUTOSERV`, `AUTOSYS`, `AUTOUSER` and
-`AUTOROOT`. Only the explicit `env` overlay can supply those four names.
-That overlay also supplies `AUTO_JOB_NAME`, `AUTORUN=S-N` and the existing
-`DSL41_*` invocation values. The startup environment also excludes inherited
-`DSL41_SOCKET`; the overlay supplies it only when the engine has a socket
-(DL-459). The input version stays 1 (DL-492).
+startup environment, less three groups of names:
 
-Every key in the JSON example is required; the spawner fills
-`lifeline_fd` (DL-150). `env` is optional (DL-428); `shell` and `limits`
-are optional (DL-492). `version`, `run_number` and `lifeline_fd` are integers,
-never booleans. `run_id`, `job`, `command`, `run_dir`, `stdout_path` and
+- `AUTOSERV`, `AUTOSYS`, `AUTOUSER` and `AUTOROOT`;
+- the generated invocation names `DSL41_JOB`, `DSL41_RUN_NUMBER`,
+  `DSL41_SCHEDULED_AT`, `DSL41_ATTEMPT`, `DSL41_RUN`, `DSL41_COOKIE`,
+  `AUTO_JOB_NAME` and `AUTORUN`, which never come from inheritance (DL-447);
+- `DSL41_SOCKET` (DL-459).
+
+Only the explicit `env` overlay can supply the four instance names. That
+overlay also supplies `AUTO_JOB_NAME`, `AUTORUN=S-N` and the `DSL41_*`
+invocation values. It supplies `DSL41_SOCKET` only when the engine has a
+socket (DL-459). The input version is 1 (DL-492).
+
+The spawner sends every key in the JSON example and fills `lifeline_fd`
+(DL-150). The wrapper itself requires the keys §4 step 6 names and
+defaults `stdin_path` and `grace_seconds` there (DL-444). `env` is optional
+(DL-428); `shell` and `limits` are optional (DL-492). `version`,
+`run_number` and `lifeline_fd` are integers, never booleans. `run_id`, `job`, `command`, `run_dir`, `stdout_path` and
 `stderr_path` are strings. `stdin_path` is a string or null.
 `grace_seconds` is a **finite** number, representable as a double, zero
 or more (DL-151).
@@ -87,11 +97,10 @@ a path separator, and must not be `.` or `..`.
 
 **No string value may hold a NUL**: not `job`, not `command`, not any path
 (DL-151). An embedded NUL makes `os.path`, `os.open` and the spawn raise
-`ValueError`, not `OSError`. The check refuses it by name, as
-`bad_spec`, before anything durable is written. Unchecked, a NUL in `command` or a stdio path would reach the
-wrapper, which records the spawn as `spawn_failed`.
+`ValueError`, not `OSError`. The wrapper's spec check refuses it by name, as
+a spec refusal (§4 step 6), before anything durable is written.
 
-An **unknown key is refused** (`bad_spec`). The object is frozen, so a key
+An **unknown key is refused** (the spec refusal). The object is frozen, so a key
 that this list does not name has no pinned type. This is the one
 place in the protocol where an unknown field refuses instead of being
 ignored.
@@ -110,14 +119,14 @@ on an incompatible change.
 A consumer of `spawn.json` or `status.json` must **refuse** a `version`
 that it does not implement. `true` and `1.0` are not the integer 1
 (DL-151). The rule is tolerant on fields and strict on versions: the
-`Wrapper-owned spool files` row of `docs/protocol-evolution.md`. The engine treats an unsupported version as unread, so it cannot
-supply an outcome (DL-151, DL-229). At restart an unread record is
+`Wrapper-owned spool files` row of `docs/protocol-evolution.md`. The engine
+treats an unsupported version as unread, so it cannot supply an outcome
+(DL-151, DL-229). At restart an unread record is
 quarantined under DL-433; it does not become a guessed completion.
 
 An **absent** `version` passes the spool reader. These two files form the
 wrapper-owned spool row of the evolution matrix, and that row alone passes
-an absent version: the Tier-0 wrapper writes them before any reader exists
-to require one (`docs/protocol-evolution.md` §1, DL-227, DL-229).
+an absent version (`docs/protocol-evolution.md` §1, DL-227, DL-229).
 
 ### spawn.json — written by the wrapper immediately after spawning
 
@@ -203,31 +212,33 @@ end. Missing records are not unconditional FAILURE `exit_status_unobservable`:
 DL-424 limits E7 to unobserved exits outside the interruption rule.
 At restart, a missing record carries the first stop's cause or
 `engine_death`. A restart reads each open attempt once and waits for no
-previous wrapper (DL-433). Cleanup of found processes runs in the live engine loop.
-Mismatched or unreadable records cause quarantine with evidence; a missing
-record or failed process scan does not (DL-433). A valid spawn retained during
-quarantine names only a candidate group. DL-431 identity proof governs Linux cookie
-cleanup; off Linux or without a cookie, the leader-token guard governs the group
-ladder (DL-444). The selected signalling primitive remains DL-436's, with no
-per-target fallback after a pidfd failure.
+previous wrapper (DL-433). Cleanup of found processes runs in the live
+engine loop. Mismatched or unreadable records cause quarantine with
+evidence; a missing record or failed process scan does not (DL-433). A
+valid spawn retained during quarantine names only a candidate group.
+DL-431 identity proof governs Linux cookie cleanup; off Linux or without a
+cookie, the leader-token guard governs the group ladder (DL-444). The
+signalling primitive is DL-436's, with no per-target fallback after a pidfd
+failure.
 
 ### DSL41_RUN env tag — forensics only
 
 The tag is base64url JSON `{"boot_id", "job", "run_id", "run_number"}` in
-the command's environment. Never use it for identity decisions. macOS
+the command's environment. The engine computes it before dispatch and
+records it in the dispatch's `env` overlay; the wrapper sets the same value
+for the command (DL-447). Never use it for identity decisions. macOS
 KERN_PROCARGS2 omits the environment for restricted binaries (/bin/sh),
 and Linux /proc/pid/environ is ptrace-gated (DL-41a item 5, probed
 empirically).
 
 ### DSL41_COOKIE env variable — the process cookie (an addition)
 
-DL-431 and DL-433 fix the process cookie. The spec keys, the spool files
-and the wrapper's behaviour are unchanged (DL-436). The cookie uses the
-optional `env` field.
+DL-431 and DL-433 define the process cookie. It adds no spec key, spool
+file or wrapper behaviour: it uses the optional `env` field (DL-436).
 The engine puts `DSL41_COOKIE=<root_id>.<run_id>` in the spec's
 `env` for every command attempt, and in the wrapper's own environment.
 `root_id` names the run root: a uuid written to the store's `meta` at
-genesis and read at every restart (state version 27, DL-433), so one
+genesis and read at every restart (DL-433), so one
 prefix covers every attempt of the root, whichever engine start launched
 it. `run_id` is the attempt's. The command gets the variable through
 `env`, and its children inherit it.
@@ -235,14 +246,15 @@ On Linux, with or without pidfd support, the engine reads
 `/proc/<pid>/environ` of the processes its uid may read. A process that
 carries an attempt's cookie belongs to that attempt, whatever its
 process group (`runner_procid.ours`). The wrapper is left out by the pid
-`spawn.json` names. EACCES/EPERM skips an unreadable process and counts it; ENOENT/ESRCH
-means gone. Other read failures hold cleanup as unknown (DL-431).
+`spawn.json` names. EACCES/EPERM skips an unreadable process and counts
+it; ENOENT/ESRCH means gone. Other read failures hold cleanup as unknown
+(DL-431).
 What is left of an attempt is the live membership of its proven process
 group and the processes that carry its cookie. A leader's start token or
 a member's cookie proves the group. Proof lasts until a reading finds it
-empty; a later nonempty group with no proof is left alone (DL-431). Both are taken as reliable: the
-engine is an orchestrator, not a jail. A process left when the command
-exits is a leak, stopped or left running by the `process-leak` switch
+empty; a later nonempty group with no proof is left alone (DL-431). Both
+are taken as reliable: the engine is an orchestrator, not a jail. A
+process left when the command exits is a leak, stopped or left running by the `process-leak` switch
 (`docs/runner-design.md` §8a).
 The limit: outside the recorded group the engine sees only what the
 scan can read. A process that leaves the group and drops the cookie
@@ -251,18 +263,18 @@ that exits), one that leaves it and turns non-dumpable (`ssh-agent`
 does both), and one that leaves it under another uid (a setuid helper)
 are beyond the engine by design.
 Calling `setenv`, `unsetenv` or `clearenv` after the exec does not
-change what `/proc/<pid>/environ` shows. The systemd unit's cgroup
-remains the stronger fence. Signals use a pidfd where supported (DL-436). A pidfd open or send
-failure never falls back to `os.kill`. Without it,
+change what `/proc/<pid>/environ` shows. The systemd unit's cgroup is the
+stronger fence. Signals use a pidfd where supported (DL-436). A pidfd open
+or send failure never falls back to `os.kill`. Without pidfd support,
 the engine re-reads the start token (`proc_start_token`, `/proc/<pid>/stat`
 field 22) and calls `os.kill` only if it still matches the scanned token.
 The race between that check and the signal is accepted: the engine is an
 orchestrator, not a jail. Both primitives use the same ownership scan and
 selected signals. Ordinary stops and cleanup use TERM, grace and KILL;
-KILLJOB uses its selected list (DL-462). One log line per serving start with a run root names the
-primitive; in-memory rehearsals print none.
-On other platforms, and for an attempt dispatched before the cookie, the (pid, start-time) tuple and
-the process group decide.
+KILLJOB uses its selected list (DL-462). One log line per serving start
+with a run root names the primitive; in-memory rehearsals print none.
+On other platforms, and for an attempt dispatched without the cookie, the
+(pid, start-time) tuple and the process group decide (DL-436).
 
 ## 4. Wrapper behavior (frozen semantics)
 
@@ -294,15 +306,14 @@ the process group decide.
 6. The wrapper exit code is a notification only: 0 = a status record
    exists, 1 = an unreadable spec, a missing key or any other uncaught
    error, 2 = the spec refusal, 3 = a record write failed (for example
-   ENOSPC). The spec refusal comes
-   before anything spawns. It refuses a `version` that is absent or is not
+   ENOSPC). The spec refusal comes before anything spawns. It refuses a `version` that is absent or is not
    the integer 1 (`true` and `1.0` are refused), a present `lifeline_fd`
    that is not an integer, and a present `grace_seconds` that is not a
    finite number of zero or more. It also refuses mistyped `shell` or
    `limits` (§2, DL-492). A boolean is not a number (DL-229).
    Readable JSON that is not an object is a spec refusal and exits 2 before
-   any durable effect (DL-444). Malformed JSON exits 1 before any record. So does a
-   spec that lacks a key the wrapper reads with no default: `run_id`,
+   any durable effect (DL-444). Malformed JSON exits 1 before any record.
+   So does a spec that lacks a key the wrapper reads with no default: `run_id`,
    `job`, `run_number`, `command`, `run_dir`, `lifeline_fd`,
    `stdout_path`, `stderr_path` (DL-150). The wrapper defaults are
    `stdin_path` (null, meaning /dev/null), `grace_seconds` (10.0), `shell`
@@ -312,4 +323,4 @@ the process group decide.
 Citation pointers:
 
 - DL-226 — the engine outcome and interruption mapping is defined in §3 (DL-424, DL-426).
-- period-model §11a (`period-model.md`, retired) — DL-424 defines the exclusion; DL-428 fixes the current attempt spool and invocation.
+- period-model §11a (`period-model.md`, retired) — DL-424 defines the exclusion; DL-428 fixes the attempt spool and invocation.
