@@ -13,10 +13,17 @@ The verdict compares each run with `dsl41 rehearse` over the same window.
 The rehearsal plays the same estate on a virtual clock and is the reference.
 
 The engine's waits on real processes use engine seconds.
-At speed 60, a 5-second wait allows about 83 ms of real time.
-These bounds include the stop ladder's `grace_term_s` and `grace_kill_s`,
-the fixed 5 seconds between selected signals, the record timeout after KILL
-(`grace_kill_s`), and the fixed 5-second drain and spool margins.
+Above speed 1, the drill writes the root's `engine.toml` with the default
+`grace_term_s` and `grace_kill_s` multiplied by the speed.
+At speed 60 these are 600 and 300 engine seconds: up to 10 real seconds from TERM to KILL,
+and 5 real seconds for the wrapper's record after the last KILL of any ladder,
+including the drain's TERM-then-KILL ladder.
+The wrapper also uses `grace_term_s` when its lifeline closes: up to 10 real seconds at speed 60.
+A leaving engine waits for the wrapper for up to this grace plus the spool margin,
+about 10.08 real seconds at speed 60.
+The restart reads the same settings. At speed 1 the engine keeps its defaults.
+The 5 seconds between selected signals and the 5-second drain and spool margins stay fixed.
+At speed 60, each fixed wait allows about 83 ms of real time.
 A slow runner can miss the record timeout even when the wrapper writes its end record.
 The verdict reports that kill as a failed `kill applied` row naming the job, run
 and `unobservable` outcome, with no wrapper end available in the engine's record.

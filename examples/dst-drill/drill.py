@@ -280,6 +280,16 @@ class Leg:
             else SteppedClock(scenario.start, work / "clock.spec")
         )
         self.root = work / "rr"
+        if speed > 1:
+            from dsl41.runner_config import SETTINGS_FILE, EngineSettings
+
+            defaults = EngineSettings()
+            settings = defaults.overridden(
+                grace_term_s=defaults.grace_term_s * speed,
+                grace_kill_s=defaults.grace_kill_s * speed,
+            )
+            self.root.mkdir(mode=0o700)
+            (self.root / SETTINGS_FILE).write_text(settings.to_toml(), encoding="utf-8")
         self.rows: list[compare.Row] = []
         self.log = (work / "engine.log").open("a", encoding="utf-8")
 
