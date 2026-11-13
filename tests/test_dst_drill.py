@@ -23,6 +23,7 @@ from typer.testing import CliRunner
 from dsl41.cli import app
 from dsl41.cli_common import load_catalog_or_exit_2
 from dsl41.lint import rule_l023
+from dsl41.runner_config import EngineSettings, load_settings
 
 DRILL_DIR = Path(__file__).resolve().parent.parent / "examples" / "dst-drill"
 WORKFLOW = DRILL_DIR.parents[1] / ".github" / "workflows" / "dst-drill.yml"
@@ -154,6 +155,31 @@ def test_dst_drill_control_verbs_keep_their_reply_budget_in_real_time(
         assert all(row.ok for row in leg.rows)
     finally:
         leg.log.close()
+
+
+@pytest.mark.parametrize("speed", [60, 1])
+def test_dst_drill_engine_graces_keep_their_real_time(
+    speed: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    given = []
+
+    def launch(args: list[str], **kwargs: object) -> None:
+        root = Path(args[args.index("--run-root") + 1])
+        given.append(load_settings(root, create=False))
+
+    monkeypatch.setattr(drill.subprocess, "Popen", launch)
+    leg = drill.Leg(BY_NAME["newyork-spring"], tmp_path, speed)
+    try:
+        leg.engine(resume=False)
+        leg.engine(resume=True)
+    finally:
+        leg.log.close()
+    defaults = EngineSettings()
+    expected = defaults.overridden(
+        grace_term_s=defaults.grace_term_s * speed,
+        grace_kill_s=defaults.grace_kill_s * speed,
+    )
+    assert given == [expected, expected]
 
 
 # ----------------------------------------------------- against the virtual clock
