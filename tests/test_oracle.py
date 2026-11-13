@@ -7294,22 +7294,6 @@ def test_error_uninjectable_event_kind_raises() -> None:
         o.feed(Event(at=T0, kind="MUST_START_ALARM", payload={}))
 
 
-# ------------------------------------------------------------------- 23. not covered
-
-
-@pytest.mark.skip(
-    reason=(
-        "T03/SEM-03 operator precedence (Q1 resolved: DL-53) is pinned entirely"
-        " at parse time by condition.lark (flat left-to-right); the oracle only"
-        " ever sees the already-built Cond tree and has no precedence concept"
-        " of its own to trace-test. See test_condition_grammar.py::"
-        "test_sem03_flat_left_to_right_precedence_pinned for the pinning test."
-    )
-)
-def test_sem03_precedence_is_not_applicable_at_the_oracle_layer() -> None:
-    pass
-
-
 # ---------------------------------------------------------------- 24. hypothesis (tier c)
 
 _DIAMOND3_JIL = (

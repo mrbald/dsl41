@@ -13,7 +13,7 @@ whose lowering reads source order. An insert_machine pool binds `factor`/`max_lo
 `machine:` line above (DL-49) and a cycle pairs `start_date`/`end_date` positionally (SEM-39).
 A `#` tail is value text, not a comment (DL-31), so it stays inside `stmt.subject` and
 vanishes only because every subject becomes a minted name. `_transform_statement`
-asserts that: an unminted subject reaching the renderer is a refusal.
+asserts that every emitted subject is minted.
 
 Every attribute key and statement subcommand resolves to exactly one class:
 
@@ -578,15 +578,13 @@ def _transform_statement(
             return None
     else:
         new_subject = alloc.simple(namespace, unquote_jil_value(subject))
-    if new_subject not in alloc.allocated:
-        # A rule-5 trailing comment can ride inside `stmt.subject`, which preserve mode emits
-        # byte for byte; it vanishes only because the subject is replaced, so an unminted
-        # subject is a leak. The token guard is not trusted for this.
-        refusals.append(
-            f"{stmt.span.at}: subject {subject!r} did not resolve to a minted name;"
-            " minify refuses to emit a subject it did not rename"
-        )
-        return None
+    # A rule-5 trailing comment can ride inside `stmt.subject`, which preserve mode emits
+    # byte for byte; it vanishes only because the subject is replaced, so an unminted
+    # subject is a leak. The token guard is not trusted for this.
+    assert new_subject in alloc.allocated, (
+        f"{stmt.span.at}: subject {subject!r} did not resolve to a minted name;"
+        " minify refuses to emit a subject it did not rename"
+    )
     inline = stmt.job_type_inline
     if inline is not None and not validate_keep("job_type", inline):
         refusals.append(

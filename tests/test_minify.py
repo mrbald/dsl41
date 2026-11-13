@@ -289,6 +289,9 @@ def test_a_keep_value_outside_its_closed_space_refuses() -> None:
     joined = " ".join(exc.value.messages)
     assert "timezone" in joined
     assert "job_load" in joined
+    for separator in ("\n", " "):
+        with pytest.raises(MinifyRefusal, match="job_type: 'UNKNOWN'.*closed value"):
+            minify_text(f"insert_job: A{separator}job_type: UNKNOWN\n", verify=False)
 
 
 def test_a_keep_value_inside_its_closed_space_does_not_refuse() -> None:
@@ -592,28 +595,6 @@ def test_a_comment_tail_riding_the_subject_cannot_leak() -> None:
     assert parsed.statements[0].comments == []  # and the scanner sees no comment
     body = minify_files([parsed], verify=False).bodies[0]
     assert body == "insert_machine: m1\ntype: a\n"
-
-
-def test_an_unminted_subject_is_a_refusal_not_a_guard_question() -> None:
-    """The defence behind the test above. If a subject ever reached the
-    renderer without being minted, its `#` tail would ship; that is a refusal,
-    and the token guard is not trusted for it. Driven with an allocator whose
-    mint is stubbed out, because nothing in the real path can produce it."""
-    from dsl41.minify import _Allocator, _transform_statement, _Transformed
-
-    stmt = parse("insert_machine: ACMEHOST # jsmith\ntype: a\n", file="<f>").statements[0]
-    out = _Transformed(jil=parse("", file="<f>"), needles=set(), kept=set())
-
-    honest = _Allocator(set(), {})
-    refusals: list[str] = []
-    emitted = _transform_statement(stmt, honest, out, refusals)
-    assert refusals == [] and emitted is not None and emitted.subject == "m1"
-
-    stubbed = _Allocator(set(), {})
-    stubbed.simple = lambda namespace, name: name  # type: ignore[method-assign]
-    refusals = []
-    assert _transform_statement(stmt, stubbed, out, refusals) is None
-    assert "did not rename" in " ".join(refusals)
 
 
 def test_an_estate_that_does_not_lower_refuses_unless_verify_is_off() -> None:

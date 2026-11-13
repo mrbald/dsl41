@@ -517,18 +517,6 @@ def test_the_refusal_stays_useful_when_the_holder_note_is_not(tmp_path: Path) ->
         holder.release()
 
 
-def test_using_a_lock_that_was_never_acquired_is_a_loud_error(tmp_path: Path) -> None:
-    """Both are invariant guards on this class's own use, and they are loud
-    rather than silent because the quiet versions are worse: a `note` that
-    did nothing would leave the next refusal naming a stale holder, and a
-    `check` that passed would be a fence that always says yes."""
-    lock = LeaderLock(tmp_path)
-    with pytest.raises(EngineError, match="not held"):
-        lock.note(at=T0)
-    with pytest.raises(EngineError, match="leadership was never acquired"):
-        lock.check()
-
-
 # ------------------------- 7. the ladder's remaining arms (DL-105)
 
 

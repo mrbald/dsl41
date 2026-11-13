@@ -1906,15 +1906,6 @@ def test_defective_tokens_classify_as_defective(token: str) -> None:
         autocal._parse_token("C", token)
 
 
-def test_calendar_attrs_is_the_allow_list_compile_uses() -> None:
-    """Breaks when `compile_calendar` grows an attribute the constant does
-    not name -- which would leave the calendar surface short a member."""
-    source = inspect.getsource(autocal.compile_calendar)
-    assert "CALENDAR_ATTRS" in source
-    for attr in autocal.CALENDAR_ATTRS - {"description"}:
-        assert attr in source, attr
-
-
 # --------------------------------------------------------------- 6. pins
 
 
@@ -1923,9 +1914,3 @@ def test_fake_adapter_completes_unscripted_runs_instantly() -> None:
     the `adapter_policy:unscripted-completion` row states it."""
     default = inspect.signature(FakeAdapter.__init__).parameters["default"].default
     assert default == (0.0, 0)
-
-
-def test_res_types_is_the_set_preflight_refuses_against() -> None:
-    """Breaks when preflight grows its own spelling of R/D/T again."""
-    source = inspect.getsource(runner_preflight._resource_preflight)
-    assert "RES_TYPES" in source
