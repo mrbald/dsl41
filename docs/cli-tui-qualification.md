@@ -30,12 +30,12 @@ They do not establish that a separately installed wheel works.
 | `rehearse` | `tests/test_semantics.py`, `tests/test_rehearse_check.py`, `tests/test_main_config.py` |
 | `journal` | `tests/test_runner_journal.py` |
 | `runs` | `tests/test_run_history.py` |
-| `query` | `tests/test_runner_control.py`, `tests/test_cli_control_branches.py`, `tests/test_subscriber_bound.py` |
+| `query` | `tests/test_runner_control.py`, `tests/test_cli_control_branches.py`, `tests/test_subscriber_bound.py`; focused and neutral status text in `tests/test_cli_output.py` (DL-482) |
 | `sendevent` | `tests/test_runner_control.py`, `tests/test_cli_control_branches.py`; TUI recovery reconstruction in `tests/test_tui_recovery_cli.py` |
 | `off-hold-all` | `tests/test_runner_control.py`, `tests/test_cli_control_branches.py` |
-| `ui`, `serve` | `tests/test_runner_serve.py`; PTY and served sessions in `tests/test_tui_recovery_drivers.py` |
+| `ui`, `serve` | `tests/test_runner_serve.py`; PTY and served sessions in `tests/test_tui_recovery_drivers.py`. The person of `ui` (hidden `--web-principal`) and its exit 2 on a bad person or a denied status: `tests/test_control_as.py` and `tests/test_runner_web.py` (DL-499). The person-aware server is `serve_people` in `src/dsl41/runner_web.py` |
 | `reread`, `update` | `tests/test_reload_update.py`, `tests/test_main_config_update.py`: socket/env selection, passive forecast, marker, application and retry (DL-463); `tests/test_cli_output.py`, `tests/test_definition_difference.py`: both layouts, filtered brief rows, shared candidate and engine-state advice, grouped differences and 5,000-job byte bounds (DL-482) |
-| `engine stop` | `tests/test_cli_control_branches.py`: stop request, refusal, unreachable engine and `--wait` through socket removal and lock release |
+| `engine stop` | `tests/test_cli_control_branches.py`: stop request, refusal, unreachable engine; `tests/test_cli_stop_process.py`: `--wait` on the exit of the engine's process, named by the peer pid on the connection that carries the stop; with no peer pid the wait uses `leader.lock` (DL-496) |
 | `--manifest`, `--environment` | `tests/test_estate_manifest.py`; navigation forms in `tests/test_nav.py` |
 
 The authority for `report`, `uc`, `host`, `supervise`, `seal`, `audit`, `verify`,

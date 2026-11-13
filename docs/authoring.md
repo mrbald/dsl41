@@ -81,7 +81,7 @@ It lowers the JIL through the compiler before it writes.
    dsl41 build catalog.py --check jobs.jil
    ```
 
-`dsl41 build` exits `2` when the module has no `estate()`, when it raises, when `estate()` returns something else, or when the JIL does not lower.
+`dsl41 build` exits `2` when the module cannot be imported or has no `estate()`, when `estate()` raises or returns something else, when the JIL does not lower, when a `--param` does not fit the module's `Params`, or when a file cannot be read or written.
 
 An estate of several JIL files can be a package with one module per file (DL-418).
 Its `__init__.py` composes the modules in the manifest's `files` order:
@@ -176,14 +176,17 @@ Lowering refuses unknown attributes outside the inert allow-list under DL-07.
 `--permit-unknown` carries those attributes verbatim.
 In Python, `build(permit_unknown=True)` selects that permission.
 The [entity contract](ir-design.md#4-ir-f-entities) defines the passthrough routes.
-Lowering also refuses duplicate job names.
+Lowering refuses duplicate job names.
 Lowering refuses a job name containing `/` or a NUL byte, or equal to `.` or `..` (DL-494).
 Lowering reads a job's name without surrounding closed block comments and refuses a comment with name text on both sides (DL-495).
 A marker glued to the name (`j/* c */`) opens no comment and stays part of the name, which DL-494 refuses for its `/`.
-New input accepts `term_run_time` from 0 through 527040 minutes; zero means no limit
-(DL-469). A main-config engine's stored catalog with an out-of-range value keeps running
+`term_run_time` accepts 0 through 527040 minutes; zero means no limit (DL-469).
+A main-config engine's stored catalog with an out-of-range value keeps running
 and restarting.
 Reread refuses that source until its value is corrected.
+Lowering refuses an `n_retrys` that is not a whole number; preflight refuses a value outside 0 through 20 (DL-469).
+Lowering refuses `std_in_file` and `envvars` on an FW job (DL-32).
+Repeated `ulimit` lines on one job are joined with a comma, not refused as duplicates.
 At definition time, `status:` accepts only INACTIVE, ON_HOLD, ON_ICE and ON_NOEXEC.
 Lowering refuses resource groups using `QUANTITY=ALL` or `VALUEOP`/`VALUE`.
 Write whole job definitions rather than `update_job`, `delete_job` or `override_job`.
@@ -571,6 +574,7 @@ Later layers override earlier ones.
 `engine.environment` selects a declared `[estate.environments.NAME]` table.
 It is required when the config declares environments.
 Its properties follow the base layers.
+`engine.fw_default_interval_s`, default 60, is the poll interval of a file watcher that sets no `watch_interval` (DL-469; [launch settings](deploy.md#what-the-main-config-selects)).
 
 `estate.include` accepts ordinary globs, with selected inputs compiled in sorted order
 as one catalog. Recursive `**` patterns are refused.
@@ -590,7 +594,8 @@ Use prebuilt JIL from [§1](#1-write-jil-or-use-the-python-dsl) when the handoff
 The following checks use the installed candidate config.
 The operator supplies access to its paths; a job author can use an agreed absolute
 config path in a separate check area instead.
-With `--config`, dsl41 refuses `--strict`, `--suppress`, positional files and `-p` with exit 2.
+With `--config`, dsl41 refuses positional files and these options with exit 2:
+`--manifest`, `--environment`, `-p/--properties`, `--timezone`, `--timezone-map`, `--semantics`, `--permit-unknown`, `--strict` and `--suppress`.
 Use `[lint]` for policy and the config for the input files and properties.
 
 1. Check the selected inputs and lint findings.
@@ -611,6 +616,9 @@ The main config's lint policy defaults to `refuse = "none"` and `ignore = []`.
 Under `none`, exit 0 can include findings.
 Lint exits 1 for blocking findings and 2 for refused inputs.
 Blocking findings refuse rehearsal/application. Passive reread reports them beside a diff when compilation succeeds (DL-463).
+`dsl41 lint` and `dsl41 rehearse` print every finding.
+A main-config start and `dsl41 reread` print a finding whole when its severity is error or the policy blocks it.
+They count the rest as `CODE SEVERITY: N findings` and name `dsl41 lint --config PATH` for the full list (DL-483).
 For an estate brought in under [§5](#5-bring-an-existing-autosys-estate-in),
 set `refuse = "warn"` to apply the `--strict` migration gate in [§4.4](#44-run-the-checks-in-order).
 Input, lowering, exception and preflight errors cannot be suppressed by this policy.
@@ -734,7 +742,8 @@ A replacement can append rows already written by the interrupted attempt.
 Use a durable invocation key to prevent duplicate database writes, messages and other side effects.
 A checkpoint is sufficient only if resuming it also prevents duplicate effects.
 
-Commands receive these generated variables; `DSL41_SOCKET` requires an engine socket:
+Commands receive these generated variables; `DSL41_SOCKET` requires an engine socket.
+`job_env` cannot set any of them:
 
 | Variable | Meaning across attempts of one run |
 | --- | --- |
@@ -744,6 +753,8 @@ Commands receive these generated variables; `DSL41_SOCKET` requires an engine so
 | `DSL41_ATTEMPT` | Attempt ordinal; changes for each replacement. |
 | `AUTO_JOB_NAME` | Exact job name; unchanged. |
 | `AUTORUN` | `S-N`: first committed dispatch sequence and current attempt ordinal; changes for each replacement. |
+| `DSL41_RUN` | Forensic tag that encodes the attempt's `run_id`, job, run number and engine boot; changes for each replacement (DL-447). |
+| `DSL41_COOKIE` | The attempt's process cookie, `<root id>.<run_id>`: the run root's id and the run id, not a path; set on commands the engine observes; changes for each replacement (DL-431, DL-447). |
 | `DSL41_SOCKET` | Absolute path of the current engine's control socket; omitted without a socket, including rehearsal (DL-459). See the [AutoSys command equivalents](incident-triage.md#read-the-jobs-state). |
 
 For input and output paths, use [Set stream paths](#set-stream-paths).
@@ -805,7 +816,7 @@ The [status response](control-protocol.md#status-job) shows `attempt` and `inter
 | KILLJOB signal interval | 5 s | Fixed; `engine.kill_signals` or `sendevent -k` selects the signals. |
 | Ordinary stop TERM to KILL | 10 s | `grace_term_s` in the run root's `engine.toml`. |
 | Confirmation after KILL | 5 s | `grace_kill_s` in the run root's `engine.toml`. |
-| Attempts per run | 5 | Engine limit; an interruption on attempt 5 holds the job. |
+| Attempts per run | 5 | Engine limit; an interruption on attempt 5 holds the job. A CMD job's `n_retrys` raises the limit to `5 + n_retrys` (DL-485). |
 
 The explicit-file or manifest form of `run` accepts `--grace-term` and `--grace-kill`
 as overrides for one engine start.
@@ -844,7 +855,7 @@ The applied count when the plan is chosen decides; interrupted tries consume the
 same ordinal, and a run never exceeds 25 attempts.
 Changing `n_retrys` stops the running try like any definition change; lowering
 it holds the job if that try's number is at least `5 +` the new count (DL-485).
-BOX and FW retries, play and rehearse remain unimplemented.
+BOX and FW jobs, play and rehearse do not retry.
 Start times missed during downtime are skipped and reported (DL-45).
 A backward wall-clock step holds engine time at its last stamp or admission
 frontier; it does not refuse operator inputs or startup (DL-435, DL-493).

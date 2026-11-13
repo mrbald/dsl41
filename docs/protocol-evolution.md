@@ -71,7 +71,7 @@ one state version (DL-424); drain with the old binary before changing that
 version, then use a fresh root. No snapshot migration is provided.
 
 State version 28 requires dispatch environments and resolved stream paths
-(DL-447). Version 27 and other foreign state versions refuse under the
+(DL-447). Every other state version is foreign and refuses under the
 same drain and fresh-root policy. Dispatches retain S, the logical run's
 first committed dispatch sequence, their explicit environment overlay,
 referenced inherited values, dispatch cwd and absolute stream paths.
@@ -79,8 +79,8 @@ Snapshots retain each job's latest dispatch even after completion or
 journal pruning. Their required `dispatch_hash` binds the retained dispatches
 and each open attempt's original dispatch. Replay never re-expands these paths.
 Stored `RuntimeProfile` includes `job_env`, applied through configuration
-revisions. Wrapper input remains version 1; the adapter sends resolved
-paths through its existing fields. Control `status` reads these stored
+revisions. Wrapper input is version 1; the adapter sends resolved
+paths in its version-1 fields. Control `status` reads these stored
 paths and returns null before dispatch, within dialect 5 (DL-498).
 An empty `job_env` is omitted from canonical profiles and hashes (DL-447).
 Version-28 dispatches and snapshots require valid invocation data and S.
@@ -97,6 +97,11 @@ in dialect 5. It changes no record or state version.
 Startup refuses a store without it. Clock domain is also checked separately.
 A new binary version alone does not change the catalog or runtime hashes.
 
+The site status hook receives one JSON object per event, with `v = 1` and every
+key present, null where it does not apply (DL-446, DL-469). A hook must ignore
+unknown fields and unknown events; an incompatible change increments `v`. The
+engine keeps no copy of a payload and never reads one.
+
 ### Notes on the rows
 
 **FW evidence (DL-461).** One reader accepts scalar and sampled observations.
@@ -109,7 +114,7 @@ its poll count and deadline but contributes no pathname stability.
 A scalar line after a sample refuses. A run with sampled evidence keeps sampling for
 the rest of that run, including after a change to an exact target. That target is
 matched as a literal path, `[` included (DL-467). Existing records are never rewritten.
-Scalar evidence remains readable without retirement. Older binaries refuse `sample`
+Scalar evidence is readable and not retired. Older binaries refuse `sample`
 by kind and quarantine that evidence on startup; rollback cannot continue such a watch.
 Shared artifact canonicalization, journal, snapshot and state versions are unchanged.
 
@@ -130,23 +135,24 @@ accepted by every reader. Before recovery acts, each name must be a BOX of the
 applied or candidate catalog, or restart refuses by name (DL-489). Snapshot
 refusals name the store path and snapshot sequence. Snapshots carry the intent
 body unchanged. State version stays 28; replay and history do not use the roots
-to derive state. An older state-28 build ignores the key
-and recomputes, including the old crash-window defect. Let an open update finish
+to derive state. A state-28 build that does not know the key ignores it and
+recomputes the roots, so a crash during the update can lose a box from its scope.
+Let an open update finish
 (`status.update` absent) before rollback or takeover by a standby on the older
 package (DL-489).
 
 **Main-config captures and plans (DL-437, DL-438).** New configuration rows use version 3.
 A required `job_order` list names every catalog job exactly once. The catalog
-map remains canonical and sorted; readers rebuild it in `job_order` order
+map is canonical and sorted; readers rebuild it in `job_order` order
 before scheduling or replay. `source_capture` is optional in version 3.
-Versions 1 and 2 remain readable. Version 2 requires captured sources; an
+Versions 1 and 2 are readable. Version 2 requires captured sources; an
 absent discriminator selects version 1. A version-2 reader recompiles only
 the stored capture, checks that its catalog hash matches the stored catalog,
 and restores that capture's job order. An unreadable or mismatched capture
-refuses the row. Legacy rows without capture keep sorted job order; their
-original live order is lost. No existing row is rewritten. All three versions reject
+refuses the row. A version-1 row has no capture and is read in sorted job
+order. No stored row is rewritten. All three versions reject
 unknown top-level fields. The configuration digest covers the format version
-and job order; `catalog_hash` remains order-free.
+and job order; `catalog_hash` is order-free.
 
 An interrupted update keeps an equal decoded row already at its expected
 revision, including one written by a version-1 or version-2 writer before
@@ -175,15 +181,17 @@ absolute `--config`. Paths anchor at that file. Ordinary globs expand in
 sorted order; `**`, unreadable inputs, duplicate selections and duplicate
 jobs refuse. JIL and `estate()` inputs compile together. `lint.refuse` is
 `none` (default), `error` or `warn`; it considers unignored findings.
-Input, lowering and preflight errors remain hard errors. A rehearsal root
+Input, lowering and preflight errors are hard errors. A rehearsal root
 must neither equal nor contain the engine root, nor lie inside it.
 
 Main-config restart restores the last applied revision. Estate, lint and
 `engine.environment` edits stay pending. Disk host identity,
-`machine_policy`, the access map and the current `kill_signals` apply at launch;
+`machine_policy`, the access map, the status hook settings (`status_hook`,
+`status_hook_long_running_s`; DL-446) and the current `kill_signals` apply at launch;
 invalid values exit 2 (DL-462). The kill list changes later kills, not replay
-or ordinary leftover cleanup. It is excluded from job-definition hashes.
-Stored configuration and plan formats remain unchanged.
+or ordinary leftover cleanup. It is excluded from job-definition hashes, as are
+`job_env` (DL-447) and `fw_default_interval_s` (DL-469).
+Stored configuration and plan formats do not change.
 A missing interrupted-update plan refuses before writes or signals.
 With the same state and format versions, restart restores the applied v3 IR,
 profile and job order without recompiling captures (DL-468). Missing settings
@@ -195,11 +203,11 @@ new binary rejects, or whose job diff differs from the recorded plan, refuses
 restart before writes or signals (DL-468). Compiler version metadata alone does
 not invalidate an otherwise matching retained configuration row. Missing runtime-policy
 keys are omitted from recomputed definition hashes only at their earlier-behavior
-defaults. Drift still refuses for a job already listed as changed. Placement and
-runtime-variable checks still apply (DL-437, DL-447).
+defaults. Drift refuses for a job already listed as changed. Placement and
+runtime-variable checks apply (DL-437, DL-447).
 It offers no legacy-root conversion and ignores
 unknown `[engine]` keys in its host-only load; the pending scan blocks the
-loop. These are limits, not permission to change the rules in this pass.
+loop. These are limits.
 
 **Wrapper evidence and input.** Spool readers ignore unknown fields but
 reject a present version other than the integer 1; booleans and floats do
@@ -212,8 +220,8 @@ missing evidence follows the interruption rule, not a guessed outcome.
 
 The wrapper input schema is frozen (DL-150). Optional `shell` and `limits`
 fields extend version 1 (DL-492). Their absence selects `/bin/sh` and no
-child limits. Unknown fields still refuse. Its field/type restrictions
-remain [wrapper protocol §2](wrapper-protocol.md#2-wrapper-input-spec-frozen).
+child limits. Unknown fields refuse. Its field/type restrictions
+are in [wrapper protocol §2](wrapper-protocol.md#2-wrapper-input-spec-frozen).
 The adapter launches the wrapper by file path; the wrapper reads stdin
 once and replaces it with `/dev/null`. A refused spec writes no spawn
 record. A spec-version change requires coordinating the adapter and wrapper.

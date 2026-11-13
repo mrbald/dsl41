@@ -9,15 +9,15 @@ verification workflow.
 The [Q register](autosys-semantics.md#9-open-questions-and-their-pinned-defaults)
 is the authority for question status and pinned defaults. Q10 has no
 protocol here; its register entry names the observation needed. Q11 is
-closed (DL-259), but its first-week default (`wekr-first-week`, `first-full`)
-is unverified; its [register entry](autosys-semantics.md#9-open-questions-and-their-pinned-defaults)
-names the live observation that settles it. No protocol here.
+closed (DL-259), and it has no protocol here. Its first-week default (`wekr-first-week`,
+`first-full`) is unverified, and its [register entry](autosys-semantics.md#9-open-questions-and-their-pinned-defaults)
+names the live observation that settles it.
 The runner's E5, E6, E7, E9 and E10 have no probe here; see
 [runner-design §15](runner-design.md#15-open-questions-e-series).
-Q12 is descoped (DL-288). Its optional AutoSys protocol is below.
+Q12 is out of scope (DL-288); its optional AutoSys protocol is below.
 
-U1, U3b and U6b need a Universal Controller instance; DL-288 descoped them and DL-424
-removed the UC backend. This runbook has no UC probe.
+U1, U3b and U6b would need a Universal Controller instance. The UC backend is not built
+(DL-288, DL-424), so this runbook has no UC probe.
 
 This page does not cover engine deployment or recovery; use
 [deploy.md](deploy.md).
@@ -143,15 +143,20 @@ uv run --project /path/to/dsl41 dsl41 rehearse estate.jil --timezone-map ujo_tim
 ```
 
 `dsl41 run` also accepts `--timezone-map`; use the
-[deployment guide](deploy.md) for an engine invocation. Without the map,
-a city name falls back to the unique zoneinfo city match, with a preflight WARN per job. With it, an OS zone
-name still resolves first, and a name that neither the OS nor the map
-knows is refused. If an estate carries admin-added entries
+[deployment guide](deploy.md) for an engine invocation. The estate manifest's
+`timezone_map` and the main config's `estate.timezone_map` select the same file.
+Without a map, a city name falls back to the one zoneinfo city match, with a preflight WARN
+per job. Zone names whose zone data is identical count as one match; different data stays
+ambiguous (DL-477). With a nonempty map, an OS zone name still resolves first, and a name that
+neither the OS nor the map knows is refused. An empty map file counts as no map, so the city
+fallback stays on (DL-163). If an estate carries admin-added entries
 (`autotimezone -a/-c`), only the export knows them.
+`dsl41 lint --timezone-map` uses the map for L023 and for the `--timezone` base-zone check;
+it gives no city-fallback warning.
 
-### Q9 — export bytes — **CLOSED (DL-60, [F])**
+### Q9 — export bytes — **settled at [F] (DL-60)**
 
-Q9 is closed from one export sample (DL-60). SEM-36/37 carry the
+Q9 rests on one export sample (DL-60). SEM-36/37 carry the
 verdicts: `extended_calendar:` spelling, fixed attribute order with
 empty-valued keys, `workday: all`, braces as grouping, `WORKD#L`,
 `holiday: S` without holcal, and `HH:MM:SS` row tails. They sit at the
@@ -241,7 +246,7 @@ What each August/December 2026 observation means:
   Aug 18 = holiday-free walk (dsl41's pin) · Aug 17 = plain next-workday,
   holidays not skipped.
 - **Q8c_2** (holiday-N chaining — Dec 24+25 are both holidays): output
-  Dec 25 = verbatim one-shot (dsl41's pin, the current doc text) · Dec 26 =
+  Dec 25 = verbatim one-shot (dsl41's pin) · Dec 26 =
   the target is re-processed by N (the 825395 hint); this result flips the
   single-shot corner. Any other date (Dec 28, for example) means N walks
   like W. Record it verbatim; it is a third behavior.
@@ -254,7 +259,7 @@ What each August/December 2026 observation means:
   generated dates (every day vs nothing). dsl41 evaluates it literally
   as an include (every day) as its pinned default (DL-59).
 - **Q8d_4** (`mon OR wed`): every Monday and every Wednesday in the
-  output shows that the OR word unions like `|` (AND is already cited,
+  output shows that the OR word unions like `|` (AND is cited in
   KB 442457).
 - **Q8d_5** (`NOT mon` alone, the only rule): every non-Monday = an
   exclusion-only rule list subtracts from the DAILY default (dsl41's pin) ·
@@ -318,7 +323,7 @@ dsl41_q6_box -d` in each case. Cleanup: run
 
 ### Q12 — FREE on a depletable resource (~3 minutes, runs up to four short jobs)
 
-Q12 is descoped (DL-288). Run this optional protocol only when the
+Q12 is out of scope (DL-288). Run this optional protocol only when the
 maintainer needs vendor evidence for that case. "resources Attribute"
 (AutoSys 24.2) documents FREE as "Optional for renewable virtual resources only". dsl41's preflight refuses FREE=Y
 and FREE=A on a depletable and accepts FREE=N (DL-287). The oracle

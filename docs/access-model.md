@@ -6,7 +6,7 @@ Deployment procedures are in [deploy.md](deploy.md).
 
 Status: **frozen (DL-231).** Design DL-146; rules from DL-147, DL-148,
 DL-149, DL-150, DL-151, DL-152, DL-158, DL-256, DL-272, DL-275, DL-311,
-DL-314, DL-421, DL-422, DL-423 and DL-499. This
+DL-314, DL-421, DL-422, DL-423, DL-496, DL-498 and DL-499. This
 document is the design of record for `runner_access.py`, the control-plane
 gate and the served web TUI. A change to a frozen item requires a
 decision-log entry, as in `docs/control-protocol.md`. The authentication
@@ -84,8 +84,11 @@ the contents at that path follows §7.
 ## 3. Local authentication: kernel peer credentials
 
 At connection accept, the engine reads the peer's credentials from the
-kernel: `SO_PEERCRED` on Linux, `LOCAL_PEERCRED` on macOS. The gate uses
-`runner_access.peer_uid` for the uid and adds the following:
+kernel: `SO_PEERCRED` on Linux, `LOCAL_PEERCRED` on macOS. One reader,
+`runner_access.peer_credentials`, gives a socket peer's pid and uid. The gate
+takes the uid through `runner_access.peer_uid` and needs no pid.
+`dsl41 engine stop --wait` takes the engine's pid from the same reader on its
+side of the connection (DL-496). The gate adds the following:
 
 - It maps the uid to a passwd name, then to groups through
   `getgrouplist`, on both platforms. macOS's `xucred.cr_groups` truncates
@@ -226,8 +229,8 @@ version check (DL-90). Nothing reaches `Engine.submit` unauthorized. The
 engine, the oracle and the store hold no authorization logic.
 
 Two doors precede the gate, in this order. The line must decode to a JSON
-object, and the request must name one of the accepted versions in
-[control-protocol §2](control-protocol.md#2-transport-and-framing-frozen). A
+object, and the request must name v5, the one version
+[control-protocol §2](control-protocol.md#2-transport-and-framing-frozen) accepts (DL-498). A
 malformed or wrong-version request is answered before classification. It
 reaches neither the policy nor the perimeter journal.
 
