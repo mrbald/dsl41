@@ -204,11 +204,7 @@ def _until_file(path: Path) -> None:
         time.sleep(0.01)
 
 
-def test_the_scan_is_unavailable_off_linux_and_without_proc(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _platform(monkeypatch, "darwin")
-    assert procid.ours("") is None
+def test_the_scan_reports_a_missing_proc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _platform(monkeypatch, "linux")
     monkeypatch.setattr(procid, "_PROC", str(tmp_path / "absent"))
     unlisted = procid.ours("")
@@ -482,12 +478,10 @@ def test_the_probe_selects_pidfd_or_token_checked_os_kill(
     assert procid.signal_ours(5, "t", 9)
     del fake_os.pidfd_open
     assert not procid.pidfd_supported()
-    assert not procid.signal_ours(5, "t", 9, pidfd=True)
     assert procid.signal_ours(5, "t", 9)
     fake_os.pidfd_open = lambda _pid: 3
     del fake_signal.pidfd_send_signal
     assert not procid.pidfd_supported()
-    assert not procid.signal_ours(5, "t", 9, pidfd=True)
     assert procid.signal_ours(5, "t", 9)
     assert sent == [9]
     assert killed == [(5, 9)] * 3

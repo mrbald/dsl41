@@ -11,8 +11,8 @@ None open.
 
 State handled outside a state machine and duplicated logic make the whole system fragile, so they rank here, not under maintenance (owner, 2026-11-10).
 
-- **FEAT-37**: Audit for code and tests that rest on state built by hand (DL-491). List the branches and chart rows that only such tests reach (store surgery, patched internals, harness worlds), from one suite run that records which test covers each branch; delete each or cover it from validated input.
-  Next: this item (owner, 2026-11-12).
+- **FEAT-37**: Audit for code and tests that rest on state built by hand (DL-491). A branch that only such tests reach is deleted, stated as an assertion, or covered from validated input. Left: `runner_tui.py`, `file_processing.py` and the small modules are not audited; the engine, restart, update, stops, adapters, process identity, control and CLI modules are. Three engine arms are undecided, each with a hand-built witness: `_release` with a held start during recovery, a KILL for a run that is no longer live within one dispatch pass, and `_close_killed` on an attempt that is already closed. `test_a_held_group_keeps_its_job_s_starts_back_until_it_is_gone` and `test_a_retry_while_a_resumed_update_still_stops_waits_for_its_application` still build state by hand, because each is the only macOS run of a branch that stays; `resume`'s optional `opened` exists for the second. The suite was not measured again after the slices, so the number of arms that only forged tests reach is not known.
+  Next: measure which test covers each branch again and list what is left.
 
 ## Known bugs
 
@@ -57,6 +57,7 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 - **BUG-77**: Lowering does not enforce the vendor's character set or its length limit for a job name; its directory-component check only refuses names containing `/` or a NUL byte, or equal to `.` or `..`; a catalog read from saved JSON or from a store is not checked (DL-494).
 - **BUG-78**: `engine stop --wait` run by an unprivileged user other than the engine's cannot confirm the exit and ends with status 2: `leader.lock` is created with mode 0600 (`src/dsl41/runner_procid.py:79`). No operator document says so.
 - **BUG-80**: Canonical rendering is not a fixpoint for a subcommand line whose subject is only a block comment before an inline `job_type:` (`insert_job: /* c */ job_type: c`): the first pass prints two spaces after the colon and the second prints one (F2). The line has no job name and lowering refuses it.
+- **BUG-81**: The status hook observes store rows that have no catalog job. `sendevent CHANGE_STATUS --job other^INS` creates a row for a cross-instance name; with `status_hook_long_running_s` set, the long-running check then sends `job_long_running` for it, and a FAILURE status sends `job_failure`, though no process runs. Decided: hook observations skip a row with no catalog job (owner, 2026-11-13). Not built.
 
 #### Tests, tooling and docs
 

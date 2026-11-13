@@ -1136,9 +1136,7 @@ class Engine:
         or a hold is an input whose admission marks the step done; a replacement is dispatched
         with its done mark, deferred while the engine recovers, and left to the restart while
         it drains."""
-        plan = self._plans.get(attempt)
-        if plan is None:
-            return
+        plan = self._plans[attempt]
         if not plan.steps:
             self._plan_finished(attempt)
             return
@@ -1197,16 +1195,14 @@ class Engine:
     def _plan_finished(self, attempt: str) -> None:
         """The plan is done: the attempt is settled, and the starts it kept back may go
         (DL-426)."""
-        plan = self._plans.pop(attempt, None)
+        plan = self._plans.pop(attempt)
         facts = self._facts.get(attempt)
         if facts is not None:
             facts.finished = True
         if self.attempts.knows(attempt):
             self.attempts.plan_done(attempt)
         self._forget_if_over(attempt)
-        job = plan.job if plan is not None else facts.job if facts is not None else None
-        if job is not None:
-            self._release(job)
+        self._release(plan.job)
 
     def _task_done(self, task: asyncio.Task[None]) -> None:
         """An observed attempt's adapter task is over: its wrapper has exited."""

@@ -729,7 +729,7 @@ def _emit_leaf_rows(
                 status=status,  # type: ignore[arg-type]
                 exit_code=exit_code,
                 started_by=started_by,
-                run_dir=run_dir if isinstance(run_dir, str) else None,
+                run_dir=run_dir,
                 box_name=box_name,
                 clock_source=clock_source,  # type: ignore[arg-type]
                 job_hash=revision.fingerprints.get(job),
@@ -870,9 +870,7 @@ def _read_all_spool(records: list[dict[str, Any]]) -> dict[tuple[str, int], Spoo
         if record.get("rec") != "dispatch":
             continue
         job, run_number = str(record["job"]), int(record["run_number"])
-        run_dir = record.get("run_dir")
-        if not isinstance(run_dir, str):
-            continue
+        run_dir = record["run_dir"]
         found = read_spool(Path(run_dir), job, run_number, str(record["run_id"]))
         initial = first.setdefault((job, run_number), found)
         if found is not None:

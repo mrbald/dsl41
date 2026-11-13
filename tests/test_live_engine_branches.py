@@ -309,7 +309,8 @@ def test_restart_resumes_the_box_roots_of_a_stopping_update(short_root):
             await client.event("STARTJOB", "BX")
             first_child = await _written(childfile)
             (short_root / "jobs.jil").write_text(text + _job("true", "box_name: BX\n", "new"))
-            await client.update()
+            admitted = await client.update()
+            assert admitted["application"] is None
             [intent] = [b for b in _records(root, "config") if b["event"] == "intent"]
             assert intent["restart_boxes"] == ["BX"]
             await _until(lambda: (root / "runs/j.1/1/status.json").exists())
@@ -318,12 +319,23 @@ def test_restart_resumes_the_box_roots_of_a_stopping_update(short_root):
             )
             await _kill_engine(engine)
         async with _cli(path) as (client, _):
+            retry = await client.update()
+            assert retry["decision"] == admitted["decision"] == "admitted"
+            assert retry["stop"] == admitted["stop"]
+            assert retry["application"] is None
+            waiting = asyncio.create_task(client.update(wait=True))
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(waiting), timeout=0.2)
+            assert not waiting.done()
             _release_child(childfile)
             await _until(
                 lambda: any(
                     b["event"] == "applied" and b["rev"] == 2 for b in _records(root, "config")
                 )
             )
+            applied = await asyncio.wait_for(waiting, timeout=10)
+            assert applied["stop"] == admitted["stop"]
+            assert applied["application"]["rev"] == 2
             status = await client.ask("status")
             assert status["config_rev"] == 2 and status["jobs"]["BX"]["run_number"] == 2
             await _until(lambda: (root / "runs/new.1/1/spawn.json").exists())

@@ -185,10 +185,6 @@ def test_signal_ladder_stops_after_early_exit():
 
 
 def test_signal_ladder_target_failures(monkeypatch):
-    with pytest.raises(ValueError, match="empty"):
-        asyncio.run(adapters.selected_signal_ladder(1, "token", ()))
-    with pytest.raises(OSError, match="no per-process targets"):
-        asyncio.run(adapters.selected_signal_ladder(1, "token", (9,), lambda: procid.Left("ours")))
     monkeypatch.setattr(procid, "signal_ours", lambda *args, **kwargs: False)
     monkeypatch.setattr(procid, "scanned_process_gone", lambda *args: True)
     asyncio.run(

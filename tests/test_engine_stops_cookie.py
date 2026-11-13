@@ -107,7 +107,7 @@ class _World:
     recorded group's members) and for the signals sent by pid, with the loop time of each."""
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self.scans: list[runner_procid.Ours | None] = [_found()]
+        self.scans: list[runner_procid.Ours] = [_found()]
         self.leader = False
         self.group: dict[int, str] | None = {}
         self.sent: list[tuple[int, int]] = []
@@ -117,7 +117,7 @@ class _World:
         monkeypatch.setattr(runner_procid, "linux_group_pids", lambda _pgid: self.group)
         monkeypatch.setattr(runner_procid, "signal_ours", self._signal)
 
-    def _ours(self, _prefix: str) -> runner_procid.Ours | None:
+    def _ours(self, _prefix: str) -> runner_procid.Ours:
         return self.scans.pop(0) if len(self.scans) > 1 else self.scans[0]
 
     def _alive(self, pid: int) -> bool:
@@ -236,8 +236,8 @@ def test_what_is_left_is_the_group_and_the_cookie(
 def test_a_failed_scan_is_unknown_and_still_names_the_group(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Astra B3: a scan cut short, a /proc that cannot be listed or a scan that could not be
-    made is `unknown`: alive, never a release, its note saying why, and the group's members
+    """Astra B3: a scan cut short or a group listing that fails is `unknown`: alive,
+    never a release, its note saying why, and the group's members
     are still named for the ladder."""
     world = _World(monkeypatch)
 
@@ -251,8 +251,6 @@ def test_a_failed_scan_is_unknown_and_still_names_the_group(
         assert look.alive and engine.stops.command_alive(PGID, "t")
         world.scans, world.group = [_found()], None
         assert engine.stops.left(PGID, "t").reason == "scan failed: EIO"
-        world.scans, world.group = [None], {}
-        assert engine.stops.left(PGID, "t").kind == "unknown"
         await engine.shutdown()
         _close(engine)
 
