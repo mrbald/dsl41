@@ -93,7 +93,7 @@ from dsl41.oracle_state import (
     JobStatus,
 )
 from dsl41.runner import Engine
-from dsl41.runner_access import AccessControl, Tier, peer_principal
+from dsl41.runner_access import AccessControl, Tier, peer_credentials, peer_principal
 from dsl41.runner_adapters import LINE_LIMIT
 from dsl41.runner_admission import (
     PROTOCOL_VERSION,
@@ -116,6 +116,7 @@ from dsl41.reload_plan import spec_texts
 from dsl41.runner_update import APPLICATION_KEYS, OpenedPlan, UpdateRequest, UpdateAnswer
 from dsl41.runner_store import Store
 from dsl41.runner_preflight import and_success_skeleton
+from dsl41.runner_procid import ProcessIdentity, proc_start_token
 from dsl41.state_machine import StatechartError
 
 #: sendevent verbs whose payload is a single catalog job (1:1 onto EventKind)
@@ -1744,17 +1745,34 @@ class ControlClient:
                 await writer.wait_closed()
 
 
+def peer_process(conn: socket_mod.socket) -> ProcessIdentity | None:
+    """The listening engine, sampled before the request's first write (DL-496)."""
+    try:
+        pid, _uid = peer_credentials(conn, include_pid=True)
+    except OSError:
+        return None
+    if pid is None or pid <= 0:
+        return None
+    try:
+        token = proc_start_token(pid)
+    except OSError:
+        token = None
+    return ProcessIdentity(pid, token)
+
+
 def roundtrip(
     socket_path: Path,
     request: dict[str, Any],
     *,
     timeout: float = 10.0,
     before_send: Callable[[], None] | None = None,
+    peer: list[ProcessIdentity | None] | None = None,
 ) -> dict[str, Any]:
     """One-shot blocking request/response for callers with no event loop (the typer
     `sendevent`/`query` verbs). Raises ControlClientError on any transport or decode
     failure; exit-code mapping is the CLI's job, so this stays free of typer (DL-78).
     `before_send` runs after connecting and before the first write, for recovery receipts.
+    `peer` receives the engine identity before that write (DL-496); nothing goes on the wire.
 
     Everything before the write is UNDELIVERED and everything from the write on is
     DELIVERED, because the boundary is what the failure means, not where it happened. A
@@ -1770,6 +1788,9 @@ def roundtrip(
             conn.connect(str(socket_path))
         except OSError as exc:
             raise ControlClientError(f"control socket {socket_path}: {exc}") from exc
+        if peer is not None:
+            # DL-496: a successful reply proves this peer survived the pre-write sampling.
+            peer.append(peer_process(conn))
         # Recovery pins precede every write (docs/control-protocol.md ss3).
         if before_send is not None:
             before_send()

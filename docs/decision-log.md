@@ -26647,3 +26647,24 @@ relitigate an entry; append a new one.
   NOT BUILT. The vendor's whole character set and its length limit for a job name, a
   blank in a name included (BUG-77). A closed comment inside an attribute value stays
   value text (rule 5).
+- DL-496 `engine stop --wait` confirms the exit by the engine's process, not by its lock
+  (2026-11-13; owner "option B on the leader.lock"; closes BUG-78; `cli_control.py`,
+  `runner_control.py`, `runner_access.py`, `runner_procid.py`, deploy)
+  THE RULE. On the connection that carries the stop, `engine stop --wait` reads the
+  engine's process from the socket's peer credentials: its pid and its start token. It
+  returns when that process is gone: the pid is absent, or it belongs to a process with
+  another start token. That path reads no file of the run root, so a user who may send
+  the stop can confirm the exit. Where the socket gives no peer pid (a client in another
+  pid namespace), the stop is still sent and `--wait` then waits on `leader.lock`; where
+  no connection is made (no socket yet, or one that refuses), it waits on the lock as
+  before. Only the engine's user can read the lock, and a free lock is not yet an exit.
+  `leader.lock` stays 0600 and nothing but the socket is open to the socket group
+  (access-model §8).
+  THE CAUSE. `--wait` probed `leader.lock`, which is 0600. A user of the socket group
+  other than the engine's could send the stop, was told that it was delivered and could
+  not be confirmed, and got status 2. And a free lock is not an exited process.
+  REJECTED. A group-readable lock, the owner's first choice, built and reviewed: read
+  access is enough to hold a shared or an exclusive flock, so a member of the group,
+  whatever its tier, could keep a stopped engine from starting, make `--wait` wait on a
+  lock no engine holds, and keep that grip after the group left the access map (Opus and
+  Astra diff reviews).

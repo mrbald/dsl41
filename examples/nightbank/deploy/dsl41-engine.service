@@ -4,7 +4,7 @@
 # One unit: the engine and every job it launches live in this unit's cgroup.
 # A stop is the engine's drain (spec-drain): ExecStop asks the engine to stop
 # every running job, TERM then KILL after the grace, record how each ended,
-# and exit 0; it returns once the engine has exited.
+# and exit 0; ExecStop confirms process exit when the peer pid is available.
 [Unit]
 Description=dsl41 engine (nightbank example)
 OnFailure=dsl41-engine-down.service
@@ -27,7 +27,7 @@ Group=dsl41
 # a run root that holds engine.db resumes the run it records, so a restart
 # reruns this same line (DL-428); a missing root is created
 ExecStart=/opt/dsl41/releases/<version>/bin/dsl41 run --config /etc/dsl41/dsl41.toml
-# the drain: returns once the socket is gone and leader.lock is free
+# DL-496: wait for process exit; without a peer pid, confirm only lock release
 ExecStop=/opt/dsl41/releases/<version>/bin/dsl41 engine stop --wait \
     --socket /srv/dsl41/runs/nightbank/control.sock
 # grace_term_s + grace_kill_s + 30 with engine.toml's defaults (10 + 5 + 30);

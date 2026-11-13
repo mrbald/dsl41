@@ -25,6 +25,7 @@ from dsl41.cli_common import (
 from dsl41.oracle_state import FAILED
 from dsl41.cli_output import OutputStyle, status_lines
 from dsl41.runner_access import REQUIRED_TIER, Tier
+from dsl41.runner_procid import ProcessIdentity
 
 
 # ------------------------------------------------------------ the control plane
@@ -310,9 +311,10 @@ def engine_stop(
     wait: bool = typer.Option(
         False,
         "--wait",
-        help="Return only once the engine has exited: its socket is gone and its run root's"
-        " leader.lock is free. An engine still starting (the lock held, no socket yet) gets"
-        " the stop as soon as it serves; one not running (the lock free) counts as stopped.",
+        help="Wait for the connected engine process to exit when its peer pid is available."
+        " Without a connection or peer pid, probe leader.lock. An engine still starting gets"
+        " the stop as soon as it serves; one not running (the lock free) counts as stopped."
+        " Socket-group users who may stop the engine can confirm its exit with a peer pid.",
     ),
 ) -> None:
     """Drain the running engine, as SIGTERM does.
@@ -334,24 +336,33 @@ def engine_stop(
 
     from dsl41.runner_control import ControlClientError, roundtrip
 
+    peer: list[ProcessIdentity | None] | None = [] if wait else None
     try:
-        response = roundtrip(socket_path, {"cmd": "engine_stop"})
+        response = roundtrip(socket_path, {"cmd": "engine_stop"}, peer=peer)
     except ControlClientError as exc:
         if not wait or exc.delivered or isinstance(exc.__cause__, PermissionError):
             raise typer.Exit(refuse(control_socket_error(socket_path, exc, stop=True))) from exc
-        retried = _stop_once_reachable(socket_path)
+        retried = _stop_once_reachable(socket_path, peer=peer)
         if retried is None:
             typer.echo(f"engine not running: {exc}")
             return
         response = retried
+    except OSError as exc:
+        raise typer.Exit(refuse(exc)) from exc
     typer.echo(json_mod.dumps(response, sort_keys=True))
     if not response.get("ok"):
         raise typer.Exit(2)
     if wait:
-        _wait_for_exit(socket_path)
+        assert peer
+        if peer[-1] is None:
+            _wait_for_lock_exit(socket_path)
+        else:
+            _wait_for_exit(peer[-1])
 
 
-def _stop_once_reachable(socket_path: Path) -> dict[str, Any] | None:
+def _stop_once_reachable(
+    socket_path: Path, *, peer: list[ProcessIdentity | None] | None = None
+) -> dict[str, Any] | None:
     """`--wait` with no socket to answer: a free `leader.lock` means no engine, so None; a held
     one means an engine still starting, so the stop is sent again every poll until it is
     delivered. A send that may have arrived is an unknown outcome and exits 2."""
@@ -359,51 +370,48 @@ def _stop_once_reachable(socket_path: Path) -> dict[str, Any] | None:
 
     from dsl41.runner_control import ControlClientError, roundtrip
 
+    while True:
+        if not _stop_lock_held(socket_path, delivered=False):
+            return None
+        time.sleep(STOP_POLL_S)
+        try:
+            return roundtrip(socket_path, {"cmd": "engine_stop"}, peer=peer)
+        except ControlClientError as exc:
+            if exc.delivered or isinstance(exc.__cause__, PermissionError):
+                raise typer.Exit(refuse(control_socket_error(socket_path, exc, stop=True))) from exc
+        except OSError as exc:
+            raise typer.Exit(refuse(exc)) from exc
+
+
+def _stop_lock_held(socket_path: Path, *, delivered: bool) -> bool:
+    """The fallback probe names the lock and whether a stop was sent (DL-496)."""
+    lock_path = socket_path.parent / "leader.lock"
     try:
-        while _lock_held(socket_path.parent / "leader.lock"):
-            time.sleep(STOP_POLL_S)
-            try:
-                return roundtrip(socket_path, {"cmd": "engine_stop"})
-            except ControlClientError as exc:
-                if exc.delivered or isinstance(exc.__cause__, PermissionError):
-                    raise typer.Exit(
-                        refuse(control_socket_error(socket_path, exc, stop=True))
-                    ) from exc
+        return _lock_held(lock_path)
     except PermissionError as exc:
-        raise typer.Exit(refuse(control_socket_error(socket_path, exc))) from exc
-    return None
-
-
-def _wait_for_exit(socket_path: Path) -> None:
-    """Block until the engine behind `socket_path` has exited: the socket refuses connects,
-    then the run root's `leader.lock` is free. The engine releases the lock last."""
-    import time
-
-    try:
-        while _answers(socket_path):
-            time.sleep(STOP_POLL_S)
-        while _lock_held(socket_path.parent / "leader.lock"):
-            time.sleep(STOP_POLL_S)
-    except PermissionError as exc:
+        outcome = "the stop was delivered, but" if delivered else "no stop was sent and"
         raise typer.Exit(
             refuse(
-                "dsl41: the stop was delivered, but --wait cannot confirm the exit because "
-                f"{socket_path.parent / 'leader.lock'} is not readable to this user"
+                f"dsl41: {outcome} --wait cannot confirm the exit because "
+                f"{lock_path} is not readable to this user"
             )
         ) from exc
 
 
-def _answers(socket_path: Path) -> bool:
-    import socket as socket_mod
+def _wait_for_lock_exit(socket_path: Path) -> None:
+    """A delivered stop with no peer pid can confirm only lock release (DL-496)."""
+    import time
 
-    with socket_mod.socket(socket_mod.AF_UNIX) as probe:
-        try:
-            probe.connect(str(socket_path))
-        except (PermissionError, BlockingIOError) as exc:
-            raise typer.Exit(refuse(control_socket_error(socket_path, exc, stop=True))) from exc
-        except OSError:
-            return False
-    return True
+    while _stop_lock_held(socket_path, delivered=True):
+        time.sleep(STOP_POLL_S)
+
+
+def _wait_for_exit(process: ProcessIdentity) -> None:
+    """Wait for the connected engine's exit, after store close and lock release (DL-496)."""
+    import time
+
+    while process.alive():
+        time.sleep(STOP_POLL_S)
 
 
 def _lock_held(path: Path) -> bool:
