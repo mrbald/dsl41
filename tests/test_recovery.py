@@ -1060,11 +1060,11 @@ def test_a_rejected_retry_answers_the_stored_code_and_a_record_without_one_omits
     async def scenario() -> tuple[dict, dict, dict, dict]:
         engine, server, loop_task = await _serve(run_root)
         try:
-            read = await _call(server.path, {"cmd": "status", "job": "j", "v": 3})
+            read = await _call(server.path, {"cmd": "status", "job": "j", "v": 5})
 
             def lost_race(request_id: str) -> dict[str, Any]:
                 return {
-                    "v": 3,
+                    "v": 5,
                     "cmd": "sendevent",
                     "baseline_id": read["baseline_id"],
                     "request_id": request_id,

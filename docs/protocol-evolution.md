@@ -2,7 +2,7 @@
 
 Status: **normative (DL-138).** Entries that rule parts of it include
 DL-144, DL-146, DL-147, DL-150, DL-151, DL-157, DL-158, DL-168, DL-170,
-DL-217, DL-227, DL-252, DL-263, DL-401 and DL-438. A change to what this document
+DL-217, DL-227, DL-252, DL-263, DL-401, DL-438 and DL-498. A change to what this document
 fixes requires a decision-log entry. Each entry is cited where it applies.
 
 For the architect: this page fixes format tolerance, version entry and
@@ -61,7 +61,7 @@ a row.
 | Reload plans | update preparation → `read_plan` and update | `plan_format_version = 2`; `artifact_format_version` (PR-08d) | Ignored | Version 1 and an absent plan version refuse as retired (DL-486); other unsupported versions refuse; malformed plans return no plan. Unsupported artifact version makes `read_plan` return no plan; absent artifact version passes | Retained plan; an interrupted update requires it |
 | Main-config input mapping | `main_config.prepare` → `from_parts` | `format_version = 1` in `main-inputs.json` | Ignored | Unsupported or absent refuses (DL-437) | Retained plan or stored capture |
 | Main config | Site → `load_config` | `format_version = 1` | Refused; restart host loading has the limit below | Unsupported or absent refuses (DL-437) | Site's config file |
-| Control socket | Client → `ControlServer` | `v` on every request; dual-read 3 and 4 (DL-462) | Ignored except strict v4 reread/update envelopes; v3 ignores `kill_signals` | Unsupported or absent refuses, connection stays open; defaults write 3, additions write 4, no fallback | One request; `subscribe` lasts to hangup |
+| Control socket | Client → `ControlServer` | Integer `v = 5` on every request (DL-498) | Ignored except strict reread/update envelopes | v1 to v4 refuse by name with their retiring entries; other unsupported or absent values refuse as unknown. Connection stays open; every bundled writer stamps 5, no fallback | One request; `subscribe` lasts to hangup |
 
 A durable format can retire only when no retained instance needs its reader
 (§3). Wire retirement needs the door to refuse the old dialect. SQLite
@@ -81,7 +81,7 @@ and each open attempt's original dispatch. Replay never re-expands these paths.
 Stored `RuntimeProfile` includes `job_env`, applied through configuration
 revisions. Wrapper input remains version 1; the adapter sends resolved
 paths through its existing fields. Control `status` reads these stored
-paths and returns null before dispatch, within dialect 3.
+paths and returns null before dispatch, within dialect 5 (DL-498).
 An empty `job_env` is omitted from canonical profiles and hashes (DL-447).
 Version-28 dispatches and snapshots require valid invocation data and S.
 Missing or damaged data refuses before recovery effects; S is never inferred.
@@ -91,7 +91,7 @@ view. Engine-owned `reread` uses live engine state (DL-463).
 
 Control `status` may carry `clock_hold: {"wall", "until"}` while real wall
 time is below engine time (DL-493). Clients may ignore this additive field
-in either dialect. It changes no record or state version.
+in dialect 5. It changes no record or state version.
 
 `root_id` is mandatory store identity, not a format version (DL-433).
 Startup refuses a store without it. Clock domain is also checked separately.
@@ -156,10 +156,10 @@ An equal candidate completes before admission, removes its prepared plan directo
 when it can, and writes no revision or record (DL-478). Its successful answer adds the optional
 `unchanged: {rev, catalog_hash}` field; wire dialects and persisted formats stay unchanged.
 
-DL-463 extends DL-462 with ADM reread and tokenless update. Status adds an optional
-memory-only reread annotation. Default framing and persisted formats stay unchanged.
-A v3 update is unknown_cmd after authorization: retiring its token form is the stated
-exception to DL-462. Older engines refuse without client fallback.
+ADM reread and tokenless update use dialect 5 (DL-463, DL-498).
+Status may carry an optional memory-only reread annotation.
+Persisted formats are independent of the control dialect.
+Older engines refuse without client fallback.
 
 Main-config plans use version 2. Version 1 and an absent version refuse as
 retired, citing DL-486, including interrupted-update recovery before writes or signals.
@@ -354,6 +354,12 @@ value is `false`, the refusal lives in that field's validator and no
 table is built. A table with one row is a table nobody consults. The four
 rules above still apply: the message names the value and its entry, and the
 malformed case keeps its own distinct error.
+
+The control-version registry lives beside the shared refusal function in
+`runner_admission.py`. It records v1 (DL-90), v2 (DL-118), and v3 and v4
+(DL-498). Both socket and envelope doors use that function. Only integer
+versions select a tombstone; strings, booleans and absent values remain unknown.
+Both cases use `unsupported_version` and leave the connection open.
 
 Reload plan version 1, including an absent `plan_format_version`, is retired
 (DL-486). Its reader refuses with `reload plan version 1 is retired (DL-486)`.

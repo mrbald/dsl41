@@ -557,7 +557,7 @@ def test_reread_validates_against_engine_startup_values_not_the_client(
         monkeypatch.delenv("CAPTURED_DIR")
         jil = short_root / "a.jil"
         jil.write_text(jil.read_text() + "std_out_file: $CAPTURED_DIR/$AUTORUN\n")
-        preview = roundtrip(socket, {"v": 4, "cmd": "reread"})
+        preview = roundtrip(socket, {"v": 5, "cmd": "reread"})
         assert preview["ok"], preview
         assert [item["name"] for item in preview["preview"]["changed"]] == ["A"]
         applied = socket_send(socket)("update", {"wait": True})

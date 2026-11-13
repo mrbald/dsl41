@@ -3313,8 +3313,7 @@ def test_cli_fw_question_late_arrival_immediate(short_root: Path, cli_env) -> No
     _cli_fw_late_arrival(short_root, restart=False)
 
 
-@pytest.mark.parametrize("version", [3, 4])
-def test_kill_signals_wire_versions(short_root: Path, version: int) -> None:
+def test_kill_signals_wire_v5(short_root: Path) -> None:
     async def scenario():
         engine, server, loop = await _serve(
             short_root / "run",
@@ -3322,7 +3321,9 @@ def test_kill_signals_wire_versions(short_root: Path, version: int) -> None:
             adapter=FakeAdapter(default=None),
         )
         try:
-            read = await _control_call(server.path, {"cmd": "status", "v": version, "job": "j"})
+            read = await _control_call(
+                server.path, {"cmd": "status", "v": PROTOCOL_VERSION, "job": "j"}
+            )
             assert read["ok"]
             envelope = command(
                 "ON_HOLD",
@@ -3331,7 +3332,7 @@ def test_kill_signals_wire_versions(short_root: Path, version: int) -> None:
                 revision=revision_in(read, "job:j"),
                 baseline_id=engine.baseline_id,
             )
-            assert (await _control_call(server.path, {**envelope, "v": version}))[
+            assert (await _control_call(server.path, {**envelope, "v": PROTOCOL_VERSION}))[
                 "decision"
             ] == "applied"
             assert engine.oracle.store.job["j"].on_hold
@@ -3342,13 +3343,12 @@ def test_kill_signals_wire_versions(short_root: Path, version: int) -> None:
                 revision=engine.oracle.store.revision("job:j"),
                 baseline_id=engine.baseline_id,
             )
-            answer = await _control_call(server.path, {**wrong_verb, "v": version})
-            if version == 4:
-                assert answer["code"] == "invalid_argument" and answer["refused"]
-            else:
-                assert answer["decision"] == "applied"
+            answer = await _control_call(server.path, {**wrong_verb, "v": PROTOCOL_VERSION})
+            assert answer["code"] == "invalid_argument" and answer["refused"]
             for value in ("invalid", [True, 9], [], [2], [9]):
-                read = await _control_call(server.path, {"cmd": "status", "v": version, "job": "j"})
+                read = await _control_call(
+                    server.path, {"cmd": "status", "v": PROTOCOL_VERSION, "job": "j"}
+                )
                 envelope = command(
                     "KILLJOB",
                     {"job": "j", "kill_signals": value},
@@ -3356,19 +3356,18 @@ def test_kill_signals_wire_versions(short_root: Path, version: int) -> None:
                     revision=revision_in(read, "job:j"),
                     baseline_id=engine.baseline_id,
                 )
-                answer = await _control_call(server.path, {**envelope, "v": version})
-                if version == 4 and value != [9]:
+                answer = await _control_call(server.path, {**envelope, "v": PROTOCOL_VERSION})
+                if value != [9]:
                     assert answer["code"] == "invalid_argument" and answer["refused"]
                 else:
                     assert answer["decision"] == "applied"
                     inputs = [r for r in read_journal(short_root / "run") if r["rec"] == "input"]
-                    assert inputs[-1]["payload"] == (
-                        {"job": "j"} if version == 3 else {"job": "j", "kill_signals": [9]}
-                    )
+                    assert inputs[-1]["payload"] == {"job": "j", "kill_signals": [9]}
             reader, writer = await asyncio.open_unix_connection(str(server.path))
             try:
                 writer.write(
-                    json.dumps({"cmd": "subscribe", "v": version, "since": 0}).encode() + b"\n"
+                    json.dumps({"cmd": "subscribe", "v": PROTOCOL_VERSION, "since": 0}).encode()
+                    + b"\n"
                 )
                 await writer.drain()
                 assert json.loads(await reader.readline())["ok"]
@@ -3434,8 +3433,9 @@ def test_k_override_old_server_refuses_without_downgrade(short_root: Path) -> No
             )
             output, _ = await child.communicate()
             assert child.returncode == 2 and b"this engine speaks v3" in output
-            mutations = [r for r in requests if r["cmd"] == "sendevent"]
-            assert len(mutations) == 1 and mutations[0]["v"] == 4
+            # The v5 pinned read meets the older engine's refusal before a mutation (DL-498).
+            assert len(requests) == 1
+            assert requests[0]["cmd"] == "status" and requests[0]["v"] == PROTOCOL_VERSION
         finally:
             server.close()
             await server.wait_closed()
@@ -3451,13 +3451,14 @@ def test_reload_access_versions_and_source_refusal(short_root: Path):
         try:
             for verb in ("reread", "update"):
                 old = await _control_call(server.path, {"v": 3, "cmd": verb})
-                assert old["code"] == "unknown_cmd"
+                assert old["code"] == "unsupported_version"
+                assert "v3 is retired (DL-498)" in old["error"]
                 fields = (
                     {}
                     if verb == "reread"
                     else {"baseline_id": engine.baseline_id, "request_id": "no-source"}
                 )
-                answer = await _control_call(server.path, {"v": 4, "cmd": verb, **fields})
+                answer = await _control_call(server.path, {"v": 5, "cmd": verb, **fields})
                 assert answer["refused"] and "fresh run root" in answer["error"]
                 assert "without a main config" in answer["error"]
         finally:
@@ -3494,7 +3495,7 @@ def test_reload_worker_context_output_and_findings(short_root: Path, monkeypatch
         engine.startup_cwd = short_root
         engine.startup_env["DSL41_WORKER_TEST"] = "startup"
         try:
-            answer = await _control_call(server.path, {"v": 4, "cmd": "reread"})
+            answer = await _control_call(server.path, {"v": 5, "cmd": "reread"})
             assert answer["ok"], answer
             assert answer["preview"]["added"] == ["P"]
             assert not list((short_root / "run" / "plans").iterdir())
@@ -3504,19 +3505,19 @@ def test_reload_worker_context_output_and_findings(short_root: Path, monkeypatch
             (short_root / "a.jil").write_text(
                 "insert_job: A\njob_type: c\ncommand: true\nmachine: localhost\ncondition: s(MISSING)\n"
             )
-            report = await _control_call(server.path, {"v": 4, "cmd": "reread"})
+            report = await _control_call(server.path, {"v": 5, "cmd": "reread"})
             assert report["ok"] and any(
                 "L001" in item for item in report["preview"]["lint_messages"]
             )
             marks = dict(engine.reread_marks)
             refused = await _control_call(
                 server.path,
-                {"v": 4, "cmd": "update", "request_id": "lint", "baseline_id": engine.baseline_id},
+                {"v": 5, "cmd": "update", "request_id": "lint", "baseline_id": engine.baseline_id},
             )
             assert not refused["ok"] and "L001" in refused["error"]
             assert engine.reread_marks == marks and engine.config_rev == 1
             (short_root / "a.jil").write_text("broken jil")
-            failed = await _control_call(server.path, {"v": 4, "cmd": "reread"})
+            failed = await _control_call(server.path, {"v": 5, "cmd": "reread"})
             assert not failed["ok"] and "error" in failed
             assert engine.reread_marks == {}
         finally:
@@ -3611,7 +3612,7 @@ def test_reload_worker_pipe_exhaustion_is_refused(short_root: Path, monkeypatch,
                 patch.setattr(os, "pipe", exhausted_pipe)
                 answer = await _control_call(
                     server.path,
-                    {"v": 4, "cmd": cmd}
+                    {"v": 5, "cmd": cmd}
                     | (
                         {"baseline_id": engine.baseline_id, "request_id": "exhausted"}
                         if cmd == "update"
@@ -3738,7 +3739,7 @@ def test_reload_worker_stderr_failure_detail(
             async with asyncio.timeout(30):
                 answer = await _control_call(
                     server.path,
-                    {"v": 4, "cmd": cmd}
+                    {"v": 5, "cmd": cmd}
                     | (
                         {"baseline_id": engine.baseline_id, "request_id": "stderr"}
                         if cmd == "update"
@@ -3930,7 +3931,7 @@ def test_update_preparation_has_one_slot_and_exact_retry(short_root: Path, monke
             engine, "request_update", lambda request: asyncio.create_task(submit(request))
         )
         request = {
-            "v": 4,
+            "v": 5,
             "cmd": "update",
             "baseline_id": engine.baseline_id,
             "request_id": "one",
@@ -3948,7 +3949,7 @@ def test_update_preparation_has_one_slot_and_exact_retry(short_root: Path, monke
             assert await first == await retry
             assert preparations == [True]
             assert server._preparing_update is None
-            invalid = await server._update({"v": 4, "cmd": "update"})
+            invalid = await server._update({"v": 5, "cmd": "update"})
             assert invalid["code"] == "baseline_mismatch"
         finally:
             release.set()
@@ -4036,7 +4037,7 @@ def test_update_decision_timeout_and_preparation_cancellation(short_root: Path, 
         )
         pending = asyncio.get_running_loop().create_future()
         request = {
-            "v": 4,
+            "v": 5,
             "cmd": "update",
             "baseline_id": engine.baseline_id,
             "request_id": "pending",

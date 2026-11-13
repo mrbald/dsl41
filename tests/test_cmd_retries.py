@@ -468,7 +468,7 @@ def test_cmd_retry_query_and_tui_note(short_root, capsys, cli_env):
             try:
                 _start_jobs(engine, "j")
                 await _spawned(root, "j", n=2)
-                answer = await client.request({"cmd": "status", "job": "j", "v": 3})
+                answer = await client.request({"cmd": "status", "job": "j", "v": 5})
                 row = answer["jobs"]["j"]
                 assert attempt_note(row) == "attempt 2, after exit 3"
                 assert status_label(row) == "RUNNING (attempt 2, after exit 3)"

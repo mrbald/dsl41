@@ -471,11 +471,11 @@ def test_real_worker_and_application_without_binding_socket(tmp_path, style):
                 await engine.run_until_quiescent(at)
 
         pump = asyncio.create_task(drive())
-        request = {"v": 4, "cmd": "update", "baseline_id": engine.baseline_id, "wait": True}
+        request = {"v": 5, "cmd": "update", "baseline_id": engine.baseline_id, "wait": True}
         try:
             await engine.run_until_quiescent(at)
             jil.write_text(jil.read_text().replace("command: true", "command: false"))
-            forecast = await server._reread({"v": 4, "cmd": "reread"})
+            forecast = await server._reread({"v": 5, "cmd": "reread"})
             assert forecast["ok"], forecast
             groups = forecast["preview"]["definition_changes"]["groups"]
             assert any(
@@ -495,7 +495,7 @@ def test_real_worker_and_application_without_binding_socket(tmp_path, style):
             assert identical["unchanged"]["rev"] == 2
             # A source-only edit still applies; zero changed jobs cannot mean unchanged.
             jil.write_text(jil.read_text() + "\n/* synthetic comment */\n")
-            source = await server._reread({"v": 4, "cmd": "reread"})
+            source = await server._reread({"v": 5, "cmd": "reread"})
             assert source["ok"] and not source["preview"]["changed"]
             assert source["preview"]["definition_changes"]["sources_changed"]
             text = "\n".join(reread_lines(source, style, "dsl41 update"))
@@ -626,7 +626,7 @@ def test_engine_state_prevents_affirmative_reread_advice(
         return candidate_answer(tmp_path)
 
     server._prepare_reload = prepare
-    answer = asyncio.run(server._reread({"v": 4, "cmd": "reread"}))
+    answer = asyncio.run(server._reread({"v": 5, "cmd": "reread"}))
     text = "\n".join(reread_lines(answer, style, "dsl41 update"))
     assert "apply with:" not in text
     assert ("draining" if draining else "another update") in text

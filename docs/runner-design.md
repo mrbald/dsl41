@@ -1149,7 +1149,8 @@ as above, independently of these refusal lists.
 
 The control plane is a Unix domain socket in the run directory, mode 0600
 (0660 to a named `socket_group` when the DL-146 access perimeter is armed —
-`docs/access-model.md` §8), with a JSON-lines protocol.
+`docs/access-model.md` §8), with a JSON-lines protocol. Every request names v5.
+Retired control dialects refuse by name (DL-498).
 
 Every CLI command taking `--socket` uses `DSL41_SOCKET` when the option
 is omitted (DL-459). An explicit option wins; missing both is an argument
@@ -1165,7 +1166,7 @@ frozen inventory; what follows is what each is for.
   FORCE_STARTJOB, KILLJOB, ON_ICE/OFF_ICE, ON_HOLD/OFF_HOLD,
   ON_NOEXEC/OFF_NOEXEC, DISARM (DL-158), RELEASE_RESOURCE (DL-256),
   SET_GLOBAL, CHANGE_STATUS (inject STATUS). KILLJOB accepts `-k LIST` through
-  control v4; an older server refuses it without a downgrade (DL-462).
+  control v5; an older server refuses it without a downgrade (DL-462, DL-498).
 - **Queries**: `status [job]`, `trace [--since seq]`, `explain <job>` — the
   job's condition shown with per-atom truth over the current store (the
   Cond IR makes this nearly free), `spec <job>` — the preserve-rendered

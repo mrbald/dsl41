@@ -395,7 +395,7 @@ def test_real_engine_death_with_live_run_notifies_catch_up_once(short_root):
         return child
 
     def status():
-        return roundtrip(root / "control.sock", {"v": 3, "cmd": "status"}, timeout=5)
+        return roundtrip(root / "control.sock", {"v": 5, "cmd": "status"}, timeout=5)
 
     try:
         first = boot(1)
@@ -403,7 +403,7 @@ def test_real_engine_death_with_live_run_notifies_catch_up_once(short_root):
         answer = roundtrip(
             root / "control.sock",
             {
-                "v": 3,
+                "v": 5,
                 "cmd": "sendevent",
                 "verb": "FORCE_STARTJOB",
                 "payload": {"job": "A"},

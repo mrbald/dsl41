@@ -587,7 +587,7 @@ def test_control_client_subscribe_raises_on_a_refused_subscribe(short_root: Path
             # the same refusal on the raw socket, with its stable code
             reader, writer = await asyncio.open_unix_connection(str(server.path))
             try:
-                writer.write(b'{"cmd": "subscribe", "v": 3}\n')
+                writer.write(b'{"cmd": "subscribe", "v": 5}\n')
                 await writer.drain()
                 line = json.loads(await asyncio.wait_for(reader.readline(), timeout=5.0))
             finally:
