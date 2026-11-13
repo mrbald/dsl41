@@ -21,6 +21,7 @@ from typer.testing import CliRunner
 
 import dsl41.cli_control as cli_control
 from dsl41.cli import app
+from dsl41.runner_procid import ProcessIdentity
 
 runner = CliRunner()
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -484,10 +485,12 @@ def _roundtrip(monkeypatch: pytest.MonkeyPatch, answer: Any) -> list[dict[str, A
 
     sent: list[dict[str, Any]] = []
 
-    def roundtrip(_socket: Path, request: dict[str, Any]) -> Any:
+    def roundtrip(_socket: Path, request: dict[str, Any], *, peer=None) -> Any:
         sent.append(request)
         if isinstance(answer, Exception):
             raise answer
+        if peer is not None:
+            peer.append(ProcessIdentity(123, "ticks:1"))
         return answer
 
     monkeypatch.setattr(runner_control, "roundtrip", roundtrip)
@@ -505,42 +508,23 @@ def test_engine_stop_cannot_confirm_a_request_whose_reply_was_lost(
     assert result.exit_code == 2, result.output
 
 
-def test_engine_stop_waits_for_the_socket_and_then_the_lock(
-    monkeypatch: pytest.MonkeyPatch, short_root: Path
-) -> None:
-    """`--wait` returns once the socket refuses connects and `leader.lock` is free."""
-    import fcntl
-    import os
-    import socket as socket_mod
-
+def test_engine_stop_waits_for_the_connected_process(monkeypatch, short_root):
+    """DL-496: a delivered stop waits for its captured process without opening the lock."""
     _roundtrip(monkeypatch, {"ok": True, "engine": "DRAINING"})
-    monkeypatch.setattr(cli_control, "STOP_POLL_S", 0.01)
-    path = short_root / "control.sock"
-    server = socket_mod.socket(socket_mod.AF_UNIX)
-    server.bind(str(path))
-    server.listen(8)
-    lock = os.open(short_root / "leader.lock", os.O_RDWR | os.O_CREAT, 0o600)
-    fcntl.flock(lock, fcntl.LOCK_EX)
-    polls: list[str] = []
-    real_answers, real_held = cli_control._answers, cli_control._lock_held
+    polls = []
 
-    def answers(socket_path: Path) -> bool:
-        polls.append("socket")
-        if polls.count("socket") == 2:
-            server.close()
-        return real_answers(socket_path)
+    def alive(process):
+        polls.append(process)
+        return len(polls) == 1
 
-    def held(lock_path: Path) -> bool:
-        polls.append("lock")
-        if polls.count("lock") == 2:
-            os.close(lock)
-        return real_held(lock_path)
+    def no_lock(path):
+        pytest.fail("a connected stop must not probe leader.lock")
 
-    monkeypatch.setattr(cli_control, "_answers", answers)
-    monkeypatch.setattr(cli_control, "_lock_held", held)
-    assert _run("engine", "stop", "--wait", socket=path).exit_code == 0
-    assert polls == ["socket", "socket", "lock", "lock"]
-    assert not real_held(short_root / "absent.lock")
+    monkeypatch.setattr(ProcessIdentity, "alive", alive)
+    monkeypatch.setattr(cli_control, "_lock_held", no_lock)
+    monkeypatch.setattr(cli_control, "STOP_POLL_S", 0)
+    assert _run("engine", "stop", "--wait", socket=short_root / "control.sock").exit_code == 0
+    assert polls == [ProcessIdentity(123, "ticks:1")] * 2
 
 
 @pytest.mark.parametrize(
@@ -569,24 +553,26 @@ def test_engine_stop_waits_for_an_engine_that_is_still_starting(
     script = iter(answers)
     sent: list[dict[str, Any]] = []
 
-    def roundtrip(_socket: Path, request: dict[str, Any]) -> Any:
+    def roundtrip(_socket: Path, request: dict[str, Any], *, peer=None) -> Any:
         sent.append(request)
         answer = next(script)
         if isinstance(answer, str):
             raise ControlClientError(
                 answer, delivered=answer == "delivered"
             ) from FileNotFoundError()
+        if peer is not None:
+            peer.append(ProcessIdentity(123, "ticks:1"))
         return answer
 
     locks = iter(held)
-    waited: list[Path] = []
+    waited: list[ProcessIdentity] = []
     monkeypatch.setattr(runner_control, "roundtrip", roundtrip)
     monkeypatch.setattr(cli_control, "STOP_POLL_S", 0.0)
     monkeypatch.setattr(cli_control, "_lock_held", lambda _path: next(locks))
     monkeypatch.setattr(cli_control, "_wait_for_exit", waited.append)
     result = _run("engine", "stop", "--wait", socket=tmp_path / "control.sock")
     assert (result.exit_code, len(sent)) == (code, sends), result.output
-    assert waited == ([tmp_path / "control.sock"] if sends == 3 else [])
+    assert waited == ([ProcessIdentity(123, "ticks:1")] if sends == 3 else [])
 
 
 @pytest.mark.usefixtures("cli_env")

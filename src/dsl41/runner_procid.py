@@ -361,6 +361,32 @@ def verify_alive(pid: int, recorded_token: str) -> bool:
     return start_tokens_match(token, recorded_token) and not zombie
 
 
+@dataclass(frozen=True)
+class ProcessIdentity:
+    """A connected engine's identity; unreadable process details prove no exit (DL-496)."""
+
+    pid: int
+    start_token: str | None
+
+    def alive(self) -> bool:
+        try:
+            os.kill(self.pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            pass  # a foreign process exists; readable details may still prove exit or reuse
+        try:
+            look = _proc_look(self.pid)
+        except OSError:
+            look = None
+        if look is None:
+            return True
+        token, zombie = look
+        return not zombie and (
+            self.start_token is None or start_tokens_match(token, self.start_token)
+        )
+
+
 # --------------------------------------------------------------- process group
 
 

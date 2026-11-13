@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 
 from dsl41 import runner_control
 from dsl41.cli import app
+from dsl41.runner_procid import ProcessIdentity
 
 pytestmark = pytest.mark.usefixtures("cli_env")
 
@@ -379,48 +380,114 @@ def test_reload_cli_reports_a_busy_engine(
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses filesystem permissions")
 @pytest.mark.parametrize("stale", [False, True], ids=["missing_socket", "stale_socket"])
-@pytest.mark.parametrize("stopped", [False, True], ids=["before_stop", "after_stop"])
-def test_engine_stop_wait_reports_an_unreadable_leader_lock(
-    stale: bool, stopped: bool, monkeypatch: pytest.MonkeyPatch, short_root: Path
-) -> None:
+def test_engine_stop_wait_reports_an_unreadable_leader_lock(stale: bool, short_root: Path) -> None:
+    """DL-496: with no connection, an unreadable lock cannot confirm exit or startup."""
     path = short_root / "custom.sock"
     lock = short_root / "leader.lock"
     lock.touch(mode=0o600)
     if stale:
         with socket.socket(socket.AF_UNIX) as listener:
             listener.bind(str(path))
-    if stopped:
-        monkeypatch.setattr(
-            runner_control, "roundtrip", lambda *_args: {"ok": True, "engine": "DRAINING"}
-        )
     lock.chmod(0)
     try:
         result = runner.invoke(app, ["engine", "stop", "--wait", "--socket", str(path)])
     finally:
         lock.chmod(0o600)
     assert result.exit_code == 2, result.output
-    expected = (
-        "dsl41: the stop was delivered, but --wait cannot confirm the exit because "
-        f"{lock} is not readable to this user"
-        if stopped
-        else _permission_message(path)
+    assert result.stderr == (
+        "dsl41: no stop was sent and --wait cannot confirm the exit because "
+        f"{lock} is not readable to this user\n"
     )
-    assert result.stderr == expected + "\n"
-    assert result.stdout == ('{"engine": "DRAINING", "ok": true}\n' if stopped else "")
+    assert result.stdout == ""
 
 
-@pytest.mark.parametrize(
-    ("error", "stopped"),
-    [
-        (errno.EACCES, False),
-        (errno.EPERM, False),
-        (errno.EACCES, True),
-        (errno.EPERM, True),
-        (errno.EAGAIN, True),
-    ],
-)
-def test_engine_stop_wait_reports_connect_failure_after_the_first_roundtrip(
-    error: int, stopped: bool, monkeypatch: pytest.MonkeyPatch, short_root: Path
+@pytest.mark.parametrize("stale", [False, True], ids=["missing-socket", "stale-socket"])
+def test_engine_stop_wait_confirms_a_root_with_no_leader_lock(
+    short_root: Path, stale: bool
+) -> None:
+    """DL-496: without a connection or a lock, the CLI confirms nothing holds the root."""
+    path = short_root / "control.sock"
+    lock = short_root / "leader.lock"
+    assert not lock.exists()
+    if stale:
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(str(path))
+    result = runner.invoke(app, ["engine", "stop", "--wait", "--socket", str(path)])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.startswith("engine not running:")
+    assert result.stderr == ""
+    assert not lock.exists()
+    assert path.exists() == stale
+
+
+@pytest.mark.parametrize("retry", [False, True], ids=["initial-socket", "retry-socket"])
+def test_engine_stop_reports_socket_allocation_failure(short_root, monkeypatch, retry):
+    """Socket allocation precedes roundtrip's error wrapper, including during startup."""
+    import fcntl
+
+    from dsl41 import cli_control
+
+    path = short_root / "control.sock"
+    original = socket.socket
+    attempts = []
+
+    def allocate(family, *args, **kwargs):
+        assert family == socket.AF_UNIX
+        attempts.append(family)
+        if len(attempts) == (2 if retry else 1):
+            raise OSError(errno.EMFILE, os.strerror(errno.EMFILE))
+        return original(family, *args, **kwargs)
+
+    # A real exclusive lock and no socket are the engine's startup window.
+    with (short_root / "leader.lock").open("wb") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        monkeypatch.setattr(socket, "socket", allocate)
+        monkeypatch.setattr(cli_control, "STOP_POLL_S", 0)
+        result = runner.invoke(app, ["engine", "stop", "--wait", "--socket", str(path)])
+    assert len(attempts) == (2 if retry else 1)
+    assert result.exit_code == 2, result.output
+    assert result.stdout == ""
+    assert result.stderr == f"[Errno {errno.EMFILE}] {os.strerror(errno.EMFILE)}\n"
+
+
+def test_real_descriptor_exhaustion_prevents_socket_allocation() -> None:
+    """EMFILE is a real constructor failure; the subprocess owns its lowered limit."""
+    probe = """
+import errno, os, resource, socket
+original = resource.getrlimit(resource.RLIMIT_NOFILE)
+soft = 64 if original[0] == resource.RLIM_INFINITY else min(original[0], 64)
+resource.setrlimit(resource.RLIMIT_NOFILE, (soft, original[1]))
+fds = []
+try:
+    while True:
+        try:
+            fds.append(os.open('/dev/null', os.O_RDONLY))
+        except OSError as exc:
+            assert exc.errno == errno.EMFILE
+            break
+    try:
+        sock = socket.socket(socket.AF_UNIX)
+    except OSError as exc:
+        assert exc.errno == errno.EMFILE
+        print('AF_UNIX allocation: EMFILE')
+    else:
+        sock.close()
+        raise AssertionError('socket allocation succeeded without a free descriptor')
+finally:
+    for fd in fds:
+        os.close(fd)
+    resource.setrlimit(resource.RLIMIT_NOFILE, original)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, timeout=10
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "AF_UNIX allocation: EMFILE\n"
+
+
+@pytest.mark.parametrize("error", [errno.EACCES, errno.EPERM])
+def test_engine_stop_wait_reports_connect_failure_during_startup(
+    error: int, monkeypatch: pytest.MonkeyPatch, short_root: Path
 ) -> None:
     from dsl41 import cli_control
 
@@ -428,13 +495,11 @@ def test_engine_stop_wait_reports_connect_failure_after_the_first_roundtrip(
     real_roundtrip = runner_control.roundtrip
     calls: list[str] = []
 
-    def first_roundtrip(socket_path: Path, request: dict[str, Any]) -> dict[str, Any]:
+    def first_roundtrip(socket_path: Path, request: dict[str, Any], **kwargs) -> dict[str, Any]:
         calls.append(request["cmd"])
         if len(calls) == 1:
-            if stopped:
-                return {"ok": True, "engine": "DRAINING"}
             raise runner_control.ControlClientError("engine starting")
-        return real_roundtrip(socket_path, request)
+        return real_roundtrip(socket_path, request, **kwargs)
 
     def fail(_socket: socket.socket, address: str) -> None:
         assert address == str(path)
@@ -445,16 +510,10 @@ def test_engine_stop_wait_reports_connect_failure_after_the_first_roundtrip(
     monkeypatch.setattr(cli_control, "_lock_held", lambda _path: True)
     monkeypatch.setattr(cli_control, "STOP_POLL_S", 0.0)
     result = runner.invoke(app, ["engine", "stop", "--wait", "--socket", str(path)])
-    assert calls == ["engine_stop"] * (1 if stopped else 2)
+    assert calls == ["engine_stop"] * 2
     assert result.exit_code == 2, result.output
-    expected = (
-        f"dsl41: the engine at {path} is busy; it may already have taken the stop; "
-        "check with dsl41 query before retrying"
-        if error == errno.EAGAIN
-        else _permission_message(path)
-    )
-    assert result.stderr == expected + "\n"
-    assert result.stdout == ('{"engine": "DRAINING", "ok": true}\n' if stopped else "")
+    assert result.stderr == _permission_message(path) + "\n"
+    assert result.stdout == ""
 
 
 @pytest.mark.parametrize("error", [errno.EAGAIN, errno.EWOULDBLOCK])
@@ -484,17 +543,18 @@ def test_engine_stop_wait_retries_only_an_undelivered_busy_send(
     script = iter(answers)
     lock_script = iter(locks)
     calls: list[dict[str, Any]] = []
-    waited: list[Path] = []
+    waited: list[ProcessIdentity] = []
     lock_probes: list[Path] = []
 
-    def roundtrip(socket_path: Path, request: dict[str, Any]) -> dict[str, Any]:
+    def roundtrip(socket_path: Path, request: dict[str, Any], **kwargs) -> dict[str, Any]:
         assert socket_path == path
         calls.append(request)
         answer = next(script)
         if answer == "ok":
+            kwargs["peer"].append(ProcessIdentity(123, "ticks:1"))
             return {"ok": True, "engine": "DRAINING"}
         if answer == "busy":
-            return real_roundtrip(socket_path, request)
+            return real_roundtrip(socket_path, request, **kwargs)
         raise runner_control.ControlClientError("busy", delivered=True) from BlockingIOError(
             error, os.strerror(error)
         )
@@ -525,7 +585,7 @@ def test_engine_stop_wait_retries_only_an_undelivered_busy_send(
     else:
         assert result.stderr == ""
     if answers[-1] == "ok":
-        assert waited == [path]
+        assert waited == [ProcessIdentity(123, "ticks:1")]
         assert result.stdout == '{"engine": "DRAINING", "ok": true}\n'
     else:
         assert waited == []
