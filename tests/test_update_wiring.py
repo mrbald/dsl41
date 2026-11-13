@@ -1645,3 +1645,42 @@ def test_a_retry_while_a_resumed_update_still_stops_waits_for_its_application(
 
 def _intent_shape() -> dict[str, Any]:
     return {"stop": [{"job": "a", "run_number": 1}], "filter": ["a"]}
+
+
+def test_a_plan_whose_catalog_hash_is_not_the_engines_is_refused(tmp_path: Path) -> None:
+    """A plan with another live digest is stale before an intent is written (DL-427)."""
+    from dsl41.runner_adapters import FakeAdapter
+    from dsl41.runner_clock import VirtualClock
+
+    estate = Estate(tmp_path, _jil({"a": "x", "b": "x"}))
+    run_root = tmp_path / "run"
+    seen: dict[str, Any] = {}
+
+    async def scenario() -> None:
+        clock = VirtualClock(start=T0)
+        engine = start_run(
+            estate.catalog,
+            run_root,
+            clock=clock,
+            adapters={"CMD": FakeAdapter(default=None)},
+            source_capture=main.encoded_parts(prepare_estate(estate.dir)),
+            launched=main.profile_of(prepare_estate(estate.dir)),
+        )
+        assert engine.journal is not None
+        try:
+            estate.write(_jil({"a": "z", "b": "x"}))
+            stale = _plan(engine, estate)
+            plan_json = run_root / "plans" / stale / "plan.json"
+            document = decode(plan_json.read_bytes())
+            plan_json.write_bytes(canonical_bytes({**document, "live_digest": "sha256:0"}) + b"\n")
+            digest = engine.request_update(_request(engine, stale, rid="r3"))
+            await engine.run_until_quiescent(clock.now())
+            seen["digest"] = digest.result()
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(scenario())
+    decision = seen["digest"].decision
+    assert isinstance(decision, Refused) and decision.code == "stale_plan"
+    assert [c["event"] for c in _configs(run_root)] == ["applied"]

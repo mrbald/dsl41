@@ -573,8 +573,9 @@ class EngineUpdate:
         only in the loop."""
         if not self.direct and self.engine.catching_up:
             # the catch-up's own first look takes it (`look`, spec-restart §6)
-            if job is not None:
-                self._ended_meanwhile.append(job)
+            # Only the loop's direct first look passes None; keep/cleaned name a job (DL-432).
+            assert job is not None
+            self._ended_meanwhile.append(job)
         elif not self.direct:
             self.engine.post_update_exit(job)
         elif job is None:

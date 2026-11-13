@@ -257,8 +257,6 @@ def off_hold_all(
     from dsl41.runner_control import claimed_actor, command, revision_in
 
     response = _control_roundtrip(socket_path, {"cmd": "status"})
-    if not response.get("ok"):
-        raise typer.Exit(refuse(str(response.get("error", "status query failed"))))
     header = read_header_of(response)
     if header is None:
         raise typer.Exit(2)

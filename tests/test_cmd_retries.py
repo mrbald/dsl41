@@ -377,8 +377,6 @@ def test_update_preserves_or_discharges_committed_retry(tmp_path, monkeypatch, r
                     assert engine.attempt_view("j")["run_id"] == chosen
             finally:
                 monkeypatch.setattr(engine, "perform_plan", perform)
-                for attempt in held:
-                    perform(attempt)
 
     asyncio.run(scenario())
     assert len(records(root, "dispatch")) == (1 if remove else 2)
@@ -560,7 +558,7 @@ def test_retry_history_spans_three_minute_attempts(tmp_path, monkeypatch, missin
         [
             _status_input(1, T0 + timedelta(minutes=3), job="j1", run_number=1, exit_code=0),
             _applied(1),
-            _dispatch("other", 1, run_dir=None, started_at=T0),
+            _dispatch("other", 1, run_dir=str(tmp_path / "absent"), started_at=T0),
         ]
     )
     spool = runner_history._read_all_spool(journal)

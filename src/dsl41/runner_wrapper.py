@@ -217,8 +217,10 @@ def _reap(child: subprocess.Popen[bytes]) -> None:
 
 def _drain(fd: int) -> None:
     try:
-        while os.read(fd, 4096):
-            pass
+        # main keeps the self-pipe's writer open for the wrapper's lifetime (DL-321).
+        while True:
+            if not os.read(fd, 4096):
+                raise AssertionError("the wrapper's self-pipe writer must remain open")
     except BlockingIOError:
         pass
 

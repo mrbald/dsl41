@@ -732,7 +732,7 @@ def test_a_restart_starts_with_the_update_stopping_and_applies_it_as_a_loop_step
     dispatches exactly one replacement, after it (spec-restart §6, DL-432)."""
     from dsl41.runner_startup import resume_run
 
-    run_root, _ = _crashed_update(tmp_path, closing=closing, idle=True)
+    run_root, attempt = _crashed_update(tmp_path, closing=closing, idle=True)
     _Procs(monkeypatch)
     entered, release = _park_ladders(monkeypatch, survivor=closing)
     seen: dict[str, Any] = {}
@@ -786,80 +786,21 @@ def test_a_restart_starts_with_the_update_stopping_and_applies_it_as_a_loop_step
     assert seen["queued"] is True and seen["rev"] == 2
     after = seen["after"]
     applied = after.index(("config", "applied", None, None), intent)
+    if closing:
+        [closed] = [
+            i
+            for i, (_, kind, body) in enumerate(rows(run_root))
+            if kind == "follow_up"
+            and body.get("event") == "ladder_done"
+            and body.get("attempt") == attempt
+        ]
+        assert closed < applied
     plan_jobs = [
         i for i, o in enumerate(after) if i > intent and o[0] == "dispatch" and o[2] in ("j", "p")
     ]
     assert plan_jobs and min(plan_jobs) > applied  # no plan job before the application
     replacements = [o for o in after[intent:] if o[0] == "dispatch" and o[2] == "j"]
     assert replacements == [("dispatch", None, "j", 2)]  # exactly one, the rerun's
-
-
-def test_a_closing_attempt_whose_plan_finished_retains_its_ladder_effects(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A closing attempt's completed task still owns its callback: a finished plan cannot
-    forget it before `ladder_done` and `cleaned` let the update apply (spec-restart, DL-433)."""
-    from dsl41.runner_startup import resume_run
-
-    run_root, attempt = _crashed_update(tmp_path, closing=True)
-    _Procs(monkeypatch)
-    _, release = _park_ladders(monkeypatch)
-
-    async def restart() -> None:
-        engine = await resume_run(
-            prepare_estate(tmp_path / "estate").catalog,
-            run_root,
-            clock=VirtualClock(start=T0 + timedelta(minutes=1)),
-            adapters={"CMD": FakeAdapter(default=None)},
-        )
-        tier = engine.attempts
-        done = tier._ladder_done
-        callbacks: list[tuple[str, asyncio.Task[None]]] = []
-        monkeypatch.setattr(tier, "_ladder_done", lambda one, task: callbacks.append((one, task)))
-        cleaned = engine.update.cleaned
-        cleanings: list[str] = []
-
-        def clean(one: str) -> None:
-            cleanings.append(one)
-            cleaned(one)
-
-        monkeypatch.setattr(engine.update, "cleaned", clean)
-        caught_up = asyncio.Event()
-        engine.catch_up(caught_up.set)
-        loop = asyncio.create_task(engine.run_until_quiescent(engine.clock.now()))
-        await caught_up.wait()
-        engine._plan_finished(attempt)
-        facts = engine.attempt_facts(attempt)
-        assert facts.finished and facts.exited and facts.closing and engine.update.stopping
-        task = tier.ladder_task(attempt)
-        assert task is not None
-        release.set()
-        await task
-        await loop
-        assert callbacks == [(attempt, task)] and task.done() and tier.ladder_running(attempt)
-        engine._forget_if_over(attempt)
-        assert tier.knows(attempt) and engine.attempt_facts(attempt) is facts
-        assert cleanings == [] and engine.update.stopping and engine.config_rev == 1
-
-        done(*callbacks.pop())
-        assert not tier.knows(attempt) and attempt not in engine._facts
-        assert cleanings == [attempt] and attempt not in engine.update._cleaning
-        await engine.run_until_quiescent(engine.clock.now())
-        assert not engine.update.stopping and engine.config_rev == 2
-        await engine.shutdown()
-        _close(engine)
-
-    asyncio.run(restart())
-    order = rows(run_root)
-    [closed] = [
-        s
-        for s, k, b in order
-        if k == "follow_up" and b.get("event") == "ladder_done" and b.get("attempt") == attempt
-    ]
-    [applied] = [
-        s for s, k, b in order if k == "config" and b.get("event") == "applied" and "token" in b
-    ]
-    assert closed < applied
 
 
 @pytest.mark.parametrize("look", [True, False], ids=["first-look", "no-look"])
@@ -869,7 +810,7 @@ def test_an_update_whose_stops_all_finished_before_the_crash_applies_at_the_firs
     """R5-1 (DL-432, spec-restart §6): every attempt of the stop set was down before the
     engine died, so no observation ends it at the restart. The catch-up's queued first look
     applies the update as a loop step, after the recovered outcome of `b`, outside the stop
-    set, is fed under the old catalog. An unnamed look during the catch-up does nothing.
+    set, is fed under the old catalog.
     Without the queued first look the update stays STOPPING."""
     from store_surgery import append
 
@@ -894,10 +835,6 @@ def test_an_update_whose_stops_all_finished_before_the_crash_applies_at_the_firs
             settings=EngineSettings(grace_term_s=0.05, grace_kill_s=0.1),
         )
         assert engine.catching_up and engine.update.stopping and engine.config_rev == 1
-        queued = len(engine._queue)
-        engine.update.ended(None)
-        assert len(engine._queue) == queued and engine.update._ended_meanwhile == []
-        assert engine.update.stopping and engine.config_rev == 1
         await engine.run_until_quiescent(engine.clock.now())
         seen["rev"], seen["stopping"] = engine.config_rev, engine.update.stopping
         await engine.shutdown()
@@ -1119,7 +1056,7 @@ def test_a_snapshot_or_a_history_with_a_run_and_no_rev_is_refused(tmp_path: Path
                 "a",
                 2,
                 attempt=OTHER_ID,
-                spool=None,
+                spool=str(tmp_path / "run" / "runs" / "a.2" / "1"),
                 started_at=T0,
                 rev=9,
                 first_dispatch_seq=engine.journal.next_seq(),

@@ -433,16 +433,17 @@ def control_socket_error(socket_path: Path, exc: BaseException, *, stop: bool = 
             "check with dsl41 query before retrying"
         )
     if not isinstance(exc, ControlClientError) or not exc.delivered:
-        if isinstance(error, OSError):
-            if error.errno in (errno.EACCES, errno.EPERM):
-                return (
-                    f"dsl41: no permission to use the control socket {socket_path}; "
-                    "run as the engine's user or join its socket group"
-                )
-            if error.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
-                return f"dsl41: the engine at {socket_path} is busy; try again"
-            if error.errno in (errno.ENOENT, errno.ECONNREFUSED):
-                return f"dsl41: no engine is running at {socket_path}"
+        # roundtrip chains every undelivered failure from connect's OSError (DL-216).
+        assert isinstance(error, OSError)
+        if error.errno in (errno.EACCES, errno.EPERM):
+            return (
+                f"dsl41: no permission to use the control socket {socket_path}; "
+                "run as the engine's user or join its socket group"
+            )
+        if error.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+            return f"dsl41: the engine at {socket_path} is busy; try again"
+        if error.errno in (errno.ENOENT, errno.ECONNREFUSED):
+            return f"dsl41: no engine is running at {socket_path}"
     return (
         str(exc) if isinstance(exc, ControlClientError) else f"control socket {socket_path}: {exc}"
     )
@@ -471,14 +472,10 @@ def read_header_of(response: dict[str, Any]) -> str | None:
 
 
 def _pins(request: dict[str, Any]) -> str:
-    """The original revision, baseline and actor pins (DL-217, DL-391). Empty for an envelope
-    with no `expect`."""
+    """The original revision, baseline and actor pins from command() (DL-217, DL-391)."""
     import shlex
 
-    expect = request.get("expect")
-    if not isinstance(expect, dict) or len(expect) != 1:
-        return ""
-    (revision,) = expect.values()
+    (revision,) = request["expect"].values()
     return f" --expect {revision} --baseline {shlex.quote(str(request.get('baseline_id')))}" + (
         f" --claimed-actor {shlex.quote(str(request['claimed_actor']))}"
         if "claimed_actor" in request

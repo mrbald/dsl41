@@ -49,7 +49,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 from dsl41 import runner_procid as _procid
 from dsl41.runner_procid import NOTHING_LEFT, Left
@@ -257,9 +257,8 @@ class EngineStops:
             if watched and group_has_live_member(pgid):
                 return Left("ours", reason=COMMAND_SURVIVED)
             return NOTHING_LEFT
-        found = _procid.ours(cookie) if scan is _UNSCANNED else scan
-        if not isinstance(found, _procid.Ours):  # a scan that could not be made at all
-            found = _procid.Ours({}, error=errno.EIO)
+        # scan_available gates this path and every shared scan (DL-431, DL-436).
+        found = _procid.ours(cookie) if scan is _UNSCANNED else cast(_procid.Ours, scan)
         group = {} if pgid == NO_GROUP else _procid.linux_group_pids(pgid)
         wrapper = self._spawns.get(attempt or "", {}).get("wrapper_pid")
         mine = {pid: start for pid, (run, start) in found.pids.items() if run == attempt}
@@ -364,10 +363,10 @@ class EngineStops:
     def kill_wrapper(self, attempt: str) -> bool:
         facts = self.engine.attempt_facts(attempt)
         launch = facts.launch
-        if launch is not None:  # a restart's attempt has no wrapper of this engine's
-            launch.wait_for_spawn = facts.kill_signals is not None
-            return launch.abort()
-        return False
+        # _launch installs the handle before a live stop; restored stops are quiet (DL-426).
+        assert launch is not None
+        launch.wait_for_spawn = facts.kill_signals is not None
+        return launch.abort()
 
     def arm_timer(self, key: str, generation: int, delay_s: float) -> None:
         self.cancel_timer(key)

@@ -573,7 +573,9 @@ def test_engine_stop_waits_for_an_engine_that_is_still_starting(
         sent.append(request)
         answer = next(script)
         if isinstance(answer, str):
-            raise ControlClientError(answer, delivered=answer == "delivered")
+            raise ControlClientError(
+                answer, delivered=answer == "delivered"
+            ) from FileNotFoundError()
         return answer
 
     locks = iter(held)

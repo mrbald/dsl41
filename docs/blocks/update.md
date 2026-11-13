@@ -67,6 +67,9 @@ The [chart lifecycles](../chart-lifecycles.md) view lists each target state with
 - `test_a_plan_job_the_oracle_starts_while_the_update_stops_waits_for_the_application`
 - `test_a_client_that_gave_up_on_the_decision_leaves_the_loop_running`
 - `test_a_retry_while_a_resumed_update_still_stops_waits_for_its_application`
+- `test_while_an_update_stops_a_retry_waits_for_it_and_another_update_is_refused`
+- `test_restart_resumes_the_box_roots_of_a_stopping_update`
+- `test_a_plan_whose_catalog_hash_is_not_the_engines_is_refused`
 - `test_a_stale_token_and_an_open_update_are_refused_and_a_retry_is_answered_once`
 - `test_a_box_that_started_since_preparation_is_restarted`
 - `test_a_changed_job_gets_a_rebuilt_tick_and_an_unchanged_one_keeps_its_own`
@@ -99,10 +102,8 @@ normal successors. A crash after `config applied` can leave a box stopped: put i
 non-INACTIVE members on hold before force-starting it. No automatic completion after that record
 is promised (DL-489).
 
-The CLI/TUI status annotation caches the last reread forecast in memory. New/failed
-reread replaces it; applied update and restart clear it. Update never consumes it.
-Forecast labels follow the first-match rule in the
-[control protocol](../control-protocol.md#2-transport-and-framing-frozen) (DL-490).
+The CLI/TUI status annotation caches the last reread forecast in memory. New/failed reread replaces it; applied update and restart clear it. Update never consumes it.
+Forecast labels follow the first-match rule in the [control protocol](../control-protocol.md#2-transport-and-framing-frozen) (DL-490).
 `restart_box` names only roots the update starts again. Jobs of both catalogs
 inside such a root in the candidate carry `restart`, retyped jobs and sub-boxes
 included. A marked job the plan keeps without retyping carries `hold` when it is
@@ -110,8 +111,7 @@ a stop or is not INACTIVE inside the box scope. A retyped job's INACTIVE row is
 not held by its mark (DL-490, D12=MARK).
 The stop list includes every running box that ends with the roots.
 The forecast reads statuses, not flags or the terminator cascade: held or iced
-members can read `restart` without running. A running `job_terminator` member
-whose own box the update ends, moved to outside every restarting root, is ended
+members can read `restart` without running. A running `job_terminator` member whose own box the update ends, moved to outside every restarting root, is ended
 with the old box run; the forecast reads
 `rerun` for a command and nothing for a sub-box (DL-490, BUG-69).
 
