@@ -193,8 +193,7 @@ class LeaderLock:
 
     def note(self, *, at: datetime) -> None:
         """Record who holds the lock, for another process's refusal text."""
-        if self._fd is None:
-            raise EngineError(f"{self.path}: not held")
+        assert self._fd is not None, f"{self.path}: not held"
         # plain json.dumps, not canon.canonical_bytes: the blob feeds `_holder()` only and is
         # never digested
         blob = json.dumps(
@@ -211,8 +210,7 @@ class LeaderLock:
 
     def check(self) -> None:
         """Re-prove leadership (S6b) with one `stat`."""
-        if self._fd is None:
-            raise EngineError(f"{self.path}: leadership was never acquired")
+        assert self._fd is not None, f"{self.path}: leadership was never acquired"
         try:
             current = os.stat(self.path).st_ino
         except FileNotFoundError as exc:

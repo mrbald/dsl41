@@ -28,8 +28,7 @@ if TYPE_CHECKING:
     from dsl41.oracle_state import JobRuntime
     from dsl41.semantics import RenewableFree, SemanticSwitches
 
-#: Sorts a waiter with no declared priority, or whose job the catalog lacks, behind every
-#: declared priority.
+#: Sorts a waiter with no declared priority behind every declared priority.
 _UNSET_PRIORITY = 1 << 31
 
 #: What one requirement does to a bucket: 'acquire' holds units until the release policy
@@ -313,12 +312,8 @@ class CapacityPool:
             # PENDING: Qr2 -- an unset priority sorts last, behind every declared one,
             # explicit 0 included, though the vendor default is 0. Lower number first is
             # documented (DL-247); enqueue-seq then name make the order total.
-            #
-            # A waiter the catalog lacks takes the same "unset" priority, not a KeyError.
-            # period-model ss10 refuses an operator that boundary (QUE_WAIT-and-removed is
-            # R); the default is the floor under that gate (period-model ss5).
-            job_ir = self.catalog.jobs.get(job)
-            prio = _safe_units(job_ir.priority_value) if job_ir is not None else None
+            job_ir = self.catalog.jobs[job]
+            prio = _safe_units(job_ir.priority_value)
             return (prio if prio is not None else _UNSET_PRIORITY, seq, job)
 
         waiting = [(job, row.waiter_seq) for job, row in rows.items() if row.waiter_seq is not None]

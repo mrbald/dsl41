@@ -162,20 +162,6 @@ def test_pr21_waiter_order_is_on_the_rows() -> None:
     assert o._pool.sorted_waiters(o.store.job) == ["wp", "wb"]
 
 
-def test_sorted_waiters_tolerates_a_waiter_absent_from_the_catalog() -> None:
-    """A waiter whose job the catalog no longer defines sorts LAST rather than
-    raising KeyError. period-model ss10 classifies QUE_WAIT-and-removed R, so
-    the boundary refuses first; this is the floor under that gate."""
-    pool = CapacityPool(
-        lower_source("insert_job: known\njob_type: c\ncommand: x\nmachine: m1\npriority: 5\n")
-    )
-    rows = {
-        "ghost": JobRuntime(status="QUE_WAIT", waiter_seq=1),
-        "known": JobRuntime(status="QUE_WAIT", waiter_seq=2),
-    }
-    assert pool.sorted_waiters(rows) == ["known", "ghost"]
-
-
 # -------------------------------------------------------------- the invariants
 
 
