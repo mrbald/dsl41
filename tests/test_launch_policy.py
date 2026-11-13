@@ -1,11 +1,11 @@
-"""DL-492: launch policy through the live adapter and the real wrapper file."""
+"""DL-492, DL-497: shell selection and POSIX launch policy through the real wrapper."""
 
 from __future__ import annotations
 
 import json
 import os
 import resource
-import shutil
+import shlex
 import signal
 import subprocess
 import sys
@@ -15,10 +15,10 @@ from pathlib import Path
 
 import pytest
 
-from dsl41 import runner_adapters as adapters, runner_procid as procid, runner_wrapper
+from dsl41 import main_config, runner_adapters as adapters, runner_procid as procid, runner_wrapper
 from dsl41.ir import lower_source
 from dsl41.runner_clock import RealClock
-from dsl41.runtime_policy import ResourceLimit
+from dsl41.runtime_policy import ResourceLimit, resolve_job_shell
 
 
 def run_wrapper(tmp_path: Path, spec: dict) -> dict:
@@ -109,10 +109,93 @@ def run_process(tmp_path: Path, command: str, **kwargs: object) -> dict:
     return status
 
 
-@pytest.mark.parametrize("shell", ["/bin/sh", shutil.which("bash") or "/no-bash"])
-def test_profiles_limits_umask_and_selected_shell(tmp_path: Path, shell: str):
-    if not os.access(shell, os.X_OK):
-        pytest.skip(f"qualified shell unavailable: {shell}")
+@pytest.mark.parametrize("configured", [True, False], ids=["configured", "default"])
+def test_configured_shell_receives_composed_line(tmp_path: Path, configured: bool):
+    from test_main_config import config_file
+
+    shell_dir = tmp_path / "selected shell's directory"
+    shell_dir.mkdir()
+    shell, recording = shell_dir / "sh", tmp_path / "shell-argv"
+    shell.write_text(
+        "#!/bin/sh\n"
+        f'printf \'%s\\0\' "$0" "$@" > {shlex.quote(str(recording))}\n'
+        'exec /bin/sh "$@"\n'
+    )
+    shell.chmod(0o755)
+    site, job_profile = tmp_path / "site's profile", tmp_path / "job's profile"
+    site.write_text("export VALUE=site\n")
+    job_profile.write_text('export VALUE="$VALUE:job"\n')
+    command = 'printf "%s:%s" "$0" "$VALUE"; printf error >&2; exit 23'
+    (tmp_path / "a.jil").write_text(
+        f"insert_job: p\njob_type: c\ncommand: {command}\nprofile: {job_profile}\n"
+    )
+    settings = f"job_profile = {json.dumps(str(site))}\n"
+    if configured:
+        settings += f"job_shell = {json.dumps(str(shell))}\n"
+    estate = main_config.prepare(config_file(tmp_path, engine=settings))
+    profile = main_config.profile_of(estate)
+    assert profile.job_shell == (str(shell) if configured else None)
+    ctx = adapters.AdapterContext(
+        clock=RealClock(),
+        run_root=tmp_path,
+        shell=resolve_job_shell(profile.job_shell),
+        site_profile=profile.job_profile,
+        env={"SHELL": str(shell)},
+    )
+    job = estate.catalog.jobs["p"]
+    run_dir, spec = adapters._build_run_spec(job, 1, ctx, grace_seconds=0)
+    expected = (
+        f". {shlex.quote(str(site))} || exit $?; "
+        f". {shlex.quote(str(job_profile))} || exit $?; {command}"
+    )
+    assert spec["shell"] == (str(shell) if configured else "/bin/sh")
+    assert spec["command"] == expected
+    baseline = subprocess.run(
+        ["/bin/sh", "-c", expected], capture_output=True, text=True, timeout=10
+    )
+    adapters._prepare_output_files(job, spec)
+    status = run_wrapper(run_dir, spec)
+    assert status["outcome"] == "exited"
+    assert status["exit_code"] == baseline.returncode == 23
+    assert Path(spec["stdout_path"]).read_text() == baseline.stdout == "/bin/sh:site:job"
+    assert Path(spec["stderr_path"]).read_text() == baseline.stderr == "error"
+    if configured:
+        assert recording.read_bytes().split(b"\0") == [
+            str(shell).encode(),
+            b"-c",
+            expected.encode(),
+            b"",
+        ]
+    else:
+        assert not recording.exists()
+
+
+def test_configured_shell_keeps_argv_zero(tmp_path: Path):
+    from test_main_config import config_file
+
+    shell_dir = tmp_path / "shell's path"
+    shell_dir.mkdir()
+    shell = shell_dir / "sh"
+    shell.symlink_to("/bin/sh")
+    (tmp_path / "a.jil").write_text('insert_job: p\njob_type: c\ncommand: printf "%s" "$0"\n')
+    estate = main_config.prepare(
+        config_file(tmp_path, engine=f"job_shell = {json.dumps(str(shell))}\n")
+    )
+    profile = main_config.profile_of(estate)
+    assert profile.job_shell == str(shell)
+    ctx = adapters.AdapterContext(
+        clock=RealClock(), run_root=tmp_path, shell=resolve_job_shell(profile.job_shell)
+    )
+    job = estate.catalog.jobs["p"]
+    run_dir, spec = adapters._build_run_spec(job, 1, ctx, grace_seconds=0)
+    adapters._prepare_output_files(job, spec)
+    status = run_wrapper(run_dir, spec)
+    assert status["outcome"] == "exited" and status["exit_code"] == 0
+    assert Path(spec["stdout_path"]).read_text() == str(shell)
+    assert Path(spec["stderr_path"]).read_text() == ""
+
+
+def test_profiles_limits_and_umask(tmp_path: Path):
     site, profile = tmp_path / "site", tmp_path / "profile"
     order = tmp_path / "order"
     site.write_text(
@@ -125,7 +208,6 @@ def test_profiles_limits_umask_and_selected_shell(tmp_path: Path, shell: str):
     result = run_process(
         tmp_path,
         'printf "%s:" "$VALUE"; ulimit -n',
-        shell=shell,
         site=str(site),
         job=str(profile),
         limits=[
@@ -192,29 +274,18 @@ def test_shell_exec_refusal_and_command_exit_are_distinct(tmp_path: Path):
     assert result["exit_code"] == 23
 
 
-def test_no_shebang_selected_shell_and_shebang_precedence(tmp_path: Path):
-    bash = shutil.which("bash")
-    if bash is None:
-        pytest.skip("real bash unavailable")
+def test_no_shebang_command_and_shebang_precedence(tmp_path: Path):
     script = tmp_path / "script"
-    script.write_text(
-        'if [ -n "${BASH_VERSION-}" ] && ! shopt -oq posix; '
-        "then printf native-bash; else printf other; fi\n"
-    )
+    script.write_text("printf no-shebang\n")
     script.chmod(0o755)
-    result = run_process(tmp_path, str(script), shell=bash)
-    assert result["exit_code"] == 0 and (tmp_path / "out").read_text() == "native-bash"
-    control = run_process(tmp_path, str(script), shell="/bin/sh", out_mode="truncate")
-    assert control["exit_code"] == 0 and (tmp_path / "out").read_text() != "native-bash"
-    script.write_text(
-        '#!/bin/sh\nif [ -n "${BASH_VERSION-}" ] && ! shopt -oq posix; '
-        "then printf native-bash; else printf other; fi\n"
-    )
-    baseline = subprocess.run(["/bin/sh", str(script)], capture_output=True, text=True, timeout=10)
-    wrong = subprocess.run([bash, str(script)], capture_output=True, text=True, timeout=10)
-    result = run_process(tmp_path, str(script), shell=bash, out_mode="truncate")
-    assert baseline.returncode == wrong.returncode == result["exit_code"] == 0
-    assert baseline.stdout == "other" and wrong.stdout == "native-bash"
+    command = shlex.quote(str(script))
+    result = run_process(tmp_path, command)
+    assert result["exit_code"] == 0 and (tmp_path / "out").read_text() == "no-shebang"
+    script.write_text(f'#!{sys.executable}\nprint("shebang")\n')
+    baseline = subprocess.run([str(script)], capture_output=True, text=True, timeout=10)
+    result = run_process(tmp_path, command, out_mode="truncate")
+    assert baseline.returncode == result["exit_code"] == 0
+    assert baseline.stdout == "shebang\n"
     assert (tmp_path / "out").read_text() == baseline.stdout
 
 
@@ -222,32 +293,6 @@ def test_shell_command_sees_no_private_positional_arguments(tmp_path: Path):
     result = run_process(tmp_path, 'printf "%s:%s" "$#" "$1"')
     assert result["exit_code"] == 0
     assert (tmp_path / "out").read_text() == "0:"
-
-
-def test_korn_profile_and_no_shebang(tmp_path: Path):
-    shell = shutil.which("ksh")
-    if shell is None:
-        pytest.skip("real Korn shell unavailable; Linux qualification is separate")
-    baseline = subprocess.run(
-        [shell, "-c", 'printf "%s" "${.sh.version}"'],
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=True,
-    )
-    assert baseline.stdout
-    site = tmp_path / "site"
-    marker = tmp_path / "profile-version"
-    site.write_text(f'printf "%s" "${{.sh.version}}" > "{marker}"\n')
-    script = tmp_path / "script"
-    script.write_text('printf "%s" "${.sh.version}"\n')
-    script.chmod(0o755)
-    result = run_process(tmp_path, str(script), shell=shell, site=str(site))
-    assert result["exit_code"] == 0
-    assert marker.read_text() == baseline.stdout
-    assert (tmp_path / "out").read_text() == baseline.stdout
-    wrong = run_process(tmp_path, str(script), shell="/bin/sh", out_mode="truncate")
-    assert wrong["exit_code"] != 0 or (tmp_path / "out").read_text() != baseline.stdout
 
 
 def test_profile_closing_fd_three_still_runs_command(tmp_path: Path):
@@ -365,24 +410,19 @@ def test_concurrent_children_keep_distinct_umasks(tmp_path: Path):
     assert (right / "created").stat().st_mode & 0o777 == 0o644
 
 
-@pytest.mark.parametrize(
-    "shell", ["/bin/sh", shutil.which("bash") or "/no-bash", shutil.which("ksh") or "/no-ksh"]
-)
 @pytest.mark.parametrize("where", ["site", "job"])
 @pytest.mark.parametrize("status", [0, 23])
-def test_closed_fd_profile_effects(tmp_path: Path, shell: str, where: str, status: int):
-    if not os.access(shell, os.X_OK):
-        pytest.skip(f"real shell unavailable: {shell}")
+def test_closed_fd_profile_effects(tmp_path: Path, where: str, status: int):
     profile = tmp_path / "profile"
     profile.write_text(f"exec 3>&-\nreturn {status}\n")
     marker, baseline_marker = tmp_path / "marker", tmp_path / "baseline-marker"
     baseline = subprocess.run(
-        [shell, "-c", '. "$1" && touch "$2"', shell, str(profile), str(baseline_marker)],
+        ["/bin/sh", "-c", '. "$1" && touch "$2"', "/bin/sh", str(profile), str(baseline_marker)],
         capture_output=True,
         text=True,
         timeout=10,
     )
-    result = run_process(tmp_path, f"touch '{marker}'", shell=shell, **{where: str(profile)})
+    result = run_process(tmp_path, f"touch '{marker}'", **{where: str(profile)})
     assert baseline.returncode == result["exit_code"] == status
     assert marker.exists() is baseline_marker.exists() is (status == 0)
 
@@ -392,27 +432,12 @@ def test_shell_signal_status_is_observed_without_stage_inference(tmp_path: Path)
     assert result["outcome"] == "signaled" and result["signal"] == signal.SIGTERM
 
 
-@pytest.mark.parametrize(
-    "shell,declaration",
-    [
-        (shutil.which("bash") or "/no-bash", "declare"),
-        (shutil.which("ksh") or "/no-ksh", "typeset"),
-    ],
-)
 @pytest.mark.parametrize("inherited", [None, "inherited"])
-def test_profiles_preserve_direct_declaration_scope(
-    tmp_path: Path, shell: str, declaration: str, inherited: str | None
-):
-    import shlex
-
-    if not os.access(shell, os.X_OK):
-        pytest.skip(f"real shell unavailable: {shell}")
+def test_profiles_preserve_direct_scope(tmp_path: Path, inherited: str | None):
     site, job_profile = tmp_path / "site's profile", tmp_path / "job's profile"
-    site.write_text(
-        f"{declaration} -x JIL_SITE=site\n{declaration} -x JIL_OVERRIDE=site\nset -- from_site\n"
-    )
+    site.write_text("export JIL_SITE=site\nexport JIL_OVERRIDE=site\nset -- from_site\n")
     job_profile.write_text(
-        f'[ "$JIL_SITE" = site ] || return 37\n[ "$JIL_OVERRIDE" = site ] || return 38\n{declaration} -x JIL_OVERRIDE=job\n{declaration} -x JIL_JOB=job\n'
+        '[ "$JIL_SITE" = site ] || return 37\n[ "$JIL_OVERRIDE" = site ] || return 38\nexport JIL_OVERRIDE=job\nexport JIL_JOB=job\n'
     )
     command = 'printf \'%s:%s:%s:%s\\n\' "$JIL_SITE" "$JIL_OVERRIDE" "$JIL_JOB" "$1"; /usr/bin/env | grep \'^JIL_OVERRIDE=\''
     env = {**os.environ, "SHELL": "/invalid/inherited-shell"}
@@ -424,24 +449,17 @@ def test_profiles_preserve_direct_declaration_scope(
         f". {shlex.quote(str(site))} && . {shlex.quote(str(job_profile))} && {command}"
     )
     baseline = subprocess.run(
-        [shell, "-c", baseline_script], env=env, capture_output=True, text=True, timeout=10
+        ["/bin/sh", "-c", baseline_script], env=env, capture_output=True, text=True, timeout=10
     )
-    actual = run_process(
-        tmp_path, command, shell=shell, site=str(site), job=str(job_profile), env=env
-    )
+    actual = run_process(tmp_path, command, site=str(site), job=str(job_profile), env=env)
     assert baseline.returncode == actual["exit_code"] == 0
     assert baseline.stderr == (tmp_path / "err").read_text() == ""
     assert (tmp_path / "out").read_text() == baseline.stdout
     assert baseline.stdout == "site:job:job:from_site\nJIL_OVERRIDE=job\n"
 
 
-@pytest.mark.parametrize(
-    "shell", ["/bin/sh", shutil.which("bash") or "/no-bash", shutil.which("ksh") or "/no-ksh"]
-)
 @pytest.mark.parametrize("mode", ["append", "truncate"])
-def test_noclobber_profile_preserves_explicit_stream_modes(tmp_path: Path, shell: str, mode: str):
-    if not os.access(shell, os.X_OK):
-        pytest.skip(f"real shell unavailable: {shell}")
+def test_noclobber_profile_preserves_explicit_stream_modes(tmp_path: Path, mode: str):
     profile = tmp_path / "profile"
     profile.write_text("set -C\n")
     out, err, marker = tmp_path / "out's path", tmp_path / "err's path", tmp_path / "marker"
@@ -452,7 +470,6 @@ def test_noclobber_profile_preserves_explicit_stream_modes(tmp_path: Path, shell
     result = run_process(
         tmp_path,
         f"printf OUT; printf ERR >&2; touch '{marker}'",
-        shell=shell,
         site=str(profile),
         stdout=str(out),
         stderr=str(err),
@@ -466,62 +483,20 @@ def test_noclobber_profile_preserves_explicit_stream_modes(tmp_path: Path, shell
     assert err.stat().st_mode & 0o777 == 0o604
 
 
-@pytest.mark.parametrize(
-    "shell", ["/bin/sh", shutil.which("bash") or "/no-bash", shutil.which("ksh") or "/no-ksh"]
-)
 @pytest.mark.parametrize("stream", ["stdout", "stderr", "stdin"])
 @pytest.mark.parametrize("mode", ["append", "truncate"])
-def test_stream_open_failure_prevents_command_for_selected_shells(
-    tmp_path: Path, shell: str, stream: str, mode: str
-):
-    if not os.access(shell, os.X_OK):
-        pytest.skip(f"real shell unavailable: {shell}")
+def test_stream_open_failure_prevents_command(tmp_path: Path, stream: str, mode: str):
     marker = tmp_path / "marker"
     missing = tmp_path / "missing" / "stream"
     result = run_process(
         tmp_path,
         f"touch '{marker}'",
-        shell=shell,
         out_mode=mode,
         err_mode=mode,
         **{stream: str(missing)},
     )
     assert result["outcome"] == "spawn_failed" and result["error"]
     assert not marker.exists()
-
-
-@pytest.mark.parametrize("where", ["site", "job"])
-def test_native_bash_profile_identity_matches_direct_baseline(tmp_path: Path, where: str):
-    bash = shutil.which("bash")
-    if bash is None:
-        pytest.skip("real bash unavailable")
-    profile = tmp_path / "profile"
-    profile.write_text(
-        'if [ -n "${BASH_VERSION-}" ] && ! shopt -oq posix; '
-        "then printf native-bash; else printf other; fi\n"
-    )
-    env = {**os.environ, "SHELL": "/bin/sh"}
-    for name in ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS"):
-        env.pop(name, None)
-    baseline = subprocess.run(
-        [bash, "-c", '. "$1"', bash, str(profile)],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    wrong = subprocess.run(
-        ["/bin/sh", "-c", '. "$1"', "/bin/sh", str(profile)],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    actual = run_process(tmp_path, "true", shell=bash, env=env, **{where: str(profile)})
-    assert baseline.returncode == wrong.returncode == actual["exit_code"] == 0
-    assert baseline.stdout == "native-bash" and wrong.stdout == "other"
-    assert (tmp_path / "out").read_text() == baseline.stdout
-    assert (tmp_path / "err").read_text() == baseline.stderr == ""
 
 
 @pytest.mark.parametrize(
@@ -636,34 +611,25 @@ def test_live_resolver_expands_literal_stream_paths_once(tmp_path):
     assert spec["stderr_path"] == str(Path.cwd() / "relative")
 
 
-@pytest.mark.parametrize("shell_name", ["sh", "dash", "bash", "ksh"])
-def test_profile_alias_does_not_rewrite_command(tmp_path, shell_name):
-    import shlex
-    from dsl41 import main_config
+def test_profile_alias_does_not_rewrite_command(tmp_path):
     from test_main_config import config_file
 
-    shell = shutil.which(shell_name)
-    if shell is None:
-        pytest.skip(f"real {shell_name} unavailable")
     executable = tmp_path / "launch_witness"
     executable.write_text("#!/bin/sh\nprintf ORIGINAL\n")
     executable.chmod(0o755)
     profile = tmp_path / "profile"
-    profile.write_text(
-        'if [ -n "${BASH_VERSION-}" ]; then shopt -s expand_aliases; fi\n'
-        "alias launch_witness='printf ALIASED'\n"
-    )
+    profile.write_text("alias launch_witness='printf ALIASED'\n")
     (tmp_path / "a.jil").write_text(
         f"insert_job: p\njob_type: c\ncommand: launch_witness\nprofile: {profile}\n"
     )
-    estate = main_config.prepare(config_file(tmp_path, engine=f'job_shell = "{shell}"\n'))
-    ctx = adapters.AdapterContext(clock=RealClock(), run_root=tmp_path, shell=shell)
+    estate = main_config.prepare(config_file(tmp_path))
+    ctx = adapters.AdapterContext(clock=RealClock(), run_root=tmp_path)
     _, spec = adapters._build_run_spec(estate.catalog.jobs["p"], 1, ctx, grace_seconds=0)
     env = {**os.environ, "PATH": str(tmp_path) + os.pathsep + os.defpath}
     for name in ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS"):
         env.pop(name, None)
     control = subprocess.run(
-        [shell, "-c", f". {shlex.quote(str(profile))}\nlaunch_witness"],
+        ["/bin/sh", "-c", f". {shlex.quote(str(profile))}\nlaunch_witness"],
         env=env,
         capture_output=True,
         text=True,
@@ -671,43 +637,32 @@ def test_profile_alias_does_not_rewrite_command(tmp_path, shell_name):
     )
     assert control.returncode == 0 and control.stdout == "ALIASED"
     result = subprocess.run(
-        [shell, "-c", spec["command"]],
+        ["/bin/sh", "-c", spec["command"]],
         env=env,
         capture_output=True,
         text=True,
         timeout=10,
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout == "ORIGINAL", f"{shell} applied the profile alias: {result.stdout!r}"
+    assert result.stdout == "ORIGINAL", f"/bin/sh applied the profile alias: {result.stdout!r}"
 
 
-@pytest.mark.parametrize("shell_name", ["sh", "dash", "bash", "ksh"])
-def test_background_command_tail_sees_profile_export(tmp_path, shell_name):
-    shell = shutil.which(shell_name)
-    if shell is None:
-        pytest.skip(f"real {shell_name} unavailable")
+def test_background_command_tail_sees_profile_export(tmp_path):
     profile = tmp_path / "profile"
     profile.write_text("export LAUNCH_PROFILE_VALUE=sourced\n")
     result = run_process(
         tmp_path,
         'true & printf "%s" "${LAUNCH_PROFILE_VALUE-unset}"; wait',
         job=str(profile),
-        shell=shell,
     )
     assert result["exit_code"] == 0
     assert (tmp_path / "out").read_text() == "sourced"
 
 
-@pytest.mark.parametrize("shell_name", ["sh", "dash", "bash", "ksh"])
 @pytest.mark.parametrize("profile_status", [None, 0, 23], ids=["no-profile", "success", "failure"])
-def test_comment_only_command_through_wrapper(tmp_path, shell_name, profile_status):
-    import shlex
-    from dsl41 import main_config
+def test_comment_only_command_through_wrapper(tmp_path, profile_status):
     from test_main_config import config_file
 
-    shell = shutil.which(shell_name)
-    if shell is None:
-        pytest.skip(f"real {shell_name} unavailable")
     witness = tmp_path / "profile-ran"
     profile = tmp_path / "profile"
     attributes = ""
@@ -717,10 +672,10 @@ def test_comment_only_command_through_wrapper(tmp_path, shell_name, profile_stat
     (tmp_path / "a.jil").write_text(
         "insert_job: p\njob_type: c\ncommand: # intentionally idle\n" + attributes
     )
-    estate = main_config.prepare(config_file(tmp_path, engine=f'job_shell = "{shell}"\n'))
+    estate = main_config.prepare(config_file(tmp_path))
     job = estate.catalog.jobs["p"]
     assert job.exec_.command == "# intentionally idle"
-    ctx = adapters.AdapterContext(clock=RealClock(), run_root=tmp_path, shell=shell)
+    ctx = adapters.AdapterContext(clock=RealClock(), run_root=tmp_path)
     run_dir, spec = adapters._build_run_spec(job, 1, ctx, grace_seconds=0)
     adapters._prepare_output_files(job, spec)
     status = run_wrapper(run_dir, spec)

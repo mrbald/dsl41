@@ -498,3 +498,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-494 | Lowering refuses a job name that is not one directory component | [README.md](../README.md), [docs/authoring.md](authoring.md), [docs/ir-design.md](ir-design.md), [docs/jil-statement-syntax.md](jil-statement-syntax.md) |
 | DL-495 | A job's name is its subject without block comments | [README.md](../README.md), [docs/authoring.md](authoring.md), [docs/ir-design.md](ir-design.md), [docs/jil-statement-syntax.md](jil-statement-syntax.md) |
 | DL-496 | `engine stop --wait` confirms the exit by the engine's process, not by its lock | [docs/deploy.md](deploy.md) |
+| DL-497 | The launch tests prove which shell runs and what it is handed, not each shell | [docs/deploy.md](deploy.md) |

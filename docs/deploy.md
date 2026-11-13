@@ -284,6 +284,9 @@ The applied launch settings control every CMD attempt (DL-492):
 
 - `engine.job_shell` selects an executable sh, dash, bash or ksh by absolute
   path. Its default is `/bin/sh`, independent of the account's passwd shell.
+  The engine composes the line from POSIX text for sourcing profiles and the job's
+  own command text; a site that sets a shell other than `/bin/sh` checks its own
+  jobs under it (DL-497).
 - `engine.job_profile` names a literal absolute readable profile. The shell
   sources it before the job's `profile`. Either profile's failure stops the
   command with that profile's exit status.
