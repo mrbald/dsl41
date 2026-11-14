@@ -747,7 +747,6 @@ def _totals(catalog: CatalogIR, elements: dict[str, list[dict[str, object]]]) ->
 
 def to_explore_html(
     catalog: CatalogIR,
-    graph: DerivedGraph | None = None,
     *,
     title: str = "catalog",
     direction: Direction | Literal["auto"] = "auto",
@@ -757,8 +756,7 @@ def to_explore_html(
 
     Boxes open expanded; `collapse_threshold` folds the report's over-threshold top-level
     boxes first (DL-190; None folds nothing). --direction maps auto/LR to RIGHT, TD to DOWN."""
-    if graph is None:
-        graph = derive_graph(catalog)
+    graph = derive_graph(catalog)
     elements = _elements(catalog, graph, collapse_threshold=collapse_threshold)
     totals = _totals(catalog, elements)
     summary = (
