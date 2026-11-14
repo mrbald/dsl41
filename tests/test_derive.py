@@ -619,6 +619,26 @@ def test_or_shape_independent_producers() -> None:
     assert shape.kind == "independent"
 
 
+def test_or_shape_with_a_condition_cycle_in_a_producers_ancestry() -> None:
+    text = (
+        "insert_job: a\njob_type: c\ncommand: true\ncondition: s(c)\n\n"
+        "insert_job: b\njob_type: c\ncommand: true\ncondition: s(a)\n\n"
+        "insert_job: c\njob_type: c\ncommand: true\ncondition: s(b)\n\n"
+        "insert_job: x\njob_type: c\ncommand: true\ncondition: s(c)\n\n"
+        "insert_job: consumer\njob_type: c\ncommand: true\ncondition: s(a) | s(x)\n"
+    )
+    catalog = lower_source(text)
+    graph = derive_graph(catalog)
+    (shape,) = graph.or_shapes
+    assert shape.job == "consumer"
+    assert shape.branches == [["a"], ["x"]]
+    assert shape.kind == "common_ancestor"
+    assert "['a', 'b', 'c']" in shape.lowering
+    assert graph.cycles == [["a", "b", "c"]]
+    (warning,) = rule_l010(catalog, graph)
+    assert warning.severity == "warn"
+
+
 def test_or_shape_mixed_when_one_branch_has_only_a_global_atom() -> None:
     text = (
         "insert_job: mixed_p1\njob_type: c\ncommand: a\nmachine: m1\n\n"

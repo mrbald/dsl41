@@ -581,7 +581,10 @@ def moves(root: Path) -> list[tuple[str, str]]:
 
 @pytest.mark.parametrize("reconciler", [True, False])
 @pytest.mark.parametrize("stage", PROCESS_BOUNDARIES)
-def test_every_processing_boundary_converges(tmp_path: Path, stage: str, reconciler: bool) -> None:
+@pytest.mark.parametrize("first", ["archive", "process"])
+def test_every_processing_boundary_converges(
+    tmp_path: Path, stage: str, reconciler: bool, first: str
+) -> None:
     """A run killed at each durable boundary converges on the next runs: the item ends DONE
     after reconciliation with the sample handler, or UNKNOWN without a reconciler."""
     deliver(tmp_path, "delivery", DATA)
@@ -599,6 +602,9 @@ def test_every_processing_boundary_converges(tmp_path: Path, stage: str, reconci
     assert work == ("DONE" if committed else "RUNNING", 1)
     assert len(published(tmp_path / "todo")) == 1
     assert len(list((tmp_path / "output").glob("*.json"))) == int(stage != "claimed")
+    if first == "archive":
+        fp.archive(tmp_path, IDENTITY)
+        assert len(published(tmp_path / "todo")) == int(not committed)
     callback = handler(tmp_path) if reconciler else WithoutReconciler(tmp_path / "output")
     selected = [fp.process(tmp_path, IDENTITY, callback).selected for _ in range(2)]
     claim, done = ("file_process.01", "handler"), ("file_process.02", "handler")

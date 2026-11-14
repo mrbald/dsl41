@@ -510,18 +510,21 @@ def test_the_emitted_bytes_must_re_scan_to_what_was_emitted() -> None:
     assert "re-scan" in " ".join(exc.value.messages)
 
 
-def test_a_synthetic_name_series_never_aliases_another_shape() -> None:
-    """base36 spells 1981 as `1j1`, so box `b1981` would be `b1j1` -- the same
-    name as the first member of box `b1`. The shared pool skips it."""
-    from dsl41.minify import _Series
-
-    pool: set[str] = set()
-    boxes = _Series("b#", pool)
-    members = _Series("b1j#", pool)
-    assert members.take() == "b1j1"
-    minted = {boxes.take() for _ in range(2100)}
-    assert "b1j1" not in minted
-    assert len(minted) == 2100  # every name distinct
+def test_minify_skips_a_box_name_already_used_by_a_member() -> None:
+    """Box and member names must be unique across the shared base36 namespace."""
+    text = (
+        "insert_job: source_box_1\njob_type: b\n\n"
+        "insert_job: source_member\njob_type: c\ncommand: true\nbox_name: source_box_1\n\n"
+        + "".join(f"insert_job: source_box_{i}\njob_type: b\n\n" for i in range(2, 1982))
+    )
+    result = minify_files([parse(text)])
+    names = result.names.jobs
+    assert names["source_member"] == "b1j1"
+    assert names["source_box_1981"] == "b1j2"
+    assert len(set(names.values())) == len(names) == 1982
+    catalog = lower_source(result.bodies[0])
+    assert len(catalog.jobs) == 1982
+    assert catalog.jobs["b1j1"].box.box_name == "b1"
 
 
 def test_the_leak_guard_fires_on_a_surviving_token() -> None:
