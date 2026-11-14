@@ -186,6 +186,7 @@ The engine captures live writes in transition order and queues them only after
 their admission commits. Recovery admissions and committed time-half effects
 are included. Dry application, historical replay and request deduplication
 produce no notifications. Initial and restored flags and no-op writes are silent.
+Hook observations skip rows with no catalog job (DL-500).
 
 | Event | Observation |
 | --- | --- |
@@ -205,8 +206,8 @@ Each invocation receives one UTF-8 JSON object and newline on stdin, then EOF:
 
 Every key is present in every payload, including both alarm flags; unavailable or
 inapplicable values are null (DL-469). False flags do not suppress events; site hooks
-choose whether to alert. Hook annotation readers use defaults on missing jobs or invalid
-values and cannot interrupt admission or another job's long-running check.
+choose whether to alert. Hook annotation readers use defaults on missing or invalid
+annotations and cannot interrupt admission or another job's long-running check.
 `run_number` describes the observed row, including alarms. `transition` is the
 oracle transition or marker, otherwise null. `threshold_s` applies only to
 long-running notifications. `exit_code` is the code supplied by a `job_failure`

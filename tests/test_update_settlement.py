@@ -5,7 +5,8 @@ marked set; an attempt's first stop cause survives the intent; a changed job's `
 keeps counting; a retry is answered from its stored admission while the engine drains; and
 `dsl41 runs` reads each run under the configuration it ran under.
 
-The process stand-ins are `test_engine_stops_cookie`'s: no real process is signalled.
+Most scenarios use `test_engine_stops_cookie`'s process stand-ins. The cleanup-before-admission
+scenario signals real processes.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from reload_fixtures import prepare_estate, write_config
 import asyncio
 import json
 import signal
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -498,35 +499,110 @@ def _park_ladders(
 
 
 def test_an_attempt_ended_before_the_admission_still_cleaning_holds_the_update(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    """The attempt of a job the plan changes ended before the admission while its cleanup
-    ladder still runs: the update counts it stopped only once the ladder is done."""
-    _Procs(monkeypatch)
-    entered, release = _park_ladders(monkeypatch)
-    seen: list[object] = []
+    """A command records its end while its selected stop ladder still owns a child.
+    An update admitted then waits for cleanup before applying (DL-431, DL-491).
+    """
+    import shlex
+    import sys
+
+    from dsl41.runner_adapters import LocalCommandAdapter
+    from dsl41.runner_clock import RealClock
+    from test_engine_stops import _script
+    from test_live_engine_branches import _stubborn
+    from test_engine_stops_cookie import _kill
+    from test_update_wiring import TIMEOUT_S, _finish, _until
+
+    ready, termed, release = (tmp_path / name for name in ("ready", "termed", "release"))
+    childfile = tmp_path / "child"
+    program = tmp_path / "command.py"
+    program.write_text(
+        "import signal, sys, time\nfrom pathlib import Path\n"
+        "def stop(*_):\n"
+        f"    Path({str(termed)!r}).touch()\n"
+        f"    while not Path({str(release)!r}).exists(): time.sleep(0.01)\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, stop)\n"
+        f"Path({str(ready)!r}).touch()\n"
+        "while True: signal.pause()\n"
+    )
+    command = _script(
+        tmp_path,
+        "parent-and-child",
+        _stubborn(childfile) + f"exec {shlex.quote(sys.executable)} {shlex.quote(str(program))}\n",
+    )
+    directory = _estate(tmp_path, _jil({"j": command}))
+    estate = prepare_estate(directory)
+    run_root = tmp_path / "run"
 
     async def scenario() -> None:
-        engine = _engine(tmp_path, _jil({"j": "sleep 30"}))
-        engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "j"}))
-        await engine.run_until_quiescent(T0)
-        _adopt(engine, "j", RUN_ID, PGID)
-        engine.attempts.stop(RUN_ID, "wrapper_lost")
-        await entered.wait()
-        engine.attempts.status_recorded(RUN_ID, SIGNALED)  # ended; its ladder runs on
-        _estate(tmp_path, _jil({"j": "sleep 31"}))
-        answer = await _request(engine, _plan(engine, tmp_path))
-        assert isinstance(answer.decision, Admitted)
-        seen.append((engine.update.stopping, engine.config_rev))
-        release.set()
-        await engine.attempts.join()
-        await engine.run_until_quiescent(engine.clock.now())  # the end is a loop step
-        seen.append((engine.update.stopping, engine.config_rev))
-        await engine.shutdown()
-        _close(engine)
+        engine = start_run(
+            estate.catalog,
+            run_root,
+            clock=RealClock(),
+            adapters={"CMD": LocalCommandAdapter()},
+            hold_open=True,
+            source_capture=main.encoded_parts(estate),
+            launched=main.profile_of(estate),
+        )
+        loop = asyncio.create_task(engine.run_until_quiescent(datetime.max))
+        try:
+            engine.inject(Event(at=engine.clock.now(), kind="FORCE_STARTJOB", payload={"job": "j"}))
+            await _until(lambda: ready.exists() and childfile.exists())
+            _estate(tmp_path, _jil({"j": "true"}))
+            request = UpdateRequest(_plan(engine, tmp_path), 1, engine.baseline_id, "u1")
+            try:
+                async with asyncio.timeout(3):
+                    engine.inject(
+                        Event(
+                            at=engine.clock.now(),
+                            kind="KILLJOB",
+                            payload={"job": "j", "kill_signals": [15, 9]},
+                        )
+                    )
+                    await _until(termed.exists)
+                    engine.inject(
+                        Event(
+                            at=engine.clock.now(),
+                            kind="STATUS",
+                            payload={"job": "j", "status": "RUNNING"},
+                        )
+                    )
+                    await _until(lambda: engine.oracle.store.job["j"].status == "RUNNING")
+                    release.touch()
+                    await _until(lambda: bool(_kinds(tmp_path, "outcome")))
+                    assert _kinds(tmp_path, "outcome")[0]["ladder"] == "running"
+                    answer = await engine.request_update(request)
+                    assert isinstance(answer.decision, Admitted) and answer.decision.stop_set == (
+                        "j",
+                    )
+                    assert engine.update.stopping and engine.config_rev == 1
+                    assert answer.applied is not None and not answer.applied.done()
+                    childfile.with_suffix(".exit").touch()
+            except TimeoutError as exc:
+                raise AssertionError(
+                    "selected-stop update admission and child release exceeded 3 s, "
+                    "before the ladder's 5 s KILL"
+                ) from exc
+            async with asyncio.timeout(TIMEOUT_S):
+                applied = await answer.applied
+            assert applied["rev"] == engine.config_rev == 2 and not engine.update.stopping
+            order = [(k, b.get("event")) for _, k, b in rows(run_root)]
+            intent = order.index(("config", "intent"))
+            assert intent < order.index(("follow_up", "ladder_done"))
+            assert order.index(("follow_up", "ladder_done")) < order.index(
+                ("config", "applied"), intent
+            )
+        finally:
+            release.touch()
+            childfile.with_suffix(".exit").touch()
+            await _finish(engine, loop)
 
-    asyncio.run(scenario())
-    assert seen == [(True, 1), (False, 2)]
+    try:
+        asyncio.run(scenario())
+    finally:
+        _kill(childfile)
 
 
 def _crashed_update(
