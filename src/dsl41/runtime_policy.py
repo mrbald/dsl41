@@ -314,20 +314,16 @@ def policy_boolean(job: str, attribute: str, text: str) -> bool:
     return text.lower() in {"y", "1"}
 
 
-def hook_alarm_flag(job: JobIR | None, attribute: str) -> bool:
+def hook_alarm_flag(job: JobIR, attribute: str) -> bool:
     """DL-469: hook observations use defaults for missing or invalid annotations."""
-    if job is None:
-        return True
     try:
         return policy_boolean(job.name, attribute, _raw(job).get(attribute, "y"))
     except PolicyRefused:
         return True
 
 
-def hook_max_run_alarm(job: JobIR | None) -> int | None:
+def hook_max_run_alarm(job: JobIR) -> int | None:
     """DL-469: an unusable hook threshold leaves the global policy in force."""
-    if job is None:
-        return None
     raw = _raw(job)
     if "max_run_alarm" not in raw:
         return None

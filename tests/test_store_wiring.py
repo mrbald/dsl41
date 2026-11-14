@@ -776,33 +776,6 @@ def test_an_exact_retry_after_a_snapshot_restart_is_answered_from_the_store(
     assert [request for request, _ in engine.deduped] == ["r1"]
 
 
-def test_a_cancel_that_meets_an_attempt_already_closed_records_nothing_more() -> None:
-    """A task reaped after its own outcome landed (the adapter returned before the cancel)
-    gets no second outcome."""
-
-    async def scenario() -> None:
-        engine = start_run(
-            lower_source(_JIL),
-            None,
-            clock=VirtualClock(start=T0),
-            adapters={"CMD": FakeAdapter({("j", 1): (1.0, 0)})},
-        )
-        engine.inject(_ev("STARTJOB", 0, job="j"))
-        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
-        assert engine.journal is not None
-        before = engine.journal.last_seq
-        task = asyncio.ensure_future(asyncio.sleep(0))
-        await task
-        from dsl41.runner import _LiveRun
-
-        engine._killed[id(task)] = _LiveRun(1, task, attempt="gone")
-        engine._close_killed(task)
-        assert engine.journal.last_seq == before
-        await engine.shutdown()
-
-    asyncio.run(scenario())
-
-
 def test_a_watch_whose_run_ended_is_closed_with_no_plan_at_a_restart(tmp_path: Path) -> None:
     """DL-242: a watch the operator set INACTIVE is left running by the engine (DL-235); at a
     restart only a live row is watched again, so the attempt is closed with no plan."""

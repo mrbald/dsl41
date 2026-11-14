@@ -25638,6 +25638,7 @@ relitigate an entry; append a new one.
   THE REASON. Loss is intentional; MUST_COMPLETE is not runtime. OnFailure reports unit failure.
   THE BOUNDARY. Amends §§4/12 with no new oracle event or durable delivery state. Mail/pager stays
   site-owned; gates and independent review stand. The boundary cannot confine malicious hook code.
+  NARROWED BY DL-500: a row with no catalog job is not observed.
 - DL-447 Durable runtime variables and stream paths (2026-11-02;
   runner_environment.py, runner_journal.py, runner_config.py)
   AUTO_JOB_NAME is the exact job name. AUTORUN is decimal S-N without padding.
@@ -26752,3 +26753,17 @@ relitigate an entry; append a new one.
   `dsl41 serve`, which is unchanged.
   UNCHANGED. Answer shapes, journal and receipt shapes, fingerprints, snapshots, golden
   traces, the state version and every other command.
+- DL-500 Status-hook observations name catalog jobs only
+  (2026-11-14; owner ruling of 2026-11-13; `oracle_reads.py`, `status_hook.py`,
+  `runtime_policy.py`, runner-design §4; narrows DL-446)
+  THE RULE. The status hook observes a store row only when the catalog holds a job of that
+  name. A row for any other name gets no observation: no `job_failure`, `job_terminated`,
+  `job_hold`, `job_long_running` or `alarm`. Such a row exists when a status is admitted
+  for a name of another instance, for example `sendevent CHANGE_STATUS --job other^INS`.
+  The annotation readers `hook_alarm_flag` and `hook_max_run_alarm` take a catalog job;
+  their default for a missing or invalid annotation stands (DL-469).
+  THE REASON. No process of this engine runs for such a row. The long-running check sent
+  `job_long_running` for a row that only an injected status made RUNNING, and an injected
+  FAILURE sent `job_failure`; neither names anything this engine's operator can act on.
+  UNCHANGED. The payload and its version, every observation of a catalog job, delivery and
+  its bounds, and the store, which still holds such rows.

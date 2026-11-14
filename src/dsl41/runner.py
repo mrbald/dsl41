@@ -654,13 +654,12 @@ class Engine:
         *,
         plan_done: bool = False,
         observed: bool = True,
-        restart: bool = False,
     ) -> None:
         """Instantiate an attempt a restart found open, under its run id, before the loop's
         first step: in SPAWNING, or in ENDED with the `outcome` the store committed for a
         closing one, which is never observed again (spec-restart §2, §5). A file watch the
-        restart quarantines (`observed` False) has no attempt instance. `restart` marks one the
-        restart's fold adopts: the loop waits for its ladder (`_restored_ladders`)."""
+        restart quarantines (`observed` False) has no attempt instance. The loop waits for
+        the adopted attempts' ladders (`_restored_ladders`)."""
         if observed and outcome is None:
             self.attempts.dispatch(facts.run_id)
         elif observed:
@@ -670,8 +669,7 @@ class Engine:
         self._facts[facts.run_id] = facts
         self._job_attempt[facts.job] = facts.run_id
         self.stops.note_cookie(facts.run_id, facts.env)
-        if restart:
-            self._restored.add(facts.run_id)
+        self._restored.add(facts.run_id)
 
     def _restored_ladders(self) -> list[asyncio.Task[None]]:
         """The ladders still running on what a restart found left: work the loop waits for, so
@@ -2059,8 +2057,10 @@ class Engine:
         live = self._killed.pop(id(task), None)
         if live is None or live.attempt is None or self.journal is None:
             return
-        if live.attempt not in self.journal.open.attempts:
-            return  # the adapter recorded its own outcome before the cancel landed
+        # Nothing suspends between the end of the settling pass and dispatch of the same
+        # input; held starts cancel their predecessor, and a watch's outcome write and
+        # completion do not suspend (DL-491).
+        assert live.attempt in self.journal.open.attempts, "a cancelled attempt is still open"
         job = self.journal.open.attempts[live.attempt].job
         at = self.now_present()
         self.journal.append(
@@ -2121,17 +2121,18 @@ class Engine:
         wall = self.clock.now()
         if item.plan is None:  # a start, pending in the store when the engine has one
             if superseded is not None:
-                if item.pending is not None:
-                    assert self.journal is not None  # a pending record is the store's
-                    self.journal.append(
-                        Record(
-                            self.now_present(wall=wall),
-                            "dispatch_pending",
-                            None,
-                            None,
-                            {"event": "discharged", "pending": item.pending, "dispatch": None},
-                        )
+                # Every plan-less deferred start carries its durable pending record (DL-491).
+                assert item.pending is not None, "an owed start has a pending record"
+                assert self.journal is not None  # a pending record is the store's
+                self.journal.append(
+                    Record(
+                        self.now_present(wall=wall),
+                        "dispatch_pending",
+                        None,
+                        None,
+                        {"event": "discharged", "pending": item.pending, "dispatch": None},
                     )
+                )
                 return
             if self._must_wait(item.job, item.run_number):
                 self._held_starts.append(item)  # until its job's group is gone (DL-426)

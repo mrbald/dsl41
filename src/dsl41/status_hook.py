@@ -340,13 +340,17 @@ class StatusHooks:
         try:
             now = self.engine.now_admitted(remember=False)
             for job, row in self.engine.oracle.store.job.items():
+                # Hook observations skip rows with no catalog job (DL-500).
+                job_ir = self.engine.oracle.catalog.jobs.get(job)
+                if job_ir is None:
+                    continue
                 interval = (row.run_number, row.status_at)
                 if row.status != "RUNNING":
                     self._seen.pop(job, None)
                     continue
                 if row.status_at is None or self._seen.get(job) == interval:
                     continue
-                minutes = hook_max_run_alarm(self.engine.oracle.catalog.jobs.get(job))
+                minutes = hook_max_run_alarm(job_ir)
                 threshold = minutes * 60 if minutes else self.threshold
                 if not threshold or (now - row.status_at).total_seconds() < threshold:
                     continue
