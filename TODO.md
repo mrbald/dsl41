@@ -25,7 +25,7 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 - **BUG-20**: Bounds and per-input scan cost of the live oracle's `_emitted` and `_kill_emissions` histories are unqualified (`src/dsl41/oracle_writers.py:135`, `src/dsl41/oracle.py:361-365`).
 - **BUG-48**: Update plan directories accumulate, even after stale refusals. Define their retention separately from attempt records (`src/dsl41/reread_worker.py:158`, `src/dsl41/runner_update.py:91`).
 - **BUG-50**: Retention for per-attempt `runs/<job>.<run>/<n>/` records (`spawn.json`, `status.json`) is undefined and unverified; they consume inodes. Keep it separate from job-output archiving.
-- **BUG-16**: Unproved race: reread finishing during update can store stale status marks (`src/dsl41/runner_control.py:683-684`).
+- **BUG-16**: Unproved race: reread finishing during update can store stale status marks (`src/dsl41/runner_control.py`, `_reread`, the `reread_marks` assignment).
 - **BUG-17**: Unproved race: an unchanged member can start while update stops other members of its restarting box (`src/dsl41/runner_update.py:354-440`).
 - **BUG-18**: A moved-out `job_terminator` can be killed by its old box's KILLJOB cascade without a rerun (`src/dsl41/runner_update.py:640-664`).
 - **BUG-19**: Unproved race: a box with only membership edits can start after admission and have its running membership replaced without restart (`src/dsl41/runner_update.py:354-440`).
@@ -52,7 +52,7 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 - **BUG-73**: At a restart, a recovered completion whose recorded end falls between two engine clock readings microseconds apart is queued above engine time. A backward step below it during the catch-up then holds it until the wall returns, and `engine started` is recorded first (`src/dsl41/runner.py` `perform_plan`, DL-493).
 - **BUG-74**: A snapshot's `enqueue_counter` and `waiter_seq` are installed without range checks at a restart. An inconsistent waiter rank is checked only when an input touches its job (`src/dsl41/oracle_state.py:1299`, `src/dsl41/oracle_state.py:953`).
 - **BUG-75**: A plan step's run id read back at a restart is first checked in `dispatch_record`, after `spawn` changed memory. `_check_steps` checks the step count and `DSL41_SCHEDULED_AT`, but not the run id (`src/dsl41/runner_journal.py:1377`, `src/dsl41/runner_journal.py:247`).
-- **BUG-76**: The engine's `stale_plan` and `update_in_progress` refusals cannot fire through the server, whose one preparation slot and STOPPING check exclude both. Only tests that call the engine reach them (`src/dsl41/runner_control.py:804-820`).
+- **BUG-76**: The engine's `stale_plan` and `update_in_progress` refusals cannot fire through the server, whose one preparation slot and STOPPING check exclude both. Only tests that call the engine reach them (`src/dsl41/runner_control.py`, `_update`).
 - **BUG-77**: Lowering does not enforce the vendor's character set or its length limit for a job name; its directory-component check only refuses names containing `/` or a NUL byte, or equal to `.` or `..`; a catalog read from saved JSON or from a store is not checked (DL-494).
 - **BUG-80**: Canonical rendering is not a fixpoint for a subcommand line whose subject is only a block comment before an inline `job_type:` (`insert_job: /* c */ job_type: c`): the first pass prints two spaces after the colon and the second prints one (F2). The line has no job name and lowering refuses it.
 - **BUG-81**: The status hook observes store rows that have no catalog job. `sendevent CHANGE_STATUS --job other^INS` creates a row for a cross-instance name; with `status_hook_long_running_s` set, the long-running check then sends `job_long_running` for it, and a FAILURE status sends `job_failure`, though no process runs. Decided: hook observations skip a row with no catalog job (owner, 2026-11-13). Not built.
@@ -96,6 +96,7 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 - **BUG-70**: `restart_boxes` reads nesting from the live catalog, so a running sub-box that an update edits and moves out of its running box is not a restart root: it keeps its run and a member added to it stays INACTIVE, where the same edit to a top-level box restarts it (`src/dsl41/reload_plan.py`, DL-463). The forecast agrees with the update.
 - **BUG-71**: An update that turns a running command into a box with members treats the new box as a restart root, because `running_boxes` tests the status and not the live type: it stops the command, then force-starts the box (`src/dsl41/reload_diff.py`; DL-463). `reread` shows it as `restart_box` (DL-490). Decide whether a retyped job should be force-started.
 - **BUG-72**: `reread` prints "would be removed; no replacement" for a job an update retypes outside a restarting box, though a new job of the same name replaces it (`src/dsl41/cli_output.py`, the `remove` effect text; DL-490).
+- **BUG-85**: Five texts state what the code or the contract does not: the module docstring of `src/dsl41/file_processing_charts.py` cites statechart-engine §11 for "restoring a durable state runs no actions", which §11 does not state; the docstring of `_execution_input_preflight` (`src/dsl41/runner_preflight.py`) names three inputs and the function checks two, `envvars` and `chk_files`; the docstring of `test_manual_known_unsupported_inventory` (`tests/test_simulation_register.py`) names `deploy.md` for a table the test reads from `authoring.md`; `docs/blocks/attempts.md` says "an attempt dispatched before the cookie" in two places, and the `process-leak` row of `docs/runner-design.md` says "decide as before the cookie", where wrapper-protocol §3 says "without the cookie" (DL-436).
 
 ### Unranked
 
@@ -141,8 +142,8 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
   - **Parked**: Prove replay representation savings without duplicating validation ([journal](src/dsl41/runner_journal.py)). Package moves also wait for a proven ownership seam and navigation gain.
   - Improve the existing document routes for [admission](docs/blocks/admission.md) between current authority, component explanation and how-to, without copying contracts.
 
-- **FEAT-13**: Complete the 20 due spec reviews at main 071c312 (`scripts/arch_check.py --spec-status`).
-- **FEAT-15**: Replace placeholder update identities and client replies with types that need no fake token, revision or catalog (`src/dsl41/runner_control.py:724-732`, `src/dsl41/cli_reload.py:193-231`).
+- **FEAT-38**: Rule the behaviour that the code has and no decision entry rules. The documents state these two and cite no entry: the preflight refusal codes `job-class`, `permission`, `auto-delete`, `shell`, `external-instance`, `fw-execution`, `notification-unsupported`, `notification-hook`, `heartbeat-unsupported` and `runtime-attribute` (`src/dsl41/runtime_policy.py`, `job_policy`; `docs/runner-design.md`); the join of repeated `ulimit` lines in lowering (`src/dsl41/ir.py`; `docs/ir-design.md`, `docs/authoring.md`). The frozen contracts leave these four out because no entry rules them: the `; limits=<json>` suffix of a `spawn_failed` text (`src/dsl41/runner_wrapper.py`); the reread answer's `settings_sources` (`src/dsl41/reread_worker.py`); the text of the note `leaked: <n>, left running` (`src/dsl41/runner_stops.py`; DL-431 rules the behaviour, not the text); the answer to a subscription's non-integer `since`, where `null` is accepted (`src/dsl41/runner_control.py`).
+- **FEAT-15**: Replace placeholder update identities and client replies with types that need no fake token, revision or catalog (`src/dsl41/runner_control.py`, the `UpdateRequest` in `_update`; `src/dsl41/cli_reload.py`, `update_reply_of`).
 - **FEAT-33**: Check that a difference label is unique within a job record. Labels such as `passthrough.description` and `kind` are unclear (DL-482).
 - **FEAT-34**: Put the job name last in the neutral `query status` table, so no column is padded to the longest name; long names make the table about 140 columns wide (DL-482).
 - **FEAT-35**: Give `query status JOB` a readable layout; it prints a raw field list with engine-wide fields mixed in (DL-482).
@@ -153,9 +154,9 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 - **FEAT-21**: Make every container rehearsal and wargame green on main: `scripts/wargame.sh`, `examples/nightbank/deploy/drill-*.sh`, `.github/workflows/service-drill.yml`, `examples/dst-drill/` and `.github/workflows/dst-drill.yml`.
 - **FEAT-22**: Make every documentation page state the built v2 design in one voice, without retired terms or contradictions.
 - **FEAT-23**: Show drain, deadline and interruption evidence in control and TUI views. The TUI subtitle already shows the plan token and the jobs still stopping. Until then use `dsl41 query status` and the `dsl41 engine stop` exit status.
-- **FEAT-24**: Shorten `docs/runner-design.md`, `docs/control-protocol.md` and `docs/access-model.md`: remove history, keep rules.
+- **FEAT-24**: Shorten `docs/runner-design.md`, `docs/control-protocol.md` and `docs/access-model.md`. Keep every rule.
 - **FEAT-25**: Improve `dsl41 decompile` output for import, configuration, execution and maintenance as a JIL migration starting point, with a migration guide on synthetic estates. Keep canonical equivalence, explicit conditions and the closed fold registry. Start with [file processing](examples/file_processing/README.md).
-- **FEAT-26**: Apply pending estate edits at engine start. Deferred: "defer now, until we have cleaned up state machines, then reassess" (owner, 2026-11-10). It was sized at eleven source files and 700 to 1,000 lines and needs FEAT-10 first. Today restart restores the stored catalog and socket `update` applies edits (DL-437, DL-463, DL-468).
+- **FEAT-26**: Apply pending estate edits at engine start. Deferred: "defer now, until we have cleaned up state machines, then reassess" (owner, 2026-11-10). It was sized at eleven source files and 700 to 1,000 lines. The UPDATE chart step it waited for is built (DL-488). Today restart restores the stored catalog and socket `update` applies edits (DL-437, DL-463, DL-468).
 
 ## Known limits
 
@@ -163,6 +164,7 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 
 - Standby starts empty; acceptable for the first system's idempotent jobs. State continuity is deferred.
 - All jobs run under the engine account; per-job accounts are unsupported and deferred.
+- On an estate with an access file, every process under the engine's account, a batch job included, can state any person and any role through `as` (DL-499; [deploy.md](docs/deploy.md), "Serve people behind the authenticating proxy", L1).
 - Cross-instance conditions `s(JOB^INST)` are refused: one instance is scheduled and another instance's status cannot be resolved.
 - `permission` is refused: per-job edit and run rights would duplicate control-socket authorization ([access-model.md](docs/access-model.md)).
 - `auto_delete` is refused: it would edit the site's configured estate, and reload would restore the job.
