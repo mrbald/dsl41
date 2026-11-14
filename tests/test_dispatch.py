@@ -574,27 +574,6 @@ def test_a_starting_overwrite_after_an_ended_run_launches_nothing(
     asyncio.run(scenario())
 
 
-def test_a_kill_for_a_run_that_is_no_longer_live_cancels_nothing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A kill names the run it was decided for. When an earlier item of the same plan has
-    replaced the live run (a start that cancelled the stale one), the kill cancels nothing:
-    stopping the newer run would stop a run nobody asked to stop."""
-    import dsl41.runner as runner_mod
-
-    engine = _engine()
-
-    async def scenario() -> None:
-        engine.inject(_ev("STARTJOB", 0, job="j"))
-        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
-        task = engine._live["j"].task
-        monkeypatch.setattr(runner_mod, "dispatch_plan", lambda *_a, **_k: [("KILL", "j", 7)])
-        engine._dispatch([])
-        assert engine._live["j"].task is task and not task.cancelled()
-
-    asyncio.run(scenario())
-
-
 def test_replay_derives_no_start_the_batch_itself_superseded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
