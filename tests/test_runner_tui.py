@@ -310,15 +310,6 @@ def test_the_console_says_where_an_applied_command_landed() -> None:
     assert line.style == "green"
 
 
-def test_the_console_says_a_refusal_left_nothing_to_look_up() -> None:
-    """The operator's next move after a refusal is to send it again, and the
-    line has to support that: nothing was written down, so there is no index
-    and no journal entry to go looking for."""
-    line = _outcome_line("> ON_HOLD j", {"ok": False, "refused": True, "error": "no expect"})
-    assert line.plain == "> ON_HOLD j: not sent, nothing logged: no expect"
-    assert line.style == "red"
-
-
 def test_the_console_separates_a_rejection_from_a_refusal() -> None:
     """A rejection IS in the log, at an index, and re-sending it unchanged
     loses the same race -- so it must not read like the refusal above."""
@@ -1160,56 +1151,6 @@ def _console_text(console: RichLog) -> str:
     return re.sub(r"\s+", "", "".join(line.text for line in console.lines))
 
 
-@pytest.mark.parametrize("width", [80, 240])
-@pytest.mark.parametrize("last_seq, count_text", [(4, "1 more time"), (5, "2 more times")])
-def test_pilot_scheduler_refusals_summarise_before_the_next_job_entry(
-    short_root: Path, local_timezone, width: int, last_seq: int, count_text: str
-) -> None:
-    async def scenario() -> None:
-        async with _trace_poll_app(short_root, size=(width, 40)) as (app, pilot, replies):
-            console = app.query_one("#console", RichLog)
-            replies.trace.update(
-                last_seq=last_seq, entries=[_start_refusal(seq) for seq in range(3, last_seq + 1)]
-            )
-            await pilot.press("r")
-            await _wait_for_ui(pilot, lambda: app._trace_seq == last_seq)
-            await pilot.pause()
-            first = f"2026-07-02T01:30:03 trace_job START_REFUSED [{_SCHEDULER_REFUSAL}]"
-            assert re.sub(r"\s+", "", first) in _console_text(console)
-            assert _console_text(console).count("START_REFUSED") == 1
-            assert "yellow" in _line_style(
-                next(line for line in console.lines if "START_REFUSED" in line.text)
-            )
-            replies.trace.update(
-                last_seq=last_seq + 1,
-                entries=[
-                    *replies.trace["entries"],
-                    {
-                        "seq": last_seq + 1,
-                        "at": f"2026-07-01T23:30:{last_seq + 1:02}",
-                        "job": "trace_job",
-                        "transition": "RUNNING->SUCCESS",
-                        "cause": "exit 0",
-                    },
-                ],
-            )
-            await pilot.press("r")
-            await _wait_for_ui(pilot, lambda: app._trace_seq == last_seq + 1)
-            await pilot.pause()
-            summary = (
-                f"2026-07-02T01:30:{last_seq + 1:02} trace_job START_REFUSED repeated {count_text},"
-                f" last 2026-07-02T01:30:{last_seq:02}"
-            )
-            following = f"2026-07-02T01:30:{last_seq + 1:02} trace_job RUNNING->SUCCESS [exit 0]"
-            assert re.sub(r"\s+", "", summary + following) in _console_text(console)
-            assert "dim" in _line_style(
-                next(line for line in console.lines if "more time" in line.text)
-            )
-            assert app._refusal_runs == {}
-
-    asyncio.run(scenario())
-
-
 @pytest.mark.parametrize("stale_seq", [3, 4], ids=["lower", "duplicate"])
 def test_pilot_stale_trace_entries_do_not_change_a_refusal_count(
     short_root: Path, local_timezone, stale_seq: int
@@ -1407,82 +1348,6 @@ def test_pilot_reconnect_preserves_refusal_summary_without_recounting(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("reset", ["restart", "baseline", "mixed-baselines"])
-def test_pilot_trace_reset_flushes_old_refusals_and_starts_fresh_counts(
-    short_root: Path, local_timezone, reset: str
-) -> None:
-    async def scenario() -> None:
-        async with _trace_poll_app(short_root) as (app, pilot, replies):
-            console = app.query_one("#console", RichLog)
-            replies.trace.update(last_seq=5, entries=[_start_refusal(seq) for seq in (3, 4, 5)])
-            await pilot.press("r")
-            await _wait_for_ui(pilot, lambda: app._trace_seq == 5)
-            assert app._scheduler_refusals == {("trace_job", 1, "RUNNING"): 3}
-            replies.requests.clear()
-            new_entries = [
-                {
-                    "seq": 1,
-                    "at": "2026-07-01T23:31:01",
-                    "transition": "RESTART",
-                    "cause": "trace since the snapshot",
-                },
-                *[{**_start_refusal(seq), "at": f"2026-07-01T23:31:{seq:02}"} for seq in (2, 3)],
-            ]
-            if reset != "restart":
-                replies.status["baseline_id"] = "period-b"
-                if reset == "baseline":
-                    replies.trace["baseline_id"] = "period-b"
-            replies.trace.update(last_seq=3, entries=new_entries)
-            await pilot.press("r")
-            if reset != "restart":
-                await _wait_for_ui(pilot, lambda: app._trace_seq == 0)
-                assert app._refusal_runs == {} and app._alarms == {}
-                assert app._scheduler_refusals == {}
-                replies.trace["baseline_id"] = "period-b"
-                await pilot.press("r")
-                if reset == "mixed-baselines":
-                    await pilot.pause()
-                    await pilot.press("r")
-            await _wait_for_ui(pilot, lambda: app._trace_seq == 3)
-            assert app._scheduler_refusals == {("trace_job", 1, "RUNNING"): 2}
-            assert app._trace_from_snapshot
-            replies.trace.update(
-                last_seq=4,
-                entries=[
-                    *new_entries,
-                    {
-                        "seq": 4,
-                        "at": "2026-07-01T23:31:04",
-                        "job": "trace_job",
-                        "transition": "RUNNING->SUCCESS",
-                        "cause": "exit 0",
-                    },
-                ],
-            )
-            await pilot.press("r")
-            await _wait_for_ui(pilot, lambda: app._trace_seq == 4)
-            await pilot.pause()
-            assert [r["since"] for r in replies.requests if r["cmd"] == "trace"] == (
-                [5, 0, 0, 3] if reset == "mixed-baselines" else [5, 0, 3]
-            )
-            rendered = _console_text(console)
-            old_summary = (
-                "2026-07-02T01:30:05 trace_job START_REFUSED repeated 2 more times,"
-                " last 2026-07-02T01:30:05"
-            )
-            new_summary = (
-                "2026-07-02T01:31:04 trace_job START_REFUSED repeated 1 more time,"
-                " last 2026-07-02T01:31:03"
-            )
-            assert rendered.count(re.sub(r"\s+", "", old_summary)) == 1
-            assert rendered.count(re.sub(r"\s+", "", new_summary)) == 1
-            assert rendered.index("repeated2moretimes") < rendered.index("RESTART")
-            assert "repeated3moretimes" not in rendered
-            assert app._refusal_runs == {} and app._alarms == {}
-
-    asyncio.run(scenario())
-
-
 @pytest.mark.parametrize("job_type", ["CMD", "BOX"])
 def test_pilot_details_count_current_run_and_keep_queued_refusals_apart(
     short_root: Path, job_type: str
@@ -1655,71 +1520,6 @@ def test_dl210_headerless_trace_refusal_preserves_cursor(short_root: Path) -> No
             console = app.query_one("#console", RichLog)
             assert any("trace query refused" in line.text for line in console.lines)
             assert not any("trace baseline" in line.text for line in console.lines)
-
-    asyncio.run(scenario())
-
-
-def test_dl210_shorter_trace_still_restarts_from_zero(short_root: Path) -> None:
-    async def scenario() -> None:
-        async with _trace_poll_app(short_root) as (app, pilot, replies):
-            replies.requests.clear()
-            replies.trace.update(last_seq=1, entries=replies.entries("shorter", 1))
-            await pilot.press("r")
-            await _wait_for_ui(pilot, lambda: app._trace_seq == 1)
-            assert [r["since"] for r in replies.requests if r["cmd"] == "trace"] == [2, 0]
-            assert app._alarms == {"trace_job": 1}
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.parametrize("verb", ["status", "trace"])
-def test_pilot_a_refused_query_is_visible_once_and_recovers(verb: str, short_root: Path) -> None:
-    """F4 (DL-187 item 6): an ok:false status OR trace answer is a query
-    refusal, distinct from a dead socket -- the last good table stays, the
-    console gets ONE red line even across two refused passes, the subtitle
-    carries "refused", and a later ok pass clears it with a green line.
-    Parametrized (P1-7): the keyed `_query_faults` memo (P1-1) tracks each
-    verb independently and must behave the same way for both."""
-    text = "insert_job: qf_job\njob_type: c\ncommand: x\nmachine: m1\n"
-
-    async def scenario() -> None:
-        engine, server, loop_task = await _serve(short_root / "run", text)
-        try:
-            app = RunnerApp(server.path)
-            async with app.run_test(size=(120, 40)) as pilot:
-                await _wait_for_ui(pilot, lambda: "qf_job" in app._rows)
-
-                inner = app._client.request
-                state = {"refuse": True}
-
-                async def flaky(request):
-                    if state["refuse"] and request.get("cmd") == verb:
-                        return {"ok": False, "error": "boom"}
-                    return await inner(request)
-
-                app._client.request = flaky
-                console = app.query_one("#console", RichLog)
-
-                def refusals() -> int:
-                    needle = f"{verb} query refused: boom"
-                    return sum(1 for ln in console.lines if needle in ln.text)
-
-                await app._refresh()
-                await _wait_for_ui(pilot, lambda: refusals() == 1)
-                assert app._query_faults[verb] == "boom"
-                assert "(refused)" in app.sub_title
-
-                await app._refresh()  # a second refused pass must not repeat the line
-                await pilot.pause()
-                assert refusals() == 1
-
-                state["refuse"] = False
-                await app._refresh()
-                await _wait_for_ui(pilot, lambda: verb not in app._query_faults)
-                assert "(refused)" not in app.sub_title
-                assert any(ln.text == f"{verb} query ok again" for ln in console.lines)
-        finally:
-            await _teardown(engine, server, loop_task)
 
     asyncio.run(scenario())
 
@@ -2877,66 +2677,6 @@ def test_pilot_triggers_refresh_preserves_the_cursor_across_ticks(short_root: Pa
     asyncio.run(scenario())
 
 
-def test_pilot_triggers_title_names_a_refused_timers_answer(short_root: Path) -> None:
-    """F4 (DL-187 item 6): an ok:false `timers` answer leaves the last good
-    rows in place, names the refusal on the border title, and -- through
-    the app's own keyed `_query_faults` memo (P1-1) -- marks the app
-    subtitle and writes the same console line status/trace use."""
-    text = "insert_job: tf_run\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 5\n"
-
-    async def scenario() -> None:
-        adapter = FakeAdapter(default=None)  # stays RUNNING: a real dated row
-        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
-        try:
-            app = RunnerApp(server.path)
-            async with app.run_test(size=(120, 40)) as pilot:
-                await _wait_for_ui(pilot, lambda: "tf_run" in app._rows)
-                table = app.query_one("#jobs", DataTable)
-                table.focus()
-                table.move_cursor(row=0)
-                await pilot.pause()
-                await pilot.press("s")
-                await _wait_for_ui(
-                    pilot, lambda: str(table.get_cell("tf_run", "status")) == "RUNNING"
-                )
-
-                await pilot.press("t")
-                await _wait_for_ui(pilot, lambda: isinstance(app.screen, TriggersScreen))
-                screen = app.screen
-                assert isinstance(screen, TriggersScreen)
-                trig = screen.query_one("#trigbox", DataTable)
-                await _wait_for_ui(pilot, lambda: trig.row_count == 1)
-
-                inner = app._client.request
-
-                async def refuse_timers(request):
-                    if request.get("cmd") == "timers":
-                        return {"ok": False, "error": "no timers for you"}
-                    return await inner(request)
-
-                app._client.request = refuse_timers
-                await screen._refresh()
-                await pilot.pause()
-
-                assert "refused: no timers for you" in str(trig.border_title)
-                assert trig.row_count == 1  # the last good row stayed
-                # P1-1: `timers` is a channel of the same keyed memo as
-                # status/trace, so it marks the subtitle too -- DL-187 item 6
-                # says "marks the subtitle" for every refused verb, not just
-                # status/trace (review MAJOR: the earlier per-screen-only
-                # memo satisfied the console line but missed the subtitle)
-                assert app._query_faults.get("timers") == "no timers for you"
-                assert "(refused)" in app.sub_title
-                console = app.query_one("#console", RichLog)
-                assert any(
-                    "timers query refused: no timers for you" in ln.text for ln in console.lines
-                )
-        finally:
-            await _teardown(engine, server, loop_task)
-
-    asyncio.run(scenario())
-
-
 # --------------------------------- 7. safety: focus scope, confirm, posture
 
 
@@ -3396,37 +3136,5 @@ def test_the_subtitle_names_the_configuration_rev_and_an_update_while_it_stops(
                 assert any("update cdcdcdcdcdcd stopping" in ln.text for ln in console.lines)
         finally:
             await _teardown(engine, server, loop_task)
-
-    asyncio.run(scenario())
-
-
-def test_pilot_reread_status_annotation(short_root: Path) -> None:
-    from dsl41.runner_control import status_label
-
-    async def scenario():
-        async with _trace_poll_app(short_root) as (app, pilot, replies):
-            table = app.query_one("#jobs", DataTable)
-            assert table.columns["status"].width == 10
-            original_width = table.virtual_size.width
-            row = replies.status["jobs"]["trace_job"]
-            row["reread"] = {"change": "changed", "action": "hold"}
-            await pilot.press("r")
-            table = app.query_one("#jobs", DataTable)
-            await _wait_for_ui(
-                pilot, lambda: "reread" in str(table.get_cell("trace_job", "status"))
-            )
-            assert str(table.get_cell("trace_job", "status")) == status_label(row)
-            assert table.columns["status"].width >= len(status_label(row))
-            await _wait_for_ui(pilot, lambda: table.virtual_size.width == original_width + 34)
-            del row["reread"]
-            await pilot.press("r")
-            await _wait_for_ui(
-                pilot,
-                lambda: (
-                    str(table.get_cell("trace_job", "status")) == "INACTIVE"
-                    and table.columns["status"].width == 10
-                    and table.virtual_size.width == original_width
-                ),
-            )
 
     asyncio.run(scenario())

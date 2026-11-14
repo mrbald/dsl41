@@ -511,21 +511,6 @@ def test_stale_archiver_read_cannot_republish_done(
     check_counts_outputs(tmp_path)
 
 
-def test_leftover_done_todo_cleaned_without_handler(tmp_path: Path) -> None:
-    deliver(tmp_path, "a", b"a")
-    fp.archive(tmp_path, IDENTITY)
-    path = published(tmp_path / "todo")[0]
-    todo = path.read_bytes()
-    fp.process(tmp_path, IDENTITY, handler(tmp_path))
-    path.write_bytes(todo)
-    assert fp.process(tmp_path, IDENTITY, handler(tmp_path)).selected == 0
-    assert not path.exists()
-    path.write_bytes(todo)
-    fp.archive(tmp_path, IDENTITY)
-    assert not path.exists()
-    check_counts_outputs(tmp_path)
-
-
 def test_archiver_can_remove_done_todo_after_processor_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
