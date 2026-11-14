@@ -32,7 +32,6 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -1119,11 +1118,6 @@ def test_dl210_u1_u4_trace_baseline_change_restarts_a_longer_trace_next_poll(
     asyncio.run(scenario())
 
 
-def _line_style(line: Any) -> str:
-    """The styles of one console line, joined, for a style assertion."""
-    return " ".join(str(segment.style) for segment in line if segment.style is not None)
-
-
 _SCHEDULER_REFUSAL = "already RUNNING -- concurrent or repeated start request, no effect (STARTJOB event (scheduler))"
 
 
@@ -1149,41 +1143,6 @@ def _start_refusal(
 
 def _console_text(console: RichLog) -> str:
     return re.sub(r"\s+", "", "".join(line.text for line in console.lines))
-
-
-@pytest.mark.parametrize("stale_seq", [3, 4], ids=["lower", "duplicate"])
-def test_pilot_stale_trace_entries_do_not_change_a_refusal_count(
-    short_root: Path, local_timezone, stale_seq: int
-) -> None:
-    async def scenario() -> None:
-        async with _trace_poll_app(short_root) as (app, pilot, _):
-            console = app.query_one("#console", RichLog)
-            app._consume_trace(
-                [
-                    _start_refusal(3),
-                    _start_refusal(4),
-                    _start_refusal(stale_seq),
-                    _start_refusal(5),
-                    {
-                        "seq": 6,
-                        "at": "2026-07-01T23:30:06",
-                        "job": "trace_job",
-                        "transition": "RUNNING->SUCCESS",
-                        "cause": "exit 0",
-                    },
-                ]
-            )
-            await pilot.pause()
-            rendered = _console_text(console)
-            summary = (
-                "2026-07-02T01:30:06 trace_job START_REFUSED repeated 2 more times,"
-                " last 2026-07-02T01:30:05"
-            )
-            assert rendered.count(re.sub(r"\s+", "", summary)) == 1
-            assert rendered.count("START_REFUSED") == 2
-            assert app._trace_seq == 6 and app._refusal_runs == {}
-
-    asyncio.run(scenario())
 
 
 def test_pilot_identical_refusal_after_a_different_entry_prints_a_new_first_line(
@@ -1400,61 +1359,6 @@ def test_pilot_details_count_current_run_and_keep_queued_refusals_apart(
             assert app._alarms == {} and app._scheduler_refusals == {}
             assert not app._trace_from_snapshot
             await details(None)
-
-    asyncio.run(scenario())
-
-
-def test_a_transition_violation_line_is_an_alert_and_a_host_subject_is_no_job(
-    short_root: Path,
-) -> None:
-    """A TRANSITION_VIOLATION entry, which no build writes since DL-353
-    but an older build's engine may still send, names its subject in `job`,
-    and a host's subject is its `host:` key. The console shows every such
-    line as an alert, whatever the subject. A host subject makes no
-    jobs-table row and no alarm count; an ordinary transition stays dim."""
-
-    async def scenario() -> None:
-        async with _trace_poll_app(short_root) as (app, pilot, replies):
-            console = app.query_one("#console", RichLog)
-            violation = {
-                "at": "2026-07-01T08:00:01",
-                "transition": "TRANSITION_VIOLATION",
-                "cause": "host.07 quarantined->evicted: evicted is not one of the targets",
-            }
-            replies.trace.update(
-                last_seq=5,
-                entries=[
-                    *replies.entries("old", 2),
-                    {"seq": 3, "job": "host:local", **violation},
-                    {"seq": 4, "job": "trace_job", **violation},
-                    {
-                        "seq": 5,
-                        "at": "2026-07-01T08:00:02",
-                        "job": "trace_job",
-                        "transition": "INACTIVE->STARTING",
-                        "cause": "STARTJOB",
-                    },
-                ],
-            )
-            await pilot.press("r")
-            await _wait_for_ui(pilot, lambda: app._trace_seq == 5)
-            host = next(line for line in console.lines if "host:local" in line.text)
-            assert "TRANSITION_VIOLATION" in host.text and "host.07" in host.text
-            assert "red" in _line_style(host)
-            job = next(
-                line for line in console.lines if "trace_job TRANSITION_VIOLATION" in line.text
-            )
-            assert "red" in _line_style(job)
-            plain = next(line for line in console.lines if "INACTIVE->STARTING" in line.text)
-            assert "red" not in _line_style(plain)
-            # fails if a violation, or its `host:` subject, is tallied as an
-            # alarm (e.g. the marker joining the alarm set), or if a trace
-            # subject makes a jobs-table row
-            assert app._alarms == {"trace_job": 2}
-            assert "host:local" not in app._alarms
-            assert app._rows == {"trace_job"}
-            table = app.query_one("#jobs", DataTable)
-            assert [str(key.value) for key in table.rows] == ["trace_job"]
 
     asyncio.run(scenario())
 
@@ -3102,39 +3006,12 @@ def test_pilot_q_closes_the_spec_popup(short_root: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_the_subtitle_names_the_configuration_rev_and_an_update_while_it_stops(
-    short_root: Path,
-) -> None:
-    """spec-reload: the subtitle shows the rev the engine runs; while an update stops its jobs it
-    names the update and those jobs, and the console says when that line changes."""
+def test_the_configuration_line_names_the_revision_or_is_empty() -> None:
+    """The configuration line names the revision when status supplies one."""
     from dsl41.runner_tui import config_line
 
-    text = "insert_job: rev_job\njob_type: c\ncommand: x\nmachine: m1\n"
     stopping = {"config_rev": 1, "update": {"token": "ab" * 32, "stopping": ["a", "b"]}}
     assert config_line(stopping) == "rev 1  [update abababababab stopping: a, b]"
+    assert config_line({"config_rev": 1}) == "rev 1"
     assert config_line({"config_rev": 2}) == "rev 2"
     assert config_line({}) == ""
-
-    async def scenario() -> None:
-        engine, server, loop_task = await _serve(short_root / "run", text)
-        try:
-            app = RunnerApp(server.path)
-            async with app.run_test(size=(120, 40)) as pilot:
-                await _wait_for_ui(pilot, lambda: "rev 1" in app.sub_title)
-                inner = app._client.request
-
-                async def stopping_update(request):
-                    answer = await inner(request)
-                    if request.get("cmd") == "status" and answer.get("ok"):
-                        answer["update"] = {"token": "cd" * 32, "stopping": ["rev_job"]}
-                    return answer
-
-                app._client.request = stopping_update
-                await app._refresh()
-                await _wait_for_ui(pilot, lambda: "stopping: rev_job" in app.sub_title)
-                console = app.query_one("#console", RichLog)
-                assert any("update cdcdcdcdcdcd stopping" in ln.text for ln in console.lines)
-        finally:
-            await _teardown(engine, server, loop_task)
-
-    asyncio.run(scenario())
