@@ -1510,17 +1510,23 @@ def _resume_watch(engine: Engine, job_ir: JobIR, attempt: OpenAttempt, last_at: 
 def _discharge_pending(
     engine: Engine, wires: list[dict[str, Any]], replay: Any, last_at: datetime
 ) -> None:
-    """Step 7: every pending dispatch is deferred to the loop, which dispatches it while its run
-    is still current. A start the replayed tail decided with no `dispatch` record (the previous
-    engine died between the decision and the record, DL-102) is made a `dispatch_pending` first,
+    """Step 7: each pending dispatch has one deferred item for the loop, which dispatches it
+    while its run is still current. A start the replayed tail decided with no `dispatch` record
+    (the previous engine died between the decision and the record, DL-102) is made a
+    `dispatch_pending` first,
     so it is durable until its `dispatch` commits. A run that already has an attempt, open or
     dispatched in the tail, a pending record, or a replacement its plan queued is not started
     again."""
     assert engine.journal is not None
     table = engine.journal.open
     owed = sorted(table.pending.values(), key=lambda p: p.seq)
+    queued = {item.pending for item in engine._deferred}
     for pending in owed:
-        engine.defer(Deferred(pending.job, pending.run_number, pending=pending.seq), after=last_at)
+        # A start already queued behind the recovery barrier stays covered (DL-425, DL-426).
+        if pending.seq not in queued:
+            engine.defer(
+                Deferred(pending.job, pending.run_number, pending=pending.seq), after=last_at
+            )
     covered = set(dispatched_runs(wires)) | {(p.job, p.run_number) for p in owed}
     covered |= {(a.job, a.run_number) for a in table.attempts.values()}
     covered |= {
