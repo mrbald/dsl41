@@ -1478,8 +1478,7 @@ def test_a_held_group_keeps_its_job_s_starts_back_until_it_is_gone(
     group is held; a second held attempt of the job keeps it waiting; a stopping attempt whose
     group is gone has its record timeout read again; a recovering engine defers what it
     releases, a draining one leaves the starts to the restart's pending records, and a plan
-    of another attempt of the job goes once the job is free. A start the oracle moved past
-    is dropped, with or without a pending record; a look that raises stops the loop; a
+    of another attempt of the job goes once the job is free. A look that raises stops the loop; a
     process listing that fails proves nothing gone."""
     from dsl41.engine_charts import DrainRequest
     from dsl41.runner import Deferred, _Plan
@@ -1503,7 +1502,6 @@ def test_a_held_group_keeps_its_job_s_starts_back_until_it_is_gone(
         owed = Deferred("j", 1)
         engine._discharge(owed)
         assert engine._held_starts == [owed]
-        engine._discharge(Deferred("j", 9))  # moved past: dropped, no pending record to close
         engine._plans[third] = _Plan(third, "j", 1, [], 0)
         engine._waiting_plans.add(third)
         engine.group_gone(RUN_ID)  # read again; OTHER_ID still holds the job

@@ -13,9 +13,11 @@ import pytest
 from dsl41 import main_config as main
 from dsl41.ir import CatalogIR, LoweringError, lower_source
 from dsl41.lint import rule_known_unsupported
+from dsl41.oracle_state import Event
 from dsl41.reload_diff import definition_hash
 from dsl41.reload_plan import RereadRefused, reread
-from dsl41.runner_adapters import FakeAdapter, read_watch_log
+from dsl41.runner_adapters import FakeAdapter, LocalCommandAdapter, read_watch_log
+from dsl41.runner_admission import Envelope
 from dsl41.runner_clock import VirtualClock
 from dsl41.runner_control import ControlServer
 from dsl41.runner_startup import active_configuration, resume_run, start_run, wire_from_profile
@@ -152,7 +154,74 @@ def test_hook_payload_always_has_nullable_alarm_keys():
         assert row["alarm_if_terminated"] is (True if event == "job_terminated" else None)
 
 
-def test_per_job_thresholds_update_fallback_missing_jobs_and_bad_annotations(monkeypatch):
+def test_hook_observations_skip_cross_instance_rows_beside_catalog_jobs(tmp_path, monkeypatch):
+    async def scenario():
+        engine = start_run(
+            lower_source("insert_xinst: INS\nxtype: a\n" + JOB),
+            tmp_path / "run",
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": LocalCommandAdapter()},
+        )
+        hooks = StatusHooks(
+            engine, HookSettings(status_hook="/missing", status_hook_long_running_s=1)
+        )
+        engine.status_hooks = hooks
+        events = []
+        monkeypatch.setattr(
+            hooks.delivery, "enqueue", lambda event, **kw: events.append((event, kw))
+        )
+        try:
+            for seconds, status in enumerate(("FAILURE", "TERMINATED", "RUNNING")):
+                for job in ("other^INS", "A"):
+                    key = f"job:{job}"
+                    event = Event(
+                        at=T0 + timedelta(seconds=seconds),
+                        kind="STATUS",
+                        payload={"job": job, "status": status},
+                    )
+                    answer = engine.submit(
+                        event,
+                        Envelope(
+                            request_id=f"{job}-{status}",
+                            expect={key: engine.oracle.store.revision(key)},
+                        ),
+                    )
+                    await engine.run_until_quiescent(event.at)
+                    assert (await answer).decision == "applied"
+                    assert engine.oracle.store.job[job].status == status
+            assert "other^INS" not in engine.oracle.catalog.jobs
+            await engine.clock.wait_until(T0 + timedelta(seconds=3))
+            hooks.check_long_running()
+            for job in ("other^INS", "A"):
+                key = f"job:{job}"
+                for kind, values in (("STATUS", {"status": "SUCCESS"}), ("ON_HOLD", {})):
+                    event = Event(
+                        at=T0 + timedelta(seconds=4), kind=kind, payload={"job": job, **values}
+                    )
+                    answer = engine.submit(
+                        event,
+                        Envelope(
+                            request_id=f"{job}-{kind}",
+                            expect={key: engine.oracle.store.revision(key)},
+                        ),
+                    )
+                    await engine.run_until_quiescent(event.at)
+                    assert (await answer).decision == "applied"
+                assert engine.oracle.store.job[job].on_hold
+            assert [(event, kw["job"]) for event, kw in events] == [
+                ("job_failure", "A"),
+                ("job_terminated", "A"),
+                ("job_long_running", "A"),
+                ("job_hold", "A"),
+            ]
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(scenario())
+
+
+def test_per_job_thresholds_update_fallback_and_bad_annotations(monkeypatch):
     async def scenario():
         text = JOB + "max_run_alarm: 1\n" + JOB.replace("A", "B") + "max_run_alarm: 0\n"
         engine, _ = make_engine(text)
@@ -165,7 +234,6 @@ def test_per_job_thresholds_update_fallback_missing_jobs_and_bad_annotations(mon
         try:
             await feed(engine, "STATUS", job="A", status="RUNNING")
             await feed(engine, "STATUS", job="B", status="RUNNING")
-            await feed(engine, "STATUS", job="ghost", status="RUNNING")
             await engine.clock.wait_until(T0 + timedelta(seconds=59))
             hooks.check_long_running()
             assert not events
@@ -190,8 +258,6 @@ def test_per_job_thresholds_update_fallback_missing_jobs_and_bad_annotations(mon
             assert events[-1][1]["alarm_if_fail"] is True
             await feed(engine, "STATUS", 65, job="A", status="TERMINATED")
             assert events[-1][1]["alarm_if_terminated"] is True
-            await feed(engine, "STATUS", 65, job="ghost", status="FAILURE")
-            assert events[-1][1]["alarm_if_fail"] is True
         finally:
             await engine.shutdown()
 

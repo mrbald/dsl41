@@ -822,6 +822,8 @@ async def _resume_under_lock(
         engine.catch_up(partial(step, scan))
     engine.catch_up(partial(_owed, engine, wires, replay, last_at))
     if journal.open.update is not None:  # the update in STOPPING, its filter holding
+        # Startup validates every open update's plan before adopting attempts (DL-432).
+        assert opened_update is not None
         engine.update.resume(journal.open.update, opened=opened_update)
     # the scheduler re-anchors now, so no tick missed while down fires late; the barrier
     # records the drops with `engine started` once the catch-up is done (§6, item 4)
@@ -1160,10 +1162,10 @@ def _adopt_open_attempts(
             # a snapshot older than the outcome's kind reads as a stop's (DL-431)
             outcome = AttemptOutcome(cast("Any", attempt.outcome or "stopped"), cause=attempt.stop)
             owed = attempt.attempt in table.plans
-            engine.adopt_attempt(facts, outcome, plan_done=not owed, restart=True)
+            engine.adopt_attempt(facts, outcome, plan_done=not owed)
             steps.append(partial(_cleanup, engine, attempt))
         else:
-            engine.adopt_attempt(facts, restart=True)
+            engine.adopt_attempt(facts)
             stop = attempt.stop or (ENGINE_STOP if attempt.attempt in stopping else None)
             steps.append(partial(_observe, engine, attempt, stop))
     return steps
@@ -1345,7 +1347,7 @@ def _watch(
     if split is None:
         _resume_watch(engine, job_ir, attempt, last_at)
         return
-    engine.adopt_attempt(_facts_of(attempt), observed=False, restart=True)
+    engine.adopt_attempt(_facts_of(attempt), observed=False)
     engine.quarantine(attempt.attempt, split)
 
 
@@ -1490,13 +1492,13 @@ def _resume_watch(engine: Engine, job_ir: JobIR, attempt: OpenAttempt, last_at: 
         ended = ExitRecord(
             exit_code=0, ended_at=watch.last_at.isoformat(), wrapper_outcome="exited"
         )
-        engine.adopt_attempt(_facts_of(attempt), observed=False, restart=True)
+        engine.adopt_attempt(_facts_of(attempt), observed=False)
         engine.record_outcome(attempt.attempt, AttemptOutcome("natural", record=ended))
         return
     rt = engine.oracle.store.job.get(job)
     if rt is None or rt.run_number != run or rt.status not in LIVE:
         # DL-242: only a live row is watched again; the oracle ended the run, so plan `none`
-        engine.adopt_attempt(_facts_of(attempt), observed=False, restart=True)
+        engine.adopt_attempt(_facts_of(attempt), observed=False)
         engine.record_outcome(attempt.attempt, AttemptOutcome("stopped", cause="run ended"))
         return
     # an idempotent read: the adapter reconstructs progress from the log and appends no second

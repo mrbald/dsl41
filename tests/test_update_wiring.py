@@ -1558,93 +1558,89 @@ def test_a_client_that_gave_up_on_the_decision_leaves_the_loop_running(tmp_path:
     assert order[applied + 1] == ("input", None, None)  # the time advance it owes
 
 
-def test_a_retry_while_a_resumed_update_still_stops_waits_for_its_application(
-    tmp_path: Path,
+def test_an_exact_update_retry_after_a_failed_applied_write_has_only_its_admission(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The update a restart resumed has no request in flight, and an exact retry of the
-    original is answered from its intent with the admission, and with the application once
-    the last stop ends; a retry of an intent the store holds with no application is answered
-    with the admission alone. A plan whose catalog hash is not the engine's is `stale_plan`
-    before anything is written."""
-    from dsl41.runner_adapters import FakeAdapter
-    from dsl41.runner_clock import VirtualClock
-    from dsl41.runner_store import Record
-    from dsl41.runner_update import admitted_of
+    """An exact retry can read its intent after the loop fails, before socket teardown.
+    A waiting retry is hung up by teardown without an application (DL-491).
+    """
+    import inspect
 
-    estate = Estate(tmp_path, _jil({"a": "x", "b": "x"}))
-    run_root = tmp_path / "run"
-    seen: dict[str, Any] = {}
+    from dsl41.runner_control import ControlServer
+    from dsl41.runner_store import Record
+    from test_runner_control import _control_call
+
+    estate = Estate(short_root, _jil({"a": "true"}))
+    run_root = short_root / "run"
 
     async def scenario() -> None:
-        clock = VirtualClock(start=T0)
-        engine = start_run(
-            estate.catalog,
-            run_root,
-            clock=clock,
-            adapters={"CMD": FakeAdapter(default=None)},
-            source_capture=main.encoded_parts(prepare_estate(estate.dir)),
-            launched=main.profile_of(prepare_estate(estate.dir)),
-        )
-        _start_jobs(engine, "a")
-        await engine.run_until_quiescent(clock.now())
+        engine = _start(run_root, estate)
+        engine.reread_source = str(estate.dir / "dsl41.toml")
+        engine.launch_settings = dict(prepare_estate(estate.dir).metadata["launch"])
         assert engine.journal is not None
-        estate.write(_jil({"a": "y", "b": "x"}))
-        token = _plan(engine, estate)
-        request = _request(engine, token)
-        attempt = engine._live["a"].attempt
-        intent = {
-            "event": "intent",
-            "token": token,
-            "live_rev": 1,
-            "stop": [{"job": "a", "run_number": 1, "attempt": attempt}],
-            "filter": ["a"],
-            "stop_running": True,
-            "request_id": "r1",
-            "fingerprint": request.fingerprint,
-        }
-        engine.journal.append(Record(clock.now(), "config", None, "r1", intent))
-        engine.update.resume(intent)
-        assert engine.update.stopping and engine.update.view() == {
-            "token": token,
-            "stopping": ["a"],
-        }
-        retry = engine.request_update(request)
-        await engine.run_until_quiescent(clock.now())
-        seen["retry"] = retry.result()
-        assert seen["retry"].applied is not None
-        seen["early"] = seen["retry"].applied.done()
-        engine.update.ended("a")  # a step of the single writer
-        await engine.run_until_quiescent(clock.now())
-        seen["body"] = await seen["retry"].applied
-        ghost = {**intent, "token": "e" * 64, "request_id": "r2"}
-        ghost["fingerprint"] = UpdateRequest("e" * 64, 1, engine.baseline_id, "r2").fingerprint
-        engine.journal.append(Record(clock.now(), "config", None, "r2", ghost))
-        lone = engine.request_update(UpdateRequest("e" * 64, 1, engine.baseline_id, "r2"))
-        await engine.run_until_quiescent(clock.now())
-        seen["lone"] = lone.result()
-        estate.write(_jil({"a": "z", "b": "x"}))
-        stale = _plan(engine, estate)
-        plan_json = run_root / "plans" / stale / "plan.json"
-        document = decode(plan_json.read_bytes())
-        plan_json.write_bytes(canonical_bytes({**document, "live_digest": "sha256:0"}) + b"\n")
-        digest = engine.request_update(_request(engine, stale, rid="r3"))
-        await engine.run_until_quiescent(clock.now())
-        seen["digest"] = digest.result()
-        engine.journal.close()
+        server = ControlServer(engine, run_root / "control.sock")
+        await server.start()
+        loop = asyncio.create_task(engine.run_until_quiescent(datetime.max))
+        append = SqliteStore.append
+        failed = []
+
+        def fail_applied(store: SqliteStore, *records: Record) -> int:
+            if any(r.kind == "config" and r.payload.get("event") == "applied" for r in records):
+                failed.extend(records)
+                raise OSError("synthetic applied write failure")
+            return append(store, *records)
+
+        writer = None
+        try:
+            estate.write(_jil({"a": "false"}))
+            request = {"cmd": "update", "request_id": "r1", "baseline_id": engine.baseline_id}
+            with monkeypatch.context() as fault:
+                fault.setattr(SqliteStore, "append", fail_applied)
+                async with asyncio.timeout(TIMEOUT_S):
+                    admission = await _control_call(server.path, request)
+                    with pytest.raises(OSError, match="synthetic applied write failure"):
+                        await loop
+            assert len(failed) == 1 and loop.done() and not engine.update.stopping
+            # The socket handlers outlive the failed loop until serve tears them down (DL-491).
+            async with asyncio.timeout(TIMEOUT_S):
+                answer = await _control_call(server.path, {**request, "retry_only": True})
+            assert answer == admission
+            assert answer["ok"] and answer["decision"] == "admitted"
+            assert answer["stop"] == [] and answer["application"] is None
+            assert [c["event"] for c in _configs(run_root)] == ["applied", "intent"]
+
+            reader, writer = await asyncio.open_unix_connection(str(server.path))
+            writer.write(json.dumps({**request, "v": 5, "wait": True}).encode() + b"\n")
+            await writer.drain()
+
+            def waiting_for_application() -> bool:
+                # The test reads the real handler's application wait without replacing it (DL-491).
+                for task in server._conn_tasks:
+                    coro = task.get_coro()
+                    while inspect.iscoroutine(coro):
+                        if coro.cr_code is ControlServer._update_answer.__code__:
+                            frame = coro.cr_frame
+                            return frame is not None and frame.f_locals["wait"]
+                        coro = coro.cr_await
+                return False
+
+            await _until(waiting_for_application)
+            await server.close()
+            async with asyncio.timeout(TIMEOUT_S):
+                assert await reader.readline() == b""
+            assert loop.done() and isinstance(loop.exception(), OSError)
+            assert [c["event"] for c in _configs(run_root)] == ["applied", "intent"]
+        finally:
+            if writer is not None:
+                writer.close()
+                await writer.wait_closed()
+            await server.close()
+            loop.cancel()
+            await asyncio.gather(loop, return_exceptions=True)
+            await engine.shutdown()
+            engine.journal.close()
 
     asyncio.run(scenario())
-    assert seen["retry"].decision == admitted_of(
-        {**_intent_shape(), "token": seen["body"]["token"]}
-    )
-    assert seen["early"] is False and seen["body"]["rev"] == 2
-    assert seen["lone"].decision is not None and seen["lone"].application is None
-    decision = seen["digest"].decision
-    assert isinstance(decision, Refused) and decision.code == "stale_plan"
-    assert [c["event"] for c in _configs(run_root)].count("intent") == 2  # nothing more
-
-
-def _intent_shape() -> dict[str, Any]:
-    return {"stop": [{"job": "a", "run_number": 1}], "filter": ["a"]}
 
 
 def test_a_plan_whose_catalog_hash_is_not_the_engines_is_refused(tmp_path: Path) -> None:

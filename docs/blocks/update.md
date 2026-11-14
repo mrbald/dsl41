@@ -66,7 +66,7 @@ The [chart lifecycles](../chart-lifecycles.md) view lists each target state with
 - `test_two_running_jobs_are_stopped_and_eighteen_untouched_with_the_engine_running`
 - `test_a_plan_job_the_oracle_starts_while_the_update_stops_waits_for_the_application`
 - `test_a_client_that_gave_up_on_the_decision_leaves_the_loop_running`
-- `test_a_retry_while_a_resumed_update_still_stops_waits_for_its_application`
+- `test_an_exact_update_retry_waits_while_the_restarted_engine_still_stops`
 - `test_while_an_update_stops_a_retry_waits_for_it_and_another_update_is_refused`
 - `test_restart_resumes_the_box_roots_of_a_stopping_update`
 - `test_a_plan_whose_catalog_hash_is_not_the_engines_is_refused`

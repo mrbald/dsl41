@@ -215,6 +215,10 @@ class OracleReads:
 
         Recording errors propagate; delivery failures are isolated after commit.
         """
+        # Hook observations skip rows with no catalog job (DL-500).
+        job_ir = self.catalog.jobs.get(job)
+        if job_ir is None:
+            return
         if self.status_observations is not None and self._now is not None:
             row = self._runtime(job)
             self.status_observations.append(
@@ -225,10 +229,8 @@ class OracleReads:
                     row.run_number,
                     transition,
                     exit_code,
-                    hook_alarm_flag(self.catalog.jobs.get(job), "alarm_if_fail")
-                    if event == "job_failure"
-                    else None,
-                    hook_alarm_flag(self.catalog.jobs.get(job), "alarm_if_terminated")
+                    hook_alarm_flag(job_ir, "alarm_if_fail") if event == "job_failure" else None,
+                    hook_alarm_flag(job_ir, "alarm_if_terminated")
                     if event == "job_terminated"
                     else None,
                 )

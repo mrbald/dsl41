@@ -487,7 +487,7 @@ class EngineUpdate:
 
     # ---- the restart
 
-    def resume(self, intent: Mapping[str, Any], *, opened: OpenedPlan | None = None) -> None:
+    def resume(self, intent: Mapping[str, Any], *, opened: OpenedPlan) -> None:
         """Restore the update a restart found in STOPPING from its `config intent` record (the
         fold, spec-restart §2): its dispatch filter holds from here, and it waits for each
         attempt of its stop set the open table holds, file watches excepted (the fold takes a
@@ -498,14 +498,6 @@ class EngineUpdate:
         engine = self.engine
         assert engine.journal is not None and engine.run_root is not None
         admitted = admitted_of(intent)
-        if opened is None:
-            opened = reopen_plan(
-                engine.run_root,
-                admitted.token,
-                configuration=Configuration(
-                    catalog=engine.oracle.catalog, profile=engine.profile or RuntimeProfile()
-                ),
-            )
         request = UpdateRequest(
             admitted.token,
             int(intent.get("live_rev", engine.config_rev)),

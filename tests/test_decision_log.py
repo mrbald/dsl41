@@ -17,7 +17,13 @@ COLUMNS = 100
 #: own), each for changing the engine or freezing a rule of docs/, or because a superseded-by
 #: mark takes it past the ceiling; an entry joins this set in the PR that lands it or the mark.
 WIDE: frozenset[str] = frozenset(
-    {"DL-380", "DL-412", "DL-416", "DL-424"}  # DL-412: its superseded-by mark is line 41
+    {
+        "DL-380",
+        "DL-412",  # DL-412: its superseded-by mark is line 41
+        "DL-416",
+        "DL-424",
+        "DL-446",  # DL-446: its narrowed-by mark is line 41
+    }
 )
 #: DL-379: the lines of the log up to the end of DL-379. A compression tranche lowers this in
 #: the same PR; only a superseded-by mark raises it, by the lines it adds.
