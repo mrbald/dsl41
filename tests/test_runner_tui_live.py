@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+import shlex
 import shutil
 import sys
 from datetime import datetime, timedelta
@@ -191,6 +192,94 @@ def test_pilot_reread_widens_the_live_status_column(short_root: Path, cli_env) -
                     ),
                 )
                 assert "reread" not in str(table.get_cell("live_job", "status"))
+
+    asyncio.run(scenario())
+
+
+def test_pilot_subtitle_names_a_stopping_update_then_the_applied_revision(
+    short_root: Path, cli_env
+) -> None:
+    """The configuration line names a live update until its TERM-ignoring job stops."""
+    program = short_root / "stubborn.py"
+    program.write_text(
+        "import signal\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "print('ready', flush=True)\n"
+        "while True: signal.pause()\n"
+    )
+    command = "exec " + shlex.join([sys.executable, str(program)])
+
+    async def scenario() -> None:
+        async with _source_run(short_root, TEXT.replace("true", command)) as (client, jil):
+            app = RunnerApp(client.path)
+            async with app.run_test(size=(200, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "live_job" in app._rows)
+                assert "rev 1" in app.sub_title
+                await pilot.press("s")
+
+                def ready() -> bool:
+                    row = app._jobs_snapshot["live_job"]
+                    log = row.get("log_out")
+                    return (
+                        row["status"] == "RUNNING"
+                        and log is not None
+                        and Path(log).exists()
+                        and "ready\n" in Path(log).read_text()
+                    )
+
+                await _wait_for_ui(pilot, ready)
+                assert Path(app._jobs_snapshot["live_job"]["log_err"]).read_text() == ""
+                jil.write_text(TEXT)
+                forecast = await client.request({"cmd": "reread"})
+                assert forecast["ok"], forecast
+                assert forecast["preview"]["stop"] == ["live_job"], forecast
+                before = await client.request({"cmd": "status"})
+                assert before["jobs"]["live_job"]["status"] == "RUNNING", str(before)
+                answer = await client.request(
+                    {
+                        "cmd": "update",
+                        "baseline_id": app._baseline,
+                        "request_id": "subtitle-update",
+                    }
+                )
+                stopping = await client.request({"cmd": "status"})
+                assert answer["ok"] and answer["stop"] == ["live_job"], (
+                    forecast,
+                    before,
+                    answer,
+                    stopping,
+                    Path(before["jobs"]["live_job"]["log_err"]).read_text(),
+                )
+                assert stopping["config_rev"] == 1, stopping
+                assert stopping["update"]["stopping"] == ["live_job"], stopping
+                line = f"rev 1  [update {stopping['update']['token'][:12]} stopping: live_job]"
+                await pilot.press("r")
+                await _wait_for_ui(pilot, lambda: line in app.sub_title)
+                console = app.query_one("#console", RichLog)
+                assert any(entry.text == line for entry in console.lines)
+
+                await _wait_for_ui(pilot, lambda: "rev 2" in app.sub_title, timeout_s=10)
+                assert "[update " not in app.sub_title
+                assert any(entry.text == "rev 2" for entry in console.lines)
+                applied = await client.request({"cmd": "status"})
+                assert applied["config_rev"] == 2 and "update" not in applied, applied
+                await _wait_for_ui(
+                    pilot,
+                    lambda: any(
+                        " CONFIG [configuration rev 2]" in entry.text for entry in console.lines
+                    ),
+                )
+                config = next(
+                    entry
+                    for entry in console.lines
+                    if " CONFIG [configuration rev 2]" in entry.text
+                )
+                assert any(segment.style and segment.style.dim for segment in config)
+                assert app._rows == {"live_job"}
+                table = app.query_one("#jobs", DataTable)
+                assert [str(key.value) for key in table.rows] == ["live_job"]
+                assert app._alarms == {}
+                assert str(table.get_cell("live_job", "alarms")) == ""
 
     asyncio.run(scenario())
 

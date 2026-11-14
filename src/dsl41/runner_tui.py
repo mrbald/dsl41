@@ -158,9 +158,6 @@ from dsl41.runner_control import (
 
 
 _ALARM_TRANSITIONS = frozenset({"MUST_START_ALARM", "MUST_COMPLETE_ALARM"})
-#: The trace marker of a move that broke a declared transition table (DL-353). An engine of an
-#: older build may still send it, and its lines show as alerts.
-VIOLATION_MARKER = "TRANSITION_VIOLATION"
 _STATUS_STYLE = {
     "INACTIVE": "dim",
     "STARTING": "cyan",
@@ -1545,17 +1542,14 @@ class RunnerApp(App[None]):
         for entry in entries:
             seq = entry.get("seq")
             if isinstance(seq, int):
-                if seq <= self._trace_seq:
-                    continue  # idempotent consumption: never render twice
+                # control-protocol trace: since is exclusive; one dialect (DL-498).
+                assert seq > self._trace_seq, "trace entries advance the UI's cursor"
                 self._trace_seq = seq
             transition = str(entry.get("transition", ""))
             if transition == "RESTART":
                 self._trace_from_snapshot = True
             for key, count in scheduler_refusal_counts([entry]).items():
                 self._scheduler_refusals[key] = self._scheduler_refusals.get(key, 0) + count
-            # the subject is a job, or for an older build's TRANSITION_VIOLATION a namespaced key
-            # such as `host:local`; only an alarm counts against a job, so such a key never
-            # reaches the jobs table or the problems view
             job = str(entry.get("job", ""))
             clock = format_local_at(entry.get("at"))
             cause = str(entry.get("cause", ""))
@@ -1570,8 +1564,7 @@ class RunnerApp(App[None]):
                 self._refusal_runs[job] = _RefusalRun(cause, clock)
             if transition in _ALARM_TRANSITIONS:
                 self._alarms[job] = self._alarms.get(job, 0) + 1
-            if transition in _ALARM_TRANSITIONS or transition == VIOLATION_MARKER:
-                # an older build's broken declared transition alerts like an alarm
+            if transition in _ALARM_TRANSITIONS:
                 style = "bold red"
             elif transition == "START_REFUSED":
                 # DL-64: a refused operator start answers "why did nothing happen"

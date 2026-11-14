@@ -845,7 +845,7 @@ def _page_elements(page: str) -> dict[str, list[dict[str, object]]]:
 def test_to_explore_html_escapes_the_json_but_round_trips_elements() -> None:
     catalog = corpus_catalog()
     graph = derive_graph(catalog)
-    page = to_explore_html(catalog, graph)
+    page = to_explore_html(catalog)
     els = _elements(catalog, graph)
     assert _page_elements(page) == els
     # and the totals travel with them: the page recomputed this arithmetic in
