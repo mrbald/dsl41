@@ -26767,3 +26767,20 @@ relitigate an entry; append a new one.
   FAILURE sent `job_failure`; neither names anything this engine's operator can act on.
   UNCHANGED. The payload and its version, every observation of a catalog job, delivery and
   its bounds, and the store, which still holds such rows.
+- DL-501 The terminal UI does not stop on a trace entry at or below its cursor
+  (2026-11-15; owner ruling; `runner_tui.py`; control-protocol `trace`)
+  THE RULE. `_consume_trace` makes no assertion about the order of trace entries. It takes
+  every entry it is given under its display rules, which print a repeated scheduler refusal
+  once and count the rest (DL-480). Consuming an entry never lowers the cursor: it is the
+  highest `seq` seen since its last reset.
+  THE REASON. The `trace` verb answers the entries after `since`, and the UI speaks the
+  engine's one dialect (DL-498), so an entry at or below the cursor comes only from an engine
+  fault. The UI is a reader. Under `run --ui` it is a task of the engine's process, and a UI
+  crash ends `run` with exit 1 (DL-46 item 10, DL-187 item 5). An assertion there would end
+  a run for a fault whose cost is repeated lines and counts in the UI.
+  THE LIMIT. An engine that keeps sending such entries keeps adding lines and counts;
+  nothing bounds them.
+  NOT BUILT. A refusal of such an entry, or a warning for it: a branch that no validated
+  input reaches (DL-491). No test sends such an entry.
+  UNCHANGED. Every entry of a conforming engine, the cursor's resets (a shorter trace, DL-46
+  item 14; a changed baseline, DL-210), and the control protocol.
