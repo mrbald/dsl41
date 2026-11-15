@@ -52,6 +52,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
 from test_live_engine_branches import _Client
 
 from dsl41 import runner_procid
@@ -69,6 +70,9 @@ UNIT_ORDER = "wrappers-first"
 CONCURRENCY = int(os.environ.get("DSL41_SWEEP_JOBS", "4"))
 #: the bound on every wait for the engine, its commands or its records
 BOUND_S = 60.0
+#: how often a wait reads the store, the gates and the processes again: concurrent points share
+#: the machine's CPUs, so a faster poll slows the engines it waits on
+POLL_S = 0.05
 #: the wrapper's grace on lifeline EOF: TERM, this, then KILL of the command's group
 WRAPPER_GRACE_S = 1.0
 #: the engine's stop ladder: TERM to KILL far longer than a scenario, so no ladder's KILL is
@@ -141,9 +145,12 @@ def acknowledge():
 
 
 witness(f"start {name} {os.getpid()}")
-if leftover:
+behaviour = json.loads((directory / "behaviour.json").read_text())
+if leftover or job in behaviour.get("_stubborn", []):
+    # the first rung of a stop: TERM for a drain or an update, INT for KILLJOB's (2, 9)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
-else:
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+if not leftover:
     # I6: one open description per attempt, shared with its leftover; the kernel drops the lock
     # only when every process of the attempt is gone, whatever ended it
     lock = os.open(directory / "locks" / job, os.O_RDWR | os.O_CREAT, 0o600)
@@ -151,7 +158,7 @@ else:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         witness(f"overlap {name} {os.getpid()}")
-    leaves = json.loads((directory / "behaviour.json").read_text()).get(job, [])
+    leaves = behaviour.get(job, [])
     if f"{run}.{ordinal}" in leaves or f"{run}.*" in leaves:
         subprocess.Popen(
             [sys.executable, __file__, str(directory), "leftover", sys.argv[3]], pass_fds=(lock,)
@@ -179,34 +186,65 @@ def gate_command(directory: Path) -> str:
 
 @dataclass(frozen=True)
 class Fault:
+    """The swept death: in engine process `incarnation` of the history (1 is genesis), at its
+    `n`th append call, `before` it or `after` it commits."""
+
     position: str  # "before" or "after"
     n: int
+    incarnation: int = 1
 
     def __str__(self) -> str:
-        return f"{self.position}-{self.n}"
+        return f"e{self.incarnation}-{self.position}-{self.n}"
+
+
+@dataclass(frozen=True)
+class Seen:
+    """A record the script clock waits for: its kind and the body fields it must hold, a dotted
+    name reaching into a mapping (`payload.job`)."""
+
+    record: str
+    fields: tuple[tuple[str, Any], ...] = ()
+
+
+def seen(record: str, **fields: Any) -> Seen:
+    return Seen(record, tuple(sorted(fields.items())))
+
+
+def _field(body: Mapping[str, Any], name: str) -> Any:
+    value: Any = body
+    for part in name.split("."):
+        value = value.get(part) if isinstance(value, Mapping) else None
+    return value
+
+
+def clock_moved(clock: Iterable[Seen], journal: list[tuple[int, str, dict[str, Any]]]) -> bool:
+    """Whether every record of `clock` is in `journal`: the script clock then stands at LATER."""
+    return all(
+        any(
+            kind == want.record and all(_field(body, f) == v for f, v in want.fields)
+            for _, kind, body in journal
+        )
+        for want in clock
+    )
 
 
 class _ScriptClock(RealClock):
-    """The real clock, or a clock that stands at BEGINNING until the store holds a STARTJOB of
-    `job` and at LATER from then on: the latency between an admission and its dispatch, and a
-    restart past every timer the scenario arms (DL-491)."""
+    """The real clock when `clock` is empty; else a clock that stands at BEGINNING until the
+    store holds every record `clock` names and at LATER from then on: the latency between an
+    admission and its dispatch, a deadline passed while the engine drains, a restart past every
+    timer the scenario arms (DL-491)."""
 
-    def __init__(self, root: Path, job: str | None) -> None:
+    def __init__(self, root: Path, clock: tuple[Seen, ...]) -> None:
         super().__init__()
         self.root = root
-        self.job = job
+        self.clock = clock
         self.moved = False
 
     def now(self) -> datetime:
-        if self.job is None:
+        if not self.clock:
             return super().now()
-        if not self.moved and (self.root / STORE_NAME).exists():
-            self.moved = any(
-                kind == "input"
-                and body.get("kind") == "STARTJOB"
-                and body.get("payload", {}).get("job") == self.job
-                for _, kind, body in rows(self.root)
-            )
+        if not self.moved:
+            self.moved = clock_moved(self.clock, rows(self.root))
         return LATER if self.moved else BEGINNING
 
 
@@ -267,10 +305,11 @@ def engine_child(spec_path: str) -> None:
     root = directory / "run"
     fault = Fault(spec["fault"][0], spec["fault"][1]) if spec["fault"] else None
     _install_fault(directory, spec["tag"], fault)
+    script_clock = tuple(Seen(r, tuple((f, v) for f, v in fs)) for r, fs in spec["clock"])
 
     async def run() -> None:
         restarting = (root / STORE_NAME).exists()
-        clock = _ScriptClock(root, spec["clock_job"])
+        clock = _ScriptClock(root, script_clock)
         catalog = lower_source((directory / "jobs.jil").read_text())
         options: dict[str, Any] = {
             "clock": clock,
@@ -285,6 +324,9 @@ def engine_child(spec_path: str) -> None:
         )
         server = ControlServer(engine, root / "control.sock")
         await server.start()
+        if spec["stop_at_startup"]:
+            # a stop that lands while the restart still recovers, as SIGTERM would (spec-drain)
+            engine.request_stop()
         try:
             horizon = datetime.fromisoformat(spec["horizon"]) if spec["horizon"] else datetime.max
             await engine.run_until_quiescent(horizon)
@@ -414,7 +456,7 @@ async def _bounded(predicate: Callable[[], bool], bound: float, what: str) -> No
     while not await asyncio.to_thread(predicate):
         if time.monotonic() > deadline:
             raise TimeoutError(f"{what}: still waiting after {bound} s")
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(POLL_S)
 
 
 # ------------------------------------------------------------------ the script
@@ -446,14 +488,37 @@ class Release:
 
 @dataclass(frozen=True)
 class Restart:
-    """A restart the script makes itself: the engine dies, the unit ends, a successor opens."""
+    """A death the script makes itself: SIGKILL of the engine, the unit ends what it left, and
+    the next engine process opens."""
+
+
+@dataclass(frozen=True)
+class Stop:
+    """`engine_stop` over the socket: the engine drains (spec-drain). A second one while the
+    drain is unsettled moves its deadline to now."""
+
+
+@dataclass(frozen=True)
+class Exit:
+    """Wait for the stopped engine to exit (0); the unit then ends what it left."""
+
+
+@dataclass(frozen=True)
+class Start:
+    """Open the next engine process on the root. With `stop_at_startup` it asks for its own
+    stop before its loop's first step, as a SIGTERM during the restart would, and exits."""
+
+    stop_at_startup: bool = False
+
+
+Act = Send | Release | Restart | Stop | Exit | Start
 
 
 @dataclass(frozen=True)
 class Step:
     name: str
     ready: Callable[[World], bool]
-    act: Send | Release | Restart | None = None
+    act: Act | None = None
 
 
 @dataclass(frozen=True)
@@ -469,10 +534,11 @@ class End:
 @dataclass
 class Scenario:
     """A catalog, a script, and how its gates end. `codes` maps (job, run, ordinal) to the exit
-    code a gate is released with, None for a gate the engine ends; `clock_job` arms the script
-    clock (`_ScriptClock`); `horizon` is the first incarnation's loop horizon. `ends` and `runs`
-    are the final state the rules give, declared in the scenario: each job's row (I8) and the
-    (job, run number) pairs dispatched (I10)."""
+    code a gate is released with, None for a gate the engine ends; `clock` names the records
+    that move the script clock (`_ScriptClock`); `horizon` is the first incarnation's loop
+    horizon; `stubborn` names the jobs whose command ignores TERM. `ends` and `runs` are the
+    final state the rules give, declared in the scenario: each job's row (I8) and the (job, run
+    number) pairs dispatched (I10)."""
 
     name: str
     jil: Callable[[Path], str]
@@ -481,8 +547,12 @@ class Scenario:
     ends: Mapping[str, End]
     runs: frozenset[tuple[str, int]]
     behaviour: Mapping[str, Any] = field(default_factory=dict)
-    clock_job: str | None = None
+    clock: tuple[Seen, ...] = ()
     horizon: datetime | None = None
+    stubborn: frozenset[str] = frozenset()
+    #: a rule arm of the scenario's own: the runs a crash point adds to I10, read from its
+    #: final journal; its docstring quotes the sentence that states it
+    arm: Callable[[list[tuple[int, str, dict[str, Any]]]], frozenset[tuple[str, int]]] | None = None
 
 
 class World:
@@ -491,9 +561,27 @@ class World:
     def __init__(self, directory: Path) -> None:
         self.directory = directory
         self.root = directory / "run"
+        #: the fault has fired: a wait that only orders the reference's records may pass, since
+        #: a history with one more death need not make them
+        self.after_fault = False
 
     def rows(self) -> list[tuple[int, str, dict[str, Any]]]:
         return rows(self.root)
+
+    def engine(self) -> str | None:
+        """The engine's lifecycle state in its `status` reply, or None while none answers."""
+        try:
+            reply = roundtrip(self.root / "control.sock", {"v": 5, "cmd": "status"}, timeout=5)
+        except (OSError, ControlClientError):
+            return None
+        return str(reply["engine"])
+
+    def pending(self, job: str, run: int) -> bool:
+        """Whether a `dispatch_pending` record holds a start of run `run` of `job`."""
+        return any(
+            b["event"] == "pending" and (b["job"], b["run_number"]) == (job, run)
+            for b in self.records("dispatch_pending")
+        )
 
     def records(self, kind: str) -> list[dict[str, Any]]:
         return [body for _, found, body in self.rows() if found == kind]
@@ -508,8 +596,36 @@ class World:
         name = f"{job}.{run}.{ordinal}" + (".leftover" if leftover else "")
         return (self.directory / "gates" / f"{name}.ack").exists()
 
+    def status(self, job: str) -> str | None:
+        """`job`'s status in the engine's `status` reply, or None while no engine answers."""
+        try:
+            reply = roundtrip(self.root / "control.sock", {"v": 5, "cmd": "status"}, timeout=5)
+        except (OSError, ControlClientError):
+            return None
+        return str(reply["jobs"][job]["status"])
+
+    def started(self, job: str, run: int) -> bool:
+        """Whether some attempt of run `run` of `job` acknowledged its gate."""
+        return any(b["job"] == job and b["run"] == run for b in self.acks().values())
+
     def plans(self, job: str) -> list[dict[str, Any]]:
         return [b for b in self.records("follow_up") if b["event"] == "plan" and b["job"] == job]
+
+    def cleaned(self, job: str, run: int) -> bool:
+        """Whether a stop's ladder of run `run` of `job` ended (`ladder_done`)."""
+        journal = self.rows()
+        mine = {
+            b["attempt"]
+            for _, k, b in journal
+            if k == "dispatch" and (b["job"], b["run_number"]) == (job, run)
+        }
+        return any(
+            k == "follow_up" and b["event"] == "ladder_done" and b["attempt"] in mine
+            for _, k, b in journal
+        )
+
+    def outcomes(self, job: str) -> list[dict[str, Any]]:
+        return [b for b in self.records("outcome") if b["job"] == job]
 
     def finished(self, job: str) -> bool:
         """Whether a `complete` plan of `job` is done: the oracle has the run's end."""
@@ -530,7 +646,10 @@ def _gate_name(job: str, run: int, ordinal: int, leftover: bool) -> str:
 
 
 class Driver:
-    """One run of a scenario: the reference with `fault` None, else one crash point (H4, H6)."""
+    """One history of a scenario: the reference with `fault` None, else one crash point (H4,
+    H6). The script holds the history's own stops and restarts; the fault is one more death,
+    at an append of any engine process of that history, and the script then goes on: a
+    successor opens at once, unless the next act would end or open an engine process anyway."""
 
     def __init__(self, scenario: Scenario, directory: Path, fault: Fault | None) -> None:
         self.scenario = scenario
@@ -545,11 +664,18 @@ class Driver:
         self.envelopes: dict[str, dict[str, Any]] = {}
         self.answered: set[str] = set()
         self.released: set[str] = set()
+        #: the fault has fired: every gate goes by the scenario's codes from then on
+        self.fired = False
+        #: the engine died by the fault and no successor is open yet
+        self.down = False
+        #: this engine process was asked to stop
+        self.stop_asked = False
         #: the store as the crash left it, before any successor wrote
         self.crashed: list[tuple[int, str, dict[str, Any]]] | None = None
+        #: each engine process's exit status, in order
         self.exits: list[int | None] = []
-        #: the first incarnation's append calls when its script ended: the reference's crash points
-        self.appends = 0
+        #: each engine process's append calls when the history ended it: the crash points
+        self.appends: list[int] = []
         self.final: list[tuple[int, str, dict[str, Any]]] = []
         self.final_status: dict[str, Any] | None = None
         self.after_quiet: list[tuple[int, str, dict[str, Any]]] = []
@@ -564,18 +690,28 @@ class Driver:
         for name in ("gates", "locks"):
             (self.directory / name).mkdir()
         (self.directory / "gate.py").write_text(GATE)
-        (self.directory / "behaviour.json").write_text(json.dumps(self.scenario.behaviour))
+        behaviour = {**self.scenario.behaviour, "_stubborn": sorted(self.scenario.stubborn)}
+        (self.directory / "behaviour.json").write_text(json.dumps(behaviour))
         (self.directory / "jobs.jil").write_text(self.scenario.jil(self.directory))
 
-    async def start(self, *, fault: Fault | None, horizon: datetime | None) -> None:
+    async def open(self, *, stop_at_startup: bool = False) -> None:
+        """Start the next engine process; the fault is armed in the process it names."""
         self.incarnation += 1
         tag = f"e{self.incarnation}"
+        armed = self.fault if self.fault and self.fault.incarnation == self.incarnation else None
+        if self.fired and self.wal is not None and self.wal_at_successor is None:
+            self.wal_at_successor = _wal_size(self.root)
         spec = {
             "directory": str(self.directory),
             "tag": tag,
-            "fault": [fault.position, fault.n] if fault else None,
-            "clock_job": self.scenario.clock_job,
-            "horizon": horizon.isoformat() if horizon else None,
+            "fault": [armed.position, armed.n] if armed else None,
+            "clock": [[c.record, list(c.fields)] for c in self.scenario.clock],
+            "horizon": (
+                self.scenario.horizon.isoformat()
+                if self.scenario.horizon and self.incarnation == 1
+                else None
+            ),
+            "stop_at_startup": stop_at_startup,
         }
         spec_path = self.directory / f"spec-{tag}.json"
         spec_path.write_text(json.dumps(spec))
@@ -592,6 +728,10 @@ class Driver:
                 start_new_session=True,
             )
         self.unit.lead(self.child.pid, runner_procid.proc_start_token(self.child.pid))
+        self.down, self.stop_asked = False, False
+        if stop_at_startup:
+            await self._ended("its stop at startup")
+            return
         await self.until(self._answers, "the control socket")
 
     def _answers(self) -> bool:
@@ -607,6 +747,9 @@ class Driver:
             for path in sorted(self.directory.glob("engine-*.log"))
         )
 
+    def _tail(self) -> str:
+        return (self.directory / f"engine-e{self.incarnation}.log").read_text()[-600:]
+
     async def until(self, predicate: Callable[[], bool], what: str) -> None:
         """H4: wait for `predicate`, racing the engine's exit, within `BOUND_S`."""
         deadline = time.monotonic() + BOUND_S
@@ -615,11 +758,10 @@ class Driver:
                 return
             assert self.child is not None
             if self.child.poll() is not None:
-                tail = (self.directory / f"engine-e{self.incarnation}.log").read_text()
-                raise Died(f"e{self.incarnation} ended while waiting for {what}: {tail[-600:]}")
+                raise Died(f"e{self.incarnation} ended while waiting for {what}: {self._tail()}")
             if time.monotonic() > deadline:
                 raise TimeoutError(f"{self.label()}: waiting for {what}\n{self.log()}")
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(POLL_S)
 
     async def ask(self, cmd: str, **fields: Any) -> dict[str, Any]:
         """One control request; a request the engine's death cut short is `Died`."""
@@ -636,22 +778,59 @@ class Driver:
     def label(self) -> str:
         return f"{self.scenario.name} {self.fault or 'reference'}"
 
-    async def died(self) -> None:
-        """The engine is gone: reap it, keep the store as it stands, end the unit (H5)."""
+    def count_appends(self) -> int:
+        log = self.directory / f"appends-e{self.incarnation}.log"
+        return len(log.read_text().splitlines()) if log.exists() else 0
+
+    async def _reap(self) -> int | None:
         assert self.child is not None
         code = await asyncio.to_thread(self.child.wait, BOUND_S)
         self.exits.append(code)
-        if self.crashed is None and self.fault is not None:
-            # the driver reads a copy, so the successor opens what the crash left, hot WAL
-            # included: the last connection to close would checkpoint the WAL and delete it
-            copy = self.directory / "crashed"
-            copy.mkdir()
-            for name in (STORE_NAME, f"{STORE_NAME}-wal", f"{STORE_NAME}-shm"):
-                if (self.root / name).exists():
-                    shutil.copy2(self.root / name, copy / name)
-            self.wal = _wal_size(self.root)
-            self.crashed = rows(copy)
+        return code
+
+    def _the_fault(self, code: int | None) -> bool:
+        return (
+            self.fault is not None
+            and not self.fired
+            and self.fault.incarnation == self.incarnation
+            and code == -signal.SIGKILL
+        )
+
+    async def _fell(self, error: Exception) -> None:
+        """An engine process ended where the history did not end it: the fault, which the
+        driver takes (H5), or anything else, which fails the run as itself."""
+        if not self._the_fault(await self._reap()):
+            raise error
+        await self._take_fault()
+
+    async def _ended(self, what: str) -> None:
+        """The history ends this engine process by its stop: it exits 0 and the unit ends what
+        it left. Its death by the fault meanwhile is the fault's."""
+        code = await self._reap()
+        if self._the_fault(code):
+            await self._take_fault()
+            return
+        if code != 0:
+            raise RuntimeError(f"{self.label()}: e{self.incarnation} exited {code} at {what}")
+        self.appends.append(self.count_appends())
         await self.unit.end()
+
+    async def _take_fault(self) -> None:
+        """The fault's death: keep the store as it stands, end the unit, and leave the engine
+        down until the history opens a successor."""
+        self.fired = True
+        self.world.after_fault = True
+        # the driver reads a copy, so the successor opens what the crash left, hot WAL
+        # included: the last connection to close would checkpoint the WAL and delete it
+        copy = self.directory / "crashed"
+        copy.mkdir()
+        for name in (STORE_NAME, f"{STORE_NAME}-wal", f"{STORE_NAME}-shm"):
+            if (self.root / name).exists():
+                shutil.copy2(self.root / name, copy / name)
+        self.wal = _wal_size(self.root)
+        self.crashed = rows(copy)
+        await self.unit.end()
+        self.down = True
 
     # ---- the acts
 
@@ -673,9 +852,43 @@ class Driver:
                 "expect": {f"job:{act.job}": status["jobs"][act.job]["state_rev"]},
             }
             self.envelopes[rid] = envelope
+        decided = self._decided(envelope["request_id"])
         answer = await self.ask("sendevent", **envelope)
+        retry = 0
+        while not answer["ok"] and self.fired and answer.get("code") == "precondition_failed":
+            # past the fault the row may have moved before this command was admitted: the
+            # unchanged envelope went first, and the operator composes it again against the
+            # current revision (F2). An original already applied is no such case: its exact
+            # retry is answered from its record (control-protocol §3), so a refusal is a break
+            assert decided != "applied", (
+                f"{self.label()}: F2: {envelope['request_id']} was applied before, and its exact"
+                f" retry was refused, not answered from its record (control-protocol §3): {answer}"
+            )
+            retry += 1
+            assert retry <= 5, (self.label(), rid, answer)
+            status = await self.ask("status")
+            envelope = {
+                **envelope,
+                "request_id": f"{rid}#{retry}",
+                "expect": {f"job:{act.job}": status["jobs"][act.job]["state_rev"]},
+            }
+            self.envelopes[rid] = envelope  # a resend after a death repeats this one unchanged
+            decided = self._decided(envelope["request_id"])
+            answer = await self.ask("sendevent", **envelope)
         assert answer["ok"], (self.label(), rid, answer)
         self.answered.add(rid)
+
+    def _decided(self, request_id: str) -> str | None:
+        """The stored decision on `request_id` (`applied` or `rejected`), or None when no engine
+        admitted it."""
+        return next(
+            (
+                str(b["decision"])
+                for _, kind, b in self.world.rows()
+                if kind == "decision" and b.get("request_id") == request_id
+            ),
+            None,
+        )
 
     def release(self, job: str, run: int, ordinal: int, leftover: bool) -> None:
         name = _gate_name(job, run, ordinal, leftover)
@@ -688,79 +901,106 @@ class Driver:
         self.released.add(name)
 
     def release_every_gate(self) -> None:
-        """After a restart every blocker goes by the scenario's policy."""
+        """After the fault every blocker goes by the scenario's codes."""
         for name, body in self.world.acks().items():
             if name not in self.released:
                 self.release(body["job"], body["run"], body["ordinal"], body["leftover"])
+
+    async def _act(self, step: Step) -> None:
+        act = step.act
+        if isinstance(act, Send):
+            await self.send(step, act)
+        elif isinstance(act, Release):
+            self.release(act.job, act.run, act.ordinal, act.leftover)
+        elif isinstance(act, Restart):
+            assert self.child is not None
+            self.child.kill()
+            await self._reap()
+            self.appends.append(self.count_appends())
+            await self.unit.end()
+            await self.open()
+        elif isinstance(act, Stop):
+            # the script stops a running engine; a stop during a restart is `Start`'s own. Past
+            # the fault the codes may let a drain the script started end before a second stop:
+            # an engine that already stopped, or exited 0, needs none (`Exit` reaps it)
+            assert self.child is not None
+            try:
+                await self.until(
+                    lambda: self.world.engine() in ("RUNNING", "DRAINING", "STOPPED"),
+                    "a running engine",
+                )
+                if self.world.engine() != "STOPPED":
+                    answer = await self.ask("engine_stop")
+                    assert answer["ok"], (self.label(), answer)
+            except Died:
+                if self.child.returncode != 0:
+                    raise
+            self.stop_asked = True
+        elif isinstance(act, Exit):
+            if not self.stop_asked:
+                # the stop went to a process the fault ended; this one is asked again
+                answer = await self.ask("engine_stop")
+                assert answer["ok"], (self.label(), answer)
+            await self._ended(step.name)
+        elif isinstance(act, Start):
+            await self.open(stop_at_startup=act.stop_at_startup)
 
     # ---- the run
 
     async def run(self) -> None:
         self.prepare()
         try:
-            index = await self._first_incarnation()
-            await self._successor(index)
+            await self._history()
             await self._stop()
             await self._quiet_restart()
         finally:
             await self.close()
 
-    async def _first_incarnation(self) -> int:
-        """The script in order until it ends, the fault fires, or the script restarts the
-        engine; answers the index of the first step still to take."""
+    async def _history(self) -> None:
+        """The script in order to quiescence. The fault's death makes the driver open a
+        successor before the next step, unless that step ends this process (`Exit`, `Restart`
+        then only opens one) or opens the next (`Start`). Past the fault a `Release` step is
+        skipped, since it only orders the reference: the scenario's codes release every gate."""
         steps = self.scenario.steps
-        try:
-            await self.start(fault=self.fault, horizon=self.scenario.horizon)
-        except Died:
-            await self.died()
-            return 0
-        for index, step in enumerate(steps):
+        index, opened = 0, False
+        while True:
             try:
-                await self.until(lambda step=step: step.ready(self.world), step.name)
-                if isinstance(step.act, Send):
-                    await self.send(step, step.act)
-                elif isinstance(step.act, Release):
-                    gate = step.act
-                    self.release(gate.job, gate.run, gate.ordinal, gate.leftover)
-                elif isinstance(step.act, Restart):
-                    assert self.child is not None
-                    self.child.kill()
-                    await self.died()
-                    self.appends = self.count_appends()
-                    return index + 1
-            except Died:
-                await self.died()
-                return index
-        try:
-            await self._quiescent()
-        except Died:
-            await self.died()
-        self.appends = self.count_appends()
-        return len(steps)
+                if not opened:
+                    opened = True
+                    await self.open()
+                if index == len(steps):
+                    if self.down:
+                        await self.open()
+                    await self._quiescent(release=self.fired)
+                    break
+                step = steps[index]
+                if self.fired and isinstance(step.act, Release):
+                    index += 1  # it orders the reference; past the fault the codes release
+                    continue
+                if self.down:
+                    if isinstance(step.act, Exit):
+                        index += 1
+                        continue
+                    if isinstance(step.act, Start):
+                        await self.open(stop_at_startup=step.act.stop_at_startup)
+                        index += 1
+                        continue
+                    await self.open()
+                    if isinstance(step.act, Restart):
+                        index += 1
+                        continue
 
-    def count_appends(self) -> int:
-        return len((self.directory / "appends-e1.log").read_text().splitlines())
+                def ready(step: Step = step) -> bool:
+                    if self.fired:
+                        self.release_every_gate()
+                    return step.ready(self.world)
 
-    async def _successor(self, index: int) -> None:
-        """H6: the successor finishes the script: lost answers are sent again, later events go
-        once their step is ready, and every gate is released, to quiescence."""
-        if index == len(self.scenario.steps) and self.child is not None:
-            if self.child.poll() is None:
-                return  # the script ended with the first incarnation alive
-        if self.wal is not None:
-            self.wal_at_successor = _wal_size(self.root)
-        await self.start(fault=None, horizon=None)
-        for step in self.scenario.steps[index:]:
-            if not isinstance(step.act, Send):
-                continue
-
-            def ready(step: Step = step) -> bool:
-                self.release_every_gate()
-                return step.ready(self.world)
-
-            await self.until(ready, step.name)
-            await self.send(step, step.act)
-        await self._quiescent(release=True)
+                await self.until(ready, step.name)
+                await self._act(step)
+                index += 1
+            except Died as error:
+                await self._fell(error)
+        self.appends.append(self.count_appends())
 
     async def _quiescent(self, *, release: bool = False) -> None:
         def settled() -> bool:
@@ -783,14 +1023,13 @@ class Driver:
         assert self.child is not None
         answer = await self.ask("engine_stop")
         assert answer["ok"], answer
-        code = await asyncio.to_thread(self.child.wait, BOUND_S)
-        self.exits.append(code)
+        code = await self._reap()
         assert code == 0, f"{self.label()}: the engine's stop exited {code}\n{self.log()}"
 
     async def _quiet_restart(self) -> None:
         """I9's restart: one more incarnation after quiescence, stopped once it started."""
         self.final = self.world.rows()
-        await self.start(fault=None, horizon=None)
+        await self.open()
         await self.until(
             lambda: (
                 sum(
@@ -825,18 +1064,18 @@ class Driver:
 
 
 def quiet(world: World, scenario: Scenario) -> str | None:
-    """Why the run is not quiescent, or None: an open attempt, pending start or plan step, a
-    gate not yet released or still running."""
+    """Why the run is not quiescent, or None: an open attempt, pending start or plan step, or a
+    gate still running, named as not released when the codes would release it. A gate the
+    engine's death or a stop ended needs no release."""
     table = open_work(world.rows())
     if table:
         return table
     for name, body in world.acks().items():
+        if _lives(body["pid"], body["token"]) is False:
+            continue
         code = 0 if body["leftover"] else scenario.codes(body["job"], body["run"], body["ordinal"])
         released = (world.directory / "gates" / f"{name}.go").exists()
-        if code is not None and not released:
-            return f"gate {name} not released"
-        if _lives(body["pid"], body["token"]) is not False:
-            return f"gate {name} still runs"
+        return f"gate {name} {'still runs' if code is None or released else 'not released'}"
     return None
 
 
@@ -969,9 +1208,10 @@ def check_invariants(driver: Driver, reference: Driver) -> list[str]:
         return ["H2: the fault never fired"]
     crashed = driver.crashed
     assert driver.fault is not None
-    calls = len((driver.directory / "appends-e1.log").read_text().splitlines())
-    if driver.exits[0] != -signal.SIGKILL or calls != driver.fault.n:
-        broken.append(f"H2: e1 ended with {driver.exits[0]} at append call {calls}")
+    k = driver.fault.incarnation
+    calls = len((driver.directory / f"appends-e{k}.log").read_text().splitlines())
+    if driver.exits[k - 1] != -signal.SIGKILL or calls != driver.fault.n:
+        broken.append(f"H2: e{k} ended with {driver.exits[k - 1]} at append call {calls}")
     # I1: the final successor started, and only the driver's stop ended it
     if not any(k == "engine" and b["event"] == "started" for _, k, b in final[len(crashed) :]):
         broken.append("I1: the successor recorded no `engine started`")
@@ -1121,6 +1361,8 @@ def declared(driver: Driver) -> list[str]:
     dispatched = {(b["job"], b["run_number"]) for _, k, b in driver.final if k == "dispatch"}
     dropped = overdue_before_launch(driver)
     runs = driver.scenario.runs - dropped
+    if driver.scenario.arm is not None and driver.crashed is not None:
+        runs |= driver.scenario.arm(driver.final)
     if dispatched != runs:
         broken.append(f"I10: runs dispatched {sorted(dispatched)}, expected {sorted(runs)}")
     broken += [_deadline_first(driver, job, run) for job, run in sorted(dropped)]
@@ -1175,12 +1417,7 @@ def overdue_before_launch(driver: Driver) -> set[tuple[str, int]]:
     from dsl41.runner_journal import open_reader, replay_store
 
     crashed = driver.crashed or []
-    clock = driver.scenario.clock_job
-    moved = any(
-        k == "input" and b.get("kind") == "STARTJOB" and b["payload"].get("job") == clock
-        for _, k, b in crashed
-    )
-    if clock is None or not moved or not crashed:
+    if not crashed or not driver.scenario.clock or not clock_moved(driver.scenario.clock, crashed):
         return set()
     with contextlib.closing(open_reader(driver.directory / "crashed")) as store:
         replayed = replay_store(store, where="the crashed store")
@@ -1196,6 +1433,16 @@ def overdue_before_launch(driver: Driver) -> set[tuple[str, int]]:
 
 
 # ------------------------------------------------------------------ the sweep
+
+
+def _mark(directory: Path, broken: list[str]) -> list[str]:
+    """Keep a broken point's directory for diagnosis. A directory that is gone does not hide the
+    point's findings: the point still reports them, and says the directory went."""
+    try:
+        (directory / "broken").write_text("\n".join(broken))
+    except OSError as exc:
+        return [f"H8: the point's directory went before its report: {exc}"]
+    return []
 
 
 @dataclass
@@ -1218,11 +1465,11 @@ class Bug88(AssertionError):
     """The `before 1` point failed as BUG-88 says, and only so."""
 
 
-def numbers(part: str, appends: int) -> range:
-    """`genesis` is append call 1, `rest` the calls after it, `all` every call."""
-    return {"genesis": range(1, 2), "rest": range(2, appends + 1), "all": range(1, appends + 1)}[
-        part
-    ]
+def numbers(part: str, appends: list[int]) -> list[tuple[int, int]]:
+    """(engine process, append call) of every crash point of a history: `genesis` is call 1 of
+    the first process, `rest` every other call of every process, `all` every call."""
+    every = [(k, n) for k, total in enumerate(appends, 1) for n in range(1, total + 1)]
+    return {"genesis": every[:1], "rest": every[1:], "all": every}[part]
 
 
 def verdict(points: list[Point], *, expected: str | None = None) -> None:
@@ -1249,13 +1496,14 @@ def verdict(points: list[Point], *, expected: str | None = None) -> None:
     raise AssertionError(report(points))
 
 
-async def sweep(
-    scenario: Scenario, position: str, make_directory: Callable[[], Path], part: str = "all"
-) -> tuple[Driver, list[Point]]:
-    """The reference run, then one crash run per append call of its first incarnation that
-    `part` names, at most `CONCURRENCY` at once. A crash point that breaks an invariant keeps
-    its directory."""
-    reference = Driver(scenario, make_directory(), None)
+#: each scenario's reference run, made once per process: every item of a scenario's sweep
+#: compares its crash points with the same history (H7, I8, I10)
+_REFERENCES: dict[str, tuple[Driver, list[Point]]] = {}
+
+
+async def _reference(scenario: Scenario, directory: Path) -> tuple[Driver, list[Point]]:
+    """The history with no fault, and why it broke, as points of their own."""
+    reference = Driver(scenario, directory, None)
     failed: list[Point] = []
     started = time.monotonic()
     try:
@@ -1263,23 +1511,37 @@ async def sweep(
     except Exception as exc:  # the crash points still run and report
         # the first incarnation's records stand; a check that needs the rest says so
         reference.final = reference.world.rows()
-        (reference.directory / "broken").write_text(str(exc))
         broken = [f"run: {type(exc).__name__}: {exc}", *_once(reference.final)]
+        broken += _mark(reference.directory, broken)
         failed.append(Point(None, broken, reference.directory, 0.0))
     else:
         if broken := declared(reference):
-            (reference.directory / "broken").write_text("\n".join(broken))
+            broken += _mark(reference.directory, broken)
             failed.append(Point(None, broken, reference.directory, 0.0))
     if leftover := await asyncio.to_thread(reference.unit.members):
         failed.append(Point(None, [f"H8: left behind {leftover}"], reference.directory, 0.0))
     reference.seconds = time.monotonic() - started
-    assert reference.appends > 0, failed
+    assert sum(reference.appends) > 0, failed
+    return reference, failed
+
+
+async def sweep(
+    scenario: Scenario, position: str, make_directory: Callable[[], Path], part: str = "all"
+) -> tuple[Driver, list[Point]]:
+    """The reference run, then one crash run per append call of every engine process of its
+    history that `part` names, at most `CONCURRENCY` at once. A crash point that breaks an
+    invariant keeps its directory."""
+    started = time.monotonic()
+    if scenario.name not in _REFERENCES:
+        _REFERENCES[scenario.name] = await _reference(scenario, make_directory())
+    reference, made = _REFERENCES[scenario.name]
+    failed = list(made)
     limit = asyncio.Semaphore(CONCURRENCY)
 
-    async def point(n: int) -> Point:
+    async def point(k: int, n: int) -> Point:
         async with limit:
             directory = make_directory()
-            driver = Driver(scenario, directory, Fault(position, n))
+            driver = Driver(scenario, directory, Fault(position, n, k))
             started = time.monotonic()
             try:
                 await driver.run()
@@ -1291,11 +1553,11 @@ async def sweep(
             if leftover:
                 broken.append(f"H8: left behind {leftover}")
             if broken:
-                (directory / "broken").write_text("\n".join(broken))
+                broken += _mark(directory, broken)
             hot = bool(driver.wal) and driver.wal_at_successor == driver.wal
             return Point(driver.fault, broken, directory, time.monotonic() - started, hot)
 
-    points = await asyncio.gather(*(point(n) for n in numbers(part, reference.appends)))
+    points = await asyncio.gather(*(point(k, n) for k, n in numbers(part, reference.appends)))
     reference.seconds = time.monotonic() - started
     return reference, failed + list(points)
 
@@ -1313,10 +1575,33 @@ def budget(reference: Driver, points: list[Point]) -> str:
     crashes = [p for p in points if p.fault is not None]
     position = crashes[0].fault.position if crashes and crashes[0].fault else "?"
     return (
-        f"{reference.scenario.name} {position}: {reference.appends} append calls,"
+        f"{reference.scenario.name} {position}: {reference.appends} append calls by process,"
         f" {len(crashes)} crash points, slowest {max(p.seconds for p in crashes):.1f} s,"
         f" sweep {reference.seconds:.1f} s"
     )
+
+
+#: the three items of every scenario's sweep. The BUG-88 expectation lives here and only here:
+#: `before 1` is the strict expected failure (`verdict`), every other point must pass
+POSITIONS = [
+    pytest.param(
+        "before",
+        "genesis",
+        marks=pytest.mark.xfail(raises=Bug88, strict=True, reason=BUG88),
+        id="before-1",
+    ),
+    pytest.param("before", "rest", id="before-2-on"),
+    pytest.param("after", "all", id="after"),
+]
+
+
+def check(scenario: Scenario, position: str, part: str) -> None:
+    """One item of a scenario's sweep (`POSITIONS`): I1 to I10 at every crash point it names."""
+    with directories() as make:
+        reference, points = asyncio.run(sweep(scenario, position, make, part))
+        assert points, "a sweep with no crash point proves nothing"
+        print(budget(reference, points))
+        verdict(points, expected=BUG88 if part == "genesis" else None)
 
 
 @contextlib.contextmanager

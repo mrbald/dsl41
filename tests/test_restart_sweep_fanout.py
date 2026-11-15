@@ -2,25 +2,20 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 import pytest
 from restart_sweep import (
+    POSITIONS,
+    check,
     End,
-    BUG88,
-    Bug88,
     LINUX,
     Release,
     Scenario,
     Send,
     Step,
     World,
-    budget,
-    directories,
     gate_command,
-    sweep,
-    verdict,
 )
 
 pytestmark = pytest.mark.usefixtures("cli_env")
@@ -69,23 +64,7 @@ FANOUT = Scenario(
 )
 
 
-@pytest.mark.parametrize(
-    ("position", "part"),
-    [
-        pytest.param(
-            "before",
-            "genesis",
-            marks=pytest.mark.xfail(raises=Bug88, strict=True, reason=BUG88),
-            id="before-1",
-        ),
-        pytest.param("before", "rest", id="before-2-on"),
-        pytest.param("after", "all", id="after"),
-    ],
-)
+@pytest.mark.parametrize(("position", "part"), POSITIONS)
 def test_every_crash_point_keeps_the_invariants(position, part):
-    """I1 to I10 at every append call of the script's first incarnation (DL-425, DL-426)."""
-    with directories() as make:
-        reference, points = asyncio.run(sweep(FANOUT, position, make, part))
-        assert points, "a sweep with no crash point proves nothing"
-        print(budget(reference, points))
-        verdict(points, expected=BUG88 if part == "genesis" else None)
+    """I1 to I10 at every append call of every engine process of the history."""
+    check(FANOUT, position, part)
