@@ -70,7 +70,8 @@ Wrapper input is frozen in docs/wrapper-protocol.md §2 and §4.6. Unknown keys,
 noncanonical run ids, invalid job components, mistyped values and NUL strings refuse
 before durable effects. Readable non-object JSON exits 2; malformed JSON or missing
 required keys exits 1 (DL-444). The wrapper defaults stdin and grace under §4.6.
-Exit 0 notifies a status record; exit 3 reports a failed record write (DL-229).
+Exit 0 notifies a status record; exit 3 reports a spawn or status record that could not be
+built or written (DL-229, DL-502).
 status.json is the sole outcome channel.
 
 """
@@ -252,6 +253,25 @@ def _await_exit_after_kill(
         if ready:
             _drain(self_pipe_r)
     killpg_quiet(child.pid, signal.SIGKILL)
+    while True:
+        observed = _observe_exit(child)
+        if observed is not None:
+            return observed
+        select.select([self_pipe_r], [], [], 0.05)
+        _drain(self_pipe_r)
+
+
+def _end_leader_alone(child: subprocess.Popen[bytes], self_pipe_r: int) -> dict[str, Any]:
+    """Take the leader's exit, signalling the leader alone with SIGKILL while it lives and
+    ignoring a failure of that signal, then wait for it. Used where the group kill failed
+    (DL-502); it never reaps."""
+    observed = _observe_exit(child)
+    if observed is not None:
+        return observed
+    try:
+        os.kill(child.pid, signal.SIGKILL)
+    except OSError:
+        pass
     while True:
         observed = _observe_exit(child)
         if observed is not None:
@@ -457,26 +477,33 @@ def main() -> int:
         return 0
 
     _test_pause("post_spawn_pre_record")
-    spawn_record = {
-        "version": SPOOL_VERSION,
-        **identity,
-        "wrapper_pid": os.getpid(),
-        "wrapper_start_time": proc_start_token(os.getpid()),
-        "command_pid": child.pid,
-        "command_pgid": child.pid,
-        "command_start_time": proc_start_token(child.pid),
-        "boot_id": boot_id,
-        "started_at": utc_now_iso(),
-    }
     try:
+        # building the record reads process start tokens, which can fail like the write
+        # (`ps` cannot run on macOS) while the command already runs (DL-502)
+        spawn_record = {
+            "version": SPOOL_VERSION,
+            **identity,
+            "wrapper_pid": os.getpid(),
+            "wrapper_start_time": proc_start_token(os.getpid()),
+            "command_pid": child.pid,
+            "command_pgid": child.pid,
+            "command_start_time": proc_start_token(child.pid),
+            "boot_id": boot_id,
+            "started_at": utc_now_iso(),
+        }
         durable_write_json(os.path.join(run_dir, "spawn.json"), spawn_record)
     except _IO_FAILURE as exc:
         # cannot promise observability without the spawn record: kill what we started,
-        # still try to record the outcome, and exit loudly
-        print(f"runner_wrapper: spawn.json write failed: {exc}", file=sys.stderr)
-        kill_observed = _await_exit_after_kill(
-            child, self_pipe_r, float(spec.get("grace_seconds", 10.0))
-        )
+        # still try to record the outcome, and exit loudly (DL-502). Ending the group can
+        # raise when `ps` is what failed (macOS answers EPERM for a group that holds only
+        # the exited leader, and the proof of absence runs `ps`), so the leader is then
+        # ended alone. The stderr line comes last: its failure must not stop the cleanup.
+        try:
+            kill_observed = _await_exit_after_kill(
+                child, self_pipe_r, float(spec.get("grace_seconds", 10.0))
+            )
+        except _IO_FAILURE:
+            kill_observed = _end_leader_alone(child, self_pipe_r)
         _reap(child)
         try:
             durable_write_json(
@@ -491,7 +518,13 @@ def main() -> int:
                 },
             )
         except _IO_FAILURE:
-            pass  # already loud on stderr; absence of status.json IS the E7 signal
+            pass  # absence of status.json IS the E7 signal
+        try:
+            # not `print`: a buffered line that failed to write would fail again when the
+            # interpreter flushes stderr at exit, and turn exit 3 into 120
+            os.write(2, f"runner_wrapper: spawn record failed: {exc}\n".encode(errors="replace"))
+        except OSError:
+            pass  # a diagnostic that cannot be written changes nothing
         return 3
     _test_pause("post_record")
 

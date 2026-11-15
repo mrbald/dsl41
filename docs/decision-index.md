@@ -503,3 +503,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-499 | The engine's own account states the person who acts, one request at a time | [README.md](../README.md), [docs/access-model.md](access-model.md), [docs/architecture.md](architecture.md), [docs/cli-tui-qualification.md](cli-tui-qualification.md), [docs/control-protocol.md](control-protocol.md), [docs/deploy.md](deploy.md), [docs/gateway.md](gateway.md), [docs/glossary.md](glossary.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |
 | DL-500 | Status-hook observations name catalog jobs only | [docs/runner-design.md](runner-design.md) |
 | DL-501 | The terminal UI does not stop on a trace entry at or below its cursor |  |
+| DL-502 | A spawn record the wrapper cannot build takes the path of one it cannot write | [docs/wrapper-protocol.md](wrapper-protocol.md) |

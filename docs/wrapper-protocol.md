@@ -168,11 +168,12 @@ an absent version (`docs/protocol-evolution.md` §1, DL-227, DL-229).
 ```
 
 The wrapper writes this record before it reaps, on every path where
-`spawn.json` landed. One path is the exception: the `spawn.json` write
-itself failed. That attempt has no `spawn.json`, so no process identity is
-recorded. The wrapper kills what it started, reaps it, then
-attempts the `status.json` write as a best effort and exits 3. E7 covers
-the file's absence on that path (DL-229).
+`spawn.json` landed. One path is the exception: `spawn.json` could not be
+built or written durably. No process identity is then relied on. The wrapper
+ends what it started (the command's group, or the leader alone when the group
+cannot be signalled), reaps it, then attempts the `status.json` write as a
+best effort and exits 3. E7 covers
+the file's absence on that path (DL-229, DL-502).
 
 Each attempt has at most one `status.json`, and it holds exactly one outcome:
 
@@ -180,16 +181,16 @@ Each attempt has at most one `status.json`, and it holds exactly one outcome:
 |---------------|---------------------|--------------------------------------------|
 | `exited`      | `exit_code`         | the command exited on its own              |
 | `signaled`    | `signal`            | the command was killed by a signal that the wrapper did not send |
-| `terminated`  | `cause`, `observed` | the wrapper killed the group (`cause: "parent lost"`, or a spawn-record write failure). `observed` carries the forensic exit detail |
+| `terminated`  | `cause`, `observed` | the wrapper ended the attempt (`cause: "parent lost"`, or a spawn record that could not be built or written). `observed` carries the forensic exit detail |
 | `spawn_failed`| `error`             | the wrapper could not open the command's stdin, stdout or stderr, could not execute the selected shell, or could not set a child limit (DL-150, DL-492) |
 
 No outcome of a command that ran is written as an absent file. The
 **absence** of `status.json` means one of four things: the recorder itself
 was killed (-9); the machine died; the wrapper refused the spec before it
-spawned anything (§4 step 6, exit 1 or 2); or the record write itself
-failed (exit 3) (DL-150). These are evidence gaps; the attempt's first stop
+spawned anything (§4 step 6, exit 1 or 2); or a record could not be built or
+written (exit 3) (DL-150). These are evidence gaps; the attempt's first stop
 and the interruption rule decide their consumer meaning (DL-424).
-The wrapper also reports a spec refusal or write failure on stderr.
+The wrapper also reports a spec refusal or a record failure on stderr.
 
 The wrapper's exit code only tells the engine to read evidence. It never
 decides an oracle status. The engine first translates the spool into an
@@ -203,7 +204,7 @@ DL-424, DL-429):
 | `signaled`, before a stop | `natural{signal}` | Feed TERMINATED (E8). |
 | Exit or signal during the attempt's stop | `stopped{cause}` | Apply the interruption rule. |
 | `terminated`, `parent lost` | `stopped{lifeline}` | Apply the interruption rule. |
-| `spawn_failed`, or a spawn-record write failure | `spawn_failed` | Feed FAILURE `wrapper_spawn_failed`; retain whether launch occurred. |
+| `spawn_failed`, or a spawn record that could not be built or written | `spawn_failed` | Feed FAILURE `wrapper_spawn_failed`; retain whether launch occurred. |
 | No readable record (wrapper gone, record timeout, unread version, or restart) | `unobservable` | Apply the interruption rule. |
 
 The interruption rule can replace an idempotent attempt without ending its
@@ -305,7 +306,7 @@ On other platforms, and for an attempt dispatched without the cookie, the
    exits.
 6. The wrapper exit code is a notification only: 0 = a status record
    exists, 1 = an unreadable spec, a missing key or any other uncaught
-   error, 2 = the spec refusal, 3 = a record write failed (for example
+   error, 2 = the spec refusal, 3 = a record could not be built or written (for example
    ENOSPC). The spec refusal comes before anything spawns. It refuses a `version` that is absent or is not
    the integer 1 (`true` and `1.0` are refused), a present `lifeline_fd`
    that is not an integer, and a present `grace_seconds` that is not a
