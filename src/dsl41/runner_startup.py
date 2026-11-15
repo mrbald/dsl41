@@ -1522,13 +1522,9 @@ def _discharge_pending(
     assert engine.journal is not None
     table = engine.journal.open
     owed = sorted(table.pending.values(), key=lambda p: p.seq)
-    queued = {item.pending for item in engine._deferred}
     for pending in owed:
-        # A start already queued behind the recovery barrier stays covered (DL-425, DL-426).
-        if pending.seq not in queued:
-            engine.defer(
-                Deferred(pending.job, pending.run_number, pending=pending.seq), after=last_at
-            )
+        # `Engine.defer` admits a pending start once, so one already queued stays covered (DL-425).
+        engine.defer(Deferred(pending.job, pending.run_number, pending=pending.seq), after=last_at)
     covered = set(dispatched_runs(wires)) | {(p.job, p.run_number) for p in owed}
     covered |= {(a.job, a.run_number) for a in table.attempts.values()}
     covered |= {
