@@ -3,14 +3,13 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 import pytest
 from restart_sweep import (
+    POSITIONS,
+    check,
     End,
-    BUG88,
-    Bug88,
     BEGINNING,
     LINUX,
     Release,
@@ -19,11 +18,8 @@ from restart_sweep import (
     Send,
     Step,
     World,
-    budget,
-    directories,
+    seen,
     gate_command,
-    sweep,
-    verdict,
 )
 
 pytestmark = pytest.mark.usefixtures("cli_env")
@@ -72,7 +68,7 @@ OVERDUE = Scenario(
     # every CMD start has a dispatch (runner-design §7, run history)
     runs=frozenset({("J", 1), ("K", 1), ("J", 2)}),
     # the clock stands at BEGINNING until K's STARTJOB is in the store, then past K's deadline
-    clock_job="K",
+    clock=(seen("input", kind="STARTJOB", **{"payload.job": "K"}),),
     # the first incarnation never moves its loop past BEGINNING: K's timer is overdue only at
     # the restart (DL-491)
     horizon=BEGINNING,
@@ -81,28 +77,14 @@ OVERDUE = Scenario(
         Step("J fails", lambda w: w.acked("J", 1, 1), Release("J", 1, 1)),
         Step("J inactive", _rerun_planned, Send("CHANGE_STATUS", "J", {"status": "INACTIVE"})),
         Step("K starts", lambda _: True, Send("STARTJOB", "K")),
-        Step("restart", lambda w: w.acked("K", 1, 1), Restart()),
+        # K.1 runs; after the fault its deadline may end it before it is launched (DL-425)
+        Step("restart", lambda w: w.started("K", 1) or w.status("K") == "TERMINATED", Restart()),
+        Step("J.2 ends", lambda w: w.after_fault or w.acked("J", 2, 1), Release("J", 2, 1)),
     ],
 )
 
 
-@pytest.mark.parametrize(
-    ("position", "part"),
-    [
-        pytest.param(
-            "before",
-            "genesis",
-            marks=pytest.mark.xfail(raises=Bug88, strict=True, reason=BUG88),
-            id="before-1",
-        ),
-        pytest.param("before", "rest", id="before-2-on"),
-        pytest.param("after", "all", id="after"),
-    ],
-)
+@pytest.mark.parametrize(("position", "part"), POSITIONS)
 def test_every_crash_point_keeps_the_invariants(position, part):
-    """I1 to I10 at every append call before the script's own restart (DL-425, DL-426)."""
-    with directories() as make:
-        reference, points = asyncio.run(sweep(OVERDUE, position, make, part))
-        assert points, "a sweep with no crash point proves nothing"
-        print(budget(reference, points))
-        verdict(points, expected=BUG88 if part == "genesis" else None)
+    """I1 to I10 at every append call of every engine process of the history."""
+    check(OVERDUE, position, part)
