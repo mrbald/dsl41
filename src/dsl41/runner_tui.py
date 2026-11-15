@@ -1370,9 +1370,9 @@ class RunnerApp(App[None]):
         self._poll()
 
     def _reset_trace_cursor(self) -> None:
-        """Read the trace from the start again and forget what the old cursor indexed (DL-75).
-        The alarms go with the cursor: they are keyed by the sequence numbers about to be
-        re-read."""
+        """Read the trace from the start again and forget what the old cursor indexed
+        (DL-46 item 14, DL-210). The alarms go with the cursor: they are keyed by the sequence
+        numbers about to be re-read."""
         # DL-480: report pending repeats before forgetting the old trace's UI counts.
         for job, run in list(self._refusal_runs.items()):
             self._flush_refusal_run(job, run.last_clock)
@@ -1542,9 +1542,8 @@ class RunnerApp(App[None]):
         for entry in entries:
             seq = entry.get("seq")
             if isinstance(seq, int):
-                # control-protocol trace: since is exclusive; one dialect (DL-498).
-                assert seq > self._trace_seq, "trace entries advance the UI's cursor"
-                self._trace_seq = seq
+                # Consuming an entry never lowers the cursor (DL-501).
+                self._trace_seq = max(self._trace_seq, seq)
             transition = str(entry.get("transition", ""))
             if transition == "RESTART":
                 self._trace_from_snapshot = True
