@@ -26784,3 +26784,27 @@ relitigate an entry; append a new one.
   input reaches (DL-491). No test sends such an entry.
   UNCHANGED. Every entry of a conforming engine, the cursor's resets (a shorter trace, DL-46
   item 14; a changed baseline, DL-210), and the control protocol.
+- DL-502 A spawn record the wrapper cannot build takes the path of one it cannot write
+  (2026-11-15; owner approval of BUG-63's fix; `runner_wrapper.py`, wrapper-protocol §3)
+  THE RULE. After the command has started, a failure to build `spawn.json` and a failure to
+  write it take one path. The wrapper ends the command's group; when the group cannot be
+  signalled it takes the leader's exit, or ends a live leader alone. It reaps the leader,
+  attempts `status.json` with outcome `terminated` and the cause
+  `spawn record write failed (...)`, attempts one line on stderr, and exits 3. No step of the
+  path fails for want of `ps`, and a stderr that cannot be written stops none of it.
+  Building the record reads the start tokens of the wrapper and of the command; on macOS
+  that reading runs `ps`.
+  THE REASON. The record was built outside the guarded block. When `ps` could not run, the
+  wrapper died after it had started the command: it wrote no record and ended nothing. The
+  engine ended the attempt `unobservable` and ran it again, and each rerun left one more
+  live command (BUG-63). On macOS a group that holds only its exited leader answers EPERM to
+  a signal, and the proof that it is empty runs `ps` too.
+  THE LIMITS. When only the leader could be ended, other members of its group can live on
+  (the leader and member limit, DL-431). A host that denies the wrapper its own signals or
+  its own waits is outside the rule: there the wrapper cannot end or observe a command at
+  all, on this path or on any other.
+  UNCHANGED. The cause text, which the engine reads by its prefix (`SPAWN_RECORD_FAILED`),
+  the exit codes, the consumer table's actions, and the start-token reading on Linux, where
+  a failed read gives no token.
+  NOT BUILT. A record with no start token on macOS when `ps` cannot run, as Linux writes:
+  an engine on such a host cannot read process groups either.

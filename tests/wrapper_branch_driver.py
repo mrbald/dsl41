@@ -20,6 +20,13 @@ event, so a test can wait on the event instead of sleeping:
   sits in select. That is the window between the handler's last chance and the
   select syscall, held open. One line before each untimed select that starts
   with nothing to read.
+- group_kill_fails_leader_exited, group_kill_fails_leader_alive,
+  group_kill_fails_leader_signal_fails (DL-502): the group kill raises, as macOS
+  answers EPERM to a group whose proof of absence needs a `ps` that cannot run,
+  so the host does not matter. The leader has already exited (a zombie, waited
+  for here), or it is alive; in the last mode the signal to the leader alone is
+  delivered and then raises as well. The first exit probe after that signal
+  reports "still running", so the wait after it runs its loop body.
 
 Not a test file: no test_ prefix, imported by nothing.
 """
@@ -177,11 +184,56 @@ def killpg_eperm(event_path: str, *, at_kill: bool, empty: bool) -> None:
     procid.subprocess.run = run
 
 
+def group_kill_fails(event_path: str, *, leader_exited: bool, signal_fails: bool) -> None:
+    """DL-502: the wrapper's group kill raises where the platform's fallback needs `ps`."""
+
+    def killpg(pgid: int, sig: int) -> None:
+        if leader_exited:
+            while True:  # the command has exited and is not reaped
+                info = os.waitid(os.P_PID, pgid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                if info is not None and info.si_pid != 0:
+                    break
+                time.sleep(0.01)
+        _note(event_path)
+        raise PermissionError(errno.EPERM, "killpg denied")
+
+    runner_wrapper.killpg_quiet = killpg
+    if signal_fails:
+        real_kill = os.kill
+
+        def kill(pid: int, sig: int) -> None:
+            real_kill(pid, sig)
+            raise PermissionError(errno.EPERM, "kill reported a failure")
+
+        os.kill = kill
+
+    if not leader_exited:
+        real_observe = runner_wrapper._observe_exit
+        probes: list[None] = []
+
+        def observe(child: Any) -> Any:
+            probes.append(None)
+            if len(probes) == 2:  # the first look after the signal to the leader
+                return None
+            return real_observe(child)
+
+        runner_wrapper._observe_exit = observe
+
+
 MODES = {
     "count_observes": count_observes,
     "full_self_pipe": full_self_pipe,
     "completion_beats_parent_loss": completion_beats_parent_loss,
     "exit_lands_in_select": exit_lands_in_select,
+    "group_kill_fails_leader_exited": partial(
+        group_kill_fails, leader_exited=True, signal_fails=False
+    ),
+    "group_kill_fails_leader_alive": partial(
+        group_kill_fails, leader_exited=False, signal_fails=False
+    ),
+    "group_kill_fails_leader_signal_fails": partial(
+        group_kill_fails, leader_exited=False, signal_fails=True
+    ),
     "eperm_term_zombie": partial(killpg_eperm, at_kill=False, empty=False),
     "eperm_term_empty": partial(killpg_eperm, at_kill=False, empty=True),
     "eperm_kill_zombie": partial(killpg_eperm, at_kill=True, empty=False),

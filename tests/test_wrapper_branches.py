@@ -19,6 +19,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -27,6 +28,7 @@ import pytest
 from test_runner_lifecycle import read_json, wait_for
 
 from dsl41 import runner_procid, runner_wrapper
+from dsl41.runner_attempts import SPAWN_RECORD_FAILED
 
 if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
     pytest.skip("lifecycle tier is POSIX-only", allow_module_level=True)
@@ -423,6 +425,382 @@ def _drive(mode: str, events: Path, spec: bytes, lifeline_r: int) -> subprocess.
 
 def _event_count(events: Path) -> int:
     return events.read_bytes().count(b"\n") if events.exists() else 0
+
+
+_ON_DARWIN = pytest.mark.skipif(
+    not sys.platform.startswith("darwin"),
+    reason="the process start reading runs `ps` on macOS and reads /proc on Linux, where the "
+    "failure is not made by an unrunnable `ps`",
+)
+
+
+def _ps_stat(pid: int) -> str:
+    """The `ps` state of `pid`, empty when it is gone; bounded."""
+    out = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    return out.stdout.strip()
+
+
+def _process_table() -> list[int]:
+    """Every pid, from `ps`. A table that cannot be read is a failure with its reason, never
+    an empty table: `ps` that cannot run, times out, exits non-zero or lists nobody (the
+    reader is itself a process) raises."""
+    try:
+        out = subprocess.run(
+            ["ps", "-A", "-o", "pid="], capture_output=True, text=True, check=False, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise AssertionError(f"the process census failed: {exc!r}") from exc
+    if out.returncode != 0:
+        raise AssertionError(
+            f"the process census failed: ps exited {out.returncode}: {out.stderr.strip()}"
+        )
+    pids = [int(token) for token in out.stdout.split()]
+    if os.getpid() not in pids:
+        raise AssertionError("the process census failed: ps did not list this process")
+    return pids
+
+
+def _session_members(sid: int) -> list[int]:
+    """Every process in session `sid` (the wrapper calls `setsid`, so its pid is the id and
+    the command stays in it); a failed census raises."""
+    members = []
+    for pid in _process_table():
+        with contextlib.suppress(OSError):
+            if os.getsid(pid) == sid:
+                members.append(pid)
+    return members
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _break_ps(tmp_path: Path, kind: str) -> str:
+    """A PATH on which `ps` cannot run: an empty directory, or one holding a `ps` file that
+    is not executable."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    if kind == "unexecutable":
+        (bin_dir / "ps").write_text("#!/bin/sh\n")
+        (bin_dir / "ps").chmod(0o644)
+    return str(bin_dir)
+
+
+class _SpawnRecordFailure:
+    """The real wrapper with a spawn record it cannot make, and the test's ownership of
+    every process it leaves, whatever fails: `close` ends the wrapper's whole session."""
+
+    def __init__(
+        self,
+        tmp_path: Path,
+        command: str,
+        *,
+        ps_kind: str | None,
+        spawn_json_is_a_directory: bool = False,
+        status_json_is_a_directory: bool = False,
+        pause: bool = False,
+        stderr_closed: bool = False,
+        driver_mode: str | None = None,
+    ) -> None:
+        self.run_dir = tmp_path / "j1.1"
+        self.run_dir.mkdir()
+        if spawn_json_is_a_directory:
+            (self.run_dir / "spawn.json").mkdir()
+        if status_json_is_a_directory:
+            (self.run_dir / "status.json").mkdir()
+        self.pid_file = tmp_path / "command.pid"
+        self.fifo = tmp_path / "block.fifo"
+        os.mkfifo(self.fifo)
+        env = dict(os.environ)
+        if ps_kind is not None:
+            env["PATH"] = _break_ps(tmp_path, ps_kind)
+        if pause:
+            env[runner_wrapper.PAUSE_ENV] = "post_spawn_pre_record"
+        lifeline_r, self.lifeline_w = os.pipe()
+        spec = json.loads(_spec(self.run_dir, command, lifeline_r))
+        spec["shell"] = "/bin/sh"
+        if stderr_closed:
+            reader, stderr = os.pipe()
+            os.close(reader)  # the wrapper's stderr is a pipe nobody reads
+        else:
+            stderr = subprocess.PIPE
+        argv = [sys.executable, str(Path(runner_wrapper.__file__))]
+        if driver_mode is not None:  # the same wrapper, with one seam made certain
+            argv = [sys.executable, str(DRIVER), driver_mode, str(tmp_path / "events")]
+        self.proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stderr=stderr,
+            pass_fds=(lifeline_r,),
+            env=env,
+        )
+        os.close(lifeline_r)
+        if stderr_closed:
+            os.close(stderr)
+        assert self.proc.stdin is not None
+        self.proc.stdin.write(json.dumps(spec).encode())
+        self.proc.stdin.close()
+
+    def command_pid(self, timeout_s: float = 10.0) -> int:
+        return int(
+            wait_for(
+                lambda: self.pid_file.exists() and self.pid_file.read_text().strip(),
+                timeout_s=timeout_s,
+            )
+        )
+
+    def at_the_pause(self) -> None:
+        wait_for(lambda: _ps_stat(self.proc.pid).startswith("T"))
+
+    def finish(self) -> int:
+        """Wait, bounded, for the wrapper to end; the command must be gone with it. This
+        runs before any cleanup, so it proves the wrapper ended the command. A census that
+        fails fails the assertion with its reason."""
+        code = self.proc.wait(timeout=30)
+        assert _session_members(self.proc.pid) == [], "the wrapper left a process behind"
+        return code
+
+    def close(self) -> None:
+        """End everything the run left, whatever the test reached, then check that nothing
+        is left. The wrapper dies first (SIGKILL works on a stopped one), so nothing more is
+        spawned while the census is taken. A wrapper killed before `setsid` has spawned
+        nothing, because `main` calls `setsid` before it starts the command, so every
+        process it ever made is in the session whose id is its pid. The census is the
+        session when `ps` can be read, and the command's process group from the pid file
+        when that file exists and its process is still in that session. Every signal that
+        can be sent is sent before a failed census is raised."""
+        failures: list[str] = []
+        with contextlib.suppress(OSError):
+            self.proc.kill()
+        try:
+            self.proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            failures.append("the wrapper did not end after SIGKILL")
+        sid = self.proc.pid
+        command_pid = None
+        with contextlib.suppress(OSError, ValueError):
+            command_pid = int(self.pid_file.read_text().strip())
+        if command_pid is not None:
+            with contextlib.suppress(OSError):  # gone, or not ours: nothing to end
+                if os.getsid(command_pid) == sid:
+                    os.killpg(command_pid, signal.SIGKILL)
+        try:
+            for pid in _session_members(sid):
+                with contextlib.suppress(OSError):
+                    os.kill(pid, signal.SIGKILL)
+            deadline = time.monotonic() + 10
+            while _session_members(sid):
+                if time.monotonic() >= deadline:
+                    failures.append("a process of the wrapper's session is still alive")
+                    break
+                time.sleep(0.05)
+        except AssertionError as exc:  # a failed census, after the signals that needed none
+            failures.append(str(exc))
+        if command_pid is not None:
+            deadline = time.monotonic() + 10
+            while _alive(command_pid) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if _alive(command_pid):
+                failures.append(f"the command {command_pid} is still alive")
+        if self.proc.stderr is not None:
+            self.proc.stderr.close()
+        os.close(self.lifeline_w)
+        assert not failures, "; ".join(failures)
+
+
+def test_wrapper_test_teardown_ends_a_wrapper_and_command_left_by_a_failed_wait(
+    tmp_path: Path,
+) -> None:
+    """The helper owns its processes whatever fails: the readiness wait fails before the pid
+    file is read, with the wrapper stopped at its pause and its command alive, and the
+    teardown still ends both."""
+    run = _SpawnRecordFailure(
+        tmp_path,
+        f'echo $$ > "{tmp_path / "command.pid"}"; read x < "{tmp_path / "block.fifo"}"',
+        ps_kind=None,
+        pause=True,
+    )
+    sid = run.proc.pid
+    try:
+        run.at_the_pause()  # the command has been started
+        with pytest.raises(AssertionError, match="timed out"):
+            run.command_pid(timeout_s=0)
+    finally:
+        run.close()
+    assert run.proc.poll() is not None
+    assert _session_members(sid) == []
+    if run.pid_file.exists():  # the command was fast enough to write it
+        assert not _alive(int(run.pid_file.read_text().strip()))
+
+
+@_ON_DARWIN
+@pytest.mark.parametrize("ps_kind", ["unexecutable", "missing"])
+def test_wrapper_kills_a_command_whose_spawn_record_cannot_be_built(
+    tmp_path: Path, ps_kind: str
+) -> None:
+    """DL-502, BUG-63: on macOS the start token is read with `ps`. When `ps` cannot run, the
+    record cannot be built after the command has started. The wrapper ends what it started,
+    reaps it, records `terminated` with the spawn-record cause, says so on stderr, exits 3
+    and leaves no `spawn.json`. The command needs nothing from PATH."""
+    run = _SpawnRecordFailure(
+        tmp_path,
+        f'echo $$ > "{tmp_path / "command.pid"}"; read x < "{tmp_path / "block.fifo"}"',
+        ps_kind=ps_kind,
+        pause=True,
+    )
+    try:
+        run.command_pid()
+        run.at_the_pause()
+        os.kill(run.proc.pid, signal.SIGCONT)
+        assert run.finish() == 3
+        assert not (run.run_dir / "spawn.json").exists()
+        status = read_json(run.run_dir / "status.json")
+        assert status["outcome"] == "terminated"
+        assert status["cause"].startswith(SPAWN_RECORD_FAILED)
+        assert status["observed"] == {"outcome": "signaled", "signal": signal.SIGTERM}
+        assert run.proc.stderr is not None
+        assert b"spawn record failed" in run.proc.stderr.read()
+    finally:
+        run.close()
+
+
+@_ON_DARWIN
+def test_wrapper_records_the_exit_of_a_command_that_ended_before_a_spawn_record_failed(
+    tmp_path: Path,
+) -> None:
+    """DL-502: the command has exited, so its group holds only its zombie leader, and macOS
+    answers EPERM to a signal for that group, whose proof of absence runs the `ps` that cannot
+    run. The wrapper still records `terminated` with the command's own exit, and exits 3."""
+    run = _SpawnRecordFailure(
+        tmp_path, f'echo $$ > "{tmp_path / "command.pid"}"', ps_kind="unexecutable", pause=True
+    )
+    try:
+        command_pid = run.command_pid()
+        run.at_the_pause()
+        wait_for(lambda: _ps_stat(command_pid).startswith("Z"))  # exited, not reaped
+        os.kill(run.proc.pid, signal.SIGCONT)
+        assert run.finish() == 3
+        status = read_json(run.run_dir / "status.json")
+        assert status["outcome"] == "terminated"
+        assert status["cause"].startswith(SPAWN_RECORD_FAILED)
+        assert status["observed"] == {"outcome": "exited", "exit_code": 0}
+        assert not (run.run_dir / "spawn.json").exists()
+    finally:
+        run.close()
+
+
+@pytest.mark.parametrize(
+    ("mode", "command", "observed"),
+    [
+        pytest.param(
+            "group_kill_fails_leader_exited",
+            "exit 7",
+            {"outcome": "exited", "exit_code": 7},
+            id="leader-exited",
+        ),
+        pytest.param(
+            "group_kill_fails_leader_alive",
+            'read x < "{fifo}"',
+            {"outcome": "signaled", "signal": signal.SIGKILL},
+            id="leader-alive",
+        ),
+        pytest.param(
+            "group_kill_fails_leader_signal_fails",
+            'read x < "{fifo}"',
+            {"outcome": "signaled", "signal": signal.SIGKILL},
+            id="leader-alive-signal-fails",
+        ),
+    ],
+)
+def test_wrapper_ends_the_leader_alone_when_the_group_kill_raises(
+    tmp_path: Path, mode: str, command: str, observed: dict[str, object]
+) -> None:
+    """DL-502, on both hosts through a stand-in for the group kill: where it raises (macOS
+    answers EPERM for a group that holds only the exited leader, and its proof of absence
+    needs a `ps` that cannot run), the wrapper takes the exit of a leader that has gone, or
+    ends a live one with SIGKILL alone and ignores a failure of that signal, then records
+    `terminated` with the spawn-record cause and exits 3. The record cannot be written
+    because a directory stands in the place of `spawn.json`."""
+    run = _SpawnRecordFailure(
+        tmp_path,
+        command.format(fifo=tmp_path / "block.fifo"),
+        ps_kind=None,
+        spawn_json_is_a_directory=True,
+        driver_mode=mode,
+    )
+    try:
+        assert run.finish() == 3
+        status = read_json(run.run_dir / "status.json")
+        assert status["outcome"] == "terminated"
+        assert status["cause"].startswith(SPAWN_RECORD_FAILED)
+        assert status["observed"] == observed
+    finally:
+        run.close()
+
+
+def test_wrapper_ends_its_command_and_exits_3_when_neither_record_can_be_written(
+    tmp_path: Path,
+) -> None:
+    """DL-502, wrapper-protocol §3: the spawn record cannot be written and neither can the
+    best-effort `status.json` (a directory stands in the place of each). The command is
+    ended and reaped all the same, nothing is recorded, and the wrapper exits 3."""
+    run = _SpawnRecordFailure(
+        tmp_path,
+        f'read x < "{tmp_path / "block.fifo"}"',
+        ps_kind=None,
+        spawn_json_is_a_directory=True,
+        status_json_is_a_directory=True,
+    )
+    try:
+        assert run.finish() == 3
+        assert not (run.run_dir / "status.json").is_file()
+        assert not (run.run_dir / "spawn.json").is_file()
+    finally:
+        run.close()
+
+
+@pytest.mark.parametrize(
+    "how",
+    [
+        pytest.param("spawn_json_is_a_directory", id="write-fails"),
+        pytest.param("ps_unexecutable", marks=_ON_DARWIN, id="build-fails"),
+    ],
+)
+def test_wrapper_ends_its_command_when_the_diagnostic_cannot_be_written(
+    tmp_path: Path, how: str
+) -> None:
+    """DL-502: the wrapper's stderr is a pipe with no reader, so the line it prints about the
+    failed spawn record raises. The command is already ended and reaped and `status.json` is
+    already tried, and the wrapper exits 3, not by a traceback. The failure is a `spawn.json`
+    that cannot be replaced (a directory is in its place), which runs on both platforms, and
+    on macOS also a `ps` that cannot run."""
+    run = _SpawnRecordFailure(
+        tmp_path,
+        f'echo $$ > "{tmp_path / "command.pid"}"; read x < "{tmp_path / "block.fifo"}"',
+        ps_kind="unexecutable" if how == "ps_unexecutable" else None,
+        spawn_json_is_a_directory=how == "spawn_json_is_a_directory",
+        stderr_closed=True,
+    )
+    try:
+        assert run.finish() == 3
+        status = read_json(run.run_dir / "status.json")
+        assert status["outcome"] == "terminated"
+        assert status["cause"].startswith(SPAWN_RECORD_FAILED)
+        assert not (run.run_dir / "spawn.json").is_file()
+    finally:
+        run.close()
 
 
 @pytest.mark.parametrize(
