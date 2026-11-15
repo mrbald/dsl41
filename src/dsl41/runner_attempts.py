@@ -69,8 +69,8 @@ from dsl41.state_machine import Event, Executor, Outcome
 
 #: The `status.json` cause the wrapper writes when it killed the group on lifeline EOF.
 LIFELINE_CAUSE: Final = "parent lost"
-#: The start of the cause the wrapper writes when it launched the command, could not write
-#: `spawn.json`, and killed the command (`docs/wrapper-protocol.md`).
+#: The start of the cause the wrapper writes when it launched the command, could not build or
+#: write `spawn.json`, and killed the command (`docs/wrapper-protocol.md`).
 SPAWN_RECORD_FAILED: Final = "spawn record write failed"
 #: The oracle statuses that count as a live run for the interruption rule: a box member can be
 #: dispatched while its row is still STARTING.
