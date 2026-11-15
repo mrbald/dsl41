@@ -2105,10 +2105,19 @@ class Engine:
         self.started.set()
 
     def defer(self, item: Deferred, *, after: datetime) -> None:
-        """Queue a dispatch a recovering engine owes for the loop (`Deferred`). `after` is the journal's
-        last instant: the loop carries it out once it has processed what is due at or before the
-        later of that instant and the clock, so the restart's reconciliation and every overdue
-        timer apply first."""
+        """Queue a dispatch a recovering engine owes for the loop (`Deferred`).
+
+        `after` is the barrier's watermark: the loop carries the item out once it has processed
+        what is due at or before the later of that instant and the clock, so the restart's
+        reconciliation and every overdue timer apply first.
+
+        A pending start is admitted once: a call for a `dispatch_pending` record that a queued or
+        held item already carries changes nothing, so a start the catch-up owed and queued is not
+        queued again by the owed step (DL-425, DL-426)."""
+        if item.pending is not None and any(
+            queued.pending == item.pending for queued in (*self._deferred, *self._held_starts)
+        ):
+            return
         self._deferred.append(item)
         self._deferred_after = max(after, self._deferred_after or after)
 
