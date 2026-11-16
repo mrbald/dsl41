@@ -1,4 +1,7 @@
-"""Real serve_people process with an observed child launcher and synthetic lookup (DL-499)."""
+"""Real serve_people process with an observed child launcher and synthetic lookup.
+
+DL-499 and DL-507 own the rules it exercises.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +17,7 @@ from dsl41.runner_web import serve_people
 
 
 def main() -> None:
-    socket_path, control_socket, log_path = sys.argv[1:]
+    socket_path, control_socket, log_path, public_url = sys.argv[1:]
     log = Path(log_path)
     shared = []
     initialize = Server.__init__
@@ -33,19 +36,22 @@ def main() -> None:
         record({"kind": "launch", "command": self.command, "shared_command": shared[0].command})
         return process
 
-    def resolve(email):
-        record({"kind": "lookup", "email": email, "thread": threading.get_ident()})
-        if email == "raise":
+    def resolve(headers):
+        # DL-507: a site may fall back to a second header; a blank or repeated first one refuses.
+        user = headers.get("X-Example-User") or headers["X-Example-Mail"]
+        record({"kind": "lookup", "user": user, "thread": threading.get_ident()})
+        if user == "raise":
             raise RuntimeError("synthetic lookup failure")
-        if email == "none":
+        if user == "none":
             return None
-        if email == "bad":
+        if user == "bad":
             return "alice", "operators"
-        if email == "surrogate":
+        if user == "surrogate":
             return "\ud800", []
-        if email == "no-roles":
-            return email, []
-        return email, ["operators"]
+        if user == "no-roles":
+            return user, []
+        roles = headers.get("X-Example-Roles")
+        return user, (["operators"] if roles is None else roles.split(";"))
 
     Server.__init__ = observe_server
     AppService._open_app_process = observe_launch
@@ -53,7 +59,7 @@ def main() -> None:
     serve_people(
         resolve,
         socket_path=socket_path,
-        public_url="https://control.example.invalid",
+        public_url=public_url,
         control_socket=control_socket,
     )
 

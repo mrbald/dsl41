@@ -26754,6 +26754,7 @@ relitigate an entry; append a new one.
   `dsl41 serve`, which is unchanged.
   UNCHANGED. Answer shapes, journal and receipt shapes, fingerprints, snapshots, golden
   traces, the state version and every other command.
+  NARROWED BY DL-507: the lookup reads the request's headers; `public_url` may carry a path.
 - DL-500 Status-hook observations name catalog jobs only
   (2026-11-14; owner ruling of 2026-11-13; `oracle_reads.py`, `status_hook.py`,
   `runtime_policy.py`, runner-design §4; narrows DL-446)
@@ -26896,3 +26897,28 @@ relitigate an entry; append a new one.
   and so does a review stamp made before it; the gates compare files, not ancestry.
   NOT DONE. The commits are not collapsed into one. One change per commit keeps
   `git blame` leading to the reason for a line.
+- DL-507 The web service takes a base path, and the person from the proxy's headers
+  (2026-11-16; owner; `runner_web.py`; access-model §9; deploy "Serve people behind the
+  authenticating proxy"; DL-499)
+  THE BASE PATH. `public_url` is `scheme://host[:port]` followed by zero or more `/segment`. A
+  segment is one or more of `[A-Za-z0-9._~-]` and neither `.` nor `..`. Any other scheme, port
+  or path, a trailing slash included, refuses at startup. The proxy strips the base path
+  before it forwards, so the service's routes do not move. A WebSocket's `Origin` must equal
+  the `scheme://host[:port]` part exactly; a missing or `null` origin refuses.
+  THE PERSON. The site's `resolve(headers)` returns `(user_id, roles)` or None. `headers` is a
+  read-only copy of the request's headers, read by name in any case. A name that was not sent
+  raises `KeyError`, so a lookup can fall back to a second name. A name sent more than once,
+  or with a blank value, raises `ValueError`, which refuses the tab unless the lookup catches
+  it. Every failure of the lookup is HTTP 403 before WebSocket preparation or process
+  creation, as DL-499 has it. The service names no header.
+  THE PROXY'S DUTY. It replaces every occurrence of each header the lookup reads with the
+  authenticated value. The count is taken on the request the service receives: a proxy that
+  joins two lines into one comma-separated value shows one, and the lookup owns the syntax of
+  each value.
+  THE COST. Every page of the same origin passes the `Origin` check under any path, so
+  applications that share the origin are trusted like the UI. The library's file-download link
+  is root-relative and is not served under a base path, so the command palette's command that
+  saves an image of the screen fails there (BUG-91).
+  NOT BUILT. The old `resolve(email)` beside the new form. Options that name headers. A switch
+  for a proxy that does not strip the path. A check of the host's spelling: a `public_url` not
+  spelled as the browser sends `Origin` still refuses every tab.

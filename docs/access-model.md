@@ -513,15 +513,31 @@ account is an explicit deployment grant.
 
 The proxy authenticates the browser. `serve_people` in `runner_web.py` serves
 one UI process per tab under the engine's own account (DL-499).
-The site supplies a synchronous `resolve(email)` returning `(user_id, roles)` or
-None. The service calls it in a thread. An exception, no answer or an invalid
-person refuses the tab with HTTP 403 before WebSocket preparation or process creation.
+The site supplies a synchronous `resolve(headers)` returning `(user_id, roles)` or
+None (DL-507). `headers` is a read-only copy of the request's headers, taken before
+the lookup starts. It reads a name in any case and follows three rules:
+
+- A name that was not sent raises `KeyError`, so `headers.get` can fall back to a
+  second name.
+- A name sent more than once, or whose value is empty or only whitespace, raises
+  `ValueError`.
+- Iteration and length cover the names sent, in lower case, each once.
+
+The service names no header. The service calls `resolve` in a thread. An exception,
+no answer or an invalid person refuses the tab with HTTP 403 before WebSocket
+preparation or process creation.
 Two tabs opening together call `resolve` from two threads; it must be safe for that.
 
-`public_url` is an HTTP or HTTPS origin: scheme, host and optional port only.
-A path or trailing slash refuses at startup. Every WebSocket requires an `Origin`
-exactly equal to it and exactly one non-empty `X-DSL41-Email` header.
-The authenticating proxy overwrites that header and protects the whole site.
+`public_url` is `scheme://host[:port]` followed by zero or more `/segment` (DL-507).
+The scheme is `http` or `https`. A segment is one or more of `[A-Za-z0-9._~-]` and is
+neither `.` nor `..`. Any other scheme, port or path, a trailing slash included, refuses
+at startup. The host's spelling is not checked: a host a browser would not send in
+`Origin` starts and refuses every tab.
+Every WebSocket requires an `Origin` exactly equal to the `scheme://host[:port]` part;
+a missing or `null` origin refuses.
+The authenticating proxy protects the whole site. It strips the base path before it
+forwards, so the service's routes do not move. It replaces every occurrence of each
+header the lookup reads with the authenticated value.
 The backend listens on a Unix socket accessible to that proxy.
 The library owns the index, static files and downloads.
 
@@ -567,7 +583,7 @@ Other faults keep the visible-query-fault behavior (DL-187 item 6).
 Synchronous CLI clients state no person either.
 
 The [deployment recipe](deploy.md#serve-people-behind-the-authenticating-proxy)
-gives the unit, proxy, access file, start script and limits L1 to L8.
+gives the unit, proxy, access file, start script and limits L1 to L10.
 
 ## 10. The verb table
 
