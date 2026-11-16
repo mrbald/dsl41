@@ -509,3 +509,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-505 | The audit of code and tests that rest on hand-built state is closed |  |
 | DL-506 | A commit message is written for the reader of the log | [docs/agents/coordination.md](agents/coordination.md) |
 | DL-507 | The web service takes a base path, and the person from the proxy's headers | [README.md](../README.md), [docs/access-model.md](access-model.md), [docs/deploy.md](deploy.md) |
+| DL-508 | A review stamp is a local tag; the remote holds release tags and one archive tag |  |

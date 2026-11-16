@@ -26922,3 +26922,16 @@ relitigate an entry; append a new one.
   NOT BUILT. The old `resolve(email)` beside the new form. Options that name headers. A switch
   for a proxy that does not strip the path. A check of the host's spelling: a `public_url` not
   spelled as the browser sends `Origin` still refuses every tab.
+- DL-508 A review stamp is a local tag; the remote holds release tags and one archive tag
+  (2026-11-16; owner; `.claude/skills/spec-review/SKILL.md`,
+  `.claude/skills/arch-review/SKILL.md`; DL-225, DL-506)
+  THE RULE. A `spec-review/*` or `arch-review/*` stamp is made as DL-225 has it and is not
+  pushed. The remote holds the release tags `v*` and the tag `archive/pre-2.0`.
+  WHY. A stamp is read only where it was made; CI's shallow checkout fetches no tags and
+  never had one. A pushed stamp is a tag that a reader of the public repository has no use
+  for.
+  DONE. The 119 stamps on the remote were deleted on 2026-11-16. The stamps in a working
+  clone stay and work as before.
+  THE COST. A new clone has no stamp. There the gate counts every specification as due
+  until its next review, and counts architecture drift from the branch point, so on `main`
+  the drift trigger stays quiet until an arch review is stamped in that clone.

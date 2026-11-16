@@ -80,5 +80,5 @@ git tag -a "arch-review/$(date -u +%Y-%m-%dT%H%M%SZ)" -m 'Architecture review ac
 ```
 
 Never move an existing tag. If the name already exists, choose a later timestamp.
-Publish only the accepted stamp with its reviewed commit, under the repository's
-push rules. Invoking this skill alone does not authorize publishing either.
+The stamp is a local tag; do not push it (DL-508). The reviewed commit is published
+under the repository's push rules. Invoking this skill alone does not authorize that.

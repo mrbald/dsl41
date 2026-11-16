@@ -116,17 +116,15 @@ git tag --points-at HEAD --list 'spec-review/<stem>/*'
 
 Reuse a stamp that already points at HEAD. Otherwise create an annotated
 tag whose message states the pass's outcome, one of `no change`,
-`wording`, or `ruling DL-NNN`, and push that one tag:
+`wording`, or `ruling DL-NNN`. The stamp is a local tag; do not push it
+(DL-508):
 
 ```sh
 ts=$(date -u +%Y-%m-%dT%H%M%SZ)
 git tag -a "spec-review/<stem>/$ts" -m "spec review: docs/<stem>.md; outcome: wording"
-git push origin "spec-review/<stem>/$ts"
 ```
 
 Never move an existing tag. If the name exists, choose a later timestamp.
-Invoking this skill does not by itself authorize the push: it happens under
-the repository's push rules, after the boss's acceptance.
 
 A disagreement ruled during the pass gets its own decision-log entry; a
 pass that changed wording only gets none. Re-find trigger for the shared
