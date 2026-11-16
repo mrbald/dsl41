@@ -26882,3 +26882,17 @@ relitigate an entry; append a new one.
   NOT BUILT. A gate on the census. Its count is not exact and its tools are not part of the
   repository. DL-491's rule holds the result: a reviewer reports code or a test that only
   hand-built state reaches.
+- DL-506 A commit message is written for the reader of the log
+  (2026-11-16; owner; `docs/agents/coordination.md` Git workflow)
+  THE RULE. The subject is one sentence of at most 72 characters that says what is true
+  after the commit. It starts with the id of the decision entry or `TODO.md` item the
+  commit is about; a commit about neither has no prefix. The body is a few short lines:
+  the rule now, the defect before, the cost or the limit. Who built or reviewed the
+  change, `TODO.md` bookkeeping and test inventories go in the pull request.
+  THE HISTORY. Most of the 213 commits after v1.13.0 carried a paragraph as their subject
+  line. Their messages are rewritten to this rule. Each commit keeps its files, author and
+  dates; its message and its hash change. Tag `archive/pre-2.0` names the old tip. A commit
+  hash cited in this log or in `TODO.md` before this entry names a commit on that old line,
+  and so does a review stamp made before it; the gates compare files, not ancestry.
+  NOT DONE. The commits are not collapsed into one. One change per commit keeps
+  `git blame` leading to the reason for a line.

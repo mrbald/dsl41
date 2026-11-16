@@ -178,8 +178,13 @@ budget for them, not for diff reads.
   the exact candidate and no open blocking ruling, then rebase-merge without
   asking and without deleting a branch. Take a merge outside those conditions
   to the owner. Ask before pushing to a protected branch.
-- Follow the owner's commit-message wording. Add no trailers, including
-  co-author trailers.
+- Write a commit message for the reader of the log (DL-506). The subject is one
+  sentence of at most 72 characters that says what is true after the commit. It
+  starts with the id of the decision entry or `TODO.md` item the commit is
+  about (`DL-503: `); a commit about neither has no prefix. The body is a few
+  short lines: the rule now, the defect before, the cost or the limit. Who
+  built or reviewed the change, `TODO.md` bookkeeping and test inventories go
+  in the pull request. Add no trailers, including co-author trailers.
   AI attribution belongs in the single top-level README footer line.
 - Push after each logically complete slice rather than batching many commits.
 - The pull, staging, delete and command-timeout rules are in the shared
