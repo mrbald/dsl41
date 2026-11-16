@@ -562,11 +562,13 @@ Duties:
    interpreter's wakeup fd (`signal.set_wakeup_fd`), written at signal
    delivery. A Python handler runs only between bytecodes, so without it
    an exit just before the `select` call could leave the wrapper asleep
-   while the lifeline is open. On every wakeup, **do the
-   child-exit check before the lifeline-EOF check**. A job that completes
-   at the instant the parent dies must be recorded as completed, not as
-   "parent lost".
-5. On child exit: observe with `waitid(WNOWAIT)` where available, durably
+   while the lifeline is open. On every wakeup, whichever descriptor woke
+   the `select`, **read the lifeline before the child-exit check**
+   (DL-503). An exit seen after the lifeline is lost belongs to the
+   engine's loss: under `KillMode=control-group` the unit's TERM may have
+   ended the command before its wrapper acted. It is recorded as "parent
+   lost", with the exit inside `observed`.
+5. On child exit with the lifeline open: observe with `waitid(WNOWAIT)` where available, durably
    write `status.json` — the same identity fields, an `outcome`, `ended_at`,
    and whichever of `exit_code` or `signal` applies — *then* reap. This
    order narrows the observe-to-record hole to a few syscalls. Both spool
@@ -575,8 +577,9 @@ Duties:
    file is the **authority**. The live reaping chain is only a
    notification that the file exists.
 6. On lifeline EOF: the parent died, which includes `kill -9`, because
-   the kernel closes fds regardless. SIGTERM the command pgid, grace,
-   SIGKILL, write `status.json` {terminated, cause: parent lost}, exit.
+   the kernel closes fds regardless. Take an exit already there, or
+   SIGTERM the command pgid, grace, SIGKILL. Write `status.json`
+   {terminated, cause: parent lost, observed: the command's end}, exit.
    This behavior makes "engine death ⇒ jobs terminate AND are recorded"
    hold with no polling and no Linux-only mechanism (DL-357).
 

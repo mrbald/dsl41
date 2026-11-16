@@ -67,7 +67,8 @@ from dsl41.ir import Semantics
 from dsl41.runner_procid import verify_alive
 from dsl41.state_machine import Event, Executor, Outcome
 
-#: The `status.json` cause the wrapper writes when it killed the group on lifeline EOF.
+#: The `status.json` cause the wrapper writes when the lifeline was lost, with the command's end
+#: inside `observed` (DL-503).
 LIFELINE_CAUSE: Final = "parent lost"
 #: The start of the cause the wrapper writes when it launched the command, could not build or
 #: write `spawn.json`, and killed the command (`docs/wrapper-protocol.md`).

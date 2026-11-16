@@ -32,18 +32,21 @@ Duties, in order (ss6a Tier 0):
    tick-exact on Linux.
 4. Portable event loop: SIGCHLD self-pipe + select over {self-pipe, lifeline}. The pipe is
    also the interpreter's wakeup fd, so a SIGCHLD delivered just before the select still
-   wakes it. On EVERY wakeup check child-exit BEFORE lifeline EOF, so a job completing
-   as its parent dies is recorded as a completion, not "parent lost".
-5. On child exit: observe with waitid(WNOWAIT), which narrows the observe-to-record hole
-   to a few syscalls, durably write ``status.json``, then reap.
+   wakes it. On EVERY wakeup, whichever descriptor woke it, read the lifeline BEFORE the
+   command's exit (DL-503): an exit seen after the lifeline is lost belongs to the
+   engine's loss and is recorded as "parent lost", never as the command's own end.
+5. On child exit with the lifeline open: observe with waitid(WNOWAIT), which narrows the
+   observe-to-record hole to a few syscalls, durably write ``status.json``, then reap.
 6. On lifeline EOF (the parent died, kill -9 included, since the kernel closes fds):
-   re-check child exit, then SIGTERM the command pgid, grace, SIGKILL, write
-   ``status.json`` outcome=terminated cause="parent lost", exit. Engine death thus
-   terminates AND records the jobs with no polling and no Linux-only mechanism.
+   take an exit already there, or SIGTERM the command pgid, grace, SIGKILL; write
+   ``status.json`` outcome=terminated cause="parent lost" with the command's end in
+   ``observed``, exit. Engine death thus terminates AND records the jobs with no polling
+   and no Linux-only mechanism.
 
 status.json outcomes (frozen in docs/wrapper-protocol.md):
-  exited(exit_code) | signaled(signal) -- how the command itself ended;
-  terminated(cause="parent lost")      -- the wrapper killed it on EOF;
+  exited(exit_code) | signaled(signal) -- how the command itself ended, lifeline open;
+  terminated(cause="parent lost")      -- the lifeline was lost: the wrapper killed the
+                                          command on EOF, or saw its exit after it (DL-503);
   spawn_failed(error)                  -- the command's stdin, stdout or stderr could
                                           not be opened, the selected shell could not execute,
                                           or a child limit could not be set (DL-150, DL-492).
@@ -214,6 +217,13 @@ def _observe_exit(child: subprocess.Popen[bytes]) -> dict[str, Any] | None:
 
 def _reap(child: subprocess.Popen[bytes]) -> None:
     child.wait()  # zombie after a WNOWAIT observation; immediate if reaped
+
+
+def _lifeline_lost(fd: int) -> bool:
+    """True when the lifeline is at EOF: its write end is closed (DL-503). Never blocks:
+    an open lifeline with nothing to read is not lost."""
+    readable, _, _ = select.select([fd], [], [], 0)
+    return bool(readable) and os.read(fd, 1) == b""
 
 
 def _drain(fd: int) -> None:
@@ -534,23 +544,24 @@ def main() -> int:
         ready, _, _ = select.select([self_pipe_r, lifeline_fd], [], [])
         if self_pipe_r in ready:
             _drain(self_pipe_r)
-        # duty 4: check child exit BEFORE lifeline EOF, on every wakeup
+        # duty 4 (DL-503): read the lifeline BEFORE the command's exit, on every wakeup,
+        # whichever descriptor woke the select. An exit seen with the lifeline lost
+        # belongs to the engine's loss: the unit's TERM may have ended the command first.
+        lifeline_lost = _lifeline_lost(lifeline_fd)
         observed = _observe_exit(child)
-        if observed is not None:
-            status = observed
-            break
-        if lifeline_fd in ready and os.read(lifeline_fd, 1) == b"":
-            # duty 6: parent died (EOF fires even under kill -9)
-            observed = _observe_exit(child)  # completion beats parent death
-            if observed is not None:
-                status = observed
-            else:
+        if lifeline_lost:
+            # duty 6: parent died (EOF fires even under kill -9); the command's end, seen
+            # already or caused by the ladder, is forensics inside the record
+            if observed is None:
                 observed = _await_exit_after_kill(child, self_pipe_r, grace_s)
-                status = {
-                    "outcome": "terminated",
-                    "cause": "parent lost",
-                    "observed": observed,  # forensics: how the group died
-                }
+            status = {
+                "outcome": "terminated",
+                "cause": "parent lost",
+                "observed": observed,  # forensics: how the group died
+            }
+            break
+        if observed is not None:
+            status = observed  # lifeline open: the command's own exit
             break
 
     _test_pause("post_wait_pre_status")

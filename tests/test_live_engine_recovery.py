@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import signal
 import subprocess
 import sys
 from datetime import datetime
 
 import pytest
-from test_engine_stops import GRACE, TIMEOUT_S, _finish, _spawned, _start, _until
+from test_engine_stops import GRACE, TIMEOUT_S, _finish, _script, _spawned, _start, _until
 from test_engine_stops_cookie import _kill, _live, _written, linux_only
+from test_runner_lifecycle import proc_state
 from test_live_engine_branches import (
     _cli,
     _config,
@@ -22,7 +25,7 @@ from test_live_engine_branches import (
 )
 
 from dsl41 import main_config as main
-from dsl41 import runner_adapters
+from dsl41 import runner_adapters, runner_procid
 from dsl41.oracle_state import Event
 from dsl41.runner_adapters import LocalCommandAdapter, read_watch_log
 from dsl41.runner_clock import RealClock
@@ -308,6 +311,64 @@ def test_an_exact_update_retry_waits_while_the_restarted_engine_still_stops(shor
         finally:
             childfile.with_suffix(".exit").touch()
             await _finish(engine, loop)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        _kill(childfile)
+
+
+def test_a_command_the_units_term_ended_first_is_run_again_not_taken_as_success(short_root):
+    """DL-503: systemd sends TERM to the whole unit when the engine dies. A command that ends
+    with exit 0 on that TERM, before its wrapper acts, is recorded `parent lost` with the exit
+    inside `observed`. The restarted engine reads `stopped{lifeline}` and runs the attempt again."""
+    childfile = short_root / "child"
+    release = childfile.with_suffix(".exit")  # the pilot's release; the CLI harness also touches it
+    body = (
+        "trap 'exit 0' TERM\n"
+        f"echo $$ >> {childfile}\n"
+        f"while [ ! -e {release} ]; do sleep 0.05 & wait $!; done\n"
+        "exit 0\n"
+    )
+    path = _config(short_root, _job(_script(short_root, "term-exits-0", body)))
+    root = short_root / "run"
+    spawn_path = root / "runs/j.1/1/spawn.json"
+    status_path = root / "runs/j.1/1/status.json"
+
+    async def scenario():
+        wrapper = None
+        try:
+            async with _cli(path) as (client, engine):
+                await client.event("STARTJOB")
+                await _written(childfile)
+                await _spawned(root, "j")
+                spawn = json.loads(spawn_path.read_text())
+                wrapper = spawn["wrapper_pid"]
+                os.kill(wrapper, signal.SIGSTOP)
+                await _until(lambda: proc_state(wrapper) == "T")
+                await _kill_engine(engine)
+                os.killpg(spawn["command_pgid"], signal.SIGTERM)  # the unit's TERM, first
+                await _until(lambda: runner_procid.proc_is_zombie(spawn["command_pid"]))
+                os.kill(wrapper, signal.SIGCONT)
+                await _until(status_path.exists)
+            status = json.loads(status_path.read_text())
+            assert status["outcome"] == "terminated" and status["cause"] == "parent lost"
+            assert status["observed"] == {"outcome": "exited", "exit_code": 0}
+            async with _cli(path) as (client, _):
+                await _until(lambda: len(_records(root, "dispatch")) == 2)
+                assert _records(root, "dispatch")[1]["ordinal"] == 2
+                [first] = _records(root, "outcome")
+                assert (first["outcome"], first["cause"]) == ("stopped", "lifeline")
+                await _spawned(root, "j", n=2)
+                assert (await client.ask("status"))["jobs"]["j"]["status"] == "RUNNING"
+                release.touch()
+                await _until(lambda: len(_records(root, "outcome")) == 2)
+                assert (await client.ask("status"))["jobs"]["j"]["status"] == "SUCCESS"
+                assert len(_records(root, "dispatch")) == 2
+        finally:
+            if wrapper is not None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(wrapper, signal.SIGCONT)
 
     try:
         asyncio.run(scenario())
