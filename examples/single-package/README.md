@@ -91,6 +91,12 @@ files and retains generated environments (DL-389, DL-439).
    /opt/synthetic-engine/runtime/bin/dsl41 --help
    ```
 
+   A site that serves the browser UI installs the UI profile instead: use
+   `exports/requirements-ui.txt` in place of `exports/requirements-base.txt` in
+   both commands above. `scripts/export-release-inputs.sh` writes both files.
+   The base profile omits the terminal UI that the web service runs for each
+   tab. This recipe's RPM is built and checked with the base profile only.
+
    Retain the wheelhouse, exports and hashes as build inputs. A missing matching
    wheel is a build failure; do not fall back to a compiler or an unpinned version.
    The base profile supplies the engine and CLI. It omits the optional TUI.
@@ -310,7 +316,7 @@ Replace a changed file by rename, then send the engine `SIGHUP`
 
 | The site has | Why |
 | --- | --- |
-| The runtime installed with the `[ui]` extra | The base profile, which step 3 installs, omits the TUI that the service runs for each tab. `scripts/export-release-inputs.sh` also writes `requirements-ui.txt` for the `[ui]` extra. |
+| The runtime installed from `requirements-ui.txt`, the UI profile, in place of `requirements-base.txt` ([step 3](#prepare-the-runtime-at-its-final-path)) | The base profile omits the terminal UI that the service runs for each tab. `scripts/export-release-inputs.sh` writes both files; this recipe is built and checked with the base profile only. |
 | The start script's `control_socket` naming the run root's `control.sock` | Each tab's UI connects to the engine through it. |
 | A second unit as the engine's account, in a group that holds the proxy's worker and no other account | The proxy reaches the web socket. The group gets no access to the engine's files. |
 | `resolve(email)` returning `(user_id, roles)` or None, safe for two threads, with its own finite timeouts | Two tabs call it from two threads. The service adds no timeout, cache or retry. |

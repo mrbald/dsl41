@@ -117,6 +117,7 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 ### Unranked
 
 - **FEAT-42**: Build and check the single-package recipe with the UI profile. Its step 3 downloads, copies and installs `requirements-base.txt`, which omits the terminal UI that the web service runs for each tab; `scripts/export-release-inputs.sh` also writes `requirements-ui.txt`, and the recipe has not been built or checked with it (`examples/single-package/README.md`).
+- **FEAT-43**: Let the web service check a person again while a tab is open. `serve_people` calls the site's `resolve(email)` once, when the tab opens, so a role removed later keeps its level until the tab closes (limit L2 of the web recipe in `docs/deploy.md`). Until then, restarting the web unit ends every open tab (`src/dsl41/runner_web.py`).
 - **FEAT-31**: The update answer names the boxes it restarted and the boxes and members it held. `dsl41 update` prints only what its answer proves, so today it names neither (DL-482).
 
 ### After shipping
