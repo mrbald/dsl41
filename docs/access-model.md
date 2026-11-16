@@ -533,11 +533,28 @@ The scheme is `http` or `https`. A segment is one or more of `[A-Za-z0-9._~-]` a
 neither `.` nor `..`. Any other scheme, port or path, a trailing slash included, refuses
 at startup. The host's spelling is not checked: a host a browser would not send in
 `Origin` starts and refuses every tab.
-Every WebSocket requires an `Origin` exactly equal to the `scheme://host[:port]` part;
-a missing or `null` origin refuses.
+
+`extra_origins`, empty by default, lists further origins (DL-509). Each is
+`scheme://host[:port]` under the same grammar with no path. The UI is reached under
+`public_url`'s origin and under each extra origin, at `public_url`'s one base path.
+The `host[:port]` parts of all origins, `public_url`'s included, are distinct without
+regard to case. A string in place of the list, a non-string item, an item with a path
+and a repeated `host[:port]` refuse at startup, before anything is created.
+
+The origin of a request is the origin whose `host[:port]` equals the request's `Host`,
+both in lower case and compared whole. A `Host` not sent, sent more than once or equal
+to none selects `public_url`'s origin. With no extra origin every request has
+`public_url`'s origin. The index page builds its WebSocket and static links from the
+request's origin and `public_url`'s base path. Only configured values enter the page;
+`Host` itself is never written into it.
+Every WebSocket requires an `Origin` exactly equal to the request's origin. Another
+origin, or a missing or `null` one, refuses with
+`Origin must equal the origin of the request's Host`.
+
 The authenticating proxy protects the whole site. It strips the base path before it
 forwards, so the service's routes do not move. It replaces every occurrence of each
-header the lookup reads with the authenticated value.
+header the lookup reads with the authenticated value. It passes `Host` as the browser
+sent it, with the port when the origin spells one.
 The backend listens on a Unix socket accessible to that proxy.
 The library owns the index, static files and downloads.
 

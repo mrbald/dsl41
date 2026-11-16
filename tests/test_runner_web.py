@@ -1,11 +1,12 @@
 """The pinned library application and actual person-aware UI children on Unix sockets.
 
-DL-499 and DL-507 own the rules these tests pin.
+DL-499, DL-507 and DL-509 own the rules these tests pin.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import shlex
@@ -16,13 +17,20 @@ from pathlib import Path
 import aiohttp
 import pytest
 
-from dsl41.runner_web import _public_origin, _RequestHeaders, serve_people
+from dsl41.runner_web import (
+    _origins,
+    _public_origin,
+    _request_origin,
+    _RequestHeaders,
+    serve_people,
+)
 from test_access import TEXT, _receipts, _serve_armed, _teardown
 from test_control_as import policy
 
 ORIGIN = "https://control.example.invalid"
 BASE = ORIGIN + "/dsl41"
 USER = "X-Example-User"
+SHORT = "https://control"
 
 
 def records(path):
@@ -30,7 +38,7 @@ def records(path):
 
 
 @asynccontextmanager
-async def running(root, control_socket, public_url=ORIGIN):
+async def running(root, control_socket, public_url=ORIGIN, extra_origins=()):
     path, log, output = root / "w", root / "events", root / "output"
     with output.open("wb") as stream:
         process = await asyncio.create_subprocess_exec(
@@ -40,6 +48,7 @@ async def running(root, control_socket, public_url=ORIGIN):
             str(control_socket),
             str(log),
             public_url,
+            *extra_origins,
             stdout=stream,
             stderr=stream,
         )
@@ -72,10 +81,10 @@ async def running(root, control_socket, public_url=ORIGIN):
 
 
 @pytest.mark.parametrize(
-    ("public_url", "headers"),
+    ("public_url", "extra_origins", "headers"),
     [
         *(
-            (ORIGIN, headers)
+            (ORIGIN, (), headers)
             for headers in (
                 [("Origin", ORIGIN)],
                 [("Origin", ORIGIN), (USER, "alice"), (USER, "bob")],
@@ -92,12 +101,28 @@ async def running(root, control_socket, public_url=ORIGIN):
                 [("Origin", "null"), (USER, "alice")],
             )
         ),
-        (BASE, [("Origin", BASE), (USER, "alice")]),
+        (BASE, (), [("Origin", BASE), (USER, "alice")]),
+        # DL-509: Origin must equal the origin of the request's own Host.
+        *(
+            (BASE, (SHORT,), [*headers, (USER, "alice")])
+            for headers in (
+                [("Host", "control.example.invalid"), ("Origin", SHORT)],
+                [("Host", "control"), ("Origin", ORIGIN)],
+                [("Host", "other.example.invalid"), ("Origin", SHORT)],
+                [("Host", "control")],
+                [("Host", "control"), ("Origin", "null")],
+            )
+        ),
+        (BASE, (), [("Host", "control"), ("Origin", SHORT), (USER, "alice")]),
     ],
 )
-def test_web_refuses_before_prepare_or_process(short_root, public_url, headers):
+def test_web_refuses_before_prepare_or_process(short_root, public_url, extra_origins, headers):
     async def scenario():
-        async with running(short_root, short_root / "missing", public_url) as (client, log, _):
+        async with running(short_root, short_root / "missing", public_url, extra_origins) as (
+            client,
+            log,
+            _,
+        ):
             with pytest.raises(aiohttp.WSServerHandshakeError) as refusal:
                 await client.ws_connect("http://localhost/ws", headers=headers)
             assert refusal.value.status == 403
@@ -186,12 +211,16 @@ def test_web_two_tabs_and_shell_characters_keep_their_persons(short_root):
     asyncio.run(scenario())
 
 
-async def one_tab(short_root, headers, public_url=ORIGIN):
+async def one_tab(short_root, headers, public_url=ORIGIN, extra_origins=()):
     """Open one tab on an armed engine; return the index page, principals and launched persons."""
     root = short_root / "r"
     engine, server, loop, access = await _serve_armed(root, TEXT, policy(short_root / "p"))
     try:
-        async with running(short_root, server.path, public_url) as (client, log, output):
+        async with running(short_root, server.path, public_url, extra_origins) as (
+            client,
+            log,
+            output,
+        ):
             async with client.get("http://localhost/") as index:
                 page = await index.text()
             async with client.ws_connect(
@@ -249,6 +278,215 @@ def test_web_base_path_builds_urls_and_compares_origin_only(short_root):
     assert "https://control.example.invalid/static/" not in page
     assert [p.spelling for p in principals] == ["app/alice"]
     assert persons == [{"user": "alice", "roles": ["operators"]}]
+
+
+def test_web_extra_origin_tab_reaches_engine(short_root):
+    _, principals, persons = asyncio.run(
+        one_tab(
+            short_root,
+            {"Host": "control", "Origin": SHORT, USER: "alice"},
+            public_url=BASE,
+            extra_origins=(SHORT,),
+        )
+    )
+    assert [p.spelling for p in principals] == ["app/alice"]
+    assert persons == [{"user": "alice", "roles": ["operators"]}]
+
+
+def test_web_public_origin_tab_reaches_engine_beside_an_extra(short_root):
+    _, principals, persons = asyncio.run(
+        one_tab(
+            short_root,
+            {"Host": "control.example.invalid", "Origin": ORIGIN, USER: "alice"},
+            public_url=BASE,
+            extra_origins=(SHORT,),
+        )
+    )
+    assert [p.spelling for p in principals] == ["app/alice"]
+    assert persons == [{"user": "alice", "roles": ["operators"]}]
+
+
+@pytest.mark.parametrize(
+    ("public_url", "extra_origins", "cases"),
+    [
+        (
+            ORIGIN,
+            (),
+            [
+                [],
+                [("Origin", "https://other.example.invalid")],
+                [("Origin", "null")],
+            ],
+        ),
+        (BASE, (), [[("Origin", BASE)], [("Host", "control"), ("Origin", SHORT)]]),
+        (
+            BASE,
+            (SHORT,),
+            [
+                [("Host", "control.example.invalid"), ("Origin", SHORT)],
+                [("Host", "control"), ("Origin", ORIGIN)],
+                [("Host", "other.example.invalid"), ("Origin", SHORT)],
+                [("Host", "control")],
+                [("Host", "control"), ("Origin", "null")],
+            ],
+        ),
+    ],
+)
+def test_web_origin_refusal_text_precedes_lookup(short_root, public_url, extra_origins, cases):
+    """A plain GET of /ws reaches the handler and carries the refusal's body (DL-509)."""
+
+    async def scenario():
+        async with running(short_root, short_root / "missing", public_url, extra_origins) as (
+            client,
+            log,
+            _,
+        ):
+            for headers in cases:
+                async with client.get(
+                    "http://localhost/ws", headers=[*headers, (USER, "alice")]
+                ) as answer:
+                    assert answer.status == 403, headers
+                    assert await answer.text() == (
+                        "Origin must equal the origin of the request's Host"
+                    ), headers
+            assert not [r for r in records(log) if r["kind"] in {"lookup", "launch"}]
+
+    asyncio.run(scenario())
+
+
+def test_web_index_links_follow_the_request_origin(short_root):
+    async def page(client, host):
+        async with client.get("http://localhost/", headers={"Host": host}) as index:
+            assert index.status == 200
+            return await index.text()
+
+    async def scenario():
+        async with running(short_root / "a", short_root / "missing", BASE, (SHORT,)) as (
+            client,
+            _,
+            _,
+        ):
+            short = await page(client, "control")
+            full = await page(client, "control.example.invalid")
+            other = await page(client, "other.example.invalid")
+        async with running(short_root / "b", short_root / "missing", BASE) as (client, _, _):
+            unlisted = await page(client, "control")
+        return short, full, other, unlisted
+
+    (short_root / "a").mkdir()
+    (short_root / "b").mkdir()
+    short, full, other, unlisted = asyncio.run(scenario())
+    assert "wss://control/dsl41/ws" in short
+    assert "https://control/dsl41/static/" in short
+    assert "control.example.invalid" not in short
+    for text in (full, other, unlisted):
+        assert "wss://control.example.invalid/dsl41/ws" in text
+        assert "https://control.example.invalid/dsl41/static/" in text
+        assert "://control/" not in text
+    assert "other.example.invalid" not in other
+
+
+def test_web_two_host_lines_never_reach_the_service(short_root):
+    """The server library answers 400 to a request with two Host lines (DL-509)."""
+
+    # RFC 6455's sample nonce; the file holds no base64 literal for the secret scan to flag.
+    nonce = base64.b64encode(b"the sample nonce")
+
+    async def scenario():
+        async with running(short_root, short_root / "missing", BASE, (SHORT,)) as (_, log, _):
+            reader, writer = await asyncio.open_unix_connection(str(short_root / "w"))
+            try:
+                writer.write(
+                    b"GET /ws HTTP/1.1\r\nHost: control\r\nHost: control\r\n"
+                    b"Origin: https://control\r\nX-Example-User: alice\r\n"
+                    b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                    b"Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: " + nonce + b"\r\n"
+                    b"\r\n"
+                )
+                await writer.drain()
+                answer = await asyncio.wait_for(reader.read(), 12)
+            finally:
+                writer.close()
+                await writer.wait_closed()
+            assert answer.startswith(b"HTTP/1.0 400 Bad Request\r\n"), answer
+            assert b"Duplicate 'Host' header found." in answer
+            assert not [r for r in records(log) if r["kind"] in {"lookup", "launch"}]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("hosts", "origin"),
+    [
+        (["control"], SHORT),
+        (["CONTROL"], SHORT),
+        (["Control.Example.Invalid"], ORIGIN),
+        (["other.example.invalid"], ORIGIN),
+        ([], ORIGIN),
+        (["control", "control"], ORIGIN),
+        (["control:8443"], ORIGIN),
+        (["[::1]:8443"], "https://[::1]:8443"),
+    ],
+)
+def test_web_request_origin_from_host(hosts, origin):
+    origins = (ORIGIN, SHORT, "https://ctl:8443", "https://[::1]:8443")
+    assert _request_origin(hosts, origins) == origin
+    assert _request_origin(hosts, (ORIGIN,)) == ORIGIN
+
+
+def test_web_request_origin_port_must_match_whole():
+    assert _request_origin(["ctl"], (ORIGIN, "https://ctl:8443")) == ORIGIN
+    assert _request_origin(["ctl:8443"], (ORIGIN, "https://ctl:8443")) == "https://ctl:8443"
+
+
+@pytest.mark.parametrize(
+    "extra_origins",
+    [(), [SHORT], ["https://control:8443"], (SHORT, "http://ctl")],
+)
+def test_web_extra_origins_accepted_at_start(extra_origins, short_root, monkeypatch):
+    from aiohttp import web
+
+    def run_app(application, **kwargs):
+        application.close()
+
+    monkeypatch.setattr(web, "run_app", run_app)
+    assert _origins(BASE, extra_origins) == (ORIGIN, *extra_origins)
+    serve_people(
+        lambda headers: None,
+        socket_path=short_root / "w",
+        public_url=BASE,
+        control_socket=short_root / "c",
+        extra_origins=extra_origins,
+    )
+
+
+@pytest.mark.parametrize(
+    "extra_origins",
+    [
+        SHORT,
+        [SHORT, 5],
+        [SHORT + "/dsl41"],
+        [SHORT + "/"],
+        ["ftp://control"],
+        ["https://CONTROL.example.invalid"],
+        [SHORT, SHORT],
+        ["http://control", SHORT],
+    ],
+)
+def test_web_extra_origins_refused_at_start(extra_origins, short_root, monkeypatch):
+    # DL-509: the refusal precedes the optional extra's import.
+    monkeypatch.setitem(sys.modules, "textual_serve.server", None)
+    with pytest.raises(ValueError) as refusal:
+        serve_people(
+            lambda headers: None,
+            socket_path=short_root / "w",
+            public_url=BASE,
+            control_socket=short_root / "c",
+            extra_origins=extra_origins,
+        )
+    assert str(refusal.value).startswith("extra_origins must be")
+    assert "\n" not in str(refusal.value)
+    assert not (short_root / "w").exists()
 
 
 def test_web_headers_reading_rules():

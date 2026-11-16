@@ -320,7 +320,7 @@ Replace a changed file by rename, then send the engine `SIGHUP`
 | The start script's `control_socket` naming the run root's `control.sock` | Each tab's UI connects to the engine through it. |
 | A second unit as the engine's account, in a group that holds the proxy's worker and no other account | The proxy reaches the web socket. The group gets no access to the engine's files. |
 | `resolve(headers)` reading the request's headers and returning `(user_id, roles)` or None, safe for two threads, with its own finite timeouts | Two tabs call it from two threads. The service adds no timeout, cache or retry. |
-| `public_url` as `scheme://host[:port]` spelled as the browser sends `Origin` (lowercase ASCII host, no default port), then an optional base path with no trailing slash | Any other spelling of the origin refuses every tab with 403. A bad base path or a trailing slash refuses at startup. |
+| `public_url` as `scheme://host[:port]` spelled as the browser sends `Origin` (lowercase ASCII host, no default port), then an optional base path with no trailing slash; any further name people use in `extra_origins`, spelled the same way with no path | Any other spelling of an origin refuses its tabs with 403. A bad base path, a trailing slash or a repeated `host[:port]` refuses at startup. |
 | A proxy that replaces every header the lookup reads, strips the base path and protects every route | The service takes the person from those headers and serves its routes at `/`. |
 
 Read the service's limits L1 to L10 in the recipe before people use it.
