@@ -22,6 +22,9 @@ wrapper acts: the wrapper reads the lost lifeline first and records `parent lost
 command's end inside `observed`, and the restart runs the attempt again (DL-503). This module
 sweeps `wrappers-first` only.
 
+The death before the first append leaves a store with no journal record. Its successor is
+refused by name, writes nothing and leaves no process (`refused`, DL-504); no script follows.
+
 A successor (`resume_run`) then opens the same root, with a clock past every timer the scenario
 arms, and the driver finishes the script: an event whose answer was lost is sent again with the
 same envelope, and every gate is released by the scenario's codes until the store is quiescent.
@@ -1457,13 +1460,19 @@ class Point:
     hot: bool = False
 
 
-#: the crash points of one position, split so a known defect's point is its own pytest item
+#: the crash points of one position, split so the genesis point is its own pytest item
 PARTS = ("genesis", "rest", "all")
-BUG88 = "BUG-88: a death inside genesis leaves a root that no restart opens"
+#: the death before the first append: the store holds no journal record (DL-504)
+GENESIS = Fault("before", 1)
 
 
-class Bug88(AssertionError):
-    """The `before 1` point failed as BUG-88 says, and only so."""
+def refusal(store: Path) -> str:
+    """The successor's refusal of a store with no journal record (`_check_journaled`, DL-504)."""
+    return (
+        f"{store}: the store holds no journal record: the first start of this run root did not"
+        f" finish. If this root has never run a job, remove {store.name} with its -wal and -shm"
+        " files and start again; otherwise restore the store (DL-504)"
+    )
 
 
 def numbers(part: str, appends: list[int]) -> list[tuple[int, int]]:
@@ -1473,28 +1482,34 @@ def numbers(part: str, appends: list[int]) -> list[tuple[int, int]]:
     return {"genesis": every[:1], "rest": every[1:], "all": every}[part]
 
 
-def verdict(points: list[Point], *, expected: str | None = None) -> None:
-    """Pass when no point broke an invariant. With `expected` (BUG88), every broken point must
-    be the restart that stops at `assert last_at is not None`: those points drop their
-    directories and the call raises `Bug88`, which the strict mark expects. Any other break
-    fails as itself and keeps its directory."""
-    broken = [p for p in points if p.broken]
-    if not broken:
-        # the H5 check is not vacuous: some crash left a hot WAL for its successor
-        assert expected is not None or any(p.hot for p in points), "no crash left a hot WAL"
-        return
-    known = expected is not None and all(
-        p.fault is not None
-        and len(p.broken) == 1
-        and p.broken[0].startswith("run: Died: e2 ended while waiting for the control socket")
-        and "assert last_at is not None" in p.broken[0]
-        for p in broken
-    )
-    if known:
-        for p in broken:
-            (p.directory / "broken").unlink()
-        raise Bug88(f"{expected}\n{report(points)}")
-    raise AssertionError(report(points))
+def refused(driver: Driver, error: Exception) -> list[str]:
+    """The declared result of the genesis point: the successor, e2, ends with the refusal on its
+    log, the store and its WAL are byte for byte what the crash left, and the run leaves no
+    process (the caller's H8)."""
+    if not isinstance(error, Died) or driver.incarnation != 2:
+        return [f"run: {type(error).__name__}: {error}"]
+    broken: list[str] = []
+    if driver.exits != [-signal.SIGKILL, 1]:
+        broken.append(f"genesis: exits {driver.exits}, not the fault and a refused start")
+    if refusal(driver.root / STORE_NAME) not in (driver.directory / "engine-e2.log").read_text():
+        broken.append(f"genesis: e2 did not refuse by name\n{driver.log()}")
+    # the `-shm` index is not compared: the driver's own read-only reads (`close`) rewrite it
+    for name in (STORE_NAME, f"{STORE_NAME}-wal"):
+        crashed, now = driver.directory / "crashed" / name, driver.root / name
+        if crashed.exists() != now.exists() or (
+            crashed.exists() and crashed.read_bytes() != now.read_bytes()
+        ):
+            broken.append(f"genesis: the refused start changed {name}")
+    return broken
+
+
+def verdict(points: list[Point]) -> None:
+    """Pass when no point broke an invariant. A broken point fails as itself and keeps its
+    directory."""
+    if any(p.broken for p in points):
+        raise AssertionError(report(points))
+    # the H5 check is not vacuous: some crash left a hot WAL for its successor
+    assert any(p.hot for p in points), "no crash left a hot WAL"
 
 
 #: each scenario's reference run, made once per process: every item of a scenario's sweep
@@ -1544,12 +1559,21 @@ async def sweep(
             directory = make_directory()
             driver = Driver(scenario, directory, Fault(position, n, k))
             started = time.monotonic()
+            genesis = driver.fault == GENESIS
             try:
                 await driver.run()
-                broken = check_invariants(driver, reference)
+                broken = (
+                    ["genesis: the successor was not refused"]
+                    if genesis
+                    else check_invariants(driver, reference)
+                )
             except Exception as exc:  # a crash point reports, the sweep goes on
                 # the store as the run left it still answers I3
-                broken = [f"run: {type(exc).__name__}: {exc}", *_once(driver.world.rows())]
+                broken = (
+                    refused(driver, exc)
+                    if genesis
+                    else [f"run: {type(exc).__name__}: {exc}", *_once(driver.world.rows())]
+                )
             leftover = await asyncio.to_thread(driver.unit.members)
             if leftover:
                 broken.append(f"H8: left behind {leftover}")
@@ -1582,15 +1606,10 @@ def budget(reference: Driver, points: list[Point]) -> str:
     )
 
 
-#: the three items of every scenario's sweep. The BUG-88 expectation lives here and only here:
-#: `before 1` is the strict expected failure (`verdict`), every other point must pass
+#: the three items of every scenario's sweep: `before 1` ends in the refusal (`refused`), every
+#: other point passes the invariants
 POSITIONS = [
-    pytest.param(
-        "before",
-        "genesis",
-        marks=pytest.mark.xfail(raises=Bug88, strict=True, reason=BUG88),
-        id="before-1",
-    ),
+    pytest.param("before", "genesis", id="before-1"),
     pytest.param("before", "rest", id="before-2-on"),
     pytest.param("after", "all", id="after"),
 ]
@@ -1602,7 +1621,7 @@ def check(scenario: Scenario, position: str, part: str) -> None:
         reference, points = asyncio.run(sweep(scenario, position, make, part))
         assert points, "a sweep with no crash point proves nothing"
         print(budget(reference, points))
-        verdict(points, expected=BUG88 if part == "genesis" else None)
+        verdict(points)
 
 
 @contextlib.contextmanager

@@ -40,7 +40,6 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 - **BUG-8**: A run root started by the legacy unit cannot resume under the main-config unit; no migration path is documented (DL-437).
 - **BUG-58**: A reread or update reply can exceed the engine's 16 MiB one-line limit: the reasons in `lint_messages` and `non_idempotent` are unbounded (`src/dsl41/reread_worker.py`). The DL-482 budget covers the definition differences only.
 - **BUG-54**: A GitHub API connection failure stops the train; reads have no bounded retry (`scripts/merge_train.py:201-233`). It stopped the train four times on one day.
-- **BUG-88**: A death inside the first start's genesis leaves a run root that no restart opens. `_genesis` (`src/dsl41/runner_startup.py`) commits the configuration row (`store.put_config`) and its first journal record in separate transactions. An engine that dies between them leaves `engine.db` with a configuration and no record. Every later `dsl41 run` resumes that store and ends on `assert last_at is not None` (`_resume_under_lock`), and a fresh start is refused because the store exists; under the unit this ends at the start limit. The restart sweep marks the point as an expected failure (`tests/test_restart_sweep_fanout.py`, `tests/test_restart_sweep_overdue.py`, `before 1`).
 
 ### Low
 
