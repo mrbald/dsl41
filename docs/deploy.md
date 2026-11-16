@@ -252,13 +252,13 @@ See [systemctl reset-failed](https://www.freedesktop.org/software/systemd/man/la
 ## Serve people behind the authenticating proxy
 
 For the Packager: this synthetic example serves `https://control.example.invalid`
-under the engine account `dsl41` (DL-499). Install the same release with the
+under the engine account `dsl41` (DL-499, DL-507). Install the same release with the
 `[ui]` extra for the engine and web service. The [access model §9](access-model.md#9-the-web-tier)
 owns the wrapper rules. `dsl41 serve` remains an OS-account service.
 
 Any process under `dsl41`, including a batch job, can state any person and roles.
 Protect the start script, lookup code, release environment and access file.
-The proxy must overwrite the identity header and protect every library route.
+The proxy must replace every header the lookup reads and protect every library route.
 
 1. Create the OS group `dsl41-web` and add nginx's worker account to it using
    the site's account tools. Keep other accounts out. Restart nginx after a
@@ -295,15 +295,26 @@ The proxy must overwrite the identity header and protect every library route.
    tier = "adm"
    ```
 
-3. Supply an importable `site_people.resolve(email)` in the release environment.
-   It returns `(user_id, roles)` or None. Roles are a list of non-blank scalar
-   strings. For a synthetic smoke check it can return `("alice", ["operators"])`
-   for `alice@example.invalid` and None for every other email.
+3. Supply an importable `site_people.resolve(headers)` in the release environment.
+   It receives a read-only copy of the request's headers and returns
+   `(user_id, roles)` or None. Roles are a list of non-blank scalar strings.
+   `headers[name]` reads a name in any case. A name that was not sent raises
+   `KeyError`, so `headers.get(name)` can fall back to a second name. A name sent
+   more than once, or with a blank value, raises `ValueError`, which refuses the tab
+   unless the lookup catches it.
+   The service names no header; the lookup chooses which ones it reads.
+   For a synthetic smoke check it can read `headers.get("X-DSL41-Email")` and return
+   `("alice", ["operators"])` for `alice@example.invalid` and None for anything else.
+   A proxy that passes roles sets them in a header the lookup reads.
    Two tabs opening together call `resolve` from two threads; it must be safe for that.
    The production lookup owns its finite database timeouts.
    The web service adds no timeout, cache or retry.
-   Spell `public_url` as a browser sends `Origin` (lowercase ASCII host, no
-   default port); any other spelling refuses every tab with 403.
+   `public_url` is `scheme://host[:port]` followed by zero or more `/segment`.
+   A segment is one or more of `[A-Za-z0-9._~-]` and is neither `.` nor `..`.
+   Any other scheme, port or path, a trailing slash included, refuses at startup.
+   The host's spelling is not checked. Spell the part before the base path as a
+   browser sends `Origin` (lowercase ASCII host, no default port); any other
+   spelling starts and refuses every tab with 403.
    Write this root-owned start script at `/etc/dsl41/serve-people.py`:
 
    ```python
@@ -378,6 +389,37 @@ The proxy must overwrite the identity header and protect every library route.
    }
    ```
 
+   The proxy replaces every occurrence of each header the lookup reads with the
+   authenticated value; `proxy_set_header` does that here. The count is taken on
+   the request the service receives. A proxy that joins two lines into one
+   comma-separated value shows one, and the lookup owns the syntax of each value.
+   nginx sends no header when the value it sets is empty, so the lookup sees that
+   name as not sent.
+
+   To serve the UI under a base path instead, set
+   `public_url="https://control.example.invalid/dsl41"` in the start script and
+   use these two locations in place of the root location. The proxy maps both
+   `/dsl41` and `/dsl41/` to the service's `/`, and strips `/dsl41` from every
+   other path, so the service's routes do not move:
+
+   ```nginx
+   location = /dsl41 {
+       return 308 /dsl41/;
+   }
+
+   location /dsl41/ {
+       auth_request /oauth2/auth;
+       error_page 401 = /oauth2/sign_in;
+       auth_request_set $dsl41_email $upstream_http_x_auth_request_email;
+       proxy_set_header X-DSL41-Email $dsl41_email;
+       proxy_set_header Host $host;
+       proxy_http_version 1.1;
+       proxy_set_header Upgrade $http_upgrade;
+       proxy_set_header Connection "upgrade";
+       proxy_pass http://unix:/run/dsl41-web/web.sock:/;
+   }
+   ```
+
 6. As root, verify and start the service, then reload the checked nginx config:
 
    ```sh
@@ -392,7 +434,7 @@ The proxy must overwrite the identity header and protect every library route.
    for `realm: "app"`, `principal: "alice"` on a mutation. An unmapped person
    must get a closed tab and a denial under that person's name.
 
-The service has these limits (DL-499):
+The service has these limits (DL-499, DL-507):
 
 - **L1.** Every process under the engine's account can state any person and role.
   With the engine's account at adm, a job gains no new command, only the means
@@ -417,6 +459,11 @@ The service has these limits (DL-499):
 - **L8.** An older unarmed engine answers `as` with `unknown_cmd`. The UI shows
   the fault and keeps asking; no command runs. Install the engine and web service
   together and restart the engine to complete the upgrade.
+- **L9.** Every page of the same origin passes the `Origin` check under any path.
+  Applications that share the origin are trusted like the UI.
+- **L10.** The library's file-download link is root-relative, so a base path does
+  not serve it. The command palette's command that saves an image of the screen
+  delivers through that link and fails under a base path (BUG-91).
 
 ## What the main config selects
 

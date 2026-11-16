@@ -42,6 +42,7 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 - **BUG-7**: Darwin `stop_ladder` can block the engine loop with `ps` for up to 5 s after EPERM. The engine path is not covered (DL-431).
 - **BUG-9**: Restart scans pending sources synchronously on the engine loop (DL-437).
 - **BUG-90**: A lifeline stop takes precedence over a saved oracle kill. A killed attempt whose row an operator sets back to RUNNING (`CHANGE_STATUS`), and whose wrapper records `parent lost` after a drain and an engine death, is run again instead of being left ended; the protection the translator means to keep is pinned in `tests/test_runner_attempts.py` (`src/dsl41/engine_charts.py`, `src/dsl41/runner_attempts.py`). Since DL-503 the same holds for a command that had ended when a stop closed its lifeline before `spawn.json` existed.
+- **BUG-91**: Under a base path the web UI's command that saves an image of the screen opens a link the proxy does not serve. That command, in the command palette, delivers a file through the library's download link, which is `<origin>/download/<key>` whatever the base path, so the person gets the proxy's answer for that root path (limit L10 of the web recipe in `docs/deploy.md`, DL-507). Served at the root, it works.
 - **BUG-14**: If `/proc/sys/kernel/random/boot_id` is unreadable on two boots, both read "unknown" and compare equal, leaving only the PID and start-tick match. A fix needs a boss ruling.
 - **BUG-26**: Operator docs omit `dsl41: cookie scan signalling: <primitive>`, and the [file-processing README](examples/file_processing/README.md) hides it with `tail -n 2` (DL-436).
 - **BUG-32**: The engine process scan can miss a process during exec, such as setsid then exec; it still finds group members (PR #311).
@@ -117,7 +118,7 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 ### Unranked
 
 - **FEAT-42**: Build and check the single-package recipe with the UI profile. Its step 3 downloads, copies and installs `requirements-base.txt`, which omits the terminal UI that the web service runs for each tab; `scripts/export-release-inputs.sh` also writes `requirements-ui.txt`, and the recipe has not been built or checked with it (`examples/single-package/README.md`).
-- **FEAT-43**: Let the web service check a person again while a tab is open. `serve_people` calls the site's `resolve(email)` once, when the tab opens, so a role removed later keeps its level until the tab closes (limit L2 of the web recipe in `docs/deploy.md`). Until then, restarting the web unit ends every open tab (`src/dsl41/runner_web.py`).
+- **FEAT-43**: Let the web service check a person again while a tab is open. `serve_people` calls the site's `resolve(headers)` once, when the tab opens, so a role removed later keeps its level until the tab closes (limit L2 of the web recipe in `docs/deploy.md`). Until then, restarting the web unit ends every open tab (`src/dsl41/runner_web.py`).
 - **FEAT-31**: The update answer names the boxes it restarted and the boxes and members it held. `dsl41 update` prints only what its answer proves, so today it names neither (DL-482).
 
 ### After shipping

@@ -319,11 +319,11 @@ Replace a changed file by rename, then send the engine `SIGHUP`
 | The runtime installed from `requirements-ui.txt`, the UI profile, in place of `requirements-base.txt` ([step 3](#prepare-the-runtime-at-its-final-path)) | The base profile omits the terminal UI that the service runs for each tab. `scripts/export-release-inputs.sh` writes both files; this recipe is built and checked with the base profile only. |
 | The start script's `control_socket` naming the run root's `control.sock` | Each tab's UI connects to the engine through it. |
 | A second unit as the engine's account, in a group that holds the proxy's worker and no other account | The proxy reaches the web socket. The group gets no access to the engine's files. |
-| `resolve(email)` returning `(user_id, roles)` or None, safe for two threads, with its own finite timeouts | Two tabs call it from two threads. The service adds no timeout, cache or retry. |
-| `public_url` spelled as the browser sends `Origin`: lowercase ASCII host, no default port, no path or trailing slash | Any other spelling refuses every tab with 403. A path or a trailing slash refuses at startup. |
-| A proxy that overwrites the identity header and protects every route | The service takes the person from that header. |
+| `resolve(headers)` reading the request's headers and returning `(user_id, roles)` or None, safe for two threads, with its own finite timeouts | Two tabs call it from two threads. The service adds no timeout, cache or retry. |
+| `public_url` as `scheme://host[:port]` spelled as the browser sends `Origin` (lowercase ASCII host, no default port), then an optional base path with no trailing slash | Any other spelling of the origin refuses every tab with 403. A bad base path or a trailing slash refuses at startup. |
+| A proxy that replaces every header the lookup reads, strips the base path and protects every route | The service takes the person from those headers and serves its routes at `/`. |
 
-Read the service's limits L1 to L8 in the recipe before people use it.
+Read the service's limits L1 to L10 in the recipe before people use it.
 
 **The first start.** If the first start of a new run root dies before its
 first journal record, the next start refuses the root with exit 2. The unit

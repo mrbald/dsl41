@@ -508,3 +508,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-504 | A store with no journal record is an unfinished first start and is refused by name | [docs/deploy.md](deploy.md), [docs/runner-design.md](runner-design.md) |
 | DL-505 | The audit of code and tests that rest on hand-built state is closed |  |
 | DL-506 | A commit message is written for the reader of the log | [docs/agents/coordination.md](agents/coordination.md) |
+| DL-507 | The web service takes a base path, and the person from the proxy's headers | [README.md](../README.md), [docs/access-model.md](access-model.md), [docs/deploy.md](deploy.md) |

@@ -501,10 +501,11 @@ widen access; it makes existing access reachable from a browser.
 
 For a person's own roles and audit name, the site imports
 `runner_web.serve_people(resolve, socket_path=..., public_url=..., control_socket=...)`
-(DL-499). Its backend runs under the engine's account on a Unix socket.
-The proxy authenticates the browser and overwrites `X-DSL41-Email`.
-The lookup supplies each tab's user id and roles. Its UI wraps every request
-so the engine decides and records it as `app/<user>`.
+(DL-499, DL-507). Its backend runs under the engine's account on a Unix socket.
+The proxy authenticates the browser and sets the headers the site's lookup reads.
+`public_url` may carry a base path that the proxy strips.
+The lookup reads the request's headers and supplies each tab's user id and roles.
+Its UI wraps every request so the engine decides and records it as `app/<user>`.
 A denied status read ends the detached viewer with exit 2.
 See [the deployment recipe and limits](docs/deploy.md#serve-people-behind-the-authenticating-proxy)
 and [the access contract](docs/access-model.md#9-the-web-tier).
