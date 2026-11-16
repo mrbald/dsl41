@@ -805,8 +805,20 @@ not become witnesses merely because a job might have written them.
 starting with non-empty state (DL-433):
 
 1. Hold `leader.lock`. Refuse foreign schema/state versions, a missing
-   `root_id`, a different clock domain, an invalid launch configuration,
-   or a missing interrupted-update plan before writes or signals.
+   `root_id`, a store with no journal record, a different clock domain, an
+   invalid launch configuration, or a missing interrupted-update plan before
+   writes or signals.
+
+   A store with no journal record (the store's sequence high-water mark is 0)
+   is a first start that did not finish: genesis commits the schema, the
+   configuration and the first records in separate transactions, and a death
+   between them leaves such a store. The refusal names the store, tells the
+   operator to remove it with its `-wal` and `-shm` files if the root has never
+   run a job and to restore it otherwise, and exits 2. A store whose records
+   were pruned still holds the mark and resumes (DL-504).
+   A store with no tables at all, left by a death inside the store's creation, is refused
+   as not a dsl41 store, and the remedy is the same: remove it if the root has never run a
+   job (DL-504).
 
    For a legacy launch: on a root no update touched, a catalog-hash mismatch
    refuses, so semantics never drift silently; a changed estate needs a fresh

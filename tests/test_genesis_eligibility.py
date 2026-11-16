@@ -2,21 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import json
 import os
+import signal
 import socket
 import sqlite3
 import subprocess
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from dsl41.cli import app
+from restart_sweep import GENESIS, Died, Driver, Scenario, gate_command, refusal
 from test_main_config import JOB, config_file
 from test_restore_drill import _cli, _tree
 
@@ -563,3 +566,114 @@ def test_empty_lock_probe_uses_acquire_retry_interval(
     monkeypatch.setattr(time, "sleep", delays.append)
     cli._check_genesis(root)
     assert len(attempts) == 3 and delays == [0.1, 0.1]
+
+
+STORE_FILES = ("engine.db", "engine.db-wal", "engine.db-shm")
+
+#: a first start that dies after the store's creation and before its configuration row
+META_ONLY = """
+import os, signal, sys
+from pathlib import Path
+from dsl41.ir import lower_source
+from dsl41.runner_adapters import LocalCommandAdapter
+from dsl41.runner_clock import RealClock
+from dsl41.runner_startup import start_run
+from dsl41.runner_store import SqliteStore
+
+def die(*_args, **_kwargs):
+    os.kill(os.getpid(), signal.SIGKILL)
+
+SqliteStore.put_config = die
+start_run(
+    lower_source(Path(sys.argv[1]).read_text()),
+    Path(sys.argv[2]),
+    clock=RealClock(),
+    adapters={"CMD": LocalCommandAdapter()},
+    hold_open=True,
+)
+"""
+
+
+def strand_before_first_append(base: Path) -> None:
+    """The restart sweep's child, ended on entry to genesis's first append (DL-504): `base/run`
+    holds a store with its meta rows and configuration and no journal record."""
+    scenario = Scenario(
+        name="stranded",
+        jil=lambda directory: f"insert_job: J\njob_type: c\ncommand: {gate_command(directory)}\n",
+        steps=[],
+        codes=lambda *_: 0,
+        ends={},
+        runs=frozenset(),
+    )
+
+    async def die() -> None:
+        driver = Driver(scenario, base, GENESIS)
+        driver.prepare()
+        try:
+            with pytest.raises(Died):
+                await driver.open()
+            assert driver.child is not None
+            assert driver.child.wait(timeout=30) == -signal.SIGKILL
+        finally:
+            await driver.close()
+
+    asyncio.run(die())
+
+
+def stranded_store(root: Path) -> tuple[int, int]:
+    """(journal rows, meta rows) of the store as it stands, read without opening its WAL for
+    writing."""
+    with closing(sqlite3.connect(f"file:{root / 'engine.db'}?mode=ro", uri=True)) as db:
+        (journal,) = db.execute("SELECT count(*) FROM journal").fetchone()
+        (meta,) = db.execute("SELECT count(*) FROM meta").fetchone()
+    return journal, meta
+
+
+def refused_by_name(args: list[str], base: Path) -> None:
+    """DL-504 through the real CLI: exit 2, the message on stderr, nothing written."""
+    root = base / "run"
+    before = _tree(base)
+    for _ in range(2):
+        result = _cli(*args)
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert refusal(root / "engine.db") in " ".join(result.stderr.split())
+        assert _tree(base) == before
+
+
+@pytest.mark.parametrize("form", ["config", "legacy"])
+def test_a_store_with_no_journal_record_is_refused_and_its_removal_starts_a_new_run(
+    short_root: Path, form: str
+) -> None:
+    """DL-504: a first start that died before its first append leaves a store that `dsl41 run`
+    refuses by name with exit 2, which the unit does not restart on; the message's remedy
+    (remove the store's files) lets the next start begin a new run and stop cleanly."""
+    strand_before_first_append(short_root)
+    root = short_root / "run"
+    assert stranded_store(root)[0] == 0
+    args = invocation(short_root, form)
+    refused_by_name(args, short_root)
+    for name in STORE_FILES:
+        (root / name).unlink(missing_ok=True)
+    with running(args, root, short_root / "engine.log"):
+        answer = _cli("query", "status", "--json", "--socket", str(root / "control.sock"))
+        assert answer.returncode == 0
+        assert json.loads(answer.stdout)["config_rev"] == 1
+    assert (root / "engine.db").is_file()
+
+
+def test_a_store_with_meta_rows_only_gets_the_same_refusal(short_root: Path) -> None:
+    """DL-504: a first start that died after the store's creation and before its configuration
+    row leaves meta rows and no configuration; the refusal comes before anything reads the
+    configuration."""
+    args = invocation(short_root, "legacy")
+    root = short_root / "run"
+    child = subprocess.run(
+        [sys.executable, "-c", META_ONLY, str(short_root / "jobs.jil"), str(root)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert child.returncode == -signal.SIGKILL, child.stderr
+    journal, meta = stranded_store(root)
+    assert journal == 0 and meta > 0
+    refused_by_name(args, short_root)

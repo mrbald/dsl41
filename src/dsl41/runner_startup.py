@@ -662,6 +662,7 @@ async def _resume_under_lock(
     try:
         _check_state_version(meta, path)
         _check_root_id(meta, path)
+        _check_journaled(store, path)
         snapshot = _latest_snapshot(store, path)
         # the configuration the records open with, and the one the last `config applied` left
         first = snapshot.config_rev if snapshot is not None else first_rev(store)
@@ -768,7 +769,7 @@ async def _resume_under_lock(
     _require_scheduler(catalog, scheduler, "resume")
     last_at = journal.position.last_at
     latest_at = store.latest_at() if not clock.virtual else None
-    # genesis appends the configuration before anything else, and a snapshot keeps the position
+    # a store with records has a position, from them or from its snapshot (`_check_journaled`)
     assert last_at is not None
     engine = Engine(
         catalog,
@@ -925,6 +926,7 @@ def active_configuration(
         with opening as store:
             _check_state_version(store.meta(), path)
             _check_root_id(store.meta(), path)
+            _check_journaled(store, path)
             snapshot = _latest_snapshot(store, path)
             first = snapshot.config_rev if snapshot is not None else first_rev(store)
             after = snapshot.seq if snapshot is not None else 0
@@ -956,6 +958,17 @@ def _check_root_id(meta: Mapping[str, str], path: Path) -> None:
         raise EngineError(
             f"{path}: the store has no root_id, which every process cookie names: start a fresh"
             " run root (spec-restart, DL-433)"
+        )
+
+
+def _check_journaled(store: Store, path: Path) -> None:
+    """A store that never held a journal record is a first start that did not finish: refused
+    before anything is written. The sequence high-water mark stays after a prune (DL-504)."""
+    if store.last_seq() == 0:
+        raise EngineError(
+            f"{path}: the store holds no journal record: the first start of this run root did"
+            f" not finish. If this root has never run a job, remove {path.name} with its -wal and"
+            " -shm files and start again; otherwise restore the store (DL-504)"
         )
 
 

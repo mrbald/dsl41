@@ -1137,9 +1137,18 @@ check downstream effects and follow the
 
 A refused resume leaves the unit down on exit 2. Read its named refusal;
 do not erase the root to bypass it. The restart checks the lock, store
-version and identity, clock domain and any pending update's captured plan.
+version and identity, that the store holds a journal record, clock domain and
+any pending update's captured plan.
 A missing or unreadable interrupted-update plan refuses before a journal
 write or process signal.
+
+The refusal `the store holds no journal record` means the first start of the
+root died before it finished. If the root has never run a job, stop the unit,
+remove `engine.db` with its `-wal` and `-shm` files and start the unit again.
+Otherwise restore the store from a backup (DL-504).
+A first start that died while the store was being created leaves an empty `engine.db`, and the
+next start refuses it with `is not a dsl41 store`. On a root's first start this is the same
+case with the same remedy (DL-504).
 
 Main-config restart restores the last applied catalog, profile and job order
 from the store. Estate and lint edits remain pending, including invalid
