@@ -262,6 +262,68 @@ Run socket commands as the service account through
 `/opt/synthetic-engine/runtime/bin/dsl41`, with
 `--socket /srv/synthetic-engine/run/control.sock`.
 
+## Check the site files before the first start
+
+Compare the site's adapted files with these lists before the first install.
+Each line restates a rule from the linked page; follow the link for detail.
+
+**The engine's unit** ([unit table](../../docs/deploy.md#install-the-package-and-unit)):
+
+| The file has | Why |
+| --- | --- |
+| `RequiresMountsFor` naming the run root and every required filesystem | An absent mount must not look like a fresh root. |
+| `Wants=time-sync.target` and `After=time-sync.target`, with the host's synchronization waiter enabled and succeeded | The target waits for real synchronization only when an enabled waiter runs successfully. |
+| At most five starts in 300 seconds | A repeated crash stays failed. The template spells it `StartLimitInterval=300` and `StartLimitBurst=5` in `[Service]` for EL7's systemd 219; the reference unit's `StartLimitIntervalSec` in `[Unit]` does not fit 219 ([EL7](#provide-python-312-on-el7)). |
+| `ExecStop` running `engine stop --wait --socket` with the run root's `control.sock`, the root the main config names | A stop drains the engine and waits for its process to exit ([drain](../../docs/deploy.md#drain-the-engine)). |
+| `TimeoutStopSec=45`: 10 + 5 + 30, both graces plus 30 with the default graces | The stop must outlast the engine's drain. Raise it with the graces in the run root's `engine.toml` ([start](../../docs/deploy.md#start-the-estate)). |
+| `Restart=always` and `RestartPreventExitStatus=2 6 7` | Every other exit restarts, 0 included. Exit 2 is a startup refusal, 6 a time-half fault before an engine input was logged, 7 a statechart assertion failure; each stays down for diagnosis. |
+| `KillMode=control-group` | A stop ends what remains in the unit after `ExecStop`. The engine's failure ends every process in the unit at once, jobs included. The restart reruns a job cut off this way, or holds it when it is marked non-idempotent or at its attempt limit ([recovery](../../docs/deploy.md#recover-after-the-engine-or-box-dies), DL-503). |
+| `OnFailure=` naming the failure unit, only with the site's status hook; the failure unit and the hook installed, the hook executable by the engine's account | The failure unit runs the hook when the engine unit fails. The failure unit's literal arguments carry the hook's absolute path, the run root and the engine unit, matching `status_hook` and this unit. The template omits all three ([watch](../../docs/deploy.md#watch-the-engine-and-jobs)). |
+
+**The main config** ([what it selects](../../docs/deploy.md#what-the-main-config-selects)):
+
+| The file has | Why |
+| --- | --- |
+| `run_root` under `[engine]`, an absolute path | The engine keeps its state there. The unit's mounts and `ExecStop` socket name the same root. |
+| `access_map` under `[engine]`, only with an access file | It arms the access rules of that file. The engine reads the path at restart. |
+| `status_hook` under `[engine]`, the hook's absolute path, only with the status hook | Omitting it disables engine notifications. The failure unit's arguments name the same path. |
+
+**The access file**, when the site uses one
+([access model §4](../../docs/access-model.md#4-the-role-map)):
+
+| The file has | Why |
+| --- | --- |
+| A regular file owned by the engine's account, not group- or other-writable | Startup refuses any other file. |
+| A parent that is not a symlink, owned by root or the engine's account, not group- or other-writable | Otherwise another account could rename a file over the map. |
+| A path under root-owned directories, such as `/etc`, not under a world-writable tree | The engine checks the file and its parent, not the directories above. |
+| `user:os/<engine account>` bound at `adm` | With an access file, the unit's `ExecStop` is checked like any caller. Without this row `systemctl stop` cannot drain the engine, and the template's `%posttrans` cannot run `update`. |
+| Each application role bound at `read`, `ops` or `adm` | The [verb table](../../docs/access-model.md#10-the-verb-table) says what each level allows. The command alone decides the level, so a level applies to every job. |
+| `unmapped = "deny"` | A caller that matches no row is denied. `"read"` is the only other value, and it discloses data. |
+| `socket_group`, optional: the OS group whose members may reach the socket | Without it the socket stays owner-only (`0600`), access file or not. Startup refuses a group the host does not know ([§8](../../docs/access-model.md#8-filesystem-modes)). |
+
+Replace a changed file by rename, then send the engine `SIGHUP`
+([reload](../../docs/access-model.md#7-reload-and-revocation)).
+
+**The web service**, only when people use the browser UI
+([recipe](../../docs/deploy.md#serve-people-behind-the-authenticating-proxy),
+[access model §9](../../docs/access-model.md#9-the-web-tier)):
+
+| The site has | Why |
+| --- | --- |
+| The runtime installed with the `[ui]` extra | The base profile, which step 3 installs, omits the TUI that the service runs for each tab. `scripts/export-release-inputs.sh` also writes `requirements-ui.txt` for the `[ui]` extra. |
+| The start script's `control_socket` naming the run root's `control.sock` | Each tab's UI connects to the engine through it. |
+| A second unit as the engine's account, in a group that holds the proxy's worker and no other account | The proxy reaches the web socket. The group gets no access to the engine's files. |
+| `resolve(email)` returning `(user_id, roles)` or None, safe for two threads, with its own finite timeouts | Two tabs call it from two threads. The service adds no timeout, cache or retry. |
+| `public_url` spelled as the browser sends `Origin`: lowercase ASCII host, no default port, no path or trailing slash | Any other spelling refuses every tab with 403. A path or a trailing slash refuses at startup. |
+| A proxy that overwrites the identity header and protects every route | The service takes the person from that header. |
+
+Read the service's limits L1 to L8 in the recipe before people use it.
+
+**The first start.** If the first start of a new run root dies before its
+first journal record, the next start refuses the root with exit 2. The unit
+stays down. Follow
+[recovery](../../docs/deploy.md#recover-after-the-engine-or-box-dies) (DL-504).
+
 ## Install and check the result
 
 1. Before upgrade, have the operator stop the service, verify the shutdown
