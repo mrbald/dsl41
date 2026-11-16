@@ -26860,3 +26860,25 @@ relitigate an entry; append a new one.
   its write-ahead log), which a person can tell and the engine cannot.
   UNCHANGED. Every store that ever held a record, including one whose records were pruned
   (the high-water mark stays), genesis itself, and the other restart refusals.
+- DL-505 The audit of code and tests that rest on hand-built state is closed
+  (2026-11-16; owner; `TODO.md` FEAT-37; DL-491)
+  THE RESULT. Every branch arc that no test free of hand-built state reaches is ruled kept,
+  has a test from validated input, or is gone. One census, run on macOS and Linux, counted
+  701 such arcs on 12 November, 512 of 9,299 on main 8140e2a (14 November) and 504 of
+  9,291 on main 3f1cd7a (15 November); the arcs that only strongly hand-built tests reach
+  fell from 504 to 283. Dead arms were removed or stated as
+  assertions. Live arms took tests from real input (`tests/test_live_engine_recovery.py`,
+  `tests/test_runner_tui_live.py`, `tests/test_restart_owed_once.py`). The audit found
+  BUG-86, a restart that launched one run twice.
+  WHAT IS KEPT. An arc stays with a hand-built test when it is a host fault, a boundary
+  check, a race made certain, or a specified answer to a defect of the build. The count
+  does not reach zero: the census errs toward flagging, and it flags a live test too where
+  the test reads engine state to wait.
+  LEFT, as items of their own. Two test-only arms of `EngineStops` and the hand-built test
+  that passes through them, which go when the local gate counts macOS and Linux coverage
+  together (FEAT-40). The `Refused` arm of `ControlServer._update_answer` (BUG-76). The
+  collision arm of the terminal UI's outcome line, kept with a hand-built test (DL-217); a
+  live test can fix its order by stopping the engine's process with SIGSTOP.
+  NOT BUILT. A gate on the census. Its count is not exact and its tools are not part of the
+  repository. DL-491's rule holds the result: a reviewer reports code or a test that only
+  hand-built state reaches.
