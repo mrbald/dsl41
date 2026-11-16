@@ -4219,7 +4219,7 @@ WRAPPER_OUTCOME_ROWS: tuple[Row, ...] = (
         member="terminated",
         klass=SUPPORTED,
         cite="wrapper-protocol ss3, DL-424, DL-429",
-        effect="the wrapper killed the command when it lost its parent; stopped{lifeline}"
+        effect="the lifeline was lost, with the command's end inside observed; stopped{lifeline}"
         " follows the interruption rule: replace an idempotent attempt, hold a marked job"
         " or a run at its attempt limit, or preserve the oracle end",
         trigger="wrapper=terminated",

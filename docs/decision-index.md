@@ -504,3 +504,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-500 | Status-hook observations name catalog jobs only | [docs/runner-design.md](runner-design.md) |
 | DL-501 | The terminal UI does not stop on a trace entry at or below its cursor |  |
 | DL-502 | A spawn record the wrapper cannot build takes the path of one it cannot write | [docs/wrapper-protocol.md](wrapper-protocol.md) |
+| DL-503 | An exit the wrapper sees after the lifeline is lost belongs to the engine's loss | [docs/blocks/wrapper.md](blocks/wrapper.md), [docs/runner-design.md](runner-design.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |

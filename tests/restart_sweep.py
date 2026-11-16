@@ -18,8 +18,9 @@ wrappers act on the lost lifeline and record it before the unit's TERM reaches t
 then every process still in those sessions gets TERM, then CONT, a bounded wait, then KILL. That
 is not the unit's only behaviour. Under `KillMode=control-group` systemd sends TERM to the whole
 group at once after the main process fails, so a command can die of that TERM before its
-wrapper acts: the wrapper records `signaled 15`, and the restart does not run the attempt again.
-That other order is BUG-89, and this module does not sweep it.
+wrapper acts: the wrapper reads the lost lifeline first and records `parent lost` with the
+command's end inside `observed`, and the restart runs the attempt again (DL-503). This module
+sweeps `wrappers-first` only.
 
 A successor (`resume_run`) then opens the same root, with a clock past every timer the scenario
 arms, and the driver finishes the script: an event whose answer was lost is sent again with the
@@ -64,7 +65,7 @@ from dsl41.runner_control import ControlClientError, roundtrip
 from dsl41.runner_journal import STORE_NAME, Journal
 
 LINUX = sys.platform.startswith("linux")
-#: the one order of the unit's kill this module sweeps (module docstring; the other is BUG-89)
+#: the one order of the unit's kill this module sweeps (module docstring; DL-503 rules the other)
 UNIT_ORDER = "wrappers-first"
 #: crash points one scenario runs at once, independent of xdist
 CONCURRENCY = int(os.environ.get("DSL41_SWEEP_JOBS", "4"))

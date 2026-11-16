@@ -179,9 +179,9 @@ Each attempt has at most one `status.json`, and it holds exactly one outcome:
 
 | outcome       | extra fields        | meaning                                    |
 |---------------|---------------------|--------------------------------------------|
-| `exited`      | `exit_code`         | the command exited on its own              |
-| `signaled`    | `signal`            | the command was killed by a signal that the wrapper did not send |
-| `terminated`  | `cause`, `observed` | the wrapper ended the attempt (`cause: "parent lost"`, or a spawn record that could not be built or written). `observed` carries the forensic exit detail |
+| `exited`      | `exit_code`         | the command exited on its own while the lifeline was open |
+| `signaled`    | `signal`            | the command was killed by a signal that the wrapper did not send, while the lifeline was open |
+| `terminated`  | `cause`, `observed` | the attempt ended with the lifeline lost (`cause: "parent lost"`) or with a spawn record that could not be built or written. `observed` carries the command's end, its own exit or signal if the wrapper saw it after the lifeline was lost (§4 step 3, DL-503), or the end the wrapper's kill caused |
 | `spawn_failed`| `error`             | the wrapper could not open the command's stdin, stdout or stderr, could not execute the selected shell, or could not set a child limit (DL-150, DL-492) |
 
 No outcome of a command that ran is written as an absent file. The
@@ -292,18 +292,27 @@ On other platforms, and for an attempt dispatched without the cookie, the
 3. The event loop is a SIGCHLD self-pipe plus select over {self-pipe,
    lifeline}. The self-pipe is also the interpreter's wakeup fd, so the
    signal writes to it at delivery. A command that exits just before the
-   select starts still wakes the wrapper. On every wakeup, the wrapper
-   checks for child exit BEFORE it checks for lifeline EOF. So a
-   completion that races parent death records as a completion.
+   select starts still wakes the wrapper. On every wakeup, whichever
+   descriptor woke the select, the wrapper reads the lifeline BEFORE it
+   checks for child exit, without blocking. With the lifeline open, an exit
+   is recorded as it is seen. With the lifeline lost, the record is
+   `terminated / parent lost` and an exit already there goes inside
+   `observed`, whatever its kind (DL-503). So an exit that follows the
+   engine's death, such as one the unit's TERM caused, belongs to the
+   engine's loss. A command that finished by itself in the instant of the
+   engine's death is recorded the same way. A living engine also closes the
+   lifeline: when a stop lands before `spawn.json` exists and the launch is
+   aborted, and when an attempt's task is cancelled at teardown. An exit seen
+   after that close is recorded `terminated / parent lost` as well (DL-503).
 4. On exit, the wrapper observes the exit with waitid(WNOWAIT), writes
    status.json, and then reaps. A stopped, continued or trapped report is
    not an exit: the command is still running (DL-300).
-5. On lifeline EOF, the wrapper checks for exit again. Then it sends
-   SIGTERM to the command's process group and waits the grace period. It
+5. On lifeline EOF, the wrapper takes an exit that is already there. Else it
+   sends SIGTERM to the command's process group and waits the grace period. It
    sends SIGKILL only to a command that is still alive at the end of that
    wait. A command that ends on the SIGTERM is observed, and the wait stops
-   there (DL-150). Then the wrapper writes `terminated / parent lost` and
-   exits.
+   there (DL-150). Then the wrapper writes `terminated / parent lost`, with
+   the command's end in `observed`, and exits.
 6. The wrapper exit code is a notification only: 0 = a status record
    exists, 1 = an unreadable spec, a missing key or any other uncaught
    error, 2 = the spec refusal, 3 = a record could not be built or written (for example
