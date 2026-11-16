@@ -943,9 +943,11 @@ def test_records_after_the_record_timeout_are_evidence_only(
     not reopen the attempt. The wrapper is frozen after it launched the command and before
     `spawn.json`; a terminal STATUS stops the attempt, whose timeout ends it `unobservable` with plan
     `none`. Continued, the wrapper then writes `spawn.json` and its record (ENDED +
-    spawn_recorded, ENDED + exit_recorded): `parent lost`, or, where the cookie names the
-    command with no `spawn.json`, the signal the cleanup's ladder sent; killed, it exits with
-    neither (ENDED +
+    spawn_recorded, ENDED + exit_recorded): `terminated / parent lost`, since the engine's stop
+    closed the lifeline before `spawn.json` existed and the wrapper reads the lifeline before
+    the command's exit (DL-503). Where the cookie names the command with no `spawn.json`, the
+    cleanup's ladder ended it before the wrapper resumed, and `observed` holds that signal;
+    killed, it exits with neither (ENDED +
     wrapper_gone); killed once `spawn.json` names the live command, the tier's verdict is a
     stop with cause `wrapper_lost` (ENDED + stop). None of them reopens the attempt."""
     from dsl41.runner_wrapper import PAUSE_ENV
@@ -1000,10 +1002,12 @@ def test_records_after_the_record_timeout_are_evidence_only(
         assert late == []
     elif engine.stops.scan_available:
         # the cookie names the command with no `spawn.json`: the cleanup's ladder ended it
-        # before the wrapper resumed, which records the signal (spec-restart §4)
-        assert [r.wrapper_outcome for r in late] == ["signaled"]
+        # before the wrapper resumed, which records `parent lost` with the signal inside
+        # `observed` (DL-503)
+        assert [(r.wrapper_outcome, r.cause) for r in late] == [("terminated", "parent lost")]
+        assert [(r.observed or {}).get("outcome") for r in late] == ["signaled"]
     else:
-        assert [r.cause for r in late] == ["parent lost"]
+        assert [(r.wrapper_outcome, r.cause) for r in late] == [("terminated", "parent lost")]
 
 
 def test_an_empty_drain_answers_every_queued_request_before_it_stops(tmp_path: Path) -> None:

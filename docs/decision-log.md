@@ -843,6 +843,7 @@ relitigate an entry; append a new one.
   of a whole tree at once -> detected at resume, reported truthfully
   (E7), never guessed.
   NARROWED BY DL-424: (1) to (5) and (7), the wrapper shim, stay; (6) and (8) are retired.
+  NARROWED BY DL-503: an exit seen after the lifeline is lost is recorded as `parent lost`.
 - DL-42 Lifecycle tier spin-off: extract-on-trigger, not now (2026-07-11;
   immediate repo+pipeline+package extraction was considered; two
   independent reviews converged on the same verdict). Decisions: (1) The niche is REAL but
@@ -26808,3 +26809,32 @@ relitigate an entry; append a new one.
   a failed read gives no token.
   NOT BUILT. A record with no start token on macOS when `ps` cannot run, as Linux writes:
   an engine on such a host cannot read process groups either.
+- DL-503 An exit the wrapper sees after the lifeline is lost belongs to the engine's loss
+  (2026-11-15; owner ruling; `runner_wrapper.py`, wrapper-protocol §4; narrows DL-41a's
+  wrapper duty that a completion racing the parent's death is a completion)
+  THE RULE. On every wakeup the wrapper reads the lifeline first. With the lifeline open,
+  an exit is recorded as it is seen, `exited` or `signaled`. With the lifeline lost, the
+  record is `terminated / parent lost`: an exit already there goes inside `observed`,
+  whatever its kind, and a live command is ended by the ladder as before. The consumer
+  reads that record as `stopped{lifeline}` and applies the interruption rule: the attempt
+  is run again, or held when its job is marked non-idempotent (DL-424, DL-485).
+  THE REASON. Under `KillMode=control-group` systemd sends TERM to the whole unit at once
+  when the engine dies with a failure, and runs no `ExecStop` (systemd 239,
+  `service_enter_running`). A command that this TERM ended before its wrapper acted was
+  recorded by its own exit: `signaled`, read as TERMINATED and not run again, or `exited 0`
+  for a command that ends cleanly on TERM, read as SUCCESS for work that was cut short.
+  Whether the job was run again depended on which process ran first (BUG-89).
+  THE COST. A command that finished by itself in the instant of the engine's death is run
+  again, or held when marked. The wrapper cannot tell that exit from one the unit caused.
+  A living engine closes a lifeline too: when a stop lands before `spawn.json` exists and
+  the launch is aborted, and when an attempt's task is cancelled at teardown. A command
+  that had already ended is then recorded `parent lost`, and its attempt is
+  `stopped{lifeline}` where it carried the stop's own cause before.
+  THE LIMITS. An engine child still between fork and exec holds the lifeline's write end
+  for a moment; a wrapper that looks in that moment sees the lifeline open. A lifeline stop
+  takes precedence over a saved oracle kill (BUG-90).
+  UNCHANGED. Every record written while the lifeline is open, the record shapes (`observed`
+  already carries an exit or a signal), the ladder, the exit codes and the consumer table.
+  NOT BUILT. A forced-order row in the service drill: systemd continues a stopped wrapper
+  before it signals the command, so the order cannot be forced under the real unit. A
+  second order of the unit's kill in the restart sweep.

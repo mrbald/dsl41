@@ -25,7 +25,13 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from test_runner_lifecycle import read_json, wait_for
+from test_runner_lifecycle import (
+    _at_pause,
+    _continue_and_wait,
+    read_json,
+    spawn_wrapper,
+    wait_for,
+)
 
 from dsl41 import runner_procid, runner_wrapper
 from dsl41.runner_attempts import SPAWN_RECORD_FAILED
@@ -854,7 +860,7 @@ def _cleanup(proc: subprocess.Popen[bytes], run_dir: Path, go: Path) -> None:
 def test_wrapper_survives_a_failing_sigchld_wakeup_write(tmp_path: Path) -> None:
     """If the self-pipe cannot take the SIGCHLD wake-up byte, the handler
     swallows the error: the wrapper still sees the exit on the next wake-up
-    (here the lifeline closing) and records it as the command's own exit."""
+    (here a byte on the open lifeline) and records it as the command's own exit."""
     run_dir = tmp_path / "j1.1"
     run_dir.mkdir()
     events = tmp_path / "events"
@@ -870,8 +876,7 @@ def test_wrapper_survives_a_failing_sigchld_wakeup_write(tmp_path: Path) -> None
         go.write_text("")
         wait_for(lambda: runner_procid.proc_is_zombie(command_pid))
         wait_for(lambda: _event_count(events) > before)  # the exit's SIGCHLD write was refused
-        os.close(lifeline_w)
-        lifeline_w = -1
+        os.write(lifeline_w, b"x")  # a wakeup that is not EOF: the lifeline stays open
         assert proc.wait(timeout=30) == 0
     finally:
         if lifeline_w >= 0:
@@ -949,12 +954,12 @@ def test_wrapper_records_the_exit_of_a_command_that_was_stopped_and_continued(
     assert "cause" not in status
 
 
-def test_wrapper_completion_beats_parent_loss_when_the_exit_lands_with_the_eof(
+def test_wrapper_takes_an_exit_the_first_look_missed_into_parent_lost(
     tmp_path: Path,
 ) -> None:
     """The lifeline is already at EOF and the command has exited, but the
-    first look called it still running: the second look, after the EOF, finds
-    the exit and the run is recorded as exited, not as a lost parent."""
+    first look called it still running: the wrapper records `parent lost`, and
+    the exit that the second look finds goes inside `observed` (DL-503)."""
     run_dir = tmp_path / "j1.1"
     run_dir.mkdir()
     events = tmp_path / "events"
@@ -971,9 +976,80 @@ def test_wrapper_completion_beats_parent_loss_when_the_exit_lands_with_the_eof(
             proc.kill()
             proc.wait()
     status = read_json(run_dir / "status.json")
-    assert status["outcome"] == "exited" and status["exit_code"] == 4
-    assert "cause" not in status and "observed" not in status
-    assert events.read_bytes().count(b"\n") == 2  # two looks, no kill-wait loop
+    assert status["outcome"] == "terminated" and status["cause"] == "parent lost"
+    assert status["observed"] == {"outcome": "exited", "exit_code": 4}
+    assert events.read_bytes().count(b"\n") == 2  # two looks
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "waitid"),
+    reason="the driver mode waits for the command's exit with os.waitid, which macOS "
+    "has only from Python 3.13",
+)
+def test_wrapper_reads_the_lifeline_when_only_the_self_pipe_woke_the_select(
+    tmp_path: Path,
+) -> None:
+    """The command's exit wakes the select through the self-pipe alone, and
+    the lifeline is already at EOF: the wrapper reads the lifeline all the
+    same, so the exit it finds goes inside `parent lost` (DL-503). Without the lifeline read the record would be `exited`."""
+    run_dir = tmp_path / "j1.1"
+    run_dir.mkdir()
+    events = tmp_path / "events"
+    lifeline_r, lifeline_w = os.pipe()
+    os.close(lifeline_w)
+    proc = _drive("self_pipe_wakeup_only", events, _spec(run_dir, "exit 4", lifeline_r), lifeline_r)
+    os.close(lifeline_r)
+    try:
+        assert proc.wait(timeout=30) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    status = read_json(run_dir / "status.json")
+    assert status["outcome"] == "terminated" and status["cause"] == "parent lost"
+    assert status["observed"] == {"outcome": "exited", "exit_code": 4}
+    assert _event_count(events) == 1  # the one wakeup
+
+
+@pytest.mark.parametrize(
+    ("command", "term_it", "observed"),
+    [
+        ("exit 0", False, {"outcome": "exited", "exit_code": 0}),
+        ("exec sleep 600", True, {"outcome": "signaled", "signal": signal.SIGTERM}),
+    ],
+    ids=["exited-0", "ended-by-term"],
+)
+def test_wrapper_records_parent_lost_for_an_exit_that_precedes_its_look(
+    tmp_path: Path, command: str, term_it: bool, observed: dict[str, int | str]
+) -> None:
+    """DL-503: the wrapper is held after its spawn record, the command ends (by
+    itself, or by the TERM the unit sends), the lifeline's write end closes, and
+    the wrapper continues. Both are already there when it looks; the lifeline
+    is read first, so the record is `parent lost` and the exit is inside
+    `observed`, whatever its kind."""
+    run_dir = tmp_path / "j1.1"
+    run_dir.mkdir()
+    proc, lifeline_w = spawn_wrapper(run_dir, command, pause="post_record")
+    try:
+        _at_pause(proc)
+        spawn = read_json(run_dir / "spawn.json")
+        if term_it:
+            os.killpg(spawn["command_pgid"], signal.SIGTERM)
+        wait_for(lambda: runner_procid.proc_is_zombie(spawn["command_pid"]))
+        os.close(lifeline_w)
+        lifeline_w = -1
+        assert _continue_and_wait(proc) == 0
+    finally:
+        if lifeline_w >= 0:
+            os.close(lifeline_w)
+        if proc.poll() is None:  # a failed test: the wrapper is held, its command may live
+            with contextlib.suppress(Exception):
+                os.killpg(read_json(run_dir / "spawn.json")["command_pgid"], signal.SIGKILL)
+            proc.kill()
+            proc.wait()
+    status = read_json(run_dir / "status.json")
+    assert status["outcome"] == "terminated" and status["cause"] == "parent lost"
+    assert status["observed"] == observed
 
 
 def test_wrapper_wakes_for_an_exit_whose_python_handler_has_not_run(tmp_path: Path) -> None:

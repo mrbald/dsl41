@@ -14,6 +14,8 @@ event, so a test can wait on the event instead of sleeping:
 - completion_beats_parent_loss: the first exit probe blocks until the command
   has exited and reports "still running", so the lifeline EOF is read with the
   exit already there. One line per probe.
+- self_pipe_wakeup_only: the loop's select reports the self-pipe alone, once the
+  command has exited, whatever the lifeline holds (DL-503). One line per such wakeup.
 - exit_lands_in_select: SIGCHLD is blocked on the main thread and open on a
   parked helper thread, so the kernel delivers it there. The C-level handler
   runs at delivery, but the Python handler waits for the main thread, which
@@ -102,6 +104,23 @@ def completion_beats_parent_loss(event_path: str) -> None:
         return saved
 
     runner_wrapper._observe_exit = observe
+
+
+def self_pipe_wakeup_only(event_path: str) -> None:
+    real_select = select.select
+
+    def select_(rlist: Any, wlist: Any, xlist: Any, *timeout: float) -> Any:
+        if timeout or len(rlist) != 2:
+            return real_select(rlist, wlist, xlist, *timeout)
+        while True:  # the command is the wrapper's only child left unreaped
+            info = os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            if info is not None and info.si_pid != 0:
+                break
+            time.sleep(0.01)
+        _note(event_path)
+        return real_select(rlist[:1], wlist, xlist, 5.0)
+
+    runner_wrapper.select = SimpleNamespace(select=select_)  # type: ignore[assignment]
 
 
 def count_observes(event_path: str) -> None:
@@ -225,6 +244,7 @@ MODES = {
     "full_self_pipe": full_self_pipe,
     "completion_beats_parent_loss": completion_beats_parent_loss,
     "exit_lands_in_select": exit_lands_in_select,
+    "self_pipe_wakeup_only": self_pipe_wakeup_only,
     "group_kill_fails_leader_exited": partial(
         group_kill_fails, leader_exited=True, signal_fails=False
     ),
