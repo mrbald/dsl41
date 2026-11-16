@@ -26838,3 +26838,25 @@ relitigate an entry; append a new one.
   NOT BUILT. A forced-order row in the service drill: systemd continues a stopped wrapper
   before it signals the command, so the order cannot be forced under the real unit. A
   second order of the unit's kill in the restart sweep.
+- DL-504 A store with no journal record is an unfinished first start and is refused by name
+  (2026-11-15; owner ruling; `runner_startup.py`, runner-design §7)
+  THE RULE. A start that finds `engine.db` with no journal record ever written (the store's
+  sequence high-water mark is 0) refuses before it writes anything: the first start of this
+  run root did not finish. The message tells the operator to remove the store with its
+  `-wal` and `-shm` files and start again if the root has never run a job, and to restore
+  the store otherwise. It is an ordinary refusal: exit 2, which the unit does not restart
+  on.
+  THE REASON. Genesis commits the store's schema, its configuration row and its first
+  records in separate transactions. An engine that died between them left a store that
+  every later start resumed and ended on an assertion, and that a fresh start refused;
+  under the unit that ended at the start limit (BUG-88, found by the restart sweep). The
+  window is about a millisecond, in the first start of a new run root only.
+  THE LIMIT. An engine killed before the store's schema is committed leaves a file with no
+  tables. That start is refused by the older check of a foreign file (`is not a dsl41
+  store`), not by this one; the remedy is the same.
+  NOT BUILT. A genesis that publishes the store by rename, and a start that removes such a
+  store by itself. Both add code to the path of every new install for a death that needs
+  that millisecond; and a store can hold no record for another reason (a restore without
+  its write-ahead log), which a person can tell and the engine cannot.
+  UNCHANGED. Every store that ever held a record, including one whose records were pruned
+  (the high-water mark stays), genesis itself, and the other restart refusals.
