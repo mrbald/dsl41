@@ -684,7 +684,7 @@ nothing.
 | wrapper_outcome:exited#no-exit-code | refused | runner_adapters.outcome_from_status | - |  |  |  | none | an 'exited' record whose exit_code is not an integer is refused as a truthful FAILURE, never mapped to anything a success-dependent downstream could consume |
 | wrapper_outcome:signaled | supported | runner-design ss6, DL-41a | - |  |  |  | generic | the command was killed by a signal; the engine injects STATUS TERMINATED because a kill actually happened |
 | wrapper_outcome:spawn_failed | supported | runner-design ss6 | - |  |  |  | generic | /bin/sh could never be spawned; the engine injects STATUS FAILURE and the run never started |
-| wrapper_outcome:terminated | supported | wrapper-protocol ss3, DL-424, DL-429 | - |  |  |  | generic | the wrapper killed the command when it lost its parent; stopped{lifeline} follows the interruption rule: replace an idempotent attempt, hold a marked job or a run at its attempt limit, or preserve the oracle end |
+| wrapper_outcome:terminated | supported | wrapper-protocol ss3, DL-424, DL-429 | - |  |  |  | generic | the lifeline was lost, with the command's end inside observed; stopped{lifeline} follows the interruption rule: replace an idempotent attempt, hold a marked job or a run at its attempt limit, or preserve the oracle end |
 
 ### event_source
 

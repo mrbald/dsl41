@@ -38,10 +38,12 @@ flowchart TD
     spawn -->|"stdio open or the /bin/sh spawn fails"| spawnfail(["status spawn_failed"])
     spawn -->|"spawned"| record{"write spawn.json"}
     record -->|"the write fails"| killed(["kill the group, best-effort status, exit 3"])
-    record -->|"durable"| wait{"wait; on each wakeup the exit check runs first"}
-    wait -->|"exit observed"| exited["write the observed outcome, then reap"]
+    record -->|"durable"| wait{"wait; on each wakeup the lifeline is read first"}
+    wait -->|"lifeline open, exit observed"| exited["write the observed outcome, then reap"]
     wait -->|"lifeline EOF, no exit observed"| lost["SIGTERM the group, SIGKILL after the grace"]
-    lost --> term["write terminated, parent lost"]
+    wait -->|"lifeline EOF, exit observed"| seen["take the exit"]
+    lost --> term["write terminated, parent lost, with the command's end in observed"]
+    seen --> term
     exited --> ok(["exit 0"])
     term --> ok
 ```
@@ -51,7 +53,7 @@ flowchart TD
 - Stdlib-only, run by file path and parent-agnostic ([runner-design §6a](../runner-design.md#6a-process-lifecycle-tiers-dl-41a); DL-42).
 - The command has its own process group, apart from the wrapper's, so a group kill never kills the recorder (DL-41a item 2; [wrapper-protocol §3, spawn.json](../wrapper-protocol.md#spawnjson--written-by-the-wrapper-immediately-after-spawning)).
 - The lifeline's write end lives in exactly one process, the spawner. EOF means the parent died, `kill -9` included (DL-41a item 3; runner-design §6a, "Lifeline fd hygiene").
-- On every wakeup the exit check runs before the lifeline-EOF check ([wrapper-protocol §4](../wrapper-protocol.md#4-wrapper-behavior-frozen-semantics) step 3).
+- On every wakeup the lifeline is read before the exit check, whichever descriptor woke the select. An exit seen with the lifeline lost is recorded as `terminated / parent lost` ([wrapper-protocol §4](../wrapper-protocol.md#4-wrapper-behavior-frozen-semantics) step 3; DL-503).
 - Record before reap, with one stated exception: the path where the `spawn.json` write failed ([wrapper-protocol §3, status.json](../wrapper-protocol.md#statusjson--written-by-the-wrapper-before-reaping); DL-229 item 1).
 - Every record uses the durability liturgy on a local filesystem ([wrapper-protocol §3](../wrapper-protocol.md#3-spool-format-frozen); DL-41a item 4).
 - `status.json` is the sole data channel and appears at most once. Its absence gives an `unobservable` attempt outcome; the interruption rule chooses the follow-up (§3, status.json; DL-424, DL-426).
@@ -61,7 +63,7 @@ flowchart TD
 
 ## Failure and recovery
 
-- The engine dies: the wrapper kills the group and records `terminated` with cause `parent lost` (§4 step 5). The engine derives `stopped{lifeline}` and applies the interruption rule (DL-426) ([runner-design §6a](../runner-design.md#6a-process-lifecycle-tiers-dl-41a)).
+- The lifeline is lost, as when the engine dies: the wrapper takes the command's exit or kills the group, and records `terminated` with cause `parent lost` and the command's end in `observed` (§4 steps 3 and 5). The engine derives `stopped{lifeline}` and applies the interruption rule (DL-426) ([runner-design §6a](../runner-design.md#6a-process-lifecycle-tiers-dl-41a)).
 - The wrapper alone, or the whole tree, is killed with -9, and no `status.json` lands. The restart ends the attempt `unobservable{engine_death}` and its cleanup stops what is left of the command; it never waits for a wrapper, and a record a live wrapper writes after the restart's reading is read by nobody ([runner-design §7](../runner-design.md#7-journal-and-recovery-e1-prod-grade); §3, status.json; DL-424, DL-433).
 - A reboot: a `boot_id` mismatch voids liveness checks and proves nothing survived (§3, spawn.json; DL-42 item 5).
 - A full disk: the record write fails and the wrapper exits 3. The missing record gives an `unobservable` attempt outcome (§3; §4 step 6; DL-426).
