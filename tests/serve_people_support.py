@@ -1,6 +1,6 @@
 """Real serve_people process with an observed child launcher and synthetic lookup.
 
-DL-499 and DL-507 own the rules it exercises.
+DL-499, DL-507 and DL-509 own the rules it exercises.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from dsl41.runner_web import serve_people
 
 
 def main() -> None:
-    socket_path, control_socket, log_path, public_url = sys.argv[1:]
+    socket_path, control_socket, log_path, public_url, *extra_origins = sys.argv[1:]
     log = Path(log_path)
     shared = []
     initialize = Server.__init__
@@ -61,6 +61,7 @@ def main() -> None:
         socket_path=socket_path,
         public_url=public_url,
         control_socket=control_socket,
+        extra_origins=extra_origins,
     )
 
 

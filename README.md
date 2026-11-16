@@ -504,6 +504,8 @@ For a person's own roles and audit name, the site imports
 (DL-499, DL-507). Its backend runs under the engine's account on a Unix socket.
 The proxy authenticates the browser and sets the headers the site's lookup reads.
 `public_url` may carry a base path that the proxy strips.
+`extra_origins` lists further origins (`scheme://host[:port]`) for the same UI; each
+page links to and admits only the origin its request came under (DL-509).
 The lookup reads the request's headers and supplies each tab's user id and roles.
 Its UI wraps every request so the engine decides and records it as `app/<user>`.
 A denied status read ends the detached viewer with exit 2.

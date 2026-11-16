@@ -26922,6 +26922,7 @@ relitigate an entry; append a new one.
   NOT BUILT. The old `resolve(email)` beside the new form. Options that name headers. A switch
   for a proxy that does not strip the path. A check of the host's spelling: a `public_url` not
   spelled as the browser sends `Origin` still refuses every tab.
+  NARROWED BY DL-509: the UI may have further origins; `Origin` must equal the request's own.
 - DL-508 A review stamp is a local tag; the remote holds release tags and one archive tag
   (2026-11-16; owner; `.claude/skills/spec-review/SKILL.md`,
   `.claude/skills/arch-review/SKILL.md`; DL-225, DL-506)
@@ -26935,3 +26936,25 @@ relitigate an entry; append a new one.
   THE COST. A new clone has no stamp. There the gate counts every specification as due
   until its next review, and counts architecture drift from the branch point, so on `main`
   the drift trigger stays quiet until an arch review is stamped in that clone.
+- DL-509 The web service is reached under more than one host name
+  (2026-11-16; owner; `runner_web.py`; access-model §9; deploy "Serve people behind the
+  authenticating proxy"; DL-507)
+  THE RULE. `serve_people` takes `extra_origins`, a list of `scheme://host[:port]` under
+  DL-507's grammar with no path. The UI is reached under `public_url`'s origin and under each
+  extra origin, at `public_url`'s one base path. The `host[:port]` parts of all origins are
+  distinct without regard to case. Otherwise, or for a string in place of the list, startup
+  refuses.
+  THE ORIGIN OF A REQUEST. It is the origin whose `host[:port]` equals the request's `Host`
+  header without regard to case. A `Host` not sent, sent more than once or equal to none
+  selects `public_url`'s origin. The page's links are built from the request's origin; `Host`
+  itself is never written into the page. A WebSocket's `Origin` must equal the request's
+  origin exactly, so a page of one name cannot use a session of another name. With no extra
+  origin every request has `public_url`'s origin, as DL-507 has it.
+  THE PROXY'S DUTY. It passes `Host` as the browser sent it, with the port when the origin
+  spells one. A cache in front of the index page keys it by host name.
+  THE COST. Every page of an origin is trusted like the UI under that name (limit L9). The
+  proxy's login belongs to one name, so a person signs in under each name they use.
+  NOT BUILT. An `Origin` list without links per name: the page of the second name would load
+  its scripts and WebSocket from the first, where the browser has no login. Relative links:
+  the library builds absolute ones, and a relative WebSocket address needs a recent browser.
+  `X-Forwarded-Host`. A base path per name. Two origins that differ only in scheme.

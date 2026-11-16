@@ -315,6 +315,12 @@ The proxy must replace every header the lookup reads and protect every library r
    The host's spelling is not checked. Spell the part before the base path as a
    browser sends `Origin` (lowercase ASCII host, no default port); any other
    spelling starts and refuses every tab with 403.
+   If people also reach the UI under another name, such as the short name `control`,
+   list its origin in `extra_origins` (DL-509). Each entry is `scheme://host[:port]`,
+   spelled the same way, with no path; the UI keeps `public_url`'s base path under it.
+   No two origins may share `host[:port]` in any case, so two that differ only in
+   scheme refuse at startup. A page links to, and admits WebSockets from, only the
+   name its request's `Host` names; a `Host` that names none gets `public_url`'s.
    Write this root-owned start script at `/etc/dsl41/serve-people.py`:
 
    ```python
@@ -326,6 +332,7 @@ The proxy must replace every header the lookup reads and protect every library r
        socket_path="/run/dsl41-web/web.sock",
        public_url="https://control.example.invalid",
        control_socket="/srv/dsl41/runs/example/control.sock",
+       # extra_origins=["https://control"],
    )
    ```
 
@@ -396,6 +403,16 @@ The proxy must replace every header the lookup reads and protect every library r
    nginx sends no header when the value it sets is empty, so the lookup sees that
    name as not sent.
 
+   For two names, list both in the TLS server's `server_name`, for example
+   `server_name control.example.invalid control;`, with a certificate for both.
+   The proxy passes `Host` as the browser sent it. nginx's `$host` drops the port,
+   so an origin with a port needs `proxy_set_header Host $http_host;` instead.
+   A cache in front of the index page keys it by host name. The proxy's login
+   belongs to one name, so a person signs in under each name they use.
+   The identity provider accepts the sign-in callback under each name, and
+   oauth2-proxy builds its redirect address from the request, with no single
+   `--redirect-url`.
+
    To serve the UI under a base path instead, set
    `public_url="https://control.example.invalid/dsl41"` in the start script and
    use these two locations in place of the root location. The proxy maps both
@@ -434,7 +451,7 @@ The proxy must replace every header the lookup reads and protect every library r
    for `realm: "app"`, `principal: "alice"` on a mutation. An unmapped person
    must get a closed tab and a denial under that person's name.
 
-The service has these limits (DL-499, DL-507):
+The service has these limits (DL-499, DL-507, DL-509):
 
 - **L1.** Every process under the engine's account can state any person and role.
   With the engine's account at adm, a job gains no new command, only the means
@@ -459,8 +476,8 @@ The service has these limits (DL-499, DL-507):
 - **L8.** An older unarmed engine answers `as` with `unknown_cmd`. The UI shows
   the fault and keeps asking; no command runs. Install the engine and web service
   together and restart the engine to complete the upgrade.
-- **L9.** Every page of the same origin passes the `Origin` check under any path.
-  Applications that share the origin are trusted like the UI.
+- **L9.** Every page of an origin passes the `Origin` check for that origin under
+  any path. Applications that share an origin are trusted like the UI.
 - **L10.** The library's file-download link is root-relative, so a base path does
   not serve it. The command palette's command that saves an image of the screen
   delivers through that link and fails under a base path (BUG-91).

@@ -1,4 +1,4 @@
-"""Person-aware browser sessions behind an authenticating proxy (DL-499, DL-507).
+"""Person-aware browser sessions behind an authenticating proxy (DL-499, DL-507, DL-509).
 
 The rules are in access-model ss9.
 """
@@ -11,7 +11,7 @@ import json
 import re
 import shlex
 import sys
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -78,15 +78,64 @@ def _public_origin(public_url: str) -> str:
     return f"{parts.scheme}://{parts.netloc}"
 
 
+def _origins(public_url: str, extra_origins: Sequence[str]) -> tuple[str, ...]:
+    """Return `public_url`'s origin followed by each extra origin (DL-509).
+
+    An extra origin is `scheme://host[:port]` with no path. No two origins share their
+    `host[:port]` in lower case.
+    """
+    origins = [_public_origin(public_url)]
+    rule = (
+        "extra_origins must be a list of http(s)://host[:port] with no path, each host[:port]"
+        " distinct in any case from public_url's and from each other"
+    )
+    if isinstance(extra_origins, str):
+        raise ValueError(rule)
+    for extra in extra_origins:
+        if not isinstance(extra, str):
+            raise ValueError(rule)
+        try:
+            valid = _public_origin(extra) == extra
+        except ValueError:
+            valid = False
+        if not valid or _authority(extra) in {_authority(origin) for origin in origins}:
+            raise ValueError(rule)
+        origins.append(extra)
+    return tuple(origins)
+
+
+def _authority(origin: str) -> str:
+    """Return the lower-case `host[:port]` of a `scheme://host[:port]` origin (DL-509)."""
+    return origin.partition("://")[2].lower()
+
+
+def _request_origin(hosts: Sequence[str], origins: Sequence[str]) -> str:
+    """Return the origin of a request from its `Host` values (DL-509).
+
+    It is the origin whose `host[:port]` equals the one `Host` value in lower case,
+    compared whole. No `Host`, more than one, or one equal to none selects the first origin.
+    """
+    if len(hosts) == 1:
+        for origin in origins:
+            if _authority(origin) == hosts[0].lower():
+                return origin
+    return origins[0]
+
+
 def serve_people(
     resolve: Callable[[Mapping[str, str]], tuple[str, list[str]] | None],
     *,
     socket_path: str | Path,
     public_url: str,
     control_socket: str | Path,
+    extra_origins: Sequence[str] = (),
 ) -> None:
-    """Serve the library's application on a Unix socket with one person per tab (DL-499)."""
-    origin = _public_origin(public_url)
+    """Serve the library's application on a Unix socket with one person per tab (DL-499).
+
+    The UI is reached under `public_url`'s origin and each extra origin (DL-509).
+    """
+    origins = _origins(public_url, extra_origins)
+    base_path = public_url.removeprefix(origins[0])
     try:
         from aiohttp import web
         from textual_serve.server import Server
@@ -96,10 +145,20 @@ def serve_people(
         ) from exc
 
     class PeopleServer(Server):
+        async def handle_index(self, request: web.Request) -> web.StreamResponse:
+            # DL-509: the page links to the request's origin at public_url's base path;
+            # only configured values are written, never Host itself.
+            page = copy.copy(self)
+            origin = _request_origin(request.headers.getall("Host", ()), origins)
+            page.public_url = origin + base_path
+            return await super(PeopleServer, page).handle_index(request)
+
         async def handle_websocket(self, request: web.Request) -> web.WebSocketResponse:
-            # DL-507: a browser's Origin carries no path; it must equal public_url's origin.
+            # DL-507, DL-509: a browser's Origin carries no path; it must equal the origin
+            # of the request's Host.
+            origin = _request_origin(request.headers.getall("Host", ()), origins)
             if request.headers.get("Origin") != origin:
-                raise web.HTTPForbidden(text="Origin must equal public_url's scheme, host and port")
+                raise web.HTTPForbidden(text="Origin must equal the origin of the request's Host")
             headers = _RequestHeaders(request.headers.items())
             try:
                 answer = await asyncio.to_thread(resolve, headers)
