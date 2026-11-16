@@ -11,13 +11,7 @@ None open.
 
 State handled outside a state machine and duplicated logic make the whole system fragile, so they rank here, not under maintenance (owner, 2026-11-10).
 
-- **FEAT-37**: Audit for code and tests that rest on state built by hand (DL-491). A branch that only such tests reach is deleted, stated as an assertion, or covered from validated input. It is done when every branch arc that no test free of hand-built state reaches is ruled kept (a host fault, a boundary check, a race made certain, a specified answer to a defect of the build) or has a test from validated input. The count does not reach zero, because the census of tests errs toward flagging (owner, 2026-11-14). Measured on main 8140e2a, on macOS and Linux: 512 such arcs of 9,299, every one triaged. Left after the live tests and the removals since, 3 arcs:
-
-  - Test-only, 2 arcs: `EngineStops.ladder` with no attempt facts and `EngineStops.command_survived` with no cached reading, which `test_a_held_group_keeps_its_job_s_starts_back_until_it_is_gone` passes through. That test stays, because coverage is gated on macOS and it is the only macOS run of three kept arcs: the plan-loop skip of `Engine._release`, which no live sequence is known to reach; the recovery arm of `Engine._release`, whose live test needs Linux; and a group reading that raises in `EngineStops._look`. The two arms go when those arcs have a macOS test that does not pass through them.
-  - Left to BUG-76, 1 arc: the `Refused` arm of `ControlServer._update_answer`.
-  - Kept by ruling, and not in this count: the collision arm of `_outcome_line` in `src/dsl41/runner_tui.py` (DL-217). It is a race: the terminal UI prints its `sending:` line with the request id before it writes, and a person who runs that line from a shell meanwhile makes the UI's own request meet its id already decided. Its test builds the answer by hand; a live test can fix the order by stopping the engine's process with SIGSTOP.
-
-  Next: one more measurement, then the audit's decision entry.
+None open.
 
 ## Known bugs
 
@@ -130,6 +124,7 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 
 - **FEAT-6**: Close G-config, G-semantic/clock, G-update, G-soak, G-history and G-upgrade ([integration test inventory](docs/integration-testing-inventory.md)).
 - **FEAT-39**: Make the store's open `dispatch_pending` records the only list of owed starts. Today each is mirrored by an item in `Engine._deferred` or `Engine._held_starts`, and `Engine.defer` only refuses a second item for one record. Deriving the barrier's starts from the store changes the order of a timer-owed start against a stored replacement and against an inherited start, so it waits until the restart sweep covers held starts and drains (`src/dsl41/runner.py`, `_finish_recovery`).
+- **FEAT-41**: Add restart-sweep scenarios for a held start, a drain with its stops and restarts, and a box that fails and starts again in one cascade (`tests/restart_sweep.py`). A first cut of the cascade scenario failed the sweep's determinism check under load, so none of the three is in the suite.
 
 #### Qualification
 
@@ -138,6 +133,7 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 
 #### Maintenance
 
+- **FEAT-40**: Remove the hand-built test `test_a_held_group_keeps_its_job_s_starts_back_until_it_is_gone` and the two test-only arms it passes through, `EngineStops.ladder` with no attempt facts and `EngineStops.command_survived` with no cached reading (DL-505). The test is the only macOS run of three kept arcs, and it goes when each has a test that does not pass through those arms: the recovery arm of `Engine._release`, whose test from real input needs Linux, so the local gate must count macOS and Linux coverage together; the plan-loop skip of `Engine._release`, which no live sequence is known to reach; and a group reading that raises in `EngineStops._look`.
 - **FEAT-11**: Close the G-correction and G-wargame gaps ([integration test inventory](docs/integration-testing-inventory.md)).
 - **FEAT-12**: Arrange acceptance of the main 071c312 architecture review and its advisory findings; `scripts/arch_check.py` reports the current count.
   The proposed follow-ups are unimplemented; no new runtime bug is demonstrated.
