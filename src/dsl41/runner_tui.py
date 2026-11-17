@@ -1266,7 +1266,14 @@ class RunnerApp(App[None]):
         self._bindings.key_to_bindings["q"] = [
             Binding("q", "quit", "stop run" if self.owns_run else "detach")
         ]
-        self.sub_title = str(self.socket_path)
+        # a web person's name and roles stand where the socket path stands otherwise; they are the
+        # lookup's answer, not the grant (DL-510)
+        self._subtitle_base = (
+            f"{person.spelling} ({', '.join(sorted(person.groups)) or 'no roles'})"
+            if person is not None
+            else str(self.socket_path)
+        )
+        self.sub_title = self._subtitle_base
         self._client = ControlClient(self.socket_path, person)
         self._selected: str | None = None
         self._rows: set[str] = set()  # DataTable row keys we created
@@ -1461,7 +1468,7 @@ class RunnerApp(App[None]):
         return response
 
     def _refresh_subtitle(self) -> None:
-        base = str(self.socket_path)
+        base = self._subtitle_base
         if self._connected is False:
             base += " (disconnected)"
         if self._query_faults:

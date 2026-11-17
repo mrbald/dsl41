@@ -1360,7 +1360,10 @@ run" and confirms under `run --ui`, "detach" under `dsl41 ui`. A crashed
 TUI exits non-zero in both postures (DL-187).
 A hidden `dsl41 ui --web-principal <JSON>` option sets the UI's person (DL-499).
 Its `ControlClient` wraps every request and subscription in `as`.
-The actor text is `app/<user>`. [Access §9](access-model.md#9-the-web-tier)
+The actor text is `app/<user>`.
+The header's subtitle names that person in place of the socket path, as
+`app/<user> (<roles>)`: the roles the web tier stated, sorted (DL-510).
+[Access §9](access-model.md#9-the-web-tier)
 owns validation and the one-request scope. `run --ui` takes no such option.
 
 `dsl41 serve --socket <path>` wraps textual-serve around the same app. Web

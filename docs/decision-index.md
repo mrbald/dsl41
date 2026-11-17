@@ -511,3 +511,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-507 | The web service takes a base path, and the person from the proxy's headers | [README.md](../README.md), [docs/access-model.md](access-model.md), [docs/deploy.md](deploy.md) |
 | DL-508 | A review stamp is a local tag; the remote holds release tags and one archive tag |  |
 | DL-509 | The web service is reached under more than one host name | [README.md](../README.md), [docs/access-model.md](access-model.md), [docs/deploy.md](deploy.md) |
+| DL-510 | The UI of a web person shows that person in its header | [docs/deploy.md](deploy.md), [docs/runner-design.md](runner-design.md) |
