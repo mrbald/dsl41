@@ -63,7 +63,6 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 
 #### Tests, tooling and docs
 
-- **BUG-93**: The release recipe pushes the version commit straight to `main` (`README.md`, "Make a release"). The protection of `main` refuses that push, because the commit has no passed checks. The commit has to go through a pull request and a fast-forward (DL-513).
 - **BUG-11**: Barrier cleanup kills a hung wrapper but not its command group, orphaning the commands. Kill the group through the live wrapper first (`tests/update_wiring_barrier.py`, `kill_wrappers`).
 - **BUG-12**: In the Codex macOS sandbox both real-terminal TUI cases held `recovery_other` as "interrupted attempt held" despite correct geometry. Cause unknown; reproduce in a supported environment (DL-424).
 - **BUG-21**: The peer alarm does not reliably stop Codex at its deadline; one build ran 4.5 h (`scripts/peer.sh:67-73`).

@@ -1171,13 +1171,33 @@ same version into `uv.lock`. `offline-installation.md` resolves to
 it is not a release input. Build locally and compare the wheel's file list with
 the previous release's (`uv build`, then `unzip -Z1` on both): the
 difference must be what the tag message is about to say. Commit the two
-version files and push them:
+version files on a branch and open a pull request. `main` takes only a
+commit whose pull-request checks passed, by a fast-forward (DL-513):
 
 ```sh
+git switch -c release-X.Y.Z
 git commit pyproject.toml uv.lock \
   -m "chore: X.Y.Z (one-line summary)"
-git push origin main
+git push -u origin release-X.Y.Z
+gh pr create --base main --fill
 ```
+
+When every check on the pull request is green, fast-forward `main` to that
+commit. The commit keeps its hash, so the tag points at the commit the
+checks ran on. The chain stops at the first command that fails. If `main`
+moved meanwhile, the second one fails: rebase the branch onto
+`origin/main`, push it with `--force-with-lease` and wait for the checks
+again.
+
+```sh
+git fetch origin &&
+  git merge-base --is-ancestor origin/main release-X.Y.Z &&
+  git push origin release-X.Y.Z:main &&
+  git switch main && git rebase origin/main
+```
+
+Once `main` holds the commit, the maintainer deletes the branch
+(`git branch -d release-X.Y.Z`, then `git push origin --delete release-X.Y.Z`).
 
 Rehearse the release on that commit before you tag it. A manual run of the
 workflow from a branch runs `gates` and `build`. It publishes
