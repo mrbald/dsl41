@@ -20,11 +20,11 @@ Execution records still name the actual selection and returned identity.
 
 | Role | Authority | Model and effort | Stand-in |
 | --- | --- | --- | --- |
-| boss | definition of done, owner-approved scope, allocation, binding rulings, release readiness | Astra (`gpt-6-astra`), high; xhigh for one named hard question | owner appoints |
+| boss | definition of done, owner-approved scope, allocation, binding rulings, release readiness | Astra (`gpt-6.2-astra`), xhigh | owner appoints |
 | advisor | one bounded hard question; recommendation only; read-only | Fable, xhigh | fresh Astra, xhigh |
 | operator | interactive session: briefs, dispatch, receipts, records, merge train, Linux-cell gate; applies rulings | Opus, medium | owner appoints |
-| builder | settled approach; routine details | Sol (`gpt-6.1-sol`), medium | boss appoints |
-| engineer | settled behavior; method needs judgment | Sol (`gpt-6.1-sol`), xhigh | boss appoints |
+| builder | settled approach; routine details | Sol (`gpt-6.2-sol`), medium | boss appoints |
+| engineer | settled behavior; method needs judgment | Sol (`gpt-6.2-sol`), xhigh | boss appoints |
 | reviewer | independent acceptance against the definition of done: code, tests, evidence provenance; fresh context, read-only | Opus, high | fresh Astra, high |
 
 The implementer is either the builder or the engineer, working in the slice
