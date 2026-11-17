@@ -169,6 +169,25 @@ def _restore_run_signal_handlers():
             signal.signal(sig, handler)
 
 
+@pytest.fixture(autouse=True)
+def _restore_match_bound_handler():
+    """The first bounded pass installs the `SIGVTALRM` handler of
+    `match_bound` for the life of the process (DL-514). A test that leaves a
+    pass armed fails here, before the restore, since a later delivery would
+    meet the old handler. Each test gets back the handler it started with,
+    where the handler now is that one. Any other change is the leak
+    detector's to name (DL-355)."""
+    from dsl41 import match_bound
+
+    handler = signal.getsignal(signal.SIGVTALRM)
+    yield
+    assert match_bound._deadline is None, "a bounded pass was left armed"
+    assert signal.getitimer(signal.ITIMER_VIRTUAL) == (0.0, 0.0), "the pass timer was left armed"
+    now = signal.getsignal(signal.SIGVTALRM)
+    if now is match_bound._on_vtalrm and handler is not now:
+        signal.signal(signal.SIGVTALRM, handler)
+
+
 @pytest.fixture
 def own_recursion_limit():
     """For a test that sets the interpreter's recursion limit itself: it gets

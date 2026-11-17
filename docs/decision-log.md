@@ -27010,6 +27010,7 @@ relitigate an entry; append a new one.
   (BUG-92). While `status=` is being typed, its first letters filter by name.
   NOT BUILT. Or between words, brackets, SQL. Fields other than status and box. Sorting. A
   time limit for a regular expression; one bound would have to cover the log pager too.
+  NARROWED BY DL-514: a regular expression is matched under a processor-time limit.
 - DL-512 A click on a box's marker folds it, and the jobs table names the fold keys
   (2026-11-17; owner; `runner_tui.py`; runner-design §11; DL-65)
   THE RULE. In the box tree, a click of the first mouse button in the first column of a box
@@ -27042,3 +27043,40 @@ relitigate an entry; append a new one.
   of `main` lands.
   THE COST. `scripts/merge_train.py` still rebase-merges, so the commit it lands is not the
   commit that was reviewed (FEAT-44).
+- DL-514 A person's regular expression in the UI is matched under a processor-time limit
+  (2026-11-17; src/dsl41/match_bound.py, runner_tui.py; docs/runner-design.md ss11; BUG-92)
+  THE RULE. Every match of a pattern a person typed, in the jobs filter and in the log pager's
+  filter and search, runs inside a bounded pass: one pass for a table render, for a pager
+  rebuild and for a batch of new log lines. A pass of the jobs filter may use 0.25 s of the
+  process's own processor time, a pass of the pager 5 s. A change of the search matches only
+  the lines the filter in force shows, so it never runs that filter again. The bound is the
+  interval timer `ITIMER_VIRTUAL` and a `SIGVTALRM` handler
+  that the process installs once and never removes. The handler raises only while a pass is
+  armed and past its limit; the timer repeats until the pass disarms it; the pass catches the
+  stop around its whole armed span. A pass only matches: it awaits nothing and changes no
+  widget and no state, so a stop leaves the view as it was. A pass inside a pass runs under
+  the outer limit.
+  ON A STOP. A draft (a keystroke in the jobs filter, Enter in the pager's prompt) is refused
+  like a pattern that does not compile: one message, the filter or search in force stays, and
+  Enter stays in the jobs filter line. A filter or search in force whose pass is stopped
+  later, by a status answer, a change of view or a batch of lines, is cleared once, with a
+  visible message, and the view is rebuilt without it. A batch of log lines goes into the
+  buffer first, so none is lost.
+  WHERE IT DOES NOT APPLY. Off the main thread, and where the platform has no such timer, a
+  pass runs without a limit. `dsl41 ui`, `run --ui` and the web service all run the UI on the
+  main thread of a process on Linux or macOS. Nothing else in the package uses
+  `ITIMER_VIRTUAL` or `SIGVTALRM`; a test holds that.
+  WHY. Measured: `([a-z_]+)+\d$` against an ordinary 35-character job name doubles its time
+  per character, 1.1 s at 24 and about 40 minutes at 35, for each name. The process answered
+  no key and, in a browser, outlived its tab. Processor time, not wall time, so a loaded or
+  suspended host stops no honest pattern. The pager's limit is longer because an honest
+  pattern costs more there: `.*error` over 10 000 lines of 200 characters takes 0.7 s.
+  THE COST. The matcher looks for a signal every 4096 steps, so a pass overruns by the time
+  one native scan of its text takes. In `run --ui` the engine waits for the pass, at most
+  the limit. A pattern that is honest but slow on very long lines is refused.
+  REJECTED: a worker process killed at the limit (a child, a protocol and asynchronous
+  filtering in a UI that renders synchronously, for a defect of this size); wall time (a
+  loaded host would clear honest filters); restoring the previous handler after a pass (a
+  signal still pending would meet the default action and end the process); refusing nested
+  quantifiers by inspection (misses `(a|a)*`, refuses good patterns); a third-party engine.
+  NARROWS DL-511's cost: a regular expression has a limit, in the jobs filter and the pager.

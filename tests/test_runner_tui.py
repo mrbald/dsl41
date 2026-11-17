@@ -41,6 +41,7 @@ pytest.importorskip("textual")
 from textual.binding import Binding
 from textual.widgets import DataTable, HelpPanel, Input, RichLog, Static
 
+from dsl41 import runner_tui
 from dsl41.ir import lower_source
 from dsl41.oracle_state import Event
 from dsl41.runner import Engine
@@ -2062,11 +2063,13 @@ def test_pilot_a_refused_draft_survives_a_focus_move_and_f1_shows_the_syntax(
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("words", ["status=te", "~^zz"], ids=["status", "regex"])
 def test_pilot_a_filter_with_no_match_leaves_the_verb_keys_nothing_to_send(
-    short_root: Path,
+    short_root: Path, words: str
 ) -> None:
     """DL-65's guard under DL-511: with zero matches no job is selected, so
-    a verb key on the table sends nothing."""
+    a verb key on the table sends nothing. A regular expression's zero
+    comes from the render's bounded pass, as any other word's does (DL-514)."""
 
     async def scenario() -> None:
         engine, server, loop_task = await _serve(short_root / "run", _FILTER_ESTATE)
@@ -2090,7 +2093,7 @@ def test_pilot_a_filter_with_no_match_leaves_the_verb_keys_nothing_to_send(
 
                 app._client.request = capture
 
-                await pilot.press("slash", *"status=te", "enter")
+                await pilot.press("slash", *words, "enter")
                 await _wait_for_ui(pilot, lambda: app._table_sync.identity == [])
                 assert app.focused is table
                 assert app._selected is None
@@ -2098,6 +2101,117 @@ def test_pilot_a_filter_with_no_match_leaves_the_verb_keys_nothing_to_send(
                 await pilot.pause()
                 assert not isinstance(app.screen, ConfirmScreen)
                 assert sent == []
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+#: a long, ordinary job name on which `([a-z_]+)+\d$` backtracks for minutes (DL-514)
+_SLOW_NAME = "core_daily_load_customer_accounts_x"
+_SLOW_WORD = r"~([a-z_]+)+\d$"
+_SLOW_ESTATE = (
+    f"insert_job: {_SLOW_NAME}\njob_type: c\ncommand: x\nmachine: m1\n\n"
+    "insert_job: core_b\njob_type: c\ncommand: x\nmachine: m1\n\n"
+    "insert_job: other_c\njob_type: c\ncommand: x\nmachine: m1\n"
+)
+_SLOW_ORDER = sorted([_SLOW_NAME, "core_b", "other_c"])
+
+
+def test_pilot_dl514_a_draft_that_takes_too_long_is_refused(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DL-514: a draft whose bounded pass is stopped is refused like a word
+    that does not read. Its message shows, the filter in force keeps the
+    table and the title, Enter stays in the line, and a draft that matches
+    in time clears the message and takes force. The app answers keys after."""
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", _SLOW_ESTATE)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == _SLOW_ORDER)
+                table = app.query_one("#jobs", DataTable)
+                line = app.query_one("#filterline", Input)
+                core = sorted([_SLOW_NAME, "core_b"])
+
+                await pilot.press("slash", *"=core_*")
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == core)
+
+                # the whole draft at once, as a paste: typed, its prefix `~([a-z_]+)` reads
+                # well and would take force first
+                monkeypatch.setattr(runner_tui, "_FILTER_LIMIT_S", 0.02)
+                line.value = "=core_* " + _SLOW_WORD
+                line.cursor_position = len(line.value)
+                await _wait_for_ui(pilot, lambda: _filter_message(app) is not None)
+                assert _filter_message(app) == (
+                    "the filter took too long to match and is not applied"
+                )
+                assert app._filter == "=core_*"
+                assert app._table_sync.identity == core
+                assert "/=core_*/" in str(table.border_title)
+
+                await pilot.press("enter")
+                await pilot.pause()
+                assert app.focused is line
+                assert str(line.styles.display) == "block"
+
+                # the real limit again. The backspaces remove `$`; then `d`, leaving
+                # `~([a-z_]+)+\d`, which still backtracks and meets a real stop; then `\`,
+                # leaving a refused draft. `~([a-z_]+)+` then matches in time.
+                monkeypatch.undo()
+                await pilot.press("backspace", "backspace", "backspace")
+                await _wait_for_ui(pilot, lambda: _filter_message(app) is None)
+                assert app._filter == r"=core_* ~([a-z_]+)+"
+                assert app._table_sync.identity == core
+
+                await pilot.press("enter")  # the app answers: Enter now leaves the line
+                await pilot.pause()
+                assert app.focused is table
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl514_a_filter_stopped_on_a_status_answer_is_cleared_once(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DL-514: a filter in force matches in time while no job is in SUCCESS,
+    since its status word answers first. A status answer that puts the long
+    name in SUCCESS stops its pass: the line, the text and the predicate are
+    cleared once, the console says so, and the table shows every job."""
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", _SLOW_ESTATE)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == _SLOW_ORDER)
+                table = app.query_one("#jobs", DataTable)
+                line = app.query_one("#filterline", Input)
+                console = app.query_one("#console", RichLog)
+                words = "status=su " + _SLOW_WORD
+
+                await pilot.press("slash", *words, "enter")
+                await _wait_for_ui(pilot, lambda: app._filter == words)
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == [])
+                assert app.focused is table
+
+                monkeypatch.setattr(runner_tui, "_FILTER_LIMIT_S", 0.02)
+                await _set_status(app, pilot, _SLOW_NAME, "SUCCESS")
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == _SLOW_ORDER)
+                assert app._filter == "" and app._job_filter.tests == ()
+                assert line.value == "" and str(line.styles.display) == "none"
+                assert _filter_message(app) is None
+                assert str(table.border_title) == "jobs 3/3"
+                note = re.sub(r"\s+", "", f"filter /{words}/ took too long to match; cleared")
+                assert _console_text(console).count(note) == 1
+
+                await _set_status(app, pilot, "core_b", "SUCCESS")  # a later answer
+                assert _console_text(console).count(note) == 1
+                assert app._table_sync.identity == _SLOW_ORDER
         finally:
             await _teardown(engine, server, loop_task)
 
@@ -2503,6 +2617,245 @@ def test_pilot_pager_ampersand_line_filter_is_a_view_and_bad_patterns_hold_the_p
                 await pilot.press("escape")
                 await pilot.pause()
                 assert app.focused is pager
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl514_a_pager_pattern_that_takes_too_long_is_refused_at_the_prompt(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DL-514: a filter or a search whose bounded pass is stopped is refused
+    through the prompt's error path. The view, and the filter in force, stay."""
+    text = "insert_job: pg_x\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                lines = [f"line {i:04d}" for i in range(40)]
+                lines[12] = f"loaded {_SLOW_NAME}"
+                lines[30] = "loaded core_b"
+                pager = await _seed_pager(pilot, app, "pg_x", lines)
+                prompt = app.query_one("#logsearch", Input)
+
+                await pilot.press("m")
+                await pilot.pause()
+                await pilot.press("ampersand", *"loaded", "enter")
+                await pilot.pause()
+                assert pager._display == [lines[12], lines[30]]
+
+                monkeypatch.setattr(runner_tui, "_PAGER_LIMIT_S", 0.02)
+                slow = _SLOW_WORD[1:]
+                for verb in ("ampersand", "slash"):
+                    await pilot.press(verb, *slow, "enter")
+                    await pilot.pause()
+                    assert app.focused is prompt and prompt.value == slow
+                    assert "the pattern took too long to match" in str(prompt.border_title)
+                    assert pager._display == [lines[12], lines[30]]
+                    assert len(pager.lines) == 2
+                    assert pager._line_filter_text == "loaded"
+                    assert pager._needle is None and pager._matches == []
+                    await pilot.press("escape")
+                    await pilot.pause()
+                    assert app.focused is pager
+
+                await pilot.press("slash", "(", "enter")  # a search that does not compile
+                await pilot.pause()
+                assert "bad pattern" in str(prompt.border_title)
+                assert pager._needle is None
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_a_batch_past_the_cap_trims_the_view_and_shifts_the_matches(
+    short_root: Path,
+) -> None:
+    """A batch that carries the view past `_PAGER_BUFFER_LINES` trims its
+    oldest rows as the widget does, shifts the search matches, and keeps a
+    paused view where it was. The batch's rows come from one bounded pass."""
+    text = "insert_job: pg_z\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "pg_z" in app._rows)
+                # the tail has taken its source, so no later source change empties the buffer
+                await _wait_for_ui(pilot, lambda: app._tail_key is not None)
+                pager = app.query_one("#logtail", _LogTail)
+                pager.feed(["hit 0"] + [f"line {i}" for i in range(1, 100)])
+                assert pager.apply_search("hit", backward=False) is None
+                assert (pager._matches, pager._match_pos) == ([0], 0)
+                await pilot.pause()
+                pager.scroll_home(animate=False)
+                await _wait_for_ui(pilot, lambda: not pager.is_vertical_scroll_end)
+
+                pager.feed(
+                    [f"hit {i}" if i % 1000 == 0 else f"line {i}" for i in range(100, 10_100)]
+                )
+                assert len(pager._display) == 10_000
+                assert pager._display[0] == "line 100"
+                assert pager._matches == [i - 100 for i in range(1000, 10_100, 1000)]
+                assert pager._match_pos == 0
+                assert len(pager._buffer) == 10_000
+
+                assert pager.apply_search("", backward=False) is None  # no search: no position
+                pager.feed([f"tail {i}" for i in range(10)])
+                assert pager._display[0] == "line 110" and pager._display[-1] == "tail 9"
+                assert (pager._matches, pager._match_pos) == ([], None)
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl514_new_lines_that_stop_the_filter_in_force_clear_it(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DL-514: a filter in force matches the seeded lines in time; a batch
+    with the long name stops its pass. The filter is cleared once, the title
+    says so, and every line of the batch is in the view."""
+    text = "insert_job: pg_y\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                seeded = ["start", "job_7", "end ok"]
+                pager = await _seed_pager(pilot, app, "pg_y", seeded)
+
+                await pilot.press("m")
+                await pilot.pause()
+                await pilot.press("ampersand", *_SLOW_WORD[1:], "enter")
+                await pilot.pause()
+                assert pager._display == ["job_7"]
+
+                monkeypatch.setattr(runner_tui, "_PAGER_LIMIT_S", 0.02)
+                batch = ["plain", _SLOW_NAME, "job_8"]
+                _append_log(app, "pg_y", batch)
+                await _wait_for_ui(pilot, lambda: len(pager._buffer) == 6)
+                await _wait_for_ui(pilot, lambda: pager._line_filter is None)
+                assert pager._line_filter_text == "" and pager._needle is None
+                assert pager._display == seeded + batch
+                assert len(pager.lines) == 6
+                await _wait_for_ui(pilot, lambda: "search and filter cleared" in pager._title_cache)
+                assert "&" not in pager._title_cache
+
+                # the next pattern applied in time removes the note
+                monkeypatch.undo()
+                await pilot.press("slash", *"job", "enter")
+                await pilot.pause()
+                assert pager._matches == [1, 5]
+                assert "cleared" not in pager._title_cache
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl514_a_stop_on_new_lines_keeps_a_paused_view_and_its_note_leaves_with_the_log(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DL-514: when new lines stop the filter in force under a paused view,
+    the rebuilt view keeps its place instead of jumping to the tail. The
+    title's note belongs to that log: a change of stream drops it."""
+    text = "insert_job: pg_p\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                seeded = [f"step_{chr(97 + i % 26)}{i % 10}" for i in range(100)]
+                pager = await _seed_pager(pilot, app, "pg_p", seeded)
+
+                await pilot.press("m")
+                await pilot.pause()
+                await pilot.press("ampersand", *_SLOW_WORD[1:], "enter")
+                await pilot.pause()
+                assert pager._display == seeded
+                await pilot.press("g")  # top: the view pauses
+                await _wait_for_ui(pilot, lambda: "[paused]" in pager._title_cache)
+
+                monkeypatch.setattr(runner_tui, "_PAGER_LIMIT_S", 0.02)
+                _append_log(app, "pg_p", ["plain", _SLOW_NAME])
+                await _wait_for_ui(pilot, lambda: pager._line_filter is None)
+                assert pager._display == [*seeded, "plain", _SLOW_NAME]
+                await _wait_for_ui(pilot, lambda: "search and filter cleared" in pager._title_cache)
+                assert pager.scroll_y == 0 and not pager.is_vertical_scroll_end
+
+                await pilot.press("o")  # the other stream: a different log
+                await _wait_for_ui(pilot, lambda: "log (err)" in pager._title_cache)
+                assert "cleared" not in pager._title_cache
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl514_a_search_does_not_run_the_filter_in_force_again(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DL-514 at the pager's real limit: `&.*error` over 10 000 buffered lines
+    of 200 characters is accepted at the prompt. Under a limit too small for
+    that filter's pass over the buffer, a new search and the clearing of a
+    search are still accepted, since they match only the lines the filter
+    shows; the same filter given again is refused."""
+    text = "insert_job: pg_e\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "pg_e" in app._rows)
+                # the tail has taken its source, so no later source change empties the buffer
+                await _wait_for_ui(pilot, lambda: app._tail_key is not None)
+                pager = app.query_one("#logtail", _LogTail)
+                prompt = app.query_one("#logsearch", Input)
+                lines = [
+                    (f"2026-11-17T10:00:00 job_{i:05d} step {i % 7} " + "x" * 200)[:200]
+                    for i in range(10_000)
+                ]
+                for i in range(0, 10_000, 100):
+                    lines[i] = (f"2026-11-17T10:00:00 job_{i:05d} error code {i} " + "y" * 200)[
+                        :200
+                    ]
+                pager.feed(lines)
+                assert len(pager._buffer) == 10_000
+
+                await pilot.press("m")
+                await pilot.pause()
+                await pilot.press("ampersand", *".*error", "enter")
+                await pilot.pause()
+                assert app.focused is pager
+                assert pager._line_filter_text == ".*error"
+                assert len(pager._display) == 100
+
+                monkeypatch.setattr(runner_tui, "_PAGER_LIMIT_S", 0.02)
+                await pilot.press("slash", *"code", "enter")
+                await pilot.pause()
+                assert app.focused is pager
+                assert len(pager._matches) == 100 and pager._needle_text == "code"
+                await pilot.press("slash", "enter")  # clearing the search
+                await pilot.pause()
+                assert app.focused is pager and pager._needle is None
+
+                await pilot.press("ampersand", *".*error", "enter")  # the full pass again
+                await pilot.pause()
+                assert app.focused is prompt
+                assert "the pattern took too long to match" in str(prompt.border_title)
+                assert len(pager._display) == 100
         finally:
             await _teardown(engine, server, loop_task)
 

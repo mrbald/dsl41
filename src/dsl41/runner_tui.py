@@ -35,9 +35,12 @@ Contract detail for DL-46, within DL-41's frame:
   shows only matching lines, a view of the buffer; an empty submit clears and escape cancels the
   prompt only (ESCAPE_TO_MINIMIZE is off so textual cannot swallow it). Follow is
   pinned-at-bottom: scrolling up pauses ([paused] in the title) and `F`/`G`/End resume. Buffer,
-  filter view and widget cap at _PAGER_BUFFER_LINES in lockstep. `m` maximizes the log pane (tail
-  plus prompt line) so the prompt stays visible. `m`/`o`/`r`, `F1` and the resize keys pass
-  through to the app.
+  filter view and widget cap at _PAGER_BUFFER_LINES in lockstep. A search or filter is matched
+  under the pager's processor-time limit of DL-514, and a new search matches only the lines the
+  filter shows: one refused at the prompt leaves the view as it was, and one in force that new
+  lines stop is cleared, with a note in the title. `m` maximizes the
+  log pane (tail plus prompt line) so the prompt stays visible. `m`/`o`/`r`, `F1` and the resize
+  keys pass through to the app.
 - The event console (`:`) accepts exactly the ss10 sendevent verbs (job verbs; SET_GLOBAL
   NAME=value; CHANGE_STATUS [job] STATUS [exit_code]); an omitted job means the selected row.
   Escape clears the typed line and returns focus to the table. Every request and response is
@@ -78,7 +81,10 @@ Contract detail for DL-46, within DL-41's frame:
   another row of a tree that has one, nothing in a flat view (DL-512). `/` opens
   the filter line (DL-511): words that all match, each a name pattern, a status or box test, or
   negated, read at each keystroke. A refused line shows its message under the line and leaves the
-  filter in force; Enter keeps a good line, Esc clears. With the log pager focused `/` searches
+  filter in force; Enter keeps a good line, Esc clears. The filter is matched under the jobs
+  filter's processor-time limit of DL-514: a draft it stops is refused, and a filter in force it
+  stops later, by a status answer or a change of view, is cleared, with a console line. With the
+  log pager focused `/` searches
   the log instead. `v` cycles the view all, problems, active.
   Filtered and non-'all' views are flat, so a match inside a folded box is never invisible. The
   console is on `:`. The status response's spec_drift flag renders in the subtitle: files changed
@@ -108,7 +114,7 @@ import re
 import shlex
 import sys
 from collections import deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -140,6 +146,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover -- exercised via CLI guar
 
 from dsl41.display_time import format_local_at
 from dsl41.job_filter import JobFilter, read_filter
+from dsl41.match_bound import Stopped, run_bounded
 from dsl41.runner_access import Principal
 from dsl41.start_refusals import RefusalKey, scheduler_refusal_counts
 from dsl41.runner_admission import addressed_key
@@ -183,6 +190,11 @@ _DETAILS_TAIL_BYTES = 4096
 _DETAILS_TAIL_LINES = 10
 #: pager memory bound: buffer, widget and display list cap here in lockstep.
 _PAGER_BUFFER_LINES = 10_000
+#: seconds of processor time one pass of the jobs filter may use (DL-514)
+_FILTER_LIMIT_S = 0.25
+#: seconds of processor time one pass of the log pager may use; an honest pattern costs more
+#: over 10 000 log lines than over the job names (DL-514)
+_PAGER_LIMIT_S = 5.0
 _COLUMNS = ("job", "status", "attempt", "at", "run", "exit", "flags", "timers", "alarms")
 #: fixed render widths for the bounded columns (the wider of content and header label).
 #: Auto-width stays on job and timers, whose content varies. Fixed widths keep update_cell's
@@ -746,6 +758,26 @@ def compile_search(pattern: str) -> re.Pattern[str] | str:
         return f"bad pattern: {exc}"
 
 
+#: a pager row to write: the line and the spans its search highlights
+type _PagerRow = tuple[str, list[tuple[int, int]]]
+#: the prompt's refusal of a pattern that a bounded pass stopped (DL-514)
+_PATTERN_TOO_SLOW = "the pattern took too long to match"
+
+
+def _pager_rows(
+    lines: Iterable[str], line_filter: re.Pattern[str] | None, needle: re.Pattern[str] | None
+) -> list[_PagerRow]:
+    """The lines a pager view shows, each with its search spans. It only matches, so it runs
+    in a bounded pass before the view changes (DL-514). A line with any match, even an empty
+    one, is a search match."""
+    rows: list[_PagerRow] = []
+    for line in lines:
+        if line_filter is None or line_filter.search(line):
+            spans = [] if needle is None else [m.span() for m in needle.finditer(line)]
+            rows.append((line, spans))
+    return rows
+
+
 class _LogSearchInput(Input):
     """The pager prompt line (`/`, `?`, `&`). Escape cancels the prompt and returns focus to the
     log without leaving the pager. RunnerApp disables textual's escape-to-minimize, which
@@ -837,27 +869,36 @@ class _LogTail(RichLog):
         self._matches: list[int] = []  # widget rows matching the needle
         self._match_pos: int | None = None  # index into _matches
         self._title_cache = ""
+        #: what a stop on new lines cleared, shown in the title until the next pattern (DL-514)
+        self._notice = ""
 
     # ------------------------------------------------------------- data plane
 
     def set_source(self, stream: str, path: str | None) -> None:
         """New tail target (job switch, o toggle, truncation): drop the buffer, keep the
-        search and filter patterns, as less does across files."""
+        search and filter patterns, as less does across files. A note of patterns cleared on
+        the old log goes with it (DL-514)."""
         self._stream, self._path = stream, path
         self._buffer.clear()
         self._display = []
         self._matches = []
         self._match_pos = None
+        self._notice = ""
         self.clear()
         self._refresh_title()
 
     def feed(self, lines: list[str]) -> None:
+        """New lines join the buffer first, so a stop loses none of them. Which of them show, and
+        their search spans, come from one bounded pass before anything is written (DL-514)."""
         was_at_end = self.is_vertical_scroll_end
-        for line in lines:
-            self._buffer.append(line)
-            if self._line_filter is None or self._line_filter.search(line):
-                self._display.append(line)
-                self._write_row(line, len(self._display) - 1)
+        self._buffer.extend(lines)
+        rows = run_bounded(
+            lambda: _pager_rows(lines, self._line_filter, self._needle), _PAGER_LIMIT_S
+        )
+        if isinstance(rows, Stopped):
+            self._drop_patterns(was_at_end)
+            return
+        self._write_rows(rows)
         overflow = len(self._display) - _PAGER_BUFFER_LINES
         if overflow > 0:
             # the widget already trimmed itself via max_lines; mirror it
@@ -879,46 +920,65 @@ class _LogTail(RichLog):
             self.scroll_to(y=max(0, self.scroll_y - overflow), animate=False)
         self._refresh_title()
 
-    def _write_row(self, line: str, row: int) -> None:
-        text = Text(line)
-        if self._needle is not None:
-            spans = list(self._needle.finditer(line))
-            if spans:
-                for span in spans:
-                    text.stylize("reverse", span.start(), span.end())
-                self._matches.append(row)
-        self.write(text, scroll_end=False)
+    def _drop_patterns(self, was_at_end: bool) -> None:
+        """New lines stopped the pass of the filter or search in force: both are cleared once,
+        since a pass cannot tell which one ran long, and the view is rebuilt from the buffer
+        without them. A view at its end follows the tail and a paused one keeps its place. The
+        title says so until the next pattern is applied or the log changes (DL-514)."""
+        top = int(self.scroll_y)  # clear() inside _redraw resets the scroll
+        self._line_filter, self._line_filter_text = None, ""
+        self._needle, self._needle_text = None, ""
+        self._redraw(_pager_rows(self._buffer, None, None))
+        self._notice = "a pattern took too long to match; search and filter cleared"
+        if was_at_end:
+            self.scroll_end(animate=False)
+        else:
+            self.scroll_to(y=min(top, self.max_scroll_y), animate=False)
+        self._refresh_title()
 
-    def _rebuild(self) -> None:
-        """Re-render the view from the buffer after a search or filter change."""
+    def _write_rows(self, rows: list[_PagerRow]) -> None:
+        for line, spans in rows:
+            self._display.append(line)
+            text = Text(line)
+            for start, end in spans:
+                text.stylize("reverse", start, end)
+            if spans:
+                self._matches.append(len(self._display) - 1)
+            self.write(text, scroll_end=False)
+
+    def _redraw(self, rows: list[_PagerRow]) -> None:
+        """Re-render the view from rows computed beforehand."""
         self.clear()
         self._display = []
         self._matches = []
         self._match_pos = None
-        for line in self._buffer:
-            if self._line_filter is None or self._line_filter.search(line):
-                self._display.append(line)
-                self._write_row(line, len(self._display) - 1)
+        self._write_rows(rows)
 
     # ------------------------------------------------------------ search model
 
     def apply_search(self, pattern: str, backward: bool) -> str | None:
         """Set the needle ('' clears it); returns an error string for the prompt, None on
         success. It jumps to the first match after (for `?`, before) the top row, wrapping."""
-        top = int(self.scroll_y)  # clear() inside _rebuild resets the scroll
-        if not pattern:
-            self._needle = None
-            self._needle_text = ""
-            self._rebuild()
-            # clearing a search keeps the view in place
-            self.scroll_to(y=min(top, self.max_scroll_y), animate=False)
-            self._refresh_title()
-            return None
-        compiled = compile_search(pattern)
-        if isinstance(compiled, str):
-            return compiled
-        self._needle, self._needle_text, self._search_backward = compiled, pattern, backward
-        self._rebuild()
+        needle: re.Pattern[str] | None = None
+        if pattern:
+            compiled = compile_search(pattern)
+            if isinstance(compiled, str):
+                return compiled
+            needle = compiled
+        # the search matches only the lines the filter in force shows, so it never runs that
+        # filter again, and clearing it runs no pattern (DL-514)
+        shown = self._display
+        rows = (
+            _pager_rows(shown, None, None)
+            if needle is None
+            else run_bounded(lambda: _pager_rows(shown, None, needle), _PAGER_LIMIT_S)
+        )
+        if isinstance(rows, Stopped):
+            return _PATTERN_TOO_SLOW
+        top = int(self.scroll_y)  # clear() inside _redraw resets the scroll
+        self._redraw(rows)
+        self._notice = ""
+        self._needle, self._needle_text, self._search_backward = needle, pattern, backward
         if self._matches:
             if backward:
                 below = [i for i, row in enumerate(self._matches) if row < top]
@@ -928,19 +988,26 @@ class _LogTail(RichLog):
                 self._match_pos = above[0] if above else 0
             self._jump()
         else:
+            # a cleared search, or one that matches nothing, keeps the view in place
             self.scroll_to(y=min(top, self.max_scroll_y), animate=False)
         self._refresh_title()
         return None
 
     def apply_line_filter(self, pattern: str) -> str | None:
+        line_filter: re.Pattern[str] | None = None
         if pattern:
             compiled = compile_search(pattern)
             if isinstance(compiled, str):
                 return compiled
-            self._line_filter, self._line_filter_text = compiled, pattern
-        else:
-            self._line_filter, self._line_filter_text = None, ""
-        self._rebuild()
+            line_filter = compiled
+        # the filter runs over the buffer, and the search over the lines that pass it (DL-514)
+        needle = self._needle
+        rows = run_bounded(lambda: _pager_rows(self._buffer, line_filter, needle), _PAGER_LIMIT_S)
+        if isinstance(rows, Stopped):
+            return _PATTERN_TOO_SLOW
+        self._redraw(rows)
+        self._notice = ""
+        self._line_filter, self._line_filter_text = line_filter, pattern
         self.scroll_end(animate=False)  # a new view of a log starts at its tail
         self._refresh_title()
         return None
@@ -1019,6 +1086,8 @@ class _LogTail(RichLog):
         if self._needle_text:
             at = "-" if self._match_pos is None else str(self._match_pos + 1)
             title.append(f"  /{self._needle_text}/ {at}/{len(self._matches)}", style="italic")
+        if self._notice:
+            title.append(f"  {self._notice}", style="bold yellow")
         if not self.is_vertical_scroll_end:
             title.append("  [paused]", style="bold yellow")
         if title.plain != self._title_cache:
@@ -1651,7 +1720,7 @@ class RunnerApp(App[None]):
         status = str(row.get("status", ""))
         return status in ("FAILURE", "TERMINATED", "QUE_WAIT") or bool(self._alarms.get(name))
 
-    def _match(self, name: str, row: dict[str, Any]) -> bool:
+    def _match(self, name: str, row: dict[str, Any], job_filter: JobFilter) -> bool:
         mode = self._VIEW_MODES[self._view_mode]
         if mode == "problems" and not self._is_problem(name, row):
             return False
@@ -1662,7 +1731,7 @@ class RunnerApp(App[None]):
         ):
             return False
         box = row.get("box_name")
-        return self._job_filter.matches(
+        return job_filter.matches(
             name, str(row.get("status", "")), box if isinstance(box, str) else None
         )
 
@@ -1675,13 +1744,13 @@ class RunnerApp(App[None]):
             kids.setdefault(box if isinstance(box, str) else None, []).append(name)
         return kids
 
-    def _visible(self) -> list[tuple[str, int]]:
+    def _visible(self, job_filter: JobFilter) -> list[tuple[str, int]]:
         """(job, depth) rows in display order: the box tree with collapsed subtrees omitted, or a
-        flat filtered list while a filter or a non-'all' view is active, so a match inside a
-        collapsed box is never invisible."""
+        flat list under `job_filter` while it has words or a non-'all' view is active, so a match
+        inside a collapsed box is never invisible. Only the flat list runs a person's pattern."""
         jobs = self._jobs_snapshot
-        if self._filter or self._view_mode:
-            return [(n, 0) for n in sorted(jobs) if self._match(n, jobs[n])]
+        if job_filter.tests or self._view_mode:
+            return [(n, 0) for n in sorted(jobs) if self._match(n, jobs[n], job_filter)]
         kids = self._children()
         out: list[tuple[str, int]] = []
         buried: set[str] = set()
@@ -1752,12 +1821,27 @@ class RunnerApp(App[None]):
             self._selected = None
         return self._restore_selected
 
-    def _render_table(self) -> None:
+    def _visible_in_force(self) -> list[tuple[str, int]]:
+        """The rows under the filter in force, matched in one bounded pass (DL-514). A stopped
+        pass clears that filter once, with a console line, and the rows are the view's."""
+        visible = run_bounded(lambda: self._visible(self._job_filter), _FILTER_LIMIT_S)
+        if not isinstance(visible, Stopped):
+            return visible
+        self._console_write(
+            Text(f"filter /{self._filter}/ took too long to match; cleared", style="yellow")
+        )
+        self._drop_filter()
+        return self._visible(self._job_filter)
+
+    def _render_table(self, visible: list[tuple[str, int]] | None = None) -> None:
+        """Render `visible`, which a draft's bounded pass computed, or the rows under the
+        filter in force."""
         try:
             table = self.query_one("#jobs", DataTable)
         except NoMatches:
             return  # teardown
-        visible = self._visible()
+        if visible is None:
+            visible = self._visible_in_force()
         kids = self._children()
         flat = bool(self._filter or self._view_mode)
         order = [name for name, _ in visible]
@@ -2200,13 +2284,20 @@ class RunnerApp(App[None]):
         line.focus()
 
     def clear_filter(self) -> None:
+        self.query_one("#jobs", DataTable).focus()
+        self._drop_filter()
+        self.query_one("#filterline", Input).styles.display = "none"
+        self._render_table()
+
+    def _drop_filter(self) -> None:
+        """Empty the line and clear the filter's text, predicate and message. A line without
+        focus closes; one with focus stays open, so the next keystroke is not a verb key."""
         line = self.query_one("#filterline", Input)
         line.value = ""
         self._filter, self._job_filter = "", JobFilter()
         self._show_filter_refusal(None)
-        line.styles.display = "none"
-        self.query_one("#jobs", DataTable).focus()
-        self._render_table()
+        if not line.has_focus:
+            line.styles.display = "none"
 
     def _show_filter_refusal(self, message: str | None) -> None:
         """The refused line's message, under the filter line; a Text, so it is never markup."""
@@ -2222,9 +2313,14 @@ class RunnerApp(App[None]):
             # the filter in force stays and goes on applying to each status answer (DL-511)
             self._show_filter_refusal(reading)
             return
+        # the draft is tried over the present rows before it takes force (DL-514)
+        visible = run_bounded(lambda: self._visible(reading), _FILTER_LIMIT_S)
+        if isinstance(visible, Stopped):
+            self._show_filter_refusal("the filter took too long to match and is not applied")
+            return
         self._show_filter_refusal(None)
         self._filter, self._job_filter = text, reading
-        self._render_table()
+        self._render_table(visible)
 
     @on(Input.Submitted, "#filterline")
     def _on_filter_submitted(self, event: Input.Submitted) -> None:
@@ -2232,8 +2328,8 @@ class RunnerApp(App[None]):
         if not text:
             self.clear_filter()
             return
-        if isinstance(read_filter(text), str):
-            return  # a refused line keeps the input and its message (DL-511)
+        if text != self._filter:
+            return  # a refused or stopped draft keeps the input and its message (DL-511, DL-514)
         self.query_one("#filterline", Input).styles.display = "none"
         self.query_one("#jobs", DataTable).focus()
 

@@ -1341,6 +1341,21 @@ the line and leaves the filter in force, which goes on applying to each
 status answer. Enter keeps a good line and stays on a refused one, Escape
 clears the line and the filter, and the table's title shows the filter in
 force. `job_filter.py` reads the line; DL-511 lists the refused words.
+
+A person's pattern is matched under a limit of the process's processor
+time (DL-514): 0.25 s for a pass of the jobs filter, 5 s for a pass of the
+log pager. One bounded pass covers a table render, a pager rebuild or a
+batch of new log lines, and it changes nothing until it ends. A new search
+matches only the lines the pager's filter shows, so it never runs that
+filter again; clearing a search runs no pattern.
+A stopped draft in the filter line is refused with its message, and the
+filter in force stays. A filter in force stopped later, by a status answer
+or a change of view, is cleared once, with a console line, and the table
+shows the whole view. In the pager, a filter or search stopped at the
+prompt is refused there, and the view stays. New lines enter the buffer
+first; if they stop the filter or search in force, both are cleared, the
+title says so until the next pattern or another log, and the view is
+rebuilt without them, keeping its place when it was paused.
 Verb keys act only while the jobs table has focus; KILLJOB and
 FORCE_STARTJOB from a key confirm first, showing the target, its box
 members, and the revision the request will name, frozen when the modal
@@ -1492,6 +1507,8 @@ the split cannot decay into a second name for one file.
   stdlib-only for the same reason (DL-72).
 - `runner_tui.py`: the §11 TUI (guarded textual import).
 - `job_filter.py`: the §11 filter line's reader, with no textual import (DL-511).
+- `match_bound.py`: the §11 processor-time limit on a person's pattern, with no
+  textual import (DL-514).
 - `runner_startup.py`: taking possession of a run root: genesis, resume and
   the recovery barrier (DL-433). It prepares the catch-up steps that
   `runner.py` runs.

@@ -806,6 +806,8 @@ Runner:
   a wake-up signal.
 - `src/dsl41/job_filter.py`: the TUI's jobs filter line read into a
   predicate or a one-line refusal (DL-511).
+- `src/dsl41/match_bound.py`: runs the matching of a person's pattern
+  under a limit of the process's processor time (DL-514).
 
 Shared cores:
 
@@ -1055,6 +1057,9 @@ Runner:
 - `tests/test_job_filter.py`: the jobs filter's word forms, negations and
   refusals, and a property that the reader and its predicate never raise
   (DL-511).
+- `tests/test_match_bound.py`: the processor-time limit on a person's
+  pattern: backtracking shapes stopped, the handler kept, nested and
+  unbounded passes (DL-514).
 - `tests/test_control_as.py`: real-engine person tiers, catalog projection,
   request scope, actor records, retry identity, malformed wrappers, stream
   revocation, UI wrapping and denied-status exit (DL-499).

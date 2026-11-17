@@ -24,6 +24,8 @@ before the detector checks:
   handlers for SIGINT, SIGTERM and SIGHUP, and closing its loop leaves the
   defaults, not the handlers it found; tests run it in-process, under coverage
   too.
+- `_restore_match_bound_handler` (conftest.py): the first bounded pass
+  installs the `SIGVTALRM` handler for the life of the process (DL-514).
 - `_restore_signal_handlers` (test_runner_supervisor.py): `Supervisor.run()`
   installs its handlers before it binds, and a test that stops it at the bind
   leaves them behind.
