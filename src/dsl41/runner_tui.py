@@ -73,8 +73,10 @@ Contract detail for DL-46, within DL-41's frame:
 - Navigation at estate scale (DL-65): the jobs table renders the box tree (indent from the status
   response's box_name; space folds the selected box, `z` folds or unfolds all; a folded box shows
   its hidden descendant count and a red problem tally, so a fold never hides a FAILURE). `/` opens
-  an incremental name filter (space-separated substrings AND'd; Enter keeps it, Esc clears; with
-  the log pager focused `/` searches the log instead). `v` cycles the view all, problems, active.
+  the filter line (DL-511): words that all match, each a name pattern, a status or box test, or
+  negated, read at each keystroke. A refused line shows its message under the line and leaves the
+  filter in force; Enter keeps a good line, Esc clears. With the log pager focused `/` searches
+  the log instead. `v` cycles the view all, problems, active.
   Filtered and non-'all' views are flat, so a match inside a folded box is never invisible. The
   console is on `:`. The status response's spec_drift flag renders in the subtitle: files changed
   on disk, the running catalog is the truth.
@@ -131,6 +133,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover -- exercised via CLI guar
     ) from exc
 
 from dsl41.display_time import format_local_at
+from dsl41.job_filter import JobFilter, read_filter
 from dsl41.runner_access import Principal
 from dsl41.start_refusals import RefusalKey, scheduler_refusal_counts
 from dsl41.runner_admission import addressed_key
@@ -635,8 +638,9 @@ class _JobsTable(DataTable[Any]):
     f force-start, k kill, i/I ice on/off, h/H hold on/off, n/N noexec
     on/off. k and f confirm first.
 
-    d or Enter opens details, t opens triggers, / filters by name, v
-    cycles all/problems/active, space folds a box, z folds every box.
+    d or Enter opens details, t opens triggers, / filters (F1 in the
+    filter line shows the syntax), v cycles all/problems/active, space
+    folds a box, z folds every box.
     """
     BINDINGS = [
         Binding("s", "app.send('STARTJOB')", "start"),
@@ -654,9 +658,24 @@ class _JobsTable(DataTable[Any]):
 
 
 class _FilterInput(Input):
-    """The `/` filter line. Escape clears and hides it; Enter (Input.Submitted, handled by the
-    app) keeps the filter and returns to the table."""
+    """The `/` filter line (DL-511). Escape clears and hides it; Enter (Input.Submitted, handled
+    by the app) keeps a good line and returns to the table, and stays on a refused one."""
 
+    HELP = """
+    Words separated by spaces. A job shows when every word matches it.
+    Letter case is ignored.
+
+    - `core`: the name contains core; `*`, `?` and `[...]` are wildcards
+    - `=core_*`: the whole name matches the pattern
+    - `@a*,b*`: the whole name matches one pattern of the list
+    - `~regex`: the regular expression is found in the name; write a space as `\\s`
+    - `status=su`, `status@su,fa`: the status, by its name or a start that fits exactly one
+    - `box=b*`, `box@a*,b*`: the name of the job's own box matches
+    - `!word`, `status!=su`, `box!@a*,b*`: the word does not match
+    - `\\text`: the name contains the text as written
+
+    Example: `!status=su =core_*`. Enter keeps a good line, Esc clears.
+    """
     BINDINGS = [Binding("escape", "clear_filter", "clear")]
 
     def action_clear_filter(self) -> None:
@@ -1216,6 +1235,7 @@ class RunnerApp(App[None]):
     #main { height: 1fr; }
     #tablecol { width: 3fr; }
     #filterline { display: none; }
+    #filtermsg { display: none; height: auto; padding: 0 1; }
     #jobs { height: 1fr; border: round $primary; }
     #side { width: 2fr; }
     #explain-box { height: 2fr; border: round $primary; }
@@ -1298,7 +1318,10 @@ class RunnerApp(App[None]):
         #: number
         self._baseline = ""
         self._claimed_actor = person.spelling if person is not None else claimed_actor()
-        self._filter = ""  # space-separated substrings, AND'd, case-insensitive
+        #: the filter in force (DL-511): its text, for the title, and its reading. A refused draft
+        #: on the line leaves both as they were.
+        self._filter = ""
+        self._job_filter = JobFilter()
         self._view_mode = 0  # index into _VIEW_MODES
         self._collapsed: set[str] = set()  # box rows folded shut
         self._table_sync = _TableSync()  # DL-178v: shared with TriggersScreen
@@ -1328,8 +1351,10 @@ class RunnerApp(App[None]):
         with Horizontal(id="main"):
             with Vertical(id="tablecol"):
                 yield _FilterInput(
-                    placeholder="filter: substring(s) -- Enter keeps, Esc clears", id="filterline"
+                    placeholder="filter: !status=su =core_* -- Enter keeps, Esc clears, F1 syntax",
+                    id="filterline",
                 )
+                yield Static(id="filtermsg")
                 yield _JobsTable(id="jobs")
             with Vertical(id="side"):
                 with _ExplainPane(id="explain-box"):
@@ -1603,8 +1628,10 @@ class RunnerApp(App[None]):
             "QUE_WAIT",
         ):
             return False
-        hay = name.lower()
-        return all(term in hay for term in self._filter.lower().split())
+        box = row.get("box_name")
+        return self._job_filter.matches(
+            name, str(row.get("status", "")), box if isinstance(box, str) else None
+        )
 
     def _children(self) -> dict[str | None, list[str]]:
         """box name -> member names (None for top level), from the status snapshot's box_name
@@ -1617,7 +1644,7 @@ class RunnerApp(App[None]):
 
     def _visible(self) -> list[tuple[str, int]]:
         """(job, depth) rows in display order: the box tree with collapsed subtrees omitted, or a
-        flat filtered list while a name filter or a non-'all' view is active, so a match inside a
+        flat filtered list while a filter or a non-'all' view is active, so a match inside a
         collapsed box is never invisible."""
         jobs = self._jobs_snapshot
         if self._filter or self._view_mode:
@@ -2135,21 +2162,38 @@ class RunnerApp(App[None]):
     def clear_filter(self) -> None:
         line = self.query_one("#filterline", Input)
         line.value = ""
-        self._filter = ""
+        self._filter, self._job_filter = "", JobFilter()
+        self._show_filter_refusal(None)
         line.styles.display = "none"
         self.query_one("#jobs", DataTable).focus()
         self._render_table()
 
+    def _show_filter_refusal(self, message: str | None) -> None:
+        """The refused line's message, under the filter line; a Text, so it is never markup."""
+        box = self.query_one("#filtermsg", Static)
+        box.update(Text(message or "", style="bold red"))
+        box.styles.display = "block" if message else "none"
+
     @on(Input.Changed, "#filterline")
     def _on_filter_changed(self, event: Input.Changed) -> None:
-        self._filter = event.value.strip()
+        text = event.value.strip()
+        reading = read_filter(text)
+        if isinstance(reading, str):
+            # the filter in force stays and goes on applying to each status answer (DL-511)
+            self._show_filter_refusal(reading)
+            return
+        self._show_filter_refusal(None)
+        self._filter, self._job_filter = text, reading
         self._render_table()
 
     @on(Input.Submitted, "#filterline")
     def _on_filter_submitted(self, event: Input.Submitted) -> None:
-        if not event.value.strip():
+        text = event.value.strip()
+        if not text:
             self.clear_filter()
             return
+        if isinstance(read_filter(text), str):
+            return  # a refused line keeps the input and its message (DL-511)
         self.query_one("#filterline", Input).styles.display = "none"
         self.query_one("#jobs", DataTable).focus()
 
