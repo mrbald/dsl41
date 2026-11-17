@@ -49,6 +49,8 @@ _UNFILTERED = "jobs 3/3"
 # The footer draws "esc clear" only while the filter line has focus, so it proves `/`
 # opened the line. A kept filter shows its value, and the event log already names that job.
 _FILTER_OPEN = "esc clear"
+# the open box's marker and name in the unfiltered tree; a click on the marker folds it (DL-512)
+_MARKER = "▾ recovery_box"
 _SGR = re.compile(rb"\x1b\[[\d;:]*m")
 
 
@@ -1141,6 +1143,22 @@ def _browser_drive(
             until(_FILTER_OPEN, after=mark)
             page.keyboard.press("Escape")
             until(_UNFILTERED, after=mark)
+            # DL-512: a real mouse click on the box's marker folds it. The marker's cell is read
+            # off the painted screen and clicked at its centre in the xterm screen's pixels.
+            columns, rows = resizes[-1]
+            screen = painted_lines(b"".join(output), columns, rows)
+            found = [(y, line.find(_MARKER)) for y, line in enumerate(screen) if _MARKER in line]
+            assert found, f"{engine} painted no {_MARKER!r}; see {diagnostics}"
+            y, x = found[0]
+            box = page.locator(".xterm-screen").bounding_box()
+            assert box is not None
+            mark = len(output)
+            page.mouse.click(
+                box["x"] + (x + 0.5) * box["width"] / columns,
+                box["y"] + (y + 0.5) * box["height"] / rows,
+            )
+            until("▸ recovery_box (1", after=mark)
+            until("jobs 2/3", after=mark)
             page.keyboard.press("q")
             page.locator("body.-closed").wait_for(state="attached")
             assert not errors, errors

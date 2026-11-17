@@ -1487,20 +1487,25 @@ def test_pilot_a_timers_refusal_does_not_erase_a_live_status_refusal(short_root:
 # ------------------- 4. DL-65 estate navigation (box tree / filter / views / details)
 
 
+#: a nested box estate: bt_box holds bt_inner (which holds bt_deep), bt_m1 and bt_m2
+_BOX_TREE_JIL = (
+    "insert_job: bt_box\njob_type: b\n\n"
+    "insert_job: bt_m1\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bt_box\n\n"
+    "insert_job: bt_m2\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bt_box\n\n"
+    "insert_job: bt_inner\njob_type: b\nbox_name: bt_box\n\n"
+    "insert_job: bt_deep\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bt_inner\n\n"
+    "insert_job: bt_solo\njob_type: c\ncommand: x\nmachine: m1\n"
+)
+_BOX_TREE_ORDER = ["bt_box", "bt_inner", "bt_deep", "bt_m1", "bt_m2", "bt_solo"]
+
+
 def test_pilot_box_tree_order_indent_fold_and_fold_all(short_root: Path) -> None:
     """DL-65 box tree: rows follow the box hierarchy (alpha within each
     level), members indent under their box, space folds the SELECTED box
     (members leave the table, the label gains the hidden-descendant count),
     space again unfolds, and `z` folds/unfolds every box at once."""
-    text = (
-        "insert_job: bt_box\njob_type: b\n\n"
-        "insert_job: bt_m1\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bt_box\n\n"
-        "insert_job: bt_m2\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bt_box\n\n"
-        "insert_job: bt_inner\njob_type: b\nbox_name: bt_box\n\n"
-        "insert_job: bt_deep\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bt_inner\n\n"
-        "insert_job: bt_solo\njob_type: c\ncommand: x\nmachine: m1\n"
-    )
-    tree_order = ["bt_box", "bt_inner", "bt_deep", "bt_m1", "bt_m2", "bt_solo"]
+    text = _BOX_TREE_JIL
+    tree_order = _BOX_TREE_ORDER
 
     async def scenario() -> None:
         engine, server, loop_task = await _serve(short_root / "run", text)
@@ -1536,6 +1541,244 @@ def test_pilot_box_tree_order_indent_fold_and_fold_all(short_root: Path) -> None
             await _teardown(engine, server, loop_task)
 
     asyncio.run(scenario())
+
+
+async def _click_label(pilot, row: int, char: int, scroll_x: int = 0, button: int = 1) -> None:
+    """Click character `char` of the job label on table row `row`. The table's border and the
+    cell padding put character 0 two columns in; the border and the header put row 0 two lines
+    down."""
+    await pilot.click("#jobs", offset=(2 + char - scroll_x, 2 + row), button=button)
+    await pilot.pause()
+
+
+@contextlib.asynccontextmanager
+async def _box_tree_app(short_root: Path):
+    """The nested box estate on the real app, its tree shown, the table focused on row 0, and
+    `action_details` counted instead of run, so a click that would open details is seen at
+    once."""
+    engine, server, loop_task = await _serve(
+        short_root / "run", _BOX_TREE_JIL, spec_texts={"bt_box": "insert_job: bt_box\n"}
+    )
+    try:
+        app = RunnerApp(server.path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == _BOX_TREE_ORDER)
+            table = app.query_one("#jobs", _JobsTable)
+            table.focus()
+            table.move_cursor(row=0)
+            await _wait_for_ui(pilot, lambda: app._selected == "bt_box")
+            details: list[str | None] = []
+            app.action_details = lambda: details.append(app._selected)
+            yield app, pilot, table, details
+    finally:
+        await _teardown(engine, server, loop_task)
+
+
+def test_pilot_dl512_a_click_on_a_box_marker_folds_and_unfolds_it(short_root: Path) -> None:
+    """DL-512: a click on a top-level box's marker folds it as space does, a second click
+    unfolds it. The clicked row is the selected one, and no details open, though the row was
+    already selected."""
+
+    async def scenario() -> None:
+        async with _box_tree_app(short_root) as (app, pilot, table, details):
+            stack = list(app.screen_stack)
+            await _click_label(pilot, 0, 0)  # "▾ bt_box": the marker
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == ["bt_box", "bt_solo"])
+            assert str(table.get_cell("bt_box", "job")) == "▸ bt_box (4)"
+            assert app._selected == "bt_box" and table.cursor_row == 0
+
+            await _click_label(pilot, 0, 1)  # the space after the marker belongs to it
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == _BOX_TREE_ORDER)
+            assert str(table.get_cell("bt_box", "job")) == "▾ bt_box"
+            assert app._selected == "bt_box" and table.cursor_row == 0
+            await pilot.pause()
+            assert details == [] and list(app.screen_stack) == stack
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl512_a_click_left_of_a_nested_box_name_folds_that_box(short_root: Path) -> None:
+    """DL-512: the indent and the marker of a nested box fold that box, not its parent, and
+    select its row."""
+
+    async def scenario() -> None:
+        async with _box_tree_app(short_root) as (app, pilot, table, details):
+            folded = ["bt_box", "bt_inner", "bt_m1", "bt_m2", "bt_solo"]
+            await _click_label(pilot, 1, 0)  # "  ▾ bt_inner": the indent
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == folded)
+            assert app._collapsed == {"bt_inner"}
+            assert app._selected == "bt_inner" and table.cursor_row == 1
+            assert str(table.get_cell("bt_inner", "job")) == "  ▸ bt_inner (1)"
+
+            await _click_label(pilot, 1, 2)  # the marker
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == _BOX_TREE_ORDER)
+            assert app._collapsed == set() and app._selected == "bt_inner"
+            await pilot.pause()
+            assert details == []
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl512_a_click_on_a_box_name_selects_and_does_not_fold(short_root: Path) -> None:
+    """DL-512: a click on a box's name selects it as before; a click on the selected box's name
+    opens details as before. Neither folds."""
+
+    async def scenario() -> None:
+        async with _box_tree_app(short_root) as (app, pilot, table, details):
+            await _click_label(pilot, 1, 4)  # "  ▾ bt_inner": the name's first letter
+            await _wait_for_ui(pilot, lambda: app._selected == "bt_inner")
+            assert details == [] and app._collapsed == set()
+
+            await _click_label(pilot, 1, 4)
+            await _wait_for_ui(pilot, lambda: details == ["bt_inner"])
+            assert app._collapsed == set()
+            assert app._table_sync.identity == _BOX_TREE_ORDER
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl512_a_click_left_of_a_job_name_folds_nothing(short_root: Path) -> None:
+    """DL-512: the indent of a job that is no box is no fold target. The click selects the row
+    as before, and a second click there opens details as before, so no fold tag leaked onto
+    the row."""
+
+    async def scenario() -> None:
+        async with _box_tree_app(short_root) as (app, pilot, table, details):
+            await _click_label(pilot, 3, 0)  # "  bt_m1": the indent
+            await _wait_for_ui(pilot, lambda: app._selected == "bt_m1")
+            await pilot.pause()
+            assert app._collapsed == set() and details == []
+            await _click_label(pilot, 3, 0)
+            await _wait_for_ui(pilot, lambda: details == ["bt_m1"])
+            assert app._collapsed == set()
+            assert app._table_sync.identity == _BOX_TREE_ORDER
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl512_under_a_filter_a_first_column_click_folds_nothing(short_root: Path) -> None:
+    """DL-512: a flat view draws no marker, so a click at a box's first characters selects the
+    row and folds nothing, and a second click there opens details as before."""
+
+    async def scenario() -> None:
+        async with _box_tree_app(short_root) as (app, pilot, table, details):
+            await pilot.press("slash", "b", "t", "enter")
+            await _wait_for_ui(pilot, lambda: app._filter == "bt" and table.has_focus)
+            flat = sorted(_BOX_TREE_ORDER)
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == flat)
+            row = flat.index("bt_inner")
+            await _click_label(pilot, row, 0)
+            await _wait_for_ui(pilot, lambda: app._selected == "bt_inner")
+            await pilot.press("z")  # a flat view folds nothing from the keys either
+            await pilot.pause()
+            assert app._collapsed == set() and details == []
+            await _click_label(pilot, row, 0)
+            await _wait_for_ui(pilot, lambda: details == ["bt_inner"])
+            assert app._collapsed == set()
+            assert app._table_sync.identity == flat
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl512_the_marker_answers_with_the_table_scrolled(short_root: Path) -> None:
+    """DL-512: the hit area moves with the table's horizontal scroll, since it is the drawn
+    span itself."""
+
+    async def scenario() -> None:
+        async with _box_tree_app(short_root) as (app, pilot, table, details):
+            assert table.max_scroll_x >= 3, "the table must scroll at this size"
+            table.scroll_to(x=3, animate=False)
+            await _wait_for_ui(pilot, lambda: table.scroll_x == 3)
+            await _click_label(pilot, 1, 2, scroll_x=3)  # "  ▾ bt_inner": its marker
+            await _wait_for_ui(pilot, lambda: app._collapsed == {"bt_inner"})
+            assert app._selected == "bt_inner"
+            await pilot.pause()
+            assert details == []
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl512_a_right_click_on_a_marker_folds_nothing(short_root: Path) -> None:
+    """DL-512: only the first button folds. A right click on a marker goes to the table as
+    before: it selects the row, and on the selected row it opens details."""
+
+    async def scenario() -> None:
+        async with _box_tree_app(short_root) as (app, pilot, table, details):
+            await _click_label(pilot, 1, 2, button=3)  # "  ▾ bt_inner": the marker
+            await _wait_for_ui(pilot, lambda: app._selected == "bt_inner")
+            await pilot.pause()
+            assert app._collapsed == set() and details == []
+            await _click_label(pilot, 1, 2, button=3)
+            await _wait_for_ui(pilot, lambda: details == ["bt_inner"])
+            assert app._collapsed == set()
+            assert app._table_sync.identity == _BOX_TREE_ORDER
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl512_the_lower_border_names_the_fold_keys(short_root: Path) -> None:
+    """DL-512: the jobs table's lower border reads `space fold · z fold all` on a box with
+    members, `z fold all` on another row of a tree with such a box, and nothing in a flat view
+    or in a tree without one. It follows the cursor, a filter set and cleared, and fold all."""
+    both, z_only = "space fold · z fold all", "z fold all"
+
+    async def scenario() -> None:
+        async with _box_tree_app(short_root) as (app, pilot, table, _details):
+
+            def hint() -> str:
+                return table.border_subtitle or ""
+
+            await _wait_for_ui(pilot, lambda: hint() == both)
+            table.move_cursor(row=_BOX_TREE_ORDER.index("bt_m1"))  # a job
+            await _wait_for_ui(pilot, lambda: hint() == z_only)
+            table.move_cursor(row=_BOX_TREE_ORDER.index("bt_inner"))  # a nested box
+            await _wait_for_ui(pilot, lambda: hint() == both)
+
+            await pilot.press("slash", "b", "t", "enter")
+            await _wait_for_ui(pilot, lambda: app._filter == "bt" and table.has_focus)
+            await _wait_for_ui(pilot, lambda: hint() == "")
+            await pilot.press("slash", "escape")
+            await _wait_for_ui(pilot, lambda: app._filter == "" and table.has_focus)
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == _BOX_TREE_ORDER)
+            await _wait_for_ui(pilot, lambda: hint() == both)
+
+            await pilot.press("v")  # the problems view is flat
+            await _wait_for_ui(pilot, lambda: hint() == "")
+            await pilot.press("v", "v")
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == _BOX_TREE_ORDER)
+
+            table.move_cursor(row=_BOX_TREE_ORDER.index("bt_solo"))
+            await _wait_for_ui(pilot, lambda: hint() == z_only)
+            await pilot.press("z")  # fold all from a job's row, as before
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == ["bt_box", "bt_solo"])
+            assert app._selected == "bt_solo" and hint() == z_only
+            await pilot.press("space")  # on a job, space folds nothing, as before
+            await pilot.pause()
+            assert app._collapsed == {"bt_box", "bt_inner"}
+            table.move_cursor(row=0)  # the folded box still has members
+            await _wait_for_ui(pilot, lambda: hint() == both)
+
+    asyncio.run(scenario())
+
+    async def no_box() -> None:
+        text = (
+            "insert_job: nb_box\njob_type: b\n\n"
+            "insert_job: nb_job\njob_type: c\ncommand: x\nmachine: m1\n"
+        )
+        engine, server, loop_task = await _serve(short_root / "run-nb", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: len(app._rows) == 2 and app._selected)
+                table = app.query_one("#jobs", DataTable)
+                for row in (0, 1):  # an empty box and a job: nothing to fold
+                    table.move_cursor(row=row)
+                    await pilot.pause()
+                    assert (table.border_subtitle or "") == ""
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(no_box())
 
 
 def test_pilot_folded_box_rollup_carries_a_red_problem_tally(short_root: Path) -> None:

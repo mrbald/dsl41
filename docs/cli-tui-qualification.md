@@ -89,6 +89,7 @@ The epoch and live-seal evidence references resolve to DL-424.
 | `:` console, `SET_GLOBAL`, `CHANGE_STATUS`, exit code | Parser/echo tests and `test_pilot_explain_pane_atoms_and_console_change_status_echo` |
 | Recovery before write, UNKNOWN, no automatic resend | `test_pilot_displays_recovery_before_send_keeps_it_with_unknown_and_never_resends` in `test_tui_recovery_cli.py`; reconstruction includes every job verb, global value, status, exit code and actor |
 | `/`, Enter keep, Escape clear, `v`, space, `z` | `test_pilot_slash_filter_narrows_flat_enter_keeps_escape_clears`, `test_pilot_filter_not_success_under_a_name_pattern`, `test_pilot_a_refused_draft_keeps_the_filter_in_force`, `test_pilot_enter_stays_on_a_refused_line_and_escape_clears_all`, `test_pilot_a_refused_draft_survives_a_focus_move_and_f1_shows_the_syntax`, `test_pilot_a_filter_with_no_match_leaves_the_verb_keys_nothing_to_send`, `test_pilot_v_cycles_all_problems_active_and_back_to_all`, `test_pilot_box_tree_order_indent_fold_and_fold_all`; the word forms and refusals in `tests/test_job_filter.py` (DL-511) |
+| First-button click on a box's indent or marker; the fold keys on the table's lower border (DL-512) | `test_pilot_dl512_a_click_on_a_box_marker_folds_and_unfolds_it`, `test_pilot_dl512_a_click_left_of_a_nested_box_name_folds_that_box`, `test_pilot_dl512_a_click_on_a_box_name_selects_and_does_not_fold`, `test_pilot_dl512_a_click_left_of_a_job_name_folds_nothing`, `test_pilot_dl512_under_a_filter_a_first_column_click_folds_nothing`, `test_pilot_dl512_the_marker_answers_with_the_table_scrolled`, `test_pilot_dl512_a_right_click_on_a_marker_folds_nothing`, `test_pilot_dl512_the_lower_border_names_the_fold_keys`; a real mouse click on a marker in the browser lane |
 | `d`/Enter details, Escape/`q` close | `test_pilot_d_key_opens_the_spec_popup_and_escape_closes_it`, `test_pilot_q_closes_the_spec_popup` |
 | `t` triggers, countdown, refresh, selection | `test_pilot_t_opens_the_live_triggers_view_and_operator_verbs_do_not_fire`, `test_pilot_triggers_refresh_preserves_the_cursor_across_ticks` |
 | F1/`?` help | `test_pilot_f1_and_question_mark_toggle_the_help_panel`, `test_pilot_f1_reaches_the_maximized_pager_and_the_triggers_screen` |
@@ -101,6 +102,7 @@ The epoch and live-seal evidence references resolve to DL-424.
 The PTY lane uses a child terminal process.
 The browser lane starts the real `serve` command and a per-session `ui` process.
 Chromium, WebKit and Firefox receive actual keyboard input and a viewport resize.
+The browser lane also clicks a box's marker with the mouse and sees the box fold (DL-512).
 The lanes assert the selected job's resulting state through the control socket.
 They also require the confirmation/cancellation and recovery text on the terminal stream.
 The engine receives SIGTERM, exits with code 0, and restarts in the same root.

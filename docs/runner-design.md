@@ -1316,6 +1316,10 @@ box_name (fold a box with space, all with z; a folded box shows its
 hidden count and a red problem tally), `/` opens the filter line, `v` cycles
 all → problems → active — filtered and non-all views flatten so a match
 never hides inside a fold. The console focuses with `:`.
+In the tree, a first-button click on a box's indent or marker selects the box
+and folds or unfolds it; it opens no details (DL-512). The table's lower border
+names the fold keys: `space fold · z fold all` on a box with members, `z fold all`
+on another row of a tree that has one, and nothing in a flat view.
 The filter line holds words separated by spaces (DL-511). A job is shown
 when every word matches it. Letter case is ignored, and a word is read by
 its first character:

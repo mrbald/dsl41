@@ -72,7 +72,10 @@ Contract detail for DL-46, within DL-41's frame:
   clock and owned timestamps use the host's local time as YYYY-MM-DDTHH:MM:SS (DL-473).
 - Navigation at estate scale (DL-65): the jobs table renders the box tree (indent from the status
   response's box_name; space folds the selected box, `z` folds or unfolds all; a folded box shows
-  its hidden descendant count and a red problem tally, so a fold never hides a FAILURE). `/` opens
+  its hidden descendant count and a red problem tally, so a fold never hides a FAILURE). In the
+  tree, a first-button click on a box's indent or marker selects and folds it. The table's lower
+  border names the fold keys: `space fold · z fold all` on a box with members, `z fold all` on
+  another row of a tree that has one, nothing in a flat view (DL-512). `/` opens
   the filter line (DL-511): words that all match, each a name pattern, a status or box test, or
   negated, read at each keystroke. A refused line shows its message under the line and leaves the
   filter in force; Enter keeps a good line, Esc clears. With the log pager focused `/` searches
@@ -113,6 +116,7 @@ from typing import Any
 
 try:
     from rich.cells import cell_len
+    from rich.style import Style
     from rich.text import Text
     from textual import on
     from textual.app import App, ComposeResult, RenderResult
@@ -120,6 +124,8 @@ try:
     from textual.containers import Horizontal, Vertical, VerticalScroll
     from textual.coordinate import Coordinate
     from textual.css.query import NoMatches
+    from textual.events import Click
+    from textual.message import Message
     from textual.screen import ModalScreen
     from textual.widgets import DataTable, Footer, Header, HelpPanel, Input, RichLog, Static
 
@@ -626,6 +632,11 @@ class TriggersScreen(ModalScreen[None]):
         table.border_title = f"triggers ({len(rows)})"
 
 
+#: the style meta key on a box row's indent and marker, naming the box: a click there folds it
+#: (DL-512)
+_FOLD_META = "fold"
+
+
 class _JobsTable(DataTable[Any]):
     """The jobs table, the only place the operator verbs are bound (DL-187).
 
@@ -640,7 +651,7 @@ class _JobsTable(DataTable[Any]):
 
     d or Enter opens details, t opens triggers, / filters (F1 in the
     filter line shows the syntax), v cycles all/problems/active, space
-    folds a box, z folds every box.
+    folds a box, z folds every box. A click on a box's marker folds it.
     """
     BINDINGS = [
         Binding("s", "app.send('STARTJOB')", "start"),
@@ -655,6 +666,28 @@ class _JobsTable(DataTable[Any]):
         Binding("n", "app.send('ON_NOEXEC')", "noexec", show=False),
         Binding("N", "app.send('OFF_NOEXEC')", "off-noexec", show=False),
     ]
+
+    class FoldClicked(Message):
+        """A click on a box's indent or marker (DL-512). It is posted after the cursor move's
+        RowHighlighted, so the app selects the row before it folds the box."""
+
+        def __init__(self, job: str) -> None:
+            super().__init__()
+            self.job = job
+
+    def on_click(self, event: Click) -> None:
+        """A first-button click on a box's indent or marker selects the row and folds the box;
+        it opens no details. The hit area is the span `_decorated_cells` marks, so the drawing
+        and the hit test cannot disagree (DL-512). Every other click goes on to
+        `DataTable._on_click`."""
+        meta = event.style.meta
+        job = meta.get(_FOLD_META)
+        if job is None or event.button != 1:
+            return
+        event.prevent_default()
+        event.stop()
+        self.move_cursor(row=meta["row"])
+        self.post_message(self.FoldClicked(job))
 
 
 class _FilterInput(Input):
@@ -1693,14 +1726,19 @@ class RunnerApp(App[None]):
         marker = ""
         if kids.get(name):
             marker = "▸ " if name in self._collapsed else "▾ "
-        label = "  " * depth + marker + name
+        lead = "  " * depth + marker
+        label = lead + name
         style = ""
         if name in self._collapsed and kids.get(name):
             total, problems = self._rollup(name, kids)
             label += f" ({total}{f', {problems}!' if problems else ''})"
             if problems:
                 style = "bold red"
-        cells[0] = Text(label, style=style)
+        text = Text(label, style=style)
+        if marker:
+            # a box's indent and marker are its click target (DL-512)
+            text.stylize(Style.from_meta({_FOLD_META: name}), 0, len(lead))
+        cells[0] = text
         return cells
 
     def _on_table_rebuild(self, order: Sequence[Any], _old_selected: Any) -> str | None:
@@ -1748,6 +1786,7 @@ class RunnerApp(App[None]):
         table.border_title = title
         if self._selected is None and table.row_count:
             self._selected = str(table.coordinate_to_cell_key(Coordinate(0, 0)).row_key.value)
+        self._name_fold_keys(table)
 
     def _row_cells(self, name: str, row: dict[str, Any]) -> list[Any]:
         status = str(row.get("status", ""))
@@ -1916,6 +1955,7 @@ class RunnerApp(App[None]):
         if selected == self._selected:
             return
         self._selected = selected
+        self._name_fold_keys(event.data_table)
         # the bound method, not a coroutine: a replaced exclusive worker would leave a
         # never-awaited coroutine (arg-type: run_worker's ResultType inference rejects the bound
         # async method that textual accepts)
@@ -2201,12 +2241,42 @@ class RunnerApp(App[None]):
         self._view_mode = (self._view_mode + 1) % len(self._VIEW_MODES)
         self._render_table()
 
+    def _foldable(self, name: str | None) -> bool:
+        """A box with members in the shown tree: what space and a marker click fold, and the
+        row the lower border names both fold keys on (DL-512). The tree exists only in the
+        unfiltered 'all' view."""
+        return (
+            name is not None
+            and not self._filter
+            and not self._view_mode
+            and bool(self._children().get(name))
+        )
+
+    def _name_fold_keys(self, table: DataTable[Any]) -> None:
+        """The jobs table's lower border names the fold keys that act on the selected row
+        (DL-512): both on a box with members, `z` on another row of a tree with such a box,
+        none in a flat view. A Text, since a border string parses as markup."""
+        hint = ""
+        if self._foldable(self._selected):
+            hint = "space fold · z fold all"
+        elif not (self._filter or self._view_mode):
+            kids = self._children()
+            if any(name in kids for name in self._jobs_snapshot):
+                hint = "z fold all"
+        # the getter returns markup, which equals these hints: they hold no markup characters
+        if (table.border_subtitle or "") != hint:
+            table.border_subtitle = Text(hint)
+
     def action_toggle_box(self) -> None:
-        name = self._selected
-        if name is None or self._filter or self._view_mode:
-            return  # the tree only exists in the unfiltered 'all' view
-        if not self._children().get(name):
-            return  # not a box with members: nothing to fold
+        self._toggle_box(self._selected)
+
+    @on(_JobsTable.FoldClicked)
+    def _on_fold_clicked(self, event: _JobsTable.FoldClicked) -> None:
+        self._toggle_box(event.job)
+
+    def _toggle_box(self, name: str | None) -> None:
+        if name is None or not self._foldable(name):
+            return
         self._collapsed.symmetric_difference_update({name})
         self._render_table()
 

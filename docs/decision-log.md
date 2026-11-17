@@ -27010,3 +27010,17 @@ relitigate an entry; append a new one.
   (BUG-92). While `status=` is being typed, its first letters filter by name.
   NOT BUILT. Or between words, brackets, SQL. Fields other than status and box. Sorting. A
   time limit for a regular expression; one bound would have to cover the log pager too.
+- DL-512 A click on a box's marker folds it, and the jobs table names the fold keys
+  (2026-11-17; owner; `runner_tui.py`; runner-design §11; DL-65)
+  THE RULE. In the box tree, a click of the first mouse button in the first column of a box
+  with members, left of its name, on the indent or the marker, selects that row and folds or
+  unfolds the box as space does. It opens no details. Every other click does what it did: on
+  the name, on another column, on a job that is no box, in a flat view, with another button.
+  The table's lower border names the fold keys: `space fold · z fold all` while the selected
+  row is a box with members, `z fold all` on any other row of a tree that has such a box, and
+  nothing in a flat view. The keys work wherever they worked.
+  WHY. The fold keys were listed only in the help panel, and a person in a browser expects the
+  marker to answer a click. The footer has no room: at 120 columns it already cuts its last
+  key, and two more items there hid `f1 help` and `/ filter` on a box row.
+  NOT BUILT. Fold state kept across tabs. The tree under a filter or a view. A double click as
+  one action: it folds and unfolds.

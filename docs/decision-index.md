@@ -513,3 +513,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-509 | The web service is reached under more than one host name | [README.md](../README.md), [docs/access-model.md](access-model.md), [docs/deploy.md](deploy.md) |
 | DL-510 | The UI of a web person shows that person in its header | [docs/deploy.md](deploy.md), [docs/runner-design.md](runner-design.md) |
 | DL-511 | The jobs filter takes patterns, a status test, a box test and negation | [README.md](../README.md), [docs/cli-tui-qualification.md](cli-tui-qualification.md), [docs/runner-design.md](runner-design.md) |
+| DL-512 | A click on a box's marker folds it, and the jobs table names the fold keys | [docs/cli-tui-qualification.md](cli-tui-qualification.md), [docs/runner-design.md](runner-design.md) |
