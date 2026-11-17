@@ -804,6 +804,8 @@ Runner:
 - `src/dsl41/runner_tui.py`: the Textual TUI, a thin client of the control
   socket. Every view comes from the idempotent queries; subscribe is only
   a wake-up signal.
+- `src/dsl41/job_filter.py`: the TUI's jobs filter line read into a
+  predicate or a one-line refusal (DL-511).
 
 Shared cores:
 
@@ -1050,6 +1052,9 @@ Runner:
   the console parser, ControlClient against a real server, the pilot
   smokes, the log pager, and the safety suite (table-scoped verb keys,
   confirmations, quit posture, help panel).
+- `tests/test_job_filter.py`: the jobs filter's word forms, negations and
+  refusals, and a property that the reader and its predicate never raise
+  (DL-511).
 - `tests/test_control_as.py`: real-engine person tiers, catalog projection,
   request scope, actor records, retry identity, malformed wrappers, stream
   revocation, UI wrapping and denied-status exit (DL-499).

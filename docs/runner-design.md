@@ -1313,9 +1313,30 @@ Pane geometry is keyboard-only: maximize toggle on the
 log tail plus fr-share nudges for both splits. Navigation at estate
 scale (DL-65): the table renders the box tree from the status response's
 box_name (fold a box with space, all with z; a folded box shows its
-hidden count and a red problem tally), `/` filters by name, `v` cycles
+hidden count and a red problem tally), `/` opens the filter line, `v` cycles
 all → problems → active — filtered and non-all views flatten so a match
 never hides inside a fold. The console focuses with `:`.
+The filter line holds words separated by spaces (DL-511). A job is shown
+when every word matches it. Letter case is ignored, and a word is read by
+its first character:
+
+| Word | Matches a job when |
+| --- | --- |
+| `\text` | the name contains the text as written |
+| `!word` | the word that follows does not match; a word takes one negation |
+| `=glob` | the whole name matches the pattern; `*`, `?` and `[...]` are wildcards |
+| `@glob,glob` | the whole name matches one pattern of the list |
+| `~regex` | the regular expression is found in the name; a space in it is written `\s` |
+| `status=value`, `status@value,value` | the status is that one, or one of the list; a value is a status name or a start that fits exactly one status |
+| `box=glob`, `box@glob,glob` | the name of the job's own box matches; a job in no box matches no pattern |
+| `field!=value`, `field!@list` | read as `!field=value` and `!field@list` |
+| any other word | the name contains it, with the same wildcards |
+
+The line is read at each keystroke; a refused word shows one message under
+the line and leaves the filter in force, which goes on applying to each
+status answer. Enter keeps a good line and stays on a refused one, Escape
+clears the line and the filter, and the table's title shows the filter in
+force. `job_filter.py` reads the line; DL-511 lists the refused words.
 Verb keys act only while the jobs table has focus; KILLJOB and
 FORCE_STARTJOB from a key confirm first, showing the target, its box
 members, and the revision the request will name, frozen when the modal
@@ -1466,6 +1487,7 @@ the split cannot decay into a second name for one file.
 - `runner_procid.py`: the process-identity helpers the wrapper uses,
   stdlib-only for the same reason (DL-72).
 - `runner_tui.py`: the §11 TUI (guarded textual import).
+- `job_filter.py`: the §11 filter line's reader, with no textual import (DL-511).
 - `runner_startup.py`: taking possession of a run root: genesis, resume and
   the recovery barrier (DL-433). It prepares the catch-up steps that
   `runner.py` runs.

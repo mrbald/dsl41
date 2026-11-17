@@ -2234,6 +2234,7 @@ relitigate an entry; append a new one.
   blast radius), fingerprint re-read raced the loader (hashes the loaded
   bytes, inside the exit-2 guard), flat views wore stale fold decoration,
   }/{ resized the wrong node after the layout change. Tests 1716 -> 1731.
+  NARROWED BY DL-511: a filter word may be a pattern, a status or box test, or negated.
 - DL-66 recovery, artifact, and truthfulness hardening (2026-08-09). An
   independent adversarial review of the DL-63/64 state (8 findings)
   drove one batch; every High/Major addressed, two defers recorded.
@@ -26976,3 +26977,36 @@ relitigate an entry; append a new one.
   NOT BUILT. The granted level in the header: it needs a new answer in the control protocol.
   Replacing control characters in a name or role: a request header carries no line break, and
   `validate_person` is where such a name would be refused.
+- DL-511 The jobs filter takes patterns, a status test, a box test and negation
+  (2026-11-17; owner; `job_filter.py`, `runner_tui.py`; runner-design §11; DL-65)
+  THE RULE. The filter line's text is words separated by spaces. A job is shown when every
+  word matches it. Letter case is ignored. A word is read by its first character:
+  `\text`: the name contains the text as written.
+  `!word`: the word that follows does not match. A word takes one negation.
+  `=glob`: the whole name matches the pattern; `*`, `?` and `[...]` are wildcards.
+  `@glob,glob`: the whole name matches one pattern of the list.
+  `~regex`: the regular expression is found in the name. A space ends the word, so a space
+  in the expression is written `\s`.
+  `status=value`, `status@value,value`: the status is that one, or one of the list. A value
+  is a status name or the start of exactly one, so `su` is SUCCESS.
+  `box=glob`, `box@glob,glob`: the name of the job's own box matches. A job in no box matches
+  no pattern.
+  `field!=value` and `field!@list` are read as `!field=value` and `!field@list`.
+  Any other word: the name contains it, and `*`, `?` and `[...]` are wildcards in it.
+  REFUSED WORDS. A field other than `status` and `box`; a status value that starts no status
+  or more than one; a comma in a `status=` value; an empty pattern, value or list item; a
+  lone `!`; two negations; a regular expression that does not compile.
+  WHILE TYPING. The line is read at each keystroke. A line with a refused word shows one
+  message and leaves the filter that was in force, and that filter goes on applying to each
+  new status answer. Enter keeps a good line and stays in a refused one. Escape clears the
+  line and the filter. The table's title shows the filter in force.
+  WHY. The need was the jobs that are not in SUCCESS under a name pattern:
+  `!status=su =core_*`. The marker is per word, so a pattern and a status test combine.
+  THE COST. A job name may hold any marker or wildcard, so a word that holds one reads
+  differently than under DL-65; `\` restores the text. A regular expression runs in the UI's
+  own process with no time limit, as the log pager's does, and runs again for every job at
+  each status answer. A pattern that backtracks at length holds one processor, and the UI
+  answers no key meanwhile; in a browser, closing the tab does not end that process
+  (BUG-92). While `status=` is being typed, its first letters filter by name.
+  NOT BUILT. Or between words, brackets, SQL. Fields other than status and box. Sorting. A
+  time limit for a regular expression; one bound would have to cover the log pager too.

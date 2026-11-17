@@ -29,6 +29,7 @@ import json
 import re
 import shlex
 import sys
+import textwrap
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -60,6 +61,7 @@ from dsl41.runner_tui import (
     SpecScreen,
     TriggersScreen,
     _ConsoleInput,
+    _FilterInput,
     _JobsTable,
     _LogPane,
     _LogTail,
@@ -1577,9 +1579,9 @@ def test_pilot_folded_box_rollup_carries_a_red_problem_tally(short_root: Path) -
 
 
 def test_pilot_slash_filter_narrows_flat_enter_keeps_escape_clears(short_root: Path) -> None:
-    """DL-65 incremental name filter: `/` focuses the filter line, each
+    """DL-65 incremental filter: `/` focuses the filter line, each
     keystroke re-narrows the table LIVE and FLAT (a match inside a box must
-    never be invisible), space-separated substrings AND together, the border
+    never be invisible), space-separated words AND together, the border
     title carries the visible/total counts plus the filter, Enter keeps the
     filter and returns to the table, Escape clears and refocuses it."""
     text = (
@@ -1626,6 +1628,233 @@ def test_pilot_slash_filter_narrows_flat_enter_keeps_escape_clears(short_root: P
                 await _wait_for_ui(pilot, lambda: app._table_sync.identity == tree_order)
                 assert app._filter == ""
                 assert app.focused is table
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+_FILTER_ESTATE = (
+    "insert_job: fl_a\njob_type: c\ncommand: x\nmachine: m1\n\n"
+    "insert_job: fl_b\njob_type: c\ncommand: x\nmachine: m1\n\n"
+    "insert_job: fl_c\njob_type: c\ncommand: x\nmachine: m1\n\n"
+    "insert_job: other_d\njob_type: c\ncommand: x\nmachine: m1\n"
+)
+
+
+async def _set_status(app: RunnerApp, pilot, job: str, status: str) -> None:
+    request = parse_console_command(f"CHANGE_STATUS {job} {status}", None)
+    assert not isinstance(request, str)
+    await app._do_sendevent(request)
+    await _wait_for_ui(pilot, lambda: app._jobs_snapshot[job]["status"] == status)
+
+
+def _filter_message(app: RunnerApp) -> str | None:
+    """The refusal under the filter line, or None while it is hidden."""
+    box = app.query_one("#filtermsg", Static)
+    return str(box.content) if str(box.styles.display) == "block" else None
+
+
+def test_pilot_filter_not_success_under_a_name_pattern(short_root: Path) -> None:
+    """DL-511's need: `!status=su =fl_*` shows exactly the jobs under the
+    pattern that are not in SUCCESS, and the title shows that filter."""
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", _FILTER_ESTATE)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: len(app._rows) == 4)
+                await _set_status(app, pilot, "fl_a", "SUCCESS")
+                await _set_status(app, pilot, "fl_b", "FAILURE")
+                await _set_status(app, pilot, "other_d", "FAILURE")
+
+                await pilot.press("slash", *"!status=su =fl_*")
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == ["fl_b", "fl_c"])
+                table = app.query_one("#jobs", DataTable)
+                assert "/!status=su =fl_*/" in str(table.border_title)
+                assert _filter_message(app) is None
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_a_refused_draft_keeps_the_filter_in_force(short_root: Path) -> None:
+    """DL-511: a refused line leaves the filter in force, and the title with
+    it, and shows its message under the line; a status answer still moves
+    jobs through that filter; a good line again removes the message."""
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", _FILTER_ESTATE)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: len(app._rows) == 4)
+                table = app.query_one("#jobs", DataTable)
+                await _set_status(app, pilot, "fl_a", "SUCCESS")
+
+                await pilot.press("slash", *"!status=su =fl_*")
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == ["fl_b", "fl_c"])
+
+                await pilot.press("space", "~", "(")  # an unclosed group: refused
+                await _wait_for_ui(pilot, lambda: _filter_message(app) is not None)
+                assert (_filter_message(app) or "").startswith("~(: bad regular expression: ")
+                assert app._filter == "!status=su =fl_*"
+                assert app._table_sync.identity == ["fl_b", "fl_c"]
+                assert "/!status=su =fl_*/" in str(table.border_title)
+                assert "~(" not in str(table.border_title)
+
+                # later status answers go through the filter in force
+                await _set_status(app, pilot, "fl_c", "SUCCESS")
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == ["fl_b"])
+                await _set_status(app, pilot, "fl_a", "FAILURE")
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == ["fl_a", "fl_b"])
+                assert _filter_message(app) is not None
+
+                await pilot.press("backspace")  # " ~": still refused, a new message
+                await _wait_for_ui(pilot, lambda: _filter_message(app) == "~: empty pattern")
+                await pilot.press("backspace")  # the good line again
+                await _wait_for_ui(pilot, lambda: _filter_message(app) is None)
+                assert app._filter == "!status=su =fl_*"
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_enter_stays_on_a_refused_line_and_escape_clears_all(short_root: Path) -> None:
+    """DL-511: Enter on a refused line stays in the input with its message;
+    Escape clears the line, the filter in force and the message; Enter on
+    an empty line clears, as Escape does."""
+    tree_order = ["fl_a", "fl_b", "fl_c", "other_d"]
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", _FILTER_ESTATE)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == tree_order)
+                table = app.query_one("#jobs", DataTable)
+                line = app.query_one("#filterline", Input)
+
+                await pilot.press("slash", *"fl status=s")
+                await _wait_for_ui(pilot, lambda: _filter_message(app) is not None)
+                assert _filter_message(app) == "status=s: s could be STARTING or SUCCESS"
+                await pilot.press("enter")
+                await pilot.pause()
+                assert app.focused is line
+                assert str(line.styles.display) == "block"
+                assert _filter_message(app) == "status=s: s could be STARTING or SUCCESS"
+
+                await pilot.press("escape")
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == tree_order)
+                assert app.focused is table
+                assert app._filter == "" and line.value == ""
+                assert str(line.styles.display) == "none"
+                assert _filter_message(app) is None
+
+                # Enter on an emptied line clears and returns to the table
+                await pilot.press("slash", *"=fl_a")
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == ["fl_a"])
+                await pilot.press(*["backspace"] * 5, "enter")
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == tree_order)
+                assert app.focused is table and app._filter == ""
+                assert str(line.styles.display) == "none"
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_a_refused_draft_survives_a_focus_move_and_f1_shows_the_syntax(
+    short_root: Path,
+) -> None:
+    """DL-511: a refused draft and its message stay on the open line when focus moves to the
+    table without Enter or Escape, and the title keeps the filter in force; `/` returns to the
+    draft, F1 there shows the filter line's syntax help, and Escape clears all three."""
+    tree_order = ["fl_a", "fl_b", "fl_c", "other_d"]
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", _FILTER_ESTATE)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == tree_order)
+                table = app.query_one("#jobs", DataTable)
+                line = app.query_one("#filterline", Input)
+
+                await pilot.press("slash", *"=fl_*")
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == tree_order[:3])
+                await pilot.press("space", "=")  # an empty pattern: refused
+                await _wait_for_ui(pilot, lambda: _filter_message(app) == "=: empty pattern")
+
+                table.focus()  # neither Enter nor Escape
+                await pilot.pause()
+                assert app.focused is table
+                assert str(line.styles.display) == "block" and line.value == "=fl_* ="
+                assert _filter_message(app) == "=: empty pattern"
+                assert "/=fl_*/" in str(table.border_title)
+                assert app._table_sync.identity == tree_order[:3]
+
+                await pilot.press("slash")
+                await pilot.pause()
+                assert app.focused is line and line.value == "=fl_* ="
+                await pilot.press("f1")
+                await _wait_for_ui(pilot, lambda: bool(app.screen.query(HelpPanel)))
+                shown = app.screen.query_one(HelpPanel).query_one("#widget-help").source
+                assert shown == textwrap.dedent(_FilterInput.HELP.rstrip())
+                assert "`!status=su =core_*`" in shown
+                await pilot.press("f1")
+                await _wait_for_ui(pilot, lambda: not app.screen.query(HelpPanel))
+
+                await pilot.press("escape")
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == tree_order)
+                assert app.focused is table and app._filter == "" and line.value == ""
+                assert str(line.styles.display) == "none"
+                assert _filter_message(app) is None
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_a_filter_with_no_match_leaves_the_verb_keys_nothing_to_send(
+    short_root: Path,
+) -> None:
+    """DL-65's guard under DL-511: with zero matches no job is selected, so
+    a verb key on the table sends nothing."""
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", _FILTER_ESTATE)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: len(app._rows) == 4)
+                table = app.query_one("#jobs", DataTable)
+                table.focus()
+                table.move_cursor(row=0)
+                await pilot.pause()
+                assert app._selected == "fl_a"
+
+                sent: list[dict] = []
+                inner = app._client.request
+
+                async def capture(request):
+                    if request.get("cmd") == "sendevent":
+                        sent.append(request)
+                    return await inner(request)
+
+                app._client.request = capture
+
+                await pilot.press("slash", *"status=te", "enter")
+                await _wait_for_ui(pilot, lambda: app._table_sync.identity == [])
+                assert app.focused is table
+                assert app._selected is None
+                await pilot.press("s", "h", "k")
+                await pilot.pause()
+                assert not isinstance(app.screen, ConfirmScreen)
+                assert sent == []
         finally:
             await _teardown(engine, server, loop_task)
 

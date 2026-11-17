@@ -1100,7 +1100,7 @@ def _browser_drive(
             until("recovery_box")
             assert initial_geometry is not None, f"unproven initial geometry: {initial_url}"
             page.keyboard.press("/")
-            until("filter: substring")
+            until("filter: !status=su")
             page.keyboard.type("recovery_child", delay=20)
             until("1/3")
             page.keyboard.press("Enter")
