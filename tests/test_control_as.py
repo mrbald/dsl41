@@ -9,6 +9,7 @@ import os
 import sys
 
 import pytest
+from textual.widgets._header import HeaderTitle
 from typer.testing import CliRunner
 
 from dsl41.cli import app as cli
@@ -357,6 +358,9 @@ def test_access_ui_wraps_every_path_and_echoes_person(short_root):
                 await pilot.press(*list("ON_HOLD acc_job"), "enter")
                 await _wait_for_ui(pilot, lambda: viewer._jobs_snapshot["acc_job"]["on_hold"])
                 assert viewer._claimed_actor == "app/alice"
+                assert viewer.sub_title.startswith("app/alice (operators)")
+                assert str(server.path) not in viewer.sub_title
+                assert "app/alice (operators)" in str(viewer.screen.query_one(HeaderTitle).render())
                 assert {p.spelling for p, _ in access.streams.values()} == {"app/alice"}
                 records = _receipts(root)
                 assert any(r.get("action") == "sendevent:ON_HOLD" for r in records)
@@ -371,6 +375,26 @@ def test_access_ui_wraps_every_path_and_echoes_person(short_root):
             await _teardown(engine, server, loop)
 
     asyncio.run(scenario())
+
+
+def test_ui_subtitle_names_person_in_place_of_socket(tmp_path):
+    path = tmp_path / "control.sock"
+    sock = str(path)
+    both = RunnerApp(path, person=person(roles=("viewers", "operators")))
+    assert both.sub_title == "app/alice (operators, viewers)"
+    assert sock not in both.sub_title
+    bare = RunnerApp(path, person=person(roles=()))
+    assert bare.sub_title == "app/alice (no roles)"
+    plain = RunnerApp(path)
+    assert plain.sub_title == sock
+    one = RunnerApp(path, person=person())
+    one._connected = False
+    one._refresh_subtitle()
+    assert one.sub_title == "app/alice (operators) (disconnected)"
+    assert sock not in one.sub_title
+    plain._connected = False
+    plain._refresh_subtitle()
+    assert plain.sub_title == f"{sock} (disconnected)"
 
 
 @pytest.mark.parametrize(

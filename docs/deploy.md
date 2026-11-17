@@ -447,7 +447,9 @@ The proxy must replace every header the lookup reads and protect every library r
    systemctl reload nginx
    ```
 
-   Open a new tab as the synthetic person. Check the engine's perimeter journal
+   Open a new tab as the synthetic person.
+   The header shows `app/alice (operators)`: the person and roles the lookup
+   returns, not the access the engine grants (DL-510). Check the engine's perimeter journal
    for `realm: "app"`, `principal: "alice"` on a mutation. An unmapped person
    must get a closed tab and a denial under that person's name.
 

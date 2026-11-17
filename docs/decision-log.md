@@ -26958,3 +26958,21 @@ relitigate an entry; append a new one.
   its scripts and WebSocket from the first, where the browser has no login. Relative links:
   the library builds absolute ones, and a relative WebSocket address needs a recent browser.
   `X-Forwarded-Host`. A base path per name. Two origins that differ only in scheme.
+- DL-510 The UI of a web person shows that person in its header
+  (2026-11-17; owner; `runner_tui.py`; runner-design §11; deploy "Serve people behind the
+  authenticating proxy"; DL-499)
+  THE RULE. When `dsl41 ui` has a person (`--web-principal`), the header's subtitle names
+  the person where it otherwise names the socket path: `app/<user> (<roles>)`. The roles are
+  sorted and joined by a comma and a space; a person with no role shows `no roles`. The
+  marks after it are unchanged. A UI with no person, `run --ui` included, shows the socket
+  path as before.
+  WHY. A person who only watches sends no command, so nothing on the screen named them. The
+  line shows a lookup that reads the wrong header, and a role whose name has no row in the
+  access file. The socket path is of no use in a browser, and the two together push the
+  connection, revision and drift marks off a tab of 100 columns.
+  THE COST. The line states what the web tier said, not the access the engine grants: a role
+  with no row still shows. A person sees their own role names. The header is one line and
+  cuts on the right, so a long list of roles hides the marks after it.
+  NOT BUILT. The granted level in the header: it needs a new answer in the control protocol.
+  Replacing control characters in a name or role: a request header carries no line break, and
+  `validate_person` is where such a name would be refused.
