@@ -63,6 +63,7 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 
 #### Tests, tooling and docs
 
+- **BUG-93**: The release recipe pushes the version commit straight to `main` (`README.md`, "Make a release"). The protection of `main` refuses that push, because the commit has no passed checks. The commit has to go through a pull request and a fast-forward (DL-513).
 - **BUG-11**: Barrier cleanup kills a hung wrapper but not its command group, orphaning the commands. Kill the group through the live wrapper first (`tests/update_wiring_barrier.py`, `kill_wrappers`).
 - **BUG-12**: In the Codex macOS sandbox both real-terminal TUI cases held `recovery_other` as "interrupted attempt held" despite correct geometry. Cause unknown; reproduce in a supported environment (DL-424).
 - **BUG-21**: The peer alarm does not reliably stop Codex at its deadline; one build ran 4.5 h (`scripts/peer.sh:67-73`).
@@ -120,6 +121,7 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 
 - **FEAT-42**: Build and check the single-package recipe with the UI profile. Its step 3 downloads, copies and installs `requirements-base.txt`, which omits the terminal UI that the web service runs for each tab; `scripts/export-release-inputs.sh` also writes `requirements-ui.txt`, and the recipe has not been built or checked with it (`examples/single-package/README.md`).
 - **FEAT-43**: Let the web service check a person again while a tab is open. `serve_people` calls the site's `resolve(headers)` once, when the tab opens, so a role removed later keeps its level until the tab closes (limit L2 of the web recipe in `docs/deploy.md`). Until then, restarting the web unit ends every open tab (`src/dsl41/runner_web.py`).
+- **FEAT-44**: Make the merge train land a pull request by a fast-forward push of its tested head commit (DL-513). `scripts/merge_train.py` rebase-merges, which gives the commit a new hash on `main`, so the commit that lands is not the one that was reviewed and tested.
 - **FEAT-31**: The update answer names the boxes it restarted and the boxes and members it held. `dsl41 update` prints only what its answer proves, so today it names neither (DL-482).
 
 ### After shipping

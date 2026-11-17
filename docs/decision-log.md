@@ -27024,3 +27024,21 @@ relitigate an entry; append a new one.
   key, and two more items there hid `f1 help` and `/ filter` on a box row.
   NOT BUILT. Fold state kept across tabs. The tree under a filter or a view. A double click as
   one action: it folds and unfolds.
+- DL-513 A pull request merges by a fast-forward of its tested commit
+  (2026-11-17; owner; `.github/workflows/ci.yml`; coordination "Git workflow")
+  THE RULE. A pull request into `main` merges by a fast-forward push of its tested head
+  commit to `main`, never forced, so `main` carries the commit that was reviewed and tested,
+  with its check marks. The operator calls that commit good to pick up at the merge. The run
+  that a push to `main` starts stays as a backstop. Nobody waits for it, and the operator
+  reports a failure there to the owner. `classify` counts a pull request into another
+  branch as code.
+  WHY. A rebase-merge gave the same tree a new hash, and each merge waited about 16 minutes
+  for a second run of that tree. A pull request into another branch that changed only
+  documents skipped the suite and showed its checks passed, so its head could carry code that
+  no run tested.
+  NOT BUILT. Removing the run on a push to `main`. In a public repository it costs nothing.
+  It saves the dependency caches that pull requests restore, the README's badges read it, and
+  it is the one test run that sees what a merge button, the merge train or a loosened protection
+  of `main` lands.
+  THE COST. `scripts/merge_train.py` still rebase-merges, so the commit it lands is not the
+  commit that was reviewed (FEAT-44).

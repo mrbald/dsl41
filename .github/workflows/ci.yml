@@ -19,9 +19,10 @@
 # a change whose every path is README.md, CLAUDE.md, TODO.md, docs/**/*.md,
 # examples/**/*.md or .claude/skills/**/*.md (DL-434, DL-471) is
 # docs-only, and the suite jobs skip; `docs` runs the docs gate of
-# scripts/prepush_checks.py on every change. A pull request compares with
-# its base branch, a branch push with the commit it replaced; a tag push, a
-# manual run and a call from release.yml always count as code. A classify
+# scripts/prepush_checks.py on every change. A pull request into `main`
+# compares with `main`, a branch push with the commit it replaced; a pull request
+# into another branch, a tag push, a manual run and a call from release.yml always
+# count as code (DL-513). A classify
 # failure retains code=true and reports valid=false for the required rehearsal
 # check (DL-441). An empty output also counts as code. A change to
 # scripts/prepush_checks.py or anything under .github/ counts as code without
@@ -71,7 +72,7 @@ jobs:
         run: |
           set -uo pipefail
           base=""
-          if [ "$EVENT" = pull_request ]; then
+          if [ "$EVENT" = pull_request ] && [ "$BASE_REF" = main ]; then
             base="origin/$BASE_REF"
           elif [ "$EVENT" = push ] && [ "$REF_TYPE" = branch ] \
               && [ -n "$BEFORE" ] && [ -n "${BEFORE//0/}" ] \

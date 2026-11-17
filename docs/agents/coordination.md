@@ -175,9 +175,11 @@ budget for them, not for diff reads.
 - Subject to the brief's side-effect limits, the operator commits a slice once
   its gates pass and its independent review is accepted.
 - Apply rule 27's standing owner approval: verify accepted review, CI green on
-  the exact candidate and no open blocking ruling, then rebase-merge without
-  asking and without deleting a branch. Take a merge outside those conditions
-  to the owner. Ask before pushing to a protected branch.
+  the exact candidate and no open blocking ruling, then fast-forward `main` to
+  the exact candidate, the head of a pull request into `main`
+  (`git push origin <candidate>:main`, never forced), without asking and without
+  deleting a branch (DL-513). Take a merge outside those conditions to the owner.
+  Ask before any other push to a protected branch.
 - Write a commit message for the reader of the log (DL-506). The subject is one
   sentence of at most 72 characters that says what is true after the commit. It
   starts with the id of the decision entry or `TODO.md` item the commit is

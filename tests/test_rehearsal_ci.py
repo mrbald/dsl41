@@ -107,6 +107,37 @@ def test_classifier_failures(tmp_path, diff_exit, script_exit, output, changed, 
     }
 
 
+def test_classifier_counts_pull_request_into_other_branch_as_code(tmp_path):
+    text = (REPO / ".github/workflows/ci.yml").read_text()
+    script = _run_block(text, "      - id: classify")
+    fake_git = tmp_path / "git"
+    fake_git.write_text('#!/bin/bash\nprintf "%s\\n" "$CHANGED"\nexit 0\n')
+    fake_git.chmod(0o755)
+    fake_python = tmp_path / "python3"
+    fake_python.write_text('#!/bin/bash\nprintf "%s\\n" "code=false"\nexit 0\n')
+    fake_python.chmod(0o755)
+    target = tmp_path / "outputs"
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "EVENT": "pull_request",
+            "BASE_REF": "some-branch",
+            "CHANGED": "docs/a.md",
+            "GITHUB_OUTPUT": str(target),
+        },
+        capture_output=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    assert dict(line.split("=", 1) for line in target.read_text().splitlines()) == {
+        "code": "true",
+        "valid": "true",
+        "base": "HEAD~1",
+    }
+
+
 def test_ci_cancels_only_superseded_pr_runs():
     ci = (REPO / ".github/workflows/ci.yml").read_text()
     concurrency = ci.split("\nconcurrency:\n", 1)[1].split("\npermissions:", 1)[0]
