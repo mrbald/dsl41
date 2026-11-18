@@ -27044,6 +27044,7 @@ relitigate an entry; append a new one.
   THE COST. `scripts/merge_train.py` still rebase-merges, so the commit it lands is not the
   commit that was reviewed (FEAT-44).
   NARROWED BY DL-515: the merge train lands by the same fast-forward push.
+  NARROWED BY DL-517: the operator deletes a merged pull request's branch.
 - DL-514 A person's regular expression in the UI is matched under a processor-time limit
   (2026-11-17; src/dsl41/match_bound.py, runner_tui.py; docs/runner-design.md ss11; BUG-92)
   THE RULE. Every match of a pattern a person typed, in the jobs filter and in the log pager's
@@ -27121,3 +27122,21 @@ relitigate an entry; append a new one.
   THE COST. A suggestion can name a job that left the catalog since the last status answer; the
   engine refuses it as it refuses any unknown job. Tab no longer moves focus out of the console
   line; Escape does.
+- DL-517 The guard lets the delete of a merged remote branch through without a question
+  (2026-11-18; scripts/hooks/bash_guard.sh; CLAUDE.md; docs/agents/coordination.md,
+  operating-model.md)
+  THE RULE. A command line that is exactly `git push <remote> --delete <branch>...` and nothing
+  else runs without a question when every branch it deletes is merged. `-q` and `git -C <dir>` may
+  be on it; a second command, a pipe, a variable or any other option may not. Merged means: the
+  remote-tracking ref of the last fetch exists and is an ancestor of the remote's default branch,
+  the remote has one URL for fetch and push, and no tag has the branch's name. Any other delete
+  asks as before, and so does a push with `--prune` or `--mirror` or a shortened spelling of an
+  option that deletes. After a merge the operator removes the pull request's worktree, local
+  branch and remote branch without asking, the remote delete as a command of its own. Deleting
+  anything that is not merged still needs the owner.
+  WHY. The question stopped a session overnight on the cleanup of a branch that the same
+  session had created and merged. Deleting a merged branch loses nothing: its commits are on
+  `main`.
+  THE COST. The proof is the last fetch. Commits that someone else pushed to the branch since
+  then, and that were not fetched, are lost with it. A delete written inside a longer command line
+  still asks.

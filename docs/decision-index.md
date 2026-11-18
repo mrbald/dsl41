@@ -518,3 +518,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-514 | A person's regular expression in the UI is matched under a processor-time limit | [README.md](../README.md), [docs/cli-tui-qualification.md](cli-tui-qualification.md), [docs/runner-design.md](runner-design.md) |
 | DL-515 | The merge train lands by a fast-forward push and runs a failed read again | [docs/agents/coordination.md](agents/coordination.md), [docs/agents/operating-model.md](agents/operating-model.md) |
 | DL-516 | The event console lists its verbs and statuses in its help and completes them | [README.md](../README.md), [docs/cli-tui-qualification.md](cli-tui-qualification.md), [docs/runner-design.md](runner-design.md) |
+| DL-517 | The guard lets the delete of a merged remote branch through without a question | [docs/agents/coordination.md](agents/coordination.md), [docs/agents/operating-model.md](agents/operating-model.md) |

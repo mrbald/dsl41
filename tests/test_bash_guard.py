@@ -69,6 +69,41 @@ def conflicted(tmp_path: Path) -> Path:
     return repo
 
 
+ASK_DELETE = "This push deletes a remote branch."
+
+
+@pytest.fixture
+def remote_clone(tmp_path: Path) -> Path:
+    """A clone, fetched, whose remote has main, two merged branches and an unmerged one."""
+    bare = tmp_path / "remote.git"
+    clone = tmp_path / "clone"
+    bare.mkdir()
+    git(bare, "init", "-q", "--bare", "-b", "main")
+    clone.mkdir()
+    git(clone, "init", "-q", "-b", "main")
+    git(clone, "remote", "add", "origin", str(bare))
+    (clone / "a.txt").write_text("base\n", encoding="utf-8")
+    git(clone, "add", "a.txt")
+    git(clone, "commit", "-q", "-m", "base")
+    git(clone, "push", "-q", "origin", "main")
+    git(clone, "switch", "-q", "-c", "merged")
+    (clone / "a.txt").write_text("merged\n", encoding="utf-8")
+    git(clone, "commit", "-q", "-am", "merged")
+    git(clone, "push", "-q", "origin", "merged")
+    git(clone, "switch", "-q", "main")
+    git(clone, "merge", "-q", "--ff-only", "merged")
+    git(clone, "push", "-q", "origin", "main")
+    git(clone, "push", "-q", "origin", "main:merged2")
+    git(clone, "switch", "-q", "-c", "unmerged")
+    (clone / "b.txt").write_text("unmerged\n", encoding="utf-8")
+    git(clone, "add", "b.txt")
+    git(clone, "commit", "-q", "-m", "unmerged")
+    git(clone, "push", "-q", "origin", "unmerged")
+    git(clone, "switch", "-q", "main")
+    git(clone, "fetch", "-q", "origin")
+    return clone
+
+
 @pytest.mark.parametrize(
     "command",
     [
@@ -256,3 +291,204 @@ def test_add_of_a_marked_path_is_denied(tmp_path: Path) -> None:
     assert decide("git add good.md", repo) == (None, "")
     decision, reason = decide(f"cd {repo} && git add good.md bad.md")
     assert decision == "deny" and "bad.md" in reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push origin --delete merged",
+        "git push -q origin --delete merged",
+        "git push --quiet origin -d merged",
+        "git push --delete origin merged",
+        "git push origin --delete merged merged2",
+        "git push origin --delete refs/heads/merged",
+        "  git push origin --delete merged  ",
+    ],
+)
+def test_the_exact_delete_of_merged_branches_is_silent(remote_clone: Path, command: str) -> None:
+    assert decide(command, remote_clone) == (None, "")
+
+
+def test_the_exact_delete_names_its_directory(remote_clone: Path, tmp_path: Path) -> None:
+    command = f"git -C {remote_clone} push -q origin --delete merged"
+    assert decide(command, tmp_path) == (None, "")
+    assert decide("git -C clone push origin --delete merged", tmp_path) == (None, "")
+    assert decide(f"git -C {tmp_path / 'nosuch'} push origin --delete merged", tmp_path) == (
+        "ask",
+        ASK_DELETE,
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push origin --delete unmerged",
+        "git push origin --delete merged unmerged",
+        "git push origin --delete nosuch",
+        "git push origin --delete main",
+        "git push origin :main",
+        "git push origin :merged",
+        "git push origin --delete HEAD",
+        "git push origin :HEAD",
+        "git push origin --delete refs/tags/v1",
+        "git push origin --delete refs/heads/main",
+        "git push origin --delete 'mer*'",
+        "git push origin --delete",
+        "git push upstream --delete merged",
+        "git push --no-verify origin --delete merged",
+        "git push origin --delete merged -o x",
+        "git push origin --delete merged --force-with-lease",
+        # a delete written inside a longer line, or with anything else on it
+        "cd {clone} && git push origin --delete merged",
+        "git push origin --delete merged; echo done",
+        "git push origin --delete merged && echo done",
+        "echo done; git push origin --delete merged",
+        "env X=1 git push origin --delete merged",
+        "env git push origin --delete merged",
+        "git push origin --delete merged | cat",
+        "git push origin --delete merged > /dev/null",
+        "git push origin --delete merged # note",
+        "git push origin --delete $B",
+        "git push origin --delete $(echo merged)",
+        "git push origin --delete `echo merged`",
+        "git push origin --delete 'merged'",
+        'git push origin --delete "merged"',
+        "git push origin --delete merged\ngit push origin --delete unmerged",
+        "git push origin --delete merged\ngit push origin --delete merged2",
+        "git push origin --delete merged;git push origin --delete unmerged",
+        "git push origin --delete merged && git push origin --delete unmerged",
+        "git push origin --delete unmerged && git push origin --delete merged",
+        "git push origin --delete merged && git branch -D x",
+        "git branch -D x; git push origin --delete merged",
+        # F2, F3, C3, C4: the command changes what git reads
+        "echo unmerged | xargs git push origin --delete merged",
+        "git push origin --delete merged | xargs echo",
+        "git --git-dir=/elsewhere/.git push origin --delete merged",
+        "git --work-tree=/elsewhere push origin --delete merged",
+        "git --config-env=remote.origin.url=X push origin --delete merged",
+        "git --namespace=x push origin --delete merged",
+        "GIT_DIR=/elsewhere/.git git push origin --delete merged",
+        "GIT_WORK_TREE=/elsewhere git push origin --delete merged",
+        "GIT_CONFIG_COUNT=1 git push origin --delete merged",
+        "GIT_COMMON_DIR=/elsewhere git push origin --delete merged",
+        "GIT_NAMESPACE=x git push origin --delete merged",
+        "HOME=/elsewhere git push origin --delete merged",
+        "git -c remote.origin.url=/elsewhere push origin --delete merged",
+        "git -c remote.origin.pushurl=/elsewhere push origin --delete merged",
+        "env -C /elsewhere git push origin --delete merged",
+        "env --chdir=/elsewhere git push origin --delete merged",
+        "cd -P /elsewhere && git push origin --delete merged",
+        "cd -- /elsewhere && git push origin --delete merged",
+        "W=/elsewhere; cd $W && git push origin --delete merged",
+        "pushd /elsewhere && git push origin --delete merged",
+        "sudo -D /elsewhere git push origin --delete merged",
+        # P1, P2, C1: options that delete, in full or shortened
+        "git push origin --d merged",
+        "git push origin --de merged",
+        "git push origin --del merged",
+        "git push origin --dele merged",
+        "git push origin --delet merged",
+        "git push origin --de unmerged",
+        "git push --prune origin 'refs/heads/*:refs/heads/*'",
+        "git push --pru origin",
+        "git push --prun origin",
+        "git push --prune origin",
+        "git push --mirror origin",
+        "git push --m origin",
+        "git push --mi origin",
+        "git push --mir origin",
+        "git push --mirr origin",
+        "git push --mirro origin",
+    ],
+)
+def test_any_other_delete_asks(remote_clone: Path, command: str) -> None:
+    command = command.replace("{clone}", str(remote_clone))
+    decision, reason = decide(command, remote_clone)
+    assert decision == "ask" and reason
+
+
+def test_a_delete_outside_a_repository_asks(tmp_path: Path) -> None:
+    assert decide("git push origin --delete merged", tmp_path) == ("ask", ASK_DELETE)
+
+
+def test_a_delete_without_the_remote_tracking_ref_asks(remote_clone: Path) -> None:
+    git(remote_clone, "update-ref", "-d", "refs/remotes/origin/merged")
+    assert decide("git push origin --delete merged", remote_clone) == ("ask", ASK_DELETE)
+
+
+def test_a_forced_delete_is_denied(remote_clone: Path) -> None:
+    decision, reason = decide("git push --force origin --delete merged", remote_clone)
+    assert decision == "deny" and reason.endswith(".")
+
+
+def other_bare(repo: Path) -> Path:
+    """A second bare repository next to the clone, to stand for a fork."""
+    other = repo.parent / "other.git"
+    other.mkdir()
+    git(other, "init", "-q", "--bare", "-b", "main")
+    return other
+
+
+def test_a_remote_with_another_push_url_asks(remote_clone: Path) -> None:
+    git(remote_clone, "remote", "set-url", "--push", "origin", str(other_bare(remote_clone)))
+    assert decide("git push origin --delete merged", remote_clone) == ("ask", ASK_DELETE)
+
+
+def test_a_remote_with_a_push_instead_of_asks(remote_clone: Path) -> None:
+    other = other_bare(remote_clone)
+    git(
+        remote_clone,
+        "config",
+        f"url.{other}.pushInsteadOf",
+        str(remote_clone.parent / "remote.git"),
+    )
+    assert decide("git push origin --delete merged", remote_clone) == ("ask", ASK_DELETE)
+
+
+def test_a_remote_with_two_urls_asks(remote_clone: Path) -> None:
+    other = other_bare(remote_clone)
+    git(remote_clone, "remote", "set-url", "--add", "origin", str(other))
+    assert decide("git push origin --delete merged", remote_clone) == ("ask", ASK_DELETE)
+
+
+def test_a_remote_with_two_push_urls_asks(remote_clone: Path) -> None:
+    bare = remote_clone.parent / "remote.git"
+    git(remote_clone, "remote", "set-url", "--push", "--add", "origin", str(bare))
+    git(
+        remote_clone,
+        "remote",
+        "set-url",
+        "--push",
+        "--add",
+        "origin",
+        str(other_bare(remote_clone)),
+    )
+    assert decide("git push origin --delete merged", remote_clone) == ("ask", ASK_DELETE)
+
+
+def test_a_name_that_is_also_a_local_tag_asks(remote_clone: Path) -> None:
+    git(remote_clone, "tag", "-m", "t", "merged", "main")
+    assert decide("git push origin --delete merged", remote_clone) == ("ask", ASK_DELETE)
+
+
+def test_the_default_branch_of_the_remote_is_the_base(remote_clone: Path) -> None:
+    git(remote_clone, "push", "-q", "origin", "unmerged:trunk")
+    git(remote_clone, "fetch", "-q", "origin")
+    git(remote_clone, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+    assert decide("git push origin --delete unmerged", remote_clone) == (None, "")
+    assert decide("git push origin --delete merged", remote_clone) == (None, "")
+    assert decide("git push origin --delete trunk", remote_clone) == ("ask", ASK_DELETE)
+
+
+def test_without_a_remote_head_the_default_branch_is_main(remote_clone: Path) -> None:
+    git(remote_clone, "update-ref", "-d", "--no-deref", "refs/remotes/origin/HEAD")
+    assert decide("git push origin --delete merged", remote_clone) == (None, "")
+    assert decide("git push -q origin --delete merged", remote_clone) == (None, "")
+    assert decide("git push origin --delete unmerged", remote_clone) == ("ask", ASK_DELETE)
+    assert decide("git push origin --delete main", remote_clone) == ("ask", ASK_DELETE)
+
+
+@pytest.mark.parametrize("name", ["Merged", "MERGED", "merGed"])
+def test_a_branch_of_another_case_is_not_proven(remote_clone: Path, name: str) -> None:
+    assert decide("git push origin --delete merged", remote_clone) == (None, "")
+    assert decide(f"git push origin --delete {name}", remote_clone) == ("ask", ASK_DELETE)

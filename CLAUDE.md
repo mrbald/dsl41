@@ -114,8 +114,10 @@ Codex uses the same bodies through `.agents/skills/<name>` symlinks.
 - Stage explicit paths; never `git add -A`.
 - A commit requires green gates and accepted review.
   Publication follows the coordination guide and the owner's instructions.
-- Ask before `git branch -D`, `git worktree remove --force`, `git push --delete`,
-  or `gh pr merge --delete-branch`. Never force-push main.
+- Ask before `git branch -D`, `git worktree remove --force`,
+  `gh pr merge --delete-branch`, or a `git push --delete` of a branch that is not
+  merged into `main`. A merged branch is deleted without asking (DL-517).
+  Never force-push main.
 - Use foreground commands and sufficient timeouts where supported. If a tool
   returns a running session or cell, poll to completion before ending the turn.
   Do not rely on background completion notifications.

@@ -48,7 +48,7 @@ its exact terms.
 24. Concurrency fixes prove the bad ordering is handled, not just that runs come up green.
 25. A local green run is not CI green; CI is the gate.
 26. A stamp or a later green run never closes an open failure.
-27. The operator merges without asking when the review is accepted, CI is green on that exact candidate and no blocking ruling is open; it fast-forwards `main` to that candidate, itself or through the merge train, and deletes no branch (DL-513, DL-515).
+27. The operator merges without asking when the review is accepted, CI is green on that exact candidate and no blocking ruling is open; it fast-forwards `main` to that candidate, itself or through the merge train, and then deletes the merged pull request's branch (DL-513, DL-515, DL-517).
 
 ## Limits on the operator
 28. The operator may make an exact, non-semantic fix that a reviewer or a ruling named; the raiser confirms it.
@@ -92,7 +92,7 @@ Each item comes with the facts and a recommendation (rule 18).
 3. A finding still open after a reviewer's third round (rule 48).
 4. Any rule breach, the operator's own included (rule 16).
 5. A disagreement between the operator and the boss on the rules (rule 17).
-6. Approvals reserved to the owner: the deletes `CLAUDE.md` names (force-deleting a branch, force-removing a worktree, deleting a remote branch, merging with branch deletion; a clean worktree of a verified merged branch may be removed without asking); changing repository settings such as required checks; tagging or releasing, after the boss rules the candidate ready; merging outside rule 27.
+6. Approvals reserved to the owner: the deletes `CLAUDE.md` names (force-deleting a branch, force-removing a worktree, deleting a remote branch that is not merged, merging with branch deletion; a clean worktree, the local branch and the remote branch of a verified merged pull request are removed without asking, DL-517); changing repository settings such as required checks; tagging or releasing, after the boss rules the candidate ready; merging outside rule 27.
 7. Stand-ins for the boss or the operator (rule 43).
 8. Cleanup beyond what is proven to belong to a run (rule 37).
 9. Changes to goals, priorities or this operating model.

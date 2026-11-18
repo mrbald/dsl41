@@ -62,6 +62,7 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 
 #### Tests, tooling and docs
 
+- **BUG-94**: The Bash guard takes the line after a quoted `'<<X'` word for a heredoc body and drops it, so a `git` command on that line is not judged (`scripts/hooks/bash_guard.sh`, `drop_heredocs`). Found in the review of DL-517.
 - **BUG-11**: Barrier cleanup kills a hung wrapper but not its command group, orphaning the commands. Kill the group through the live wrapper first (`tests/update_wiring_barrier.py`, `kill_wrappers`).
 - **BUG-12**: In the Codex macOS sandbox both real-terminal TUI cases held `recovery_other` as "interrupted attempt held" despite correct geometry. Cause unknown; reproduce in a supported environment (DL-424).
 - **BUG-21**: The peer alarm does not reliably stop Codex at its deadline; one build ran 4.5 h (`scripts/peer.sh:67-73`).

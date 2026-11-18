@@ -177,8 +177,11 @@ budget for them, not for diff reads.
 - Apply rule 27's standing owner approval: verify accepted review, CI green on
   the exact candidate and no open blocking ruling, then fast-forward `main` to
   the exact candidate, the head of a pull request into `main`
-  (`git push origin <candidate>:main`, never forced), without asking and without
-  deleting a branch (DL-513). Take a merge outside those conditions to the owner.
+  (`git push origin <candidate>:main`, never forced), without asking (DL-513).
+  Then remove the pull request's worktree, local branch and remote branch, also
+  without asking, the remote delete as a command of its own
+  (`git push -q origin --delete <branch>`); a branch that is not merged stays (DL-517).
+  Take a merge outside those conditions to the owner.
   Ask before any other push to a protected branch.
 - Write a commit message for the reader of the log (DL-506). The subject is one
   sentence of at most 72 characters that says what is true after the commit. It

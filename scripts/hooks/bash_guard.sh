@@ -3,7 +3,9 @@
 # permission decision. No output means the command may go on.
 #   deny: commands that discard work, stage everything, force-push without a lease,
 #         or record a state that still holds merge-conflict markers.
-#   ask:  commands that delete a branch or a worktree by force.
+#   ask:  commands that delete a branch or a worktree by force, and a push that deletes
+#         remote branches unless the whole command is one exact `git push <remote> --delete
+#         <branch>...` line and every branch is merged (DL-517).
 # The marker pattern is the one in tests/test_docs_hygiene.py (DL-237).
 # A shell tokenizer (Python's shlex) reads the command: heredoc bodies and quoted
 # words that hold whitespace never reach a rule, and quotes around a flag do not hide it.
@@ -225,6 +227,110 @@ named_marked() {
     )
 }
 
+# $1 directory, $2 a full refname: the repository stores exactly one ref of that name.
+stored_exactly() {
+    [ "$(git -C "$1" for-each-ref --format='%(refname)' "$2" 2>/dev/null)" = "$2" ]
+}
+
+# $1 directory, $2 remote, then the branches a push deletes: every branch is merged
+# (DL-517). A branch is merged when its remote-tracking ref of the last fetch is an
+# ancestor of the remote's default branch: the symbolic ref refs/remotes/<remote>/HEAD, or
+# main without it. The remote has one fetch URL and the same one push URL, and no local tag
+# has the branch's name. The default branch, HEAD, a ref outside refs/heads and any failed
+# git command are not proven. A ref counts only under its exact stored name, case
+# included: for-each-ref prints the name as stored, so a loose ref found through a disk
+# that ignores case does not prove a branch with another spelling. Only the local
+# repository is read.
+merged_delete() {
+    (
+        dir=$1
+        remote=$2
+        shift 2
+        fetch_url=$(git -C "$dir" remote get-url --all "$remote" 2>/dev/null) || exit 1
+        push_url=$(git -C "$dir" remote get-url --push --all "$remote" 2>/dev/null) || exit 1
+        case "$fetch_url" in '' | *"$NL"*) exit 1 ;; esac
+        [ "$fetch_url" = "$push_url" ] || exit 1
+        default=main
+        head=$(git -C "$dir" symbolic-ref -q "refs/remotes/$remote/HEAD" 2>/dev/null) || head=
+        if [ -n "$head" ]; then
+            default=${head#"refs/remotes/$remote/"}
+            [ "$default" != "$head" ] || exit 1
+        fi
+        stored_exactly "$dir" "refs/remotes/$remote/$default" || exit 1
+        git -C "$dir" rev-parse -q --verify "refs/remotes/$remote/$default^{commit}" \
+            >/dev/null 2>&1 || exit 1
+        [ "$#" -gt 0 ] || exit 1
+        for name in "$@"; do
+            name=${name#refs/heads/}
+            case "$name" in
+            HEAD | refs/* | "$default") exit 1 ;;
+            esac
+            ! git -C "$dir" rev-parse -q --verify "refs/tags/$name" >/dev/null 2>&1 || exit 1
+            stored_exactly "$dir" "refs/remotes/$remote/$name" || exit 1
+            git -C "$dir" rev-parse -q --verify "refs/remotes/$remote/$name^{commit}" \
+                >/dev/null 2>&1 || exit 1
+            git -C "$dir" merge-base --is-ancestor "refs/remotes/$remote/$name" \
+                "refs/remotes/$remote/$default" >/dev/null 2>&1 || exit 1
+        done
+    )
+}
+
+# The whole raw command is one exact line (DL-517):
+#   git [-C <dir>] push [-q|--quiet] <remote> (--delete|-d) <branch>...
+# or the same with (--delete|-d) before <remote>, and every branch is merged. The shape is
+# one anchored regular expression for grep -E -x, so a quote, $, backtick, ; & | < > ( ),
+# backslash or any other character outside the classes below fails it; a newline is
+# refused first, because grep matches by line. <dir> is letters, digits and _ . / ~ -;
+# <remote> letters, digits and _ . - and not a leading -; a <branch> letters, digits and
+# _ . / - and not a leading -. The directory is <dir> against the hook's cwd, or the cwd.
+# Any other command line is not proven and the push asks.
+NL='
+'
+SHAPE_DIR='[A-Za-z0-9_./~-]+'
+SHAPE_REMOTE='[A-Za-z0-9_.][A-Za-z0-9_.-]*'
+SHAPE_BRANCH='[A-Za-z0-9_./][A-Za-z0-9_./-]*'
+SHAPE_DELETE='(--delete|-d)'
+SHAPE="^git( +-C +$SHAPE_DIR)? +push( +(-q|--quiet))?"
+SHAPE="$SHAPE( +$SHAPE_REMOTE +$SHAPE_DELETE| +$SHAPE_DELETE +$SHAPE_REMOTE)"
+SHAPE="$SHAPE( +$SHAPE_BRANCH)+\$"
+
+exact_merged_delete() {
+    (
+        line=$(printf '%s' "$cmd" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+        case "$line" in *"$NL"*) exit 1 ;; esac
+        printf '%s\n' "$line" | grep -E -x -q -e "$SHAPE" || exit 1
+        set -f
+        # shellcheck disable=SC2086
+        set -- $line
+        shift
+        dir=$start
+        if [ "$1" = -C ]; then
+            dir=$2
+            shift 2
+            case "$dir" in
+            \~ | \~/*) dir=${HOME:-}${dir#\~} ;;
+            esac
+            case "$dir" in
+            /*) ;;
+            *) dir=$start/$dir ;;
+            esac
+        fi
+        shift
+        case "$1" in -q | --quiet) shift ;; esac
+        case "$1" in
+        --delete | -d)
+            remote=$2
+            shift 2
+            ;;
+        *)
+            remote=$1
+            shift 2
+            ;;
+        esac
+        merged_delete "$dir" "$remote" "$@"
+    )
+}
+
 segments=$(printf '%s' "$cmd" | python3 -c "$NORMALISE" "$start") || {
     echo "bash_guard: the command could not be read; no guard ran." >&2
     exit 1
@@ -285,8 +391,10 @@ while IFS="$TAB" read -r where seg; do
             emit deny "A forced push needs --force-with-lease, without --force or a + refspec."
             exit 0
         fi
-        if has "$seg" "--delete|$(short d)|:.+"; then
-            ask_reason="This push deletes a remote branch."
+        # git takes a unique prefix of a long option: --d to --delete, --m to --mirror,
+        # --pru to --prune (DL-517).
+        if has "$seg" "--d|--de|--del|--dele|--delet|--delete|$(short d)|:.+|--m|--mi|--mir|--mirr|--mirro|--mirror|--pru|--prun|--prune"; then
+            exact_merged_delete || ask_reason="This push deletes a remote branch."
         fi
         ;;
     "git branch "*)
