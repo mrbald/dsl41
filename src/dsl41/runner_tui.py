@@ -94,10 +94,18 @@ Contract detail for DL-46, within DL-41's frame:
   Filtered and non-'all' views are flat, so a match inside a folded box is never invisible. The
   console is on `:`. The status response's spec_drift flag renders in the subtitle: files changed
   on disk, the running catalog is the truth.
-- Pane geometry is keyboard only: `m` toggles maximizing the log pane and hands focus to the
-  pager (`q`/escape also restore); `]`/`[` grow and shrink the log against explain, `}`/`{` the
-  jobs table against the side column. While anything is maximized the tree filter and the console
-  never take focus, so an input the operator cannot see never swallows keystrokes (DL-67).
+- Pane geometry (DL-520): three splits, the table column against the side column and the explain
+  pane against the log pane as ratios, the console as rows, kept for the session and across a
+  change of the terminal's size. A first-button drag on a split's border, the two lines that
+  meet there, moves it with the pointer; the press, the drag, the release and its click reach no
+  widget, and the lines
+  take the accent colour under the pointer and during the drag. `+`/`=` and `-` resize the
+  focused pane by 5 points or 2 rows; `]`/`[` move the log against explain and `}`/`{` the jobs
+  table against the side column by a fifth. No pane goes under 20 columns, the explain pane
+  under 3 rows, the log under 5, the console box under 6, the area above it under 8. `m` toggles
+  maximizing the log pane, which then fills the screen, and hands focus to the pager (`q`/escape also restore); nothing
+  resizes meanwhile. While anything is maximized the tree filter and the console never take
+  focus, so an input the operator cannot see never swallows keystrokes (DL-67).
 - One request connection, lock-serialized (the server answers one line per line); `subscribe`
   owns its connection until hangup (ss10). A dead socket flips the header subtitle to
   "disconnected", is reported once to the console, and every path retries quietly, so the TUI
@@ -132,7 +140,7 @@ try:
     from rich.style import Style
     from rich.table import Table
     from rich.text import Text
-    from textual import on
+    from textual import events, on
     from textual.app import App, ComposeResult, RenderResult
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -140,8 +148,9 @@ try:
     from textual.css.query import NoMatches
     from textual.events import Click
     from textual.message import Message
-    from textual.screen import ModalScreen
+    from textual.screen import ModalScreen, Screen
     from textual.suggester import Suggester
+    from textual.geometry import Region
     from textual.widget import Widget
     from textual.widgets import DataTable, Footer, Header, HelpPanel, Input, RichLog, Static
 
@@ -158,6 +167,7 @@ from dsl41.console_words import STATUS_ROWS, VERB_ROWS, complete_line
 from dsl41.display_time import format_local_at
 from dsl41.job_filter import JobFilter, read_filter
 from dsl41.match_bound import Stopped, run_bounded
+from dsl41.pane_layout import Sizes, Split, place, set_cells, step
 from dsl41.runner_access import Principal
 from dsl41.start_refusals import RefusalKey, scheduler_refusal_counts
 from dsl41.runner_admission import addressed_key
@@ -393,6 +403,7 @@ _OPERATOR_BELLS = tuple(
     for key in (
         *("s", "f", "k", "i", "I", "h", "H", "n", "N"),
         *("d", "m", "o", "slash", "v", "space", "z", "colon", "]", "[", "}", "{"),
+        *("plus", "equals_sign", "minus"),
     )
 )
 
@@ -743,6 +754,8 @@ class _JobsTable(DataTable[Any]):
     d or Enter opens details, t opens triggers, / filters (F1 in the
     filter line shows the syntax), v cycles all/problems/active, space
     folds a box, z folds every box. A click on a box's marker folds it.
+
+    Drag a border to resize; + and - resize the focused pane.
 
     F1 in the console line (`:`) lists every verb and every status
     CHANGE_STATUS takes.
@@ -1458,6 +1471,100 @@ def config_line(status: Mapping[str, Any]) -> str:
     return line
 
 
+@dataclass(frozen=True)
+class _Drag:
+    """A drag of a split's border: the split, the pointer's column (table) or row (log,
+    console) at the press, and the split's cells then (DL-520)."""
+
+    split: Split
+    start: int
+    cells: int
+
+
+#: the split `+` and `-` move for each focusable pane, and by how much for `+`: points of the
+#: ratio, or rows for the console; the explain pane grows against the log (DL-520)
+_PANE_STEPS: dict[str, tuple[Split, float]] = {
+    "jobs": (Split.TABLE, 0.05),
+    "explain-box": (Split.LOG, -0.05),
+    "logtail": (Split.LOG, 0.05),
+    "console": (Split.CONSOLE, 2),
+}
+
+#: the border lines that meet at each split, as a widget and the side of its border. The handle
+#: is these lines and nothing else, and they are what takes the accent colour, so the cell a press
+#: lands on and the line that lights up cannot disagree. The pager's prompt, when it shows, is
+#: the log pane's lowest widget: its bottom line stands for the log's (DL-520).
+_HANDLE_LINES: dict[Split, tuple[tuple[str, str], ...]] = {
+    Split.TABLE: (
+        ("jobs", "right"),
+        ("explain-box", "left"),
+        ("logtail", "left"),
+        ("logsearch", "left"),
+    ),
+    Split.LOG: (("explain-box", "bottom"), ("logtail", "top")),
+    Split.CONSOLE: (
+        ("jobs", "bottom"),
+        ("logtail", "bottom"),
+        ("logsearch", "bottom"),
+        ("console", "top"),
+    ),
+}
+
+
+def _on_border(region: Region, side: str, x: int, y: int) -> bool:
+    """Whether a screen cell lies on one side of a widget's border; a hidden widget's region is
+    empty and has none."""
+    across = region.x <= x < region.right
+    down = region.y <= y < region.bottom
+    if side == "left":
+        return x == region.x and down
+    if side == "right":
+        return x == region.right - 1 and down
+    return across and y == (region.y if side == "top" else region.bottom - 1)
+
+
+class _PaneRow(Horizontal):
+    """The row above the console. When its size changes, the splits are placed again, so a
+    change of the terminal's size keeps the ratios and the console's rows (DL-520)."""
+
+    def on_resize(self) -> None:
+        app = self.app
+        assert isinstance(app, RunnerApp)
+        app._place_panes()
+
+
+class _MainScreen(Screen[None]):
+    """The app's own screen. It sees each mouse event before the library sends it to the widget
+    under the pointer, so a press on a split's border starts a drag that selects no row, folds
+    nothing, moves no focus and starts no text selection (DL-520). The library has no public
+    hook ahead of that dispatch; `_forward_event` is where both its drivers and its pilot hand
+    a mouse event to the screen."""
+
+    def _forward_event(self, event: events.Event) -> None:
+        app = self.app
+        if (
+            isinstance(event, events.MouseEvent)
+            and not event.is_forwarded
+            and isinstance(app, RunnerApp)
+            and app._pane_mouse(event)
+        ):
+            return
+        super()._forward_event(event)
+
+    def watch_maximized(self) -> None:
+        # nothing resizes while the log is maximized; on the way back the splits are placed on
+        # the screen there is then
+        app = self.app
+        assert isinstance(app, RunnerApp)
+        app._release_handle()
+        app.call_after_refresh(app._place_panes)
+
+    def on_screen_suspend(self) -> None:
+        app = self.app
+        assert isinstance(app, RunnerApp)
+        app._release_handle()
+
+
 class RunnerApp(App[None]):
     """The ss11 app: jobs table, explain pane, log tail, event console."""
 
@@ -1479,6 +1586,17 @@ class RunnerApp(App[None]):
     #logsearch { display: none; }
     #consolebox { height: 11; }
     #console { height: 1fr; border: round $secondary; }
+    /* a split's handle in the accent colour: one side of each border, its label as it was */
+    #jobs.-grab-right { border-right: round $accent; }
+    #explain-box.-grab-left, #logtail.-grab-left { border-left: round $accent; }
+    #jobs.-grab-bottom, #explain-box.-grab-bottom, #logtail.-grab-bottom {
+        border-bottom: round $accent;
+        border-subtitle-color: $primary;
+    }
+    #logtail.-grab-top { border-top: round $accent; border-title-color: $primary; }
+    #logsearch.-grab-left { border-left: tall $accent; }
+    #logsearch.-grab-bottom { border-bottom: tall $accent; }
+    #console.-grab-top { border-top: round $accent; border-title-color: $secondary; }
     """
 
     #: No `send(...)` action belongs here: the operator verbs live on _JobsTable, where focus
@@ -1500,12 +1618,15 @@ class RunnerApp(App[None]):
         Binding("space", "toggle_box", "fold", show=False),
         Binding("z", "toggle_all", "fold-all", show=False),
         Binding("colon", "focus_console", "console"),
-        # pane sizing: ]/[ grow and shrink the log against explain; }/{ the jobs table against
-        # the side column
-        Binding("]", "resize('log', 1)", "log+", show=False),
-        Binding("[", "resize('log', -1)", "log-", show=False),
-        Binding("}", "resize('table', 1)", "table+", show=False),
-        Binding("{", "resize('table', -1)", "table-", show=False),
+        # pane sizing (DL-520): ]/[ move the log against explain and }/{ the jobs table against
+        # the side column by a fifth; +/= and - resize the focused pane by a small step
+        Binding("]", "resize('log', 1)", "log taller", show=False),
+        Binding("[", "resize('log', -1)", "log shorter", show=False),
+        Binding("}", "resize('table', 1)", "table wider", show=False),
+        Binding("{", "resize('table', -1)", "table narrower", show=False),
+        Binding("plus", "grow_pane(1)", "grow pane", show=False),
+        Binding("equals_sign", "grow_pane(1)", "grow pane", show=False),
+        Binding("minus", "grow_pane(-1)", "shrink pane", show=False),
     ]
 
     def __init__(
@@ -1547,9 +1668,16 @@ class RunnerApp(App[None]):
         # (stream, path), since out and err may resolve to the same file and `o` must retitle
         self._tail_key: tuple[str, str | None] | None = None
         self._tail_pos: int | None = None
-        # pane shares, resized by ]/[ and }/{: fr weights out of _SHARE_TOTAL
-        self._log_share = 3  # log vs explain (CSS default 3fr : 2fr)
-        self._table_share = 3  # jobs table vs side column (CSS default 3fr : 2fr)
+        #: the three splits' sizes for this session, never saved (DL-520)
+        self._sizes = Sizes()
+        #: the drag of a split's border under way, if any
+        self._drag: _Drag | None = None
+        #: the split whose handle is in the accent colour: under the pointer or dragged
+        self._lit: Split | None = None
+        #: the buttons whose press started or interrupted a drag: each owns its release
+        self._owned: set[int] = set()
+        #: a release that was swallowed is followed by the library's click; it is eaten
+        self._eat_click = False
         # DL-65 navigation state
         self._jobs_snapshot: dict[str, dict[str, Any]] = {}  # last status response
         #: the concurrency-model ss6 read header from the last answer: the log the revisions in
@@ -1585,9 +1713,12 @@ class RunnerApp(App[None]):
 
     # ------------------------------------------------------------- layout
 
+    def get_default_screen(self) -> Screen[Any]:
+        return _MainScreen(id="_default")
+
     def compose(self) -> ComposeResult:
         yield _LocalHeader()
-        with Horizontal(id="main"):
+        with _PaneRow(id="main"):
             with Vertical(id="tablecol"):
                 yield _FilterInput(
                     placeholder="filter: !status=su =core_* -- Enter keeps, Esc clears, F1 syntax",
@@ -2317,8 +2448,6 @@ class RunnerApp(App[None]):
 
     # ------------------------------------------------------- pane geometry
 
-    _SHARE_TOTAL = 5  # both splits are X fr : (5 - X) fr
-
     def action_maximize_log(self) -> None:
         pane = self.query_one("#logbox", _LogPane)
         if self.screen.maximized is pane:
@@ -2332,19 +2461,153 @@ class RunnerApp(App[None]):
             _focus_now(self.query_one("#logtail", _LogTail))
 
     def action_resize(self, pane: str, delta: int) -> None:
-        span = range(1, self._SHARE_TOTAL)  # 1..4: neither side collapses
-        if pane == "log":
-            self._log_share = min(max(self._log_share + delta, span.start), span[-1])
-            # logbox, not #logtail: the pane takes part in the vertical split
-            self.query_one("#logbox", _LogPane).styles.height = f"{self._log_share}fr"
-            self.query_one(
-                "#explain-box"
-            ).styles.height = f"{self._SHARE_TOTAL - self._log_share}fr"
-        else:
-            self._table_share = min(max(self._table_share + delta, span.start), span[-1])
-            # tablecol, not #jobs: the filter column takes part in the horizontal split
-            self.query_one("#tablecol").styles.width = f"{self._table_share}fr"
-            self.query_one("#side").styles.width = f"{self._SHARE_TOTAL - self._table_share}fr"
+        """`]` `[` `}` `{`: a fifth of the split, from where it is (DL-520)."""
+        self._step(Split(pane), delta / 5)
+
+    def action_grow_pane(self, sign: int) -> None:
+        """`+` (or `=`) and `-`: grow or shrink the focused pane by 5 points of the ratio, or
+        the console by 2 rows. A text line takes the keys as text. The triggers view and the
+        verbs screen ring the bell for them, and no other dialog sees them (DL-520)."""
+        focused = self.focused
+        steps = _PANE_STEPS.get(focused.id or "") if focused is not None else None
+        if steps is not None:
+            self._step(steps[0], steps[1] * sign)
+
+    def _pane_area(self) -> tuple[int, int] | None:
+        """The columns of the row above the console, and the rows of that row and the console
+        together; None while the log is maximized, when nothing resizes (DL-520)."""
+        main = self.query_one("#main")
+        if main.screen.maximized is not None or not main.region.width:
+            return None
+        return main.region.width, self.query_one(Footer).region.y - main.region.y
+
+    def _place_panes(self) -> None:
+        """Place the splits on the screen there is now. The table column, the explain pane and
+        the console get cells; the side column and the log pane keep their fr and take what is
+        left, so the maximized log still fills the screen."""
+        area = self._pane_area()
+        if area is None:
+            return
+        placed = place(self._sizes, *area)
+        self.query_one("#tablecol").styles.width = placed.table
+        explain = area[1] - placed.console - placed.log
+        self.query_one("#explain-box").styles.height = explain
+        self.query_one("#consolebox").styles.height = placed.console
+
+    def _step(self, split: Split, delta: float) -> None:
+        area = self._pane_area()
+        if area is not None:
+            self._set_sizes(step(self._sizes, split, delta, *area))
+
+    def _set_sizes(self, sizes: Sizes) -> None:
+        if sizes != self._sizes:
+            self._sizes = sizes
+            self._place_panes()
+
+    def _handle_lines(self, split: Split) -> list[tuple[str, str]]:
+        """The border lines of a split as they are on screen now: with the pager's prompt
+        showing, its bottom line is the log pane's, and the log's own is between the two."""
+        prompt = bool(self.query_one("#logsearch").display)
+        skip = ("logtail", "bottom") if prompt else None
+        return [
+            line
+            for line in _HANDLE_LINES[split]
+            if line != skip and (prompt or line[0] != "logsearch")
+        ]
+
+    def _handle_at(self, x: int, y: int) -> Split | None:
+        """The split whose handle is at a screen cell: a cell of one of the border lines that
+        meet there. A corner cell belongs to the horizontal line it ends."""
+        if self._pane_area() is None:
+            return None
+        for split in (Split.CONSOLE, Split.LOG, Split.TABLE):
+            for name, side in self._handle_lines(split):
+                if _on_border(self.query_one(f"#{name}").region, side, x, y):
+                    return split
+        return None
+
+    def _pane_mouse(self, event: events.MouseEvent) -> bool:
+        """See a mouse event before any widget; True when it belongs to a drag of a split's
+        border and goes no further (DL-520). A first-button press on a handle starts the drag;
+        each move with that button held sets the split so the border follows the pointer; its
+        release ends the drag. A press swallowed this way owns its release, and the release
+        owns the click the library makes of it: both are swallowed also when the drag ended
+        early (a resize, a lost focus, a dialog), so nothing under the pointer is selected,
+        folded or opened. Another button pressed during a drag is swallowed the same way and
+        leaves the drag going. A move with no button held means every button was released
+        outside the app: the drag ends and nothing is owned any more. A move with no drag
+        lights the handle under the pointer."""
+        if isinstance(event, events.Click):
+            eaten, self._eat_click = self._eat_click, False
+            return eaten
+        drag = self._drag
+        if isinstance(event, events.MouseMove):
+            if drag is not None and event.button == 1:
+                self._drag_to(drag, event)
+                return True
+            if event.button == 0:
+                self._owned.clear()
+            self._drag = None
+            self._light(self._handle_at(event.x, event.y) if event.button == 0 else None)
+            return False
+        if isinstance(event, events.MouseDown):
+            self._eat_click = False
+            self._owned.discard(event.button)  # its release was lost outside the app
+            if drag is not None:
+                self._owned.add(event.button)
+                return True
+            split = self._handle_at(event.x, event.y) if event.button == 1 else None
+            area = self._pane_area()
+            if split is None or area is None:
+                return False
+            pointer = event.x if split is Split.TABLE else event.y
+            self._drag = _Drag(split, pointer, place(self._sizes, *area).of(split))
+            self._owned.add(1)
+            self._light(split)
+            return True
+        if isinstance(event, events.MouseUp) and event.button in self._owned:
+            self._owned.discard(event.button)
+            self._eat_click = True
+            if drag is not None and event.button == 1:
+                self._drag_to(drag, event)
+                self._drag = None
+                self._light(self._handle_at(event.x, event.y))
+            return True
+        return False
+
+    def _drag_to(self, drag: _Drag, event: events.MouseEvent) -> None:
+        area = self._pane_area()
+        assert area is not None  # maximizing the log ends a drag (watch_maximized)
+        if drag.split is Split.TABLE:
+            cells = drag.cells + event.x - drag.start
+        else:  # the measured pane is below its border: moving the border down shrinks it
+            cells = drag.cells - (event.y - drag.start)
+        self._set_sizes(set_cells(self._sizes, drag.split, cells, *area))
+
+    def _light(self, split: Split | None) -> None:
+        """Give one split's handle the accent colour, and the others their own."""
+        if split is self._lit:
+            return
+        if self._lit is not None:
+            for name, side in _HANDLE_LINES[self._lit]:
+                self.query_one(f"#{name}").remove_class(f"-grab-{side}")
+        if split is not None:
+            for name, side in self._handle_lines(split):
+                self.query_one(f"#{name}").add_class(f"-grab-{side}")
+        self._lit = split
+
+    def _release_handle(self) -> None:
+        """End a drag and give the handle its colour back: the screen changed, the terminal's
+        size changed or the app lost focus, so the release may never come."""
+        self._drag = None
+        self._light(None)
+
+    def on_resize(self) -> None:
+        # the row above the console places the splits again when its own size changes
+        self._release_handle()
+
+    def on_app_blur(self) -> None:
+        self._release_handle()
 
     # ------------------------------------------------- quit / send (DL-187)
 

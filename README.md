@@ -447,7 +447,9 @@ flag `A`. Verb keys act only while the jobs table has focus. Kill and force
 ask first, naming the box members and the revision they act on. F1 opens
 the help panel. On the console line F1 opens a screen of every verb and
 status instead. Tab or Right takes the grey completion, which never
-offers KILLJOB or FORCE_STARTJOB, and Tab never leaves the line (DL-516).
+offers KILLJOB or FORCE_STARTJOB, and Tab never leaves the line (DL-516). Drag
+the border between two panes to resize them; `+` and `-` resize the
+focused pane (DL-520).
 
 An operator hold is `on_hold`: `sendevent ON_HOLD` sets it, and
 `sendevent OFF_HOLD` or `off-hold-all` releases it.
@@ -812,6 +814,8 @@ Runner:
   under a limit of the process's processor time (DL-514).
 - `src/dsl41/console_words.py`: the TUI event console's verbs and statuses,
   each with one line of meaning, and the completion of a half-typed line (DL-516).
+- `src/dsl41/pane_layout.py`: the sizes of the TUI's three splits and their
+  limits (DL-520).
 
 Shared cores:
 
@@ -1067,6 +1071,8 @@ Runner:
 - `tests/test_console_words.py`: the event console's status table and the
   completion of each word, with a property that a completion extends the line as
   typed (DL-516).
+- `tests/test_pane_layout.py`: the sizes of the TUI's splits: limits, ratios
+  kept across a change of size, and a screen too small for the limits (DL-520).
 - `tests/test_control_as.py`: real-engine person tiers, catalog projection,
   request scope, actor records, retry identity, malformed wrappers, stream
   revocation, UI wrapping and denied-status exit (DL-499).

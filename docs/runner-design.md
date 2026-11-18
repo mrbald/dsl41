@@ -1309,8 +1309,36 @@ exit codes; it refuses `--brief` and explicit `--style`. Status has no reload
 capability field, so its source-drift sentence gives no reload advice.
 Engine, storage and socket timestamps stay UTC. `query trace`, `query timers`,
 `runs` and `journal` keep UTC output. No timezone switch or setting is provided.
-Pane geometry is keyboard-only: maximize toggle on the
-log tail plus fr-share nudges for both splits. Navigation at estate
+The screen has three splits (DL-520): the table column against the side column,
+the explain pane against the log pane, and the console against the area above it.
+The first two are ratios and the console is a number of rows.
+The handle of a split is the two border lines that meet there.
+A first-button press on a handle and a move set the split so the border follows the pointer.
+The release ends the drag, also outside the handle, and a move with no button held ends it too.
+A press and release without a move changes nothing.
+A drag that starts on a handle selects no row, folds nothing, opens nothing and starts no text
+selection; a press anywhere else does what it did.
+The press owns its release and the click made of it: when the drag ends early, by a change of
+size, a lost focus or a dialog, they still reach nothing under the pointer.
+The handle is only the lines that meet: with the pager's prompt open its bottom line is the log
+pane's, and the filter line's border is no handle.
+The two lines take the accent colour while the pointer is over the handle and during its drag.
+Their titles and subtitles keep their colour.
+`+` (or `=`) grows and `-` shrinks the focused pane by 5 points of the ratio or 2 rows:
+the table column, the explain or the log pane against the other, or the console.
+In a text line these keys are text. The triggers view and the verbs screen ring the bell for
+them, and other dialogs ignore them.
+`]` and `[` move the log against the explain pane, `}` and `{` the table column against the
+side column, by a fifth from where the split is.
+Every way of resizing keeps the limits: no pane narrower than 20 columns, the explain pane
+at least 3 rows, the log pane 5, the console box 6, so one line of events shows above the
+command line, and the area above it 8.
+A screen too small for a split's limits keeps that split as it is.
+A change of the terminal's size keeps the ratios and the console's rows, within the limits.
+`m` maximizes the log pane, which fills the screen as it did before any resize, and nothing
+resizes while it is maximized.
+The sizes last for the UI process; nothing is saved. `pane_layout.py` holds the arithmetic.
+Navigation at estate
 scale (DL-65): the table renders the box tree from the status response's
 box_name (fold a box with space, all with z; a folded box shows its
 hidden count and a red problem tally), `/` opens the filter line, `v` cycles
@@ -1532,6 +1560,8 @@ the split cannot decay into a second name for one file.
   textual import (DL-514).
 - `console_words.py`: the §11 event console's verb and status tables and the completion
   of a half-typed line, with no textual import (DL-516).
+- `pane_layout.py`: the §11 sizes of the three splits and their limits, with no textual
+  import (DL-520).
 - `runner_startup.py`: taking possession of a run root: genesis, resume and
   the recovery barrier (DL-433). It prepares the catch-up steps that
   `runner.py` runs.

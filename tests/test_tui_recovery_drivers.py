@@ -54,6 +54,17 @@ _MARKER = "▾ recovery_box"
 _SGR = re.compile(rb"\x1b\[[\d;:]*m")
 
 
+def _table_border(
+    output: list[bytes], columns: int, rows: int, engine: str, diagnostics: Path
+) -> tuple[int, int]:
+    """The row and column of the table's top right corner where it meets the explain pane's
+    top left corner on the painted screen (DL-520)."""
+    screen = painted_lines(b"".join(output), columns, rows)
+    found = [(y, line.find("╮╭")) for y, line in enumerate(screen) if "╮╭" in line]
+    assert found, f"{engine} painted no table border; see {diagnostics}"
+    return found[0]
+
+
 def _header_timestamp_ready(rendered: bytes, columns: int, rows: int) -> bool:
     header = painted_lines(rendered, columns, rows)[0]
     return bool(re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", header))
@@ -1235,6 +1246,25 @@ def _browser_drive(
             )
             until("▸ recovery_box (1", after=mark)
             until("jobs 2/3", after=mark)
+            # DL-520: a real drag on the table's right border moves it with the pointer. The
+            # border is where the table's top corner meets the explain pane's, read off the
+            # painted screen like the marker.
+            top, x = _table_border(output, columns, rows, engine, diagnostics)
+
+            def cell(column: int, row: int) -> tuple[float, float]:
+                return (
+                    box["x"] + (column + 0.5) * box["width"] / columns,
+                    box["y"] + (row + 0.5) * box["height"] / rows,
+                )
+
+            page.mouse.move(*cell(x, top + 4))
+            page.mouse.down()
+            page.mouse.move(*cell(x + 6, top + 4), steps=6)
+            page.mouse.up()
+            deadline = time.monotonic() + _TIMEOUT
+            while _table_border(output, columns, rows, engine, diagnostics) != (top, x + 6):
+                assert time.monotonic() < deadline, f"{engine} did not move the border"
+                page.wait_for_timeout(20)
             page.keyboard.press("q")
             page.locator("body.-closed").wait_for(state="attached")
             assert not errors, errors

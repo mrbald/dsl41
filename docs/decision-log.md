@@ -27169,3 +27169,24 @@ relitigate an entry; append a new one.
   THE COST. After the window regains focus the grey text is gone until the next keystroke,
   and Tab completes all the same. Printable keys that arrive within a millisecond of Tab
   still land before it acts, so such a burst is left as typed (BUG-97).
+- DL-520 Panes resize by dragging their border, and `+` and `-` resize the focused pane
+  (2026-11-18; src/dsl41/runner_tui.py; docs/runner-design.md ss11)
+  THE RULE. The UI has three splits: the table column against the side column, the explain pane
+  against the log pane, and the console against the area above it. The first two are ratios, the
+  third a number of rows. The handle of a split is the two border lines that meet there. Pressing
+  the first mouse button on a handle and moving sets the split so the border follows the pointer;
+  the two lines take the accent colour under the pointer and during the drag. `+` (or `=`) grows
+  and `-` shrinks the focused pane by a small step; in a text line they are text. `]` `[` `}` `{`
+  keep their step of one fifth and work from where the split is. Limits hold for every way: no
+  pane narrower than 20 columns, the explain pane at least 3 rows, the log pane 5, the console box
+  6 (one line of events above the command line), the area above it 8. A change of the terminal's
+  size keeps the ratios and the console's rows. Nothing resizes while the log is maximized, the
+  maximized log fills the screen as before, and nothing is saved past the session. Borders, titles
+  and subtitles stay as they are.
+  WHY. The bracket keys moved a border by a fifth of the screen, need AltGr on Swiss and
+  German keyboards, and left the console's height fixed. A person at a browser expects to
+  drag the border between two panes; tmux and Zellij do it in a terminal.
+  REJECTED: removing the borders for a splitter widget (the borders carry the titles, the
+  filter, the fold-key hint and the pager's notes); saving the layout (each tab is its own
+  process with no place of its own to keep it).
+  THE COST. A press on a border line no longer does nothing: it starts a drag.

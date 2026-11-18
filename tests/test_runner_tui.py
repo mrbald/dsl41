@@ -44,11 +44,14 @@ from rich.console import Console
 from textual import events
 from textual.binding import Binding
 from textual.containers import VerticalScroll
-from textual.widgets import DataTable, HelpPanel, Input, RichLog, Static
+from textual.geometry import Region
+from textual.pilot import _get_mouse_message_arguments
+from textual.widgets import DataTable, Footer, HelpPanel, Input, RichLog, Static
 
 from dsl41 import runner_tui
 from dsl41.ir import lower_source
 from dsl41.oracle_state import Event
+from dsl41.pane_layout import Split
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import RealClock
@@ -823,8 +826,9 @@ def test_pilot_d_key_opens_the_spec_popup_and_escape_closes_it(short_root: Path)
 def test_pilot_pane_geometry_maximize_toggle_and_share_nudges(short_root: Path) -> None:
     """DL-64 keyboard geometry, DL-67 target: `m` maximizes the log PANE
     (tail + search prompt, so the prompt stays visible while zoomed) and
-    hands focus to the pager; `m` again restores. `]` and `}` move the fr
-    shares within their 1..4 clamp -- on the pane, the split participant."""
+    hands focus to the pager; `m` again restores. `]` and `}` move their
+    split by a fifth, within the limits of DL-520: the log pane, and the
+    table column, the split's participants."""
     text = "insert_job: tp_geo\njob_type: c\ncommand: x\nmachine: m1\n"
 
     async def scenario() -> None:
@@ -844,19 +848,20 @@ def test_pilot_pane_geometry_maximize_toggle_and_share_nudges(short_root: Path) 
                 await pilot.pause()
                 assert app.screen.maximized is None
 
-                assert (app._log_share, app._table_share) == (3, 3)
+                # 120 columns; 27 rows above the 11 of the console
+                await _wait_for_ui(pilot, lambda: _panes(app) == (72, 48, 11, 16, 11, 27))
                 await pilot.press("]")
-                assert app._log_share == 4
-                assert str(logbox.styles.height) == "4fr"
-                await pilot.press("]")  # clamped: neither pane may collapse
-                assert app._log_share == 4
+                assert app._sizes.log == pytest.approx(0.8)
+                await _wait_for_ui(pilot, lambda: _panes(app)[2:4] == (5, 22))
+                await pilot.press("]")  # clamped: the explain pane keeps 3 rows
+                await _wait_for_ui(pilot, lambda: _panes(app)[2:4] == (3, 24))
                 await pilot.press("{")
                 await pilot.press("{")
-                await pilot.press("{")  # clamped at 1
-                assert app._table_share == 1
+                await pilot.press("{")  # clamped: the table column keeps 20 columns
                 # tablecol (the filter+table column) is the horizontal-split
                 # participant, not #jobs inside it (DL-65 review)
-                assert str(app.query_one("#tablecol").styles.width) == "1fr"
+                await _wait_for_ui(pilot, lambda: _panes(app)[:2] == (20, 100))
+                assert app.query_one("#tablecol").styles.width.value == 20
         finally:
             await _teardown(engine, server, loop_task)
 
@@ -1787,6 +1792,663 @@ def test_pilot_dl512_the_lower_border_names_the_fold_keys(short_root: Path) -> N
             await _teardown(engine, server, loop_task)
 
     asyncio.run(no_box())
+
+
+# ------------------------------------------------- DL-520: pane borders and +/-
+
+
+def _panes(app: RunnerApp) -> tuple[int, int, int, int, int, int]:
+    """The table column's and the side column's widths, the explain pane's, the log pane's and
+    the console's heights, and the height of the row above the console."""
+    regions = {
+        name: app.query_one(f"#{name}").region
+        for name in ("tablecol", "side", "explain-box", "logbox", "consolebox", "main")
+    }
+    return (
+        regions["tablecol"].width,
+        regions["side"].width,
+        regions["explain-box"].height,
+        regions["logbox"].height,
+        regions["consolebox"].height,
+        regions["main"].height,
+    )
+
+
+def _handles(app: RunnerApp) -> dict[str, tuple[int, int]]:
+    """A cell on each split's handle, read off the widgets' regions: the table's right border,
+    the log pane's top border and the console's top border."""
+    tablecol, logbox, console = (
+        app.query_one(f"#{name}").region for name in ("tablecol", "logbox", "consolebox")
+    )
+    return {
+        "table": (tablecol.right - 1, tablecol.y + 6),
+        "log": (logbox.x + 10, logbox.y),
+        "console": (console.x + 30, console.y),
+    }
+
+
+async def _drag(pilot, start: tuple[int, int], *path: tuple[int, int]) -> None:
+    """Press the first button at `start`, move with it held through `path`, and release at the
+    last point, as a terminal reports a drag."""
+    await pilot.mouse_down(offset=start)
+    for point in path:
+        await pilot._post_mouse_events([events.MouseMove], offset=point, button=1)
+    await pilot.mouse_up(offset=path[-1] if path else start)
+    await pilot.pause()
+
+
+def _shift(point: tuple[int, int], dx: int = 0, dy: int = 0) -> tuple[int, int]:
+    return point[0] + dx, point[1] + dy
+
+
+def test_pilot_dl520_dragging_each_border_moves_it_with_the_pointer_and_back(
+    short_root: Path,
+) -> None:
+    """DL-520: a drag on the table's right border by N columns widens the table column by N and
+    narrows the side by N; back left restores it. The explain/log border and the console's
+    border follow the pointer by rows in the same way."""
+
+    async def scenario() -> None:
+        async with _box_tree_app(short_root) as (app, pilot, _table, _details):
+            start = (72, 48, 11, 16, 11, 27)
+            await _wait_for_ui(pilot, lambda: _panes(app) == start)
+            handle = _handles(app)
+
+            await _drag(
+                pilot, handle["table"], _shift(handle["table"], 3), _shift(handle["table"], 7)
+            )
+            await _wait_for_ui(pilot, lambda: _panes(app) == (79, 41, 11, 16, 11, 27))
+            moved = _shift(handle["table"], 7)
+            await _drag(pilot, moved, handle["table"])
+            await _wait_for_ui(pilot, lambda: _panes(app) == start)
+
+            await _drag(pilot, handle["log"], _shift(handle["log"], dy=4))  # down: log shorter
+            await _wait_for_ui(pilot, lambda: _panes(app) == (72, 48, 15, 12, 11, 27))
+            await _drag(pilot, _shift(handle["log"], dy=4), handle["log"])
+            await _wait_for_ui(pilot, lambda: _panes(app) == start)
+
+            await _drag(pilot, handle["console"], _shift(handle["console"], dy=-5))  # up
+            await _wait_for_ui(pilot, lambda: _panes(app)[4:] == (16, 22))
+            await _drag(pilot, _shift(handle["console"], dy=-5), handle["console"])
+            await _wait_for_ui(pilot, lambda: _panes(app) == start)
+
+            # the other line of each handle drags the same split
+            side_left = (app.query_one("#side").region.x, handle["table"][1])
+            await _drag(pilot, side_left, _shift(side_left, -2))
+            await _wait_for_ui(pilot, lambda: _panes(app)[:2] == (70, 50))
+            explain_bottom = _shift(handle["log"], dy=-1)
+            await _drag(pilot, explain_bottom, _shift(explain_bottom, dy=-2))
+            await _wait_for_ui(pilot, lambda: _panes(app)[2:4] == (9, 18))
+            above_bottom = _shift(handle["console"], dy=-1)
+            await _drag(pilot, above_bottom, _shift(above_bottom, dy=3))
+            await _wait_for_ui(pilot, lambda: _panes(app)[4:] == (8, 30))
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl520_the_limits_hold_at_both_ends_of_each_split(short_root: Path) -> None:
+    """DL-520: no pane narrower than 20 columns; the explain pane at least 3 rows and the log
+    pane at least 5; the console box at least 6 rows and the area above it at least 8. The border
+    stops at the limit while the pointer goes on."""
+
+    async def scenario() -> None:
+        async with _box_tree_app(short_root) as (app, pilot, _table, _details):
+            await _wait_for_ui(pilot, lambda: _panes(app) == (72, 48, 11, 16, 11, 27))
+            handle = _handles(app)
+            table = handle["table"]
+            await _drag(pilot, table, (110, table[1]), (119, table[1]))
+            await _wait_for_ui(pilot, lambda: _panes(app)[:2] == (100, 20))
+            await _drag(pilot, (99, table[1]), (0, table[1]))
+            await _wait_for_ui(pilot, lambda: _panes(app)[:2] == (20, 100))
+
+            log = handle["log"]
+            await _drag(pilot, log, (log[0], 1))  # the top of the side column
+            await _wait_for_ui(pilot, lambda: _panes(app)[2:4] == (3, 24))
+            log = (log[0], app.query_one("#logbox").region.y)
+            await _drag(pilot, log, (log[0], 39))
+            await _wait_for_ui(pilot, lambda: _panes(app)[2:4] == (22, 5))
+
+            console = handle["console"]
+            await _drag(pilot, console, (console[0], 0))
+            await _wait_for_ui(pilot, lambda: _panes(app)[4:] == (30, 8))
+            console = (console[0], app.query_one("#consolebox").region.y)
+            await _drag(pilot, console, (console[0], 39))
+            await _wait_for_ui(pilot, lambda: _panes(app)[4:] == (6, 32))
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl520_a_press_and_release_on_a_handle_changes_no_size(short_root: Path) -> None:
+    """DL-520: a press and release without a move, the click a person makes on a border,
+    changes no size, selects no row and opens nothing."""
+
+    async def scenario() -> None:
+        async with _box_tree_app(short_root) as (app, pilot, table, details):
+            start = (72, 48, 11, 16, 11, 27)
+            await _wait_for_ui(pilot, lambda: _panes(app) == start)
+            sizes = app._sizes
+            for point in _handles(app).values():
+                await pilot.click(offset=point)
+                await pilot.pause()
+                assert _panes(app) == start and app._sizes == sizes
+            await _drag(pilot, _handles(app)["table"])
+            assert _panes(app) == start and app._sizes == sizes
+            assert app._selected == "bt_box" and table.cursor_row == 0
+            assert details == [] and app._collapsed == set()
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl520_a_drag_from_a_handle_selects_folds_and_opens_nothing(
+    short_root: Path,
+) -> None:
+    """DL-520: a drag that starts on a handle and ends over a row's marker selects no row, folds
+    nothing, opens nothing, moves no focus and starts no text selection. A click on a row and on
+    a box's marker still do what they do (DL-512), and a press in the log still starts a text
+    selection."""
+
+    async def scenario() -> None:
+        async with _box_tree_app(short_root) as (app, pilot, table, details):
+            await _wait_for_ui(pilot, lambda: _panes(app) == (72, 48, 11, 16, 11, 27))
+            console = app.query_one("#console", RichLog)
+            console.focus()
+            await pilot.pause()
+            row1 = table.region.y + 3  # bt_inner's row: border, header, row 0
+            # the pointer ends on bt_inner's indent, past the table's 20-column limit
+            await _drag(pilot, (71, row1), (40, row1), (table.region.x + 2, row1))
+            await _wait_for_ui(pilot, lambda: _panes(app)[:2] == (20, 100))
+            # the bottom border of the table, over the first column, is the console's handle
+            await _drag(pilot, (2, 27), (2, 26), (2, 27))
+            await pilot.click(offset=(71 - 52, row1))  # the table's right border now
+            await pilot.pause()
+            assert app.focused is console
+            assert app._selected == "bt_box" and table.cursor_row == 0
+            assert details == [] and app._collapsed == set()
+            assert app._table_sync.identity == _BOX_TREE_ORDER
+
+            logbox = app.query_one("#logbox").region
+            await pilot.mouse_down(offset=(logbox.x + 5, logbox.y))
+            assert app.screen._select_state is None
+            await pilot.mouse_up(offset=(logbox.x + 5, logbox.y))
+            await pilot.mouse_down(offset=(logbox.x + 5, logbox.y + 2))
+            assert app.screen._select_state is not None
+            await pilot.mouse_up(offset=(logbox.x + 5, logbox.y + 2))
+
+            await _click_label(pilot, 1, 4)  # bt_inner's name
+            await _wait_for_ui(pilot, lambda: app._selected == "bt_inner")
+            await _click_label(pilot, 0, 0)  # bt_box's marker
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == ["bt_box", "bt_solo"])
+            assert details == []
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl520_a_release_off_the_handle_or_outside_the_app_ends_the_drag(
+    short_root: Path,
+) -> None:
+    """DL-520: the drag goes on while the pointer leaves the handle with the button held, and a
+    release anywhere ends it. A move with no button held, as after a release outside the app,
+    ends it too. A later move without a button changes nothing."""
+
+    async def scenario() -> None:
+        async with _box_tree_app(short_root) as (app, pilot, _table, _details):
+            await _wait_for_ui(pilot, lambda: _panes(app) == (72, 48, 11, 16, 11, 27))
+            table = _handles(app)["table"]
+            await _drag(pilot, table, (80, 20), (60, 3))  # off the handle, then released
+            await _wait_for_ui(pilot, lambda: _panes(app)[:2] == (61, 59))  # border on 60
+            await pilot.hover(offset=(90, 20))
+            await pilot.hover(offset=(100, 30))
+            await pilot.pause()
+            assert _panes(app)[:2] == (61, 59) and app._drag is None
+
+            await pilot.mouse_down(offset=(60, 10))
+            await pilot._post_mouse_events([events.MouseMove], offset=(50, 10), button=1)
+            await _wait_for_ui(pilot, lambda: _panes(app)[:2] == (51, 69))
+            # a press of another button changes nothing: the drag goes on
+            await pilot._post_mouse_events([events.MouseDown], offset=(45, 10), button=3)
+            assert app._drag is not None and app._lit is Split.TABLE
+            await pilot.hover(offset=(40, 10))  # the button was let go outside the app
+            await pilot.hover(offset=(30, 10))
+            await pilot.pause()
+            assert _panes(app)[:2] == (51, 69) and app._drag is None and app._lit is None
+
+            await pilot.mouse_down(offset=(50, 10))
+            await pilot._post_mouse_events([events.MouseMove], offset=(55, 10), button=1)
+            app.post_message(events.AppBlur())  # the window lost focus: no release will come
+            await _wait_for_ui(pilot, lambda: app._drag is None and app._lit is None)
+            await pilot._post_mouse_events([events.MouseMove], offset=(70, 10), button=1)
+            await pilot.pause()
+            assert _panes(app)[:2] == (56, 64)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl520_nothing_resizes_while_the_log_is_maximized(short_root: Path) -> None:
+    """DL-520: while the log pane is maximized, a drag where a border was and every resize key
+    change nothing; back from the maximized view the layout is as it was."""
+
+    async def scenario() -> None:
+        async with _box_tree_app(short_root) as (app, pilot, _table, _details):
+            start = (72, 48, 11, 16, 11, 27)
+            await _wait_for_ui(pilot, lambda: _panes(app) == start)
+            handles = _handles(app)
+            sizes = app._sizes
+            await pilot.press("m")
+            await _wait_for_ui(pilot, lambda: app.screen.maximized is not None)
+            for point in handles.values():
+                await _drag(pilot, point, _shift(point, 5, 5))
+            await pilot.press("plus", "equals_sign", "minus", "minus", "]", "}", "[", "{")
+            await pilot.pause()
+            assert app._sizes == sizes and app._drag is None
+            await pilot.press("m")
+            await _wait_for_ui(pilot, lambda: app.screen.maximized is None)
+            await _wait_for_ui(pilot, lambda: _panes(app) == start)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl520_plus_and_minus_resize_the_focused_pane(short_root: Path) -> None:
+    """DL-520: `+` and `=` grow and `-` shrinks the focused pane, by 5 points of the ratio or 2
+    rows: the table column's width, the explain pane's or the log pane's height against the
+    other, the console's height. In the console line they are typed as text, and in a dialog
+    they do nothing."""
+
+    async def scenario() -> None:
+        async with _box_tree_app(short_root) as (app, pilot, table, _details):
+            await _wait_for_ui(pilot, lambda: _panes(app) == (72, 48, 11, 16, 11, 27))
+            await pilot.press("plus")  # the table is focused: 0.65 of 120
+            await _wait_for_ui(pilot, lambda: _panes(app)[:2] == (78, 42))
+            await pilot.press("equals_sign")
+            await _wait_for_ui(pilot, lambda: _panes(app)[:2] == (84, 36))
+            await pilot.press("minus")
+            await _wait_for_ui(pilot, lambda: _panes(app)[:2] == (78, 42))
+
+            app.query_one("#explain-box").focus()
+            await pilot.pause()
+            await pilot.press("plus")  # the log's share 0.55 of 27 rows
+            await _wait_for_ui(pilot, lambda: _panes(app)[2:4] == (12, 15))
+            app.query_one("#logtail").focus()
+            await pilot.pause()
+            await pilot.press("plus", "plus")  # 0.65
+            await _wait_for_ui(pilot, lambda: _panes(app)[2:4] == (9, 18))
+            await pilot.press("minus")
+            await _wait_for_ui(pilot, lambda: _panes(app)[2:4] == (11, 16))
+            app.query_one("#console").focus()
+            await pilot.pause()
+            await pilot.press("plus")
+            await _wait_for_ui(pilot, lambda: _panes(app)[4:] == (13, 25))
+            await pilot.press("minus", "minus")
+            await _wait_for_ui(pilot, lambda: _panes(app)[4:] == (9, 29))
+
+            sizes, panes = app._sizes, _panes(app)
+            app.screen.set_focus(None)  # no pane focused: nothing to resize
+            await pilot.press("plus", "minus")
+            await pilot.pause()
+            assert app._sizes == sizes
+            await pilot.press("colon")
+            cmdline = app.query_one("#cmdline", Input)
+            await pilot.press("plus", "equals_sign", "minus")
+            await pilot.pause()
+            assert cmdline.value == "+=-"
+            assert app._sizes == sizes and _panes(app) == panes
+            await pilot.press("escape")
+            await pilot.pause()
+
+            await pilot.press("t")  # the triggers view, a dialog
+            await _wait_for_ui(pilot, lambda: isinstance(app.screen, TriggersScreen))
+            await pilot.press("plus", "equals_sign", "minus")
+            await pilot.pause()
+            assert app._sizes == sizes
+            await pilot.press("escape")
+            await _wait_for_ui(pilot, lambda: not isinstance(app.screen, TriggersScreen))
+            assert _panes(app) == panes
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl520_the_bracket_keys_step_a_fifth_from_where_a_drag_left_the_split(
+    short_root: Path,
+) -> None:
+    """DL-520: after a drag, `}` and `{` move the table's border by a fifth from where the drag
+    left it, and `]` and `[` the log's, within the limits."""
+
+    async def scenario() -> None:
+        async with _box_tree_app(short_root) as (app, pilot, _table, _details):
+            await _wait_for_ui(pilot, lambda: _panes(app) == (72, 48, 11, 16, 11, 27))
+            handles = _handles(app)
+            await _drag(pilot, handles["table"], (49, handles["table"][1]))  # 50 of 120
+            await _wait_for_ui(pilot, lambda: _panes(app)[:2] == (50, 70))
+            await pilot.press("right_curly_bracket")  # 50/120 + 0.2 = 74/120
+            await _wait_for_ui(pilot, lambda: _panes(app)[:2] == (74, 46))
+            await pilot.press("right_curly_bracket")
+            await _wait_for_ui(pilot, lambda: _panes(app)[:2] == (98, 22))
+            await pilot.press("right_curly_bracket")  # the side keeps 20 columns
+            await _wait_for_ui(pilot, lambda: _panes(app)[:2] == (100, 20))
+            await pilot.press("left_curly_bracket")
+            await _wait_for_ui(pilot, lambda: _panes(app)[:2] == (76, 44))
+
+            log = handles["log"]
+            await _drag(pilot, log, _shift(log, dy=-6))  # 22 of 27 rows
+            await _wait_for_ui(pilot, lambda: _panes(app)[2:4] == (5, 22))
+            await pilot.press("left_square_bracket")  # 22/27 - 0.2 = 16.6 rows
+            await _wait_for_ui(pilot, lambda: _panes(app)[2:4] == (10, 17))
+            await pilot.press("right_square_bracket", "right_square_bracket")
+            await _wait_for_ui(pilot, lambda: _panes(app)[2:4] == (3, 24))
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl520_a_change_of_the_terminal_size_keeps_the_ratios_and_the_console_rows(
+    short_root: Path,
+) -> None:
+    """DL-520: the two ratios and the console's rows outlast a change of the terminal's size,
+    within the limits there; a screen too small for the limits keeps the present layout, and
+    nothing resizes it."""
+
+    async def scenario() -> None:
+        async with _box_tree_app(short_root) as (app, pilot, table, _details):
+            await _wait_for_ui(pilot, lambda: _panes(app) == (72, 48, 11, 16, 11, 27))
+            handles = _handles(app)
+            await _drag(pilot, handles["table"], (47, handles["table"][1]))  # 48 of 120: 0.4
+            await _drag(pilot, handles["console"], _shift(handles["console"], dy=-4))  # 15 rows
+            await _wait_for_ui(pilot, lambda: _panes(app)[:2] == (48, 72))
+            await _wait_for_ui(pilot, lambda: _panes(app)[4:] == (15, 23))
+            log = round(app._sizes.log * 23)
+            assert _panes(app)[3] == log
+
+            await pilot.resize_terminal(180, 50)  # 48 rows under the header and the footer
+            await _wait_for_ui(pilot, lambda: _panes(app) == (72, 108, 13, 20, 15, 33))
+            await pilot.resize_terminal(50, 16)  # 14 rows: the console gives way to 6
+            await _wait_for_ui(pilot, lambda: _panes(app)[:2] == (20, 30))
+            await _wait_for_ui(pilot, lambda: _panes(app)[4:] == (6, 8))
+            await pilot.resize_terminal(120, 40)
+            await _wait_for_ui(pilot, lambda: _panes(app)[:2] == (48, 72))
+            await _wait_for_ui(pilot, lambda: _panes(app)[3:] == (log, 15, 23))
+
+            sizes = app._sizes
+            await pilot.resize_terminal(36, 30)  # too narrow for two 20-column panes
+            await _wait_for_ui(pilot, lambda: _panes(app)[:2] == (14, 22))
+            table.focus()
+            await pilot.pause()
+            await pilot.press("plus", "right_curly_bracket")
+            await _drag(pilot, (13, 10), (20, 10))
+            assert app._sizes.table == sizes.table
+            await pilot.resize_terminal(120, 40)
+            await _wait_for_ui(pilot, lambda: _panes(app)[:2] == (48, 72))
+
+    asyncio.run(scenario())
+
+
+def _edge_colours(widget, y: int) -> list[tuple[str, str | None]]:
+    """The text and the colour of each segment of one rendered line of a widget, its borders
+    included."""
+    line = widget.render_lines(widget.region.reset_offset)[y]
+    return [
+        (segment.text, segment.style.color.name if segment.style and segment.style.color else None)
+        for segment in line
+    ]
+
+
+def test_pilot_dl520_the_handle_takes_the_accent_colour_under_the_pointer_and_in_a_drag(
+    short_root: Path,
+) -> None:
+    """DL-520: while the pointer is over a handle, and during its drag, the two border lines of
+    that split take the accent colour; they return to their colour when the pointer leaves or
+    the drag ends. The titles and subtitles on those lines keep their colour."""
+
+    async def scenario() -> None:
+        async with _box_tree_app(short_root) as (app, pilot, _table, _details):
+            await _wait_for_ui(pilot, lambda: _panes(app) == (72, 48, 11, 16, 11, 27))
+            jobs, explain, logtail, console = (
+                app.query_one(f"#{name}") for name in ("jobs", "explain-box", "logtail", "console")
+            )
+            plain = _edge_colours(jobs, 5)[-1][1]
+            title = _edge_colours(logtail, 0)[2]
+            subtitle = _edge_colours(jobs, -1)[2]
+            events_title = _edge_colours(console, 0)[2]
+            assert (
+                title[0] == " log (out): none yet " and subtitle[0] == " space fold · z fold all "
+            )
+            handles = _handles(app)
+
+            await pilot.hover(offset=handles["table"])
+            await pilot.pause()
+            accent = _edge_colours(jobs, 5)[-1][1]
+            assert accent != plain, _edge_colours(explain, 5)
+            assert _edge_colours(explain, 5)[0][1] == accent, _edge_colours(explain, 5)
+            assert _edge_colours(logtail, 5)[0][1] == accent
+            assert _edge_colours(logtail, 0)[0][1] == plain  # not this split's line
+
+            await pilot.hover(offset=handles["log"])
+            await pilot.pause()
+            assert _edge_colours(jobs, 5)[-1][1] == plain
+            assert _edge_colours(explain, -1)[0][1] == accent
+            assert _edge_colours(logtail, 0)[0][1] == accent
+            assert _edge_colours(logtail, 0)[2] == title
+
+            await pilot.hover(offset=handles["console"])
+            await pilot.pause()
+            assert _edge_colours(jobs, -1)[0][1] == accent
+            assert _edge_colours(jobs, -1)[2] == subtitle
+            assert _edge_colours(logtail, -1)[0][1] == accent
+            assert _edge_colours(console, 0)[0][1] != _edge_colours(console, 2)[0][1]
+            assert _edge_colours(console, 0)[2] == events_title
+
+            await pilot.hover(offset=(30, 10))  # inside the table
+            await pilot.pause()
+            assert app._lit is None
+            assert _edge_colours(jobs, -1)[0][1] == plain and _edge_colours(jobs, -1)[2] == subtitle
+
+            # during a drag the handle stays lit away from it; the release away returns it
+            await pilot.mouse_down(offset=handles["table"])
+            await pilot._post_mouse_events([events.MouseMove], offset=(90, 30), button=1)
+            assert _edge_colours(jobs, 5)[-1][1] == accent
+            await pilot.mouse_up(offset=(100, 33))
+            await pilot.pause()
+            assert app._lit is None and _edge_colours(jobs, 5)[-1][1] == plain
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl520_the_key_list_names_the_resize_keys(short_root: Path) -> None:
+    """DL-520: the F1 key list names each resize key by what it does."""
+
+    async def scenario() -> None:
+        async with _box_tree_app(short_root) as (app, pilot, _table, _details):
+            await pilot.press("f1")
+            await _wait_for_ui(pilot, lambda: bool(app.screen.query(HelpPanel)))
+            listing = Console(width=200, file=io.StringIO(), record=True)
+            listing.print(app.screen.query_one("BindingsTable").render_bindings_table())
+            lines = listing.export_text().splitlines()
+            for keys, name in (
+                ("]", "log taller"),
+                ("[", "log shorter"),
+                ("}", "table wider"),
+                ("{", "table narrower"),
+                ("+ =", "grow pane"),
+                ("-", "shrink pane"),
+            ):
+                assert any(line.split() == [*keys.split(), *name.split()] for line in lines), name
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(("size", "rows"), [((120, 40), 39), ((80, 24), 23)])
+def test_pilot_dl520_the_zoomed_log_fills_the_screen_and_leaving_restores_the_split(
+    short_root: Path, size: tuple[int, int], rows: int
+) -> None:
+    """DL-520: `m` zooms the log pane to the whole screen above the footer, as before any
+    resize (39 rows at 120x40, 23 at 80x24), also after the splits were moved; leaving the zoom
+    gives the split back as it was."""
+
+    async def scenario() -> None:
+        async with _box_tree_app(short_root) as (app, pilot, _table, _details):
+            await pilot.resize_terminal(*size)
+            await pilot.press("plus", "right_square_bracket")  # table wider, log taller
+            await pilot.pause()
+            panes = _panes(app)
+            await _wait_for_ui(pilot, lambda: _panes(app) == panes)
+            logbox = app.query_one("#logbox")
+            await pilot.press("m")
+            await _wait_for_ui(pilot, lambda: logbox.region == Region(0, 0, size[0], rows))
+            await pilot.press("m")
+            await _wait_for_ui(pilot, lambda: app.screen.maximized is None)
+            await _wait_for_ui(pilot, lambda: _panes(app) == panes)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("size", [(120, 40), (80, 16)])
+def test_pilot_dl520_the_console_box_at_its_least_shows_an_event_line_above_the_command_line(
+    short_root: Path, size: tuple[int, int]
+) -> None:
+    """DL-520: at its least, 6 rows, the console box shows one line of events above the
+    command line, and the command line stays above the footer."""
+
+    async def scenario() -> None:
+        async with _box_tree_app(short_root) as (app, pilot, _table, _details):
+            await pilot.resize_terminal(*size)
+            app.query_one("#console").focus()
+            await pilot.pause()
+            await pilot.press(*["minus"] * 4)
+            await _wait_for_ui(pilot, lambda: _panes(app)[4] == 6)
+            console, cmdline, footer = (
+                app.query_one(selector).region for selector in ("#console", "#cmdline", Footer)
+            )
+            assert console.height - 2 == 1  # one line between its two border lines
+            assert console.bottom == cmdline.y and cmdline.bottom <= footer.y
+
+    asyncio.run(scenario())
+
+
+async def _post_raw(pilot, event_class: type, point: tuple[int, int], button: int = 1) -> None:
+    """Post a mouse event to the app as the drivers do: through `App.on_event`, which hands it
+    to the screen and makes a click of a release on the pressed widget. The pilot's own mouse
+    calls skip that path."""
+    app = pilot.app
+    app.post_message(event_class(**_get_mouse_message_arguments(app.screen, point, button=button)))
+    await pilot.pause()
+
+
+def test_pilot_dl520_a_drag_on_the_drivers_path_resizes_and_its_click_reaches_nothing(
+    short_root: Path,
+) -> None:
+    """DL-520: raw press, moves and release posted to the app move the table's border. The
+    release lands over bt_inner's fold marker, past the 20-column limit, and the click the
+    app makes of it selects, folds and opens nothing. A plain click on that path still
+    selects. The drag goes through `_MainScreen._forward_event`: a library that stopped calling
+    it would fail here."""
+
+    async def scenario() -> None:
+        async with _box_tree_app(short_root) as (app, pilot, table, details):
+            await _wait_for_ui(pilot, lambda: _panes(app) == (72, 48, 11, 16, 11, 27))
+            jobs = table.region
+            row1 = jobs.y + 3
+            await _post_raw(pilot, events.MouseDown, (jobs.right - 1, row1))
+            await _post_raw(pilot, events.MouseMove, (60, row1))
+            await _wait_for_ui(pilot, lambda: _panes(app)[:2] == (61, 59))
+            await _post_raw(pilot, events.MouseMove, (jobs.x + 5, row1))
+            await _post_raw(pilot, events.MouseUp, (jobs.x + 5, row1))
+            await _wait_for_ui(pilot, lambda: _panes(app)[:2] == (20, 100))
+            assert app._selected == "bt_box" and app._collapsed == set() and details == []
+
+            await _post_raw(pilot, events.MouseDown, (jobs.x + 8, row1))
+            await _post_raw(pilot, events.MouseUp, (jobs.x + 8, row1))
+            await _wait_for_ui(pilot, lambda: app._selected == "bt_inner")
+            assert app._collapsed == set() and details == []
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("ending", ["resize", "blur", "second button"])
+@pytest.mark.parametrize("target", ["selected row", "marker"])
+def test_pilot_dl520_a_release_after_the_drag_ended_early_reaches_nothing(
+    short_root: Path, ending: str, target: str
+) -> None:
+    """DL-520: the press that started a drag owns its release and the click made of it. When
+    the drag ends early, by a resize or a lost focus, or is interrupted by another button,
+    the release over the selected row opens no details and over a box's marker folds
+    nothing. The events go the drivers' way."""
+
+    async def scenario() -> None:
+        async with _box_tree_app(short_root) as (app, pilot, table, details):
+            await _wait_for_ui(pilot, lambda: _panes(app) == (72, 48, 11, 16, 11, 27))
+            jobs = table.region
+            border = (jobs.right - 1, jobs.y + 6)
+            point = (jobs.x + (6 if target == "selected row" else 2), jobs.y + 2)  # bt_box
+            await _post_raw(pilot, events.MouseDown, border)
+            await _post_raw(pilot, events.MouseMove, (40, border[1]))
+            if ending == "resize":
+                await pilot.resize_terminal(120, 41)
+            elif ending == "blur":
+                app.post_message(events.AppBlur())
+            else:
+                await _post_raw(pilot, events.MouseDown, point, button=3)
+                await _post_raw(pilot, events.MouseUp, point, button=3)
+            await pilot.pause()
+            await _post_raw(pilot, events.MouseMove, point)
+            await _post_raw(pilot, events.MouseUp, point)
+            await pilot.pause()
+            assert details == [] and app._collapsed == set()
+            assert app._selected == "bt_box" and app._drag is None and not app._owned
+
+            await _post_raw(pilot, events.MouseDown, point)  # the next click is a click
+            await _post_raw(pilot, events.MouseUp, point)
+            if target == "selected row":
+                await _wait_for_ui(pilot, lambda: details == ["bt_box"])
+            else:
+                await _wait_for_ui(pilot, lambda: app._collapsed == {"bt_box"})
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl520_the_handle_is_only_the_lines_that_meet(short_root: Path) -> None:
+    """DL-520: with the pager's prompt open, its bottom line is the log pane's: a press there
+    drags the console split and that line lights up, while the log's own bottom line above
+    the prompt is no handle. The prompt's left line belongs to the table split. The filter
+    line's right border is no handle: a press there focuses the line as before."""
+
+    async def scenario() -> None:
+        async with _box_tree_app(short_root) as (app, pilot, _table, _details):
+            await _wait_for_ui(pilot, lambda: _panes(app) == (72, 48, 11, 16, 11, 27))
+            logtail, prompt = app.query_one("#logtail"), app.query_one("#logsearch")
+            logtail.focus()
+            await pilot.pause()
+            await pilot.press("slash")
+            await _wait_for_ui(pilot, lambda: prompt.region.height == 3)
+            bottom = (prompt.region.x + 5, prompt.region.bottom - 1)
+            await pilot.hover(offset=bottom)
+            await pilot.pause()
+            assert app._lit is Split.CONSOLE
+            assert prompt.has_class("-grab-bottom") and not logtail.has_class("-grab-bottom")
+            await pilot.hover(offset=(logtail.region.x + 5, logtail.region.bottom - 1))
+            await pilot.pause()
+            assert app._lit is None and not prompt.has_class("-grab-bottom")
+            await pilot.hover(offset=(prompt.region.x, prompt.region.y + 1))
+            await pilot.pause()
+            assert app._lit is Split.TABLE and prompt.has_class("-grab-left")
+            await _drag(pilot, bottom, _shift(bottom, dy=-3))
+            await _wait_for_ui(pilot, lambda: _panes(app)[4:] == (14, 24))
+            assert app.focused is prompt
+
+            await pilot.press("escape")
+            table = app.query_one("#jobs")
+            table.focus()
+            await pilot.pause()
+            await pilot.press("slash")
+            line = app.query_one("#filterline", Input)
+            await _wait_for_ui(pilot, lambda: line.region.height == 3)
+            table.focus()
+            await pilot.pause()
+            edge = (line.region.right - 1, line.region.y + 1)
+            await pilot.hover(offset=edge)
+            await pilot.pause()
+            assert app._lit is None
+            await pilot.click(offset=edge)
+            await pilot.pause()
+            assert app.focused is line and app._drag is None and _panes(app)[:2] == (72, 48)
+
+    asyncio.run(scenario())
 
 
 def test_pilot_folded_box_rollup_carries_a_red_problem_tally(short_root: Path) -> None:
@@ -2771,6 +3433,9 @@ def test_pager_bindings_shadow_or_allowlist_every_app_key() -> None:
         "[",
         "}",
         "{",  # pane shares
+        "plus",
+        "equals_sign",
+        "minus",  # the focused pane's size, here the log's (DL-520)
     }
 
     def keys(bindings) -> set[str]:
