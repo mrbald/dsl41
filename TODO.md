@@ -33,6 +33,7 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 - **BUG-3**: `config applied.stopped` reports `none` and `update --wait` misreports a stop-set job that an earlier committed plan reran under its new definition. No unplanned job runs (DL-432).
 - **BUG-8**: A run root started by the legacy unit cannot resume under the main-config unit; no migration path is documented (DL-437).
 - **BUG-58**: A reread or update reply can exceed the engine's 16 MiB one-line limit: the reasons in `lint_messages` and `non_idempotent` are unbounded (`src/dsl41/reread_worker.py`). The DL-482 budget covers the definition differences only.
+- **BUG-95**: A key typed right after `:` or `/` can reach the jobs table, because focus moves to the line a moment after the key that asked for it. When keys arrive in a burst, as in a served session under lag, the `s` of a typed `:start...` or `/su...` sends `STARTJOB` for the selected job, and `h`, `i`, `n` and their capitals send their verbs; none of these asks first. Seen in the browser lane, whose driver now waits for the line's footer (`src/dsl41/runner_tui.py`, `action_focus_console`, `action_focus_filter`).
 
 ### Low
 

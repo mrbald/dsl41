@@ -445,7 +445,9 @@ log tail (`m`) turns it into a less-style pager with `/` search, `&` filter,
 and live filewatch with countdowns. The jobs table marks an armed latch as
 flag `A`. Verb keys act only while the jobs table has focus. Kill and force
 ask first, naming the box members and the revision they act on. F1 opens
-the help panel.
+the help panel. On the console line F1 opens a screen of every verb and
+status instead. Tab or Right takes the grey completion, which never
+offers KILLJOB or FORCE_STARTJOB, and Tab never leaves the line (DL-516).
 
 An operator hold is `on_hold`: `sendevent ON_HOLD` sets it, and
 `sendevent OFF_HOLD` or `off-hold-all` releases it.
@@ -808,6 +810,8 @@ Runner:
   predicate or a one-line refusal (DL-511).
 - `src/dsl41/match_bound.py`: runs the matching of a person's pattern
   under a limit of the process's processor time (DL-514).
+- `src/dsl41/console_words.py`: the TUI event console's verbs and statuses,
+  each with one line of meaning, and the completion of a half-typed line (DL-516).
 
 Shared cores:
 
@@ -1060,6 +1064,9 @@ Runner:
 - `tests/test_match_bound.py`: the processor-time limit on a person's
   pattern: backtracking shapes stopped, the handler kept, nested and
   unbounded passes (DL-514).
+- `tests/test_console_words.py`: the event console's status table and the
+  completion of each word, with a property that a completion extends the line as
+  typed (DL-516).
 - `tests/test_control_as.py`: real-engine person tiers, catalog projection,
   request scope, actor records, retry identity, malformed wrappers, stream
   revocation, UI wrapping and denied-status exit (DL-499).

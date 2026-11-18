@@ -1360,6 +1360,15 @@ Verb keys act only while the jobs table has focus; KILLJOB and
 FORCE_STARTJOB from a key confirm first, showing the target, its box
 members, and the revision the request will name, frozen when the modal
 opens (DL-187). Escape cancels a console line. F1 toggles the help panel.
+F1 on the console line opens a screen of its own, at full width, in place of the help panel
+(DL-516). It shows every verb with its key and meaning, every status `CHANGE_STATUS` takes, and
+three examples, and it scrolls from the keyboard. Escape, `q` or F1 closes it and returns to the
+line as it was. Tests hold its two tables in `console_words.py` to the verbs and statuses the
+engine accepts and to the table's keys. While a person types, the line suggests in grey a verb,
+after `CHANGE_STATUS` a status, then a job name from the present status answer. It never suggests
+`KILLJOB` or `FORCE_STARTJOB`, whose keys ask first: a typed verb is sent without a question
+because typing it in full is the intent (DL-187). Right at the end of the line or Tab takes the
+suggestion. Tab never leaves the line; with nothing to take it rings the bell, and Escape leaves.
 A refused query is reported in the console and the subtitle, never shown
 as an empty estate. A detached `dsl41 ui` exits 2 on a status answer with
 `ok: false` and `access_denied`, before asking for trace (DL-499).
@@ -1509,6 +1518,8 @@ the split cannot decay into a second name for one file.
 - `job_filter.py`: the §11 filter line's reader, with no textual import (DL-511).
 - `match_bound.py`: the §11 processor-time limit on a person's pattern, with no
   textual import (DL-514).
+- `console_words.py`: the §11 event console's verb and status tables and the completion
+  of a half-typed line, with no textual import (DL-516).
 - `runner_startup.py`: taking possession of a run root: genesis, resume and
   the recovery barrier (DL-433). It prepares the catch-up steps that
   `runner.py` runs.

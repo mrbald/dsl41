@@ -27098,3 +27098,26 @@ relitigate an entry; append a new one.
   commit on `main` had a hash that no check had run on. One connection failure on a read
   stopped the train four times in one day.
   THE COST. A read that fails for a lasting reason stops the train two pauses later.
+- DL-516 The event console lists its verbs and statuses in its help and completes them
+  (2026-11-18; src/dsl41/console_words.py, runner_tui.py; docs/runner-design.md ss11)
+  THE RULE. One table in code names every verb the console takes, the jobs-table key that sends
+  it, whether that key asks first, and one line of meaning. A second names every status
+  `CHANGE_STATUS` takes, with one line each. Tests hold both tables equal to the sets the engine
+  accepts and to the jobs table's bindings. F1 on the console line shows both tables and three
+  examples on a screen of its own, at full width, that scrolls from the keyboard: the library's
+  help panel is narrow and shows a fifth of them. While a person types, the line suggests in grey
+  the first verb of the table's order that starts with the typed text; after `CHANGE_STATUS`, a
+  status, then a job name; after another job verb, a job name. It never suggests a verb whose key
+  asks first (`KILLJOB`, `FORCE_STARTJOB`): a typed verb is sent without a question because typing
+  it in full is the intent (DL-187), and a completed one would not be typed. Right at the end of
+  the line, or Tab, takes the suggestion; Tab never leaves the line, and with nothing to take it
+  rings the bell. Verbs and statuses match without regard to case, job names exactly. Job names
+  come from the present status answer.
+  WHY. The owner's direction: keep events generic, and let a person discover and learn the
+  verbs and statuses in the UI. Setting a job to SUCCESS after a manual correction was one
+  typed command that the help did not show.
+  NOT BUILT: a key on the jobs table for `CHANGE_STATUS` (one status would get a key and the
+  others none); a menu of verbs; a status shorthand on the wire.
+  THE COST. A suggestion can name a job that left the catalog since the last status answer; the
+  engine refuses it as it refuses any unknown job. Tab no longer moves focus out of the console
+  line; Escape does.

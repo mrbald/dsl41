@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import json
 import re
 import shlex
@@ -38,7 +39,9 @@ import pytest
 
 pytest.importorskip("textual")
 
+from rich.console import Console
 from textual.binding import Binding
+from textual.containers import VerticalScroll
 from textual.widgets import DataTable, HelpPanel, Input, RichLog, Static
 
 from dsl41 import runner_tui
@@ -53,11 +56,13 @@ from dsl41.runner_control import (
     ControlClientError,
     ControlServer,
 )
+from dsl41.console_words import STATUS_ROWS, VERB_ROWS
 from dsl41.runner_startup import start_run
 from dsl41.runner_tui import (
     _COLUMNS,
     _CONSOLE_VERBS,
     ConfirmScreen,
+    ConsoleWordsScreen,
     RunnerApp,
     SpecScreen,
     TriggersScreen,
@@ -3719,6 +3724,415 @@ def test_pilot_escape_clears_the_console_line_and_returns_to_the_table(short_roo
                 await pilot.pause()
                 assert sum(1 for ln in console.lines if ln.text.startswith("> ")) == echoes_before
         finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+# ------------------------------------- the console's words, help and completion (DL-516)
+
+
+def test_dl516_the_verb_table_names_every_console_verb() -> None:
+    verbs = [row.verb for row in VERB_ROWS]
+    assert sorted(verbs) == _CONSOLE_VERBS
+    assert len(set(verbs)) == len(verbs)
+
+
+def test_dl516_the_verb_table_keys_and_asks_agree_with_the_jobs_table() -> None:
+    sent = {}
+    for binding in _JobsTable.BINDINGS:
+        assert isinstance(binding, Binding)
+        verb = re.fullmatch(r"app\.send\('(\w+)'\)", binding.action)
+        if verb is not None:
+            sent[verb.group(1)] = binding.key
+    assert {row.verb: row.key for row in VERB_ROWS if row.key is not None} == sent
+    assert {row.verb for row in VERB_ROWS if row.asks} == RunnerApp._CONFIRM_VERBS
+    assert all(row.key is not None for row in VERB_ROWS if row.asks)
+
+
+async def _console_app(pilot, app: RunnerApp, job: str) -> _ConsoleInput:
+    """The table's first row selected and the console focused by `:`."""
+    await _wait_for_ui(pilot, lambda: job in app._rows)
+    table = app.query_one("#jobs", DataTable)
+    table.focus()
+    table.move_cursor(row=0)
+    await pilot.pause()
+    await pilot.press("colon")
+    await pilot.pause()
+    cmdline = app.query_one("#cmdline", _ConsoleInput)
+    assert app.focused is cmdline
+    return cmdline
+
+
+def _line_text(cmdline: _ConsoleInput) -> str:
+    return "".join(segment.text for segment in cmdline.render_line(0)).strip()
+
+
+def test_pilot_dl516_ch_shows_the_suggestion_and_tab_takes_it(short_root: Path) -> None:
+    text = "insert_job: cw_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                cmdline = await _console_app(pilot, app, "cw_job")
+                await pilot.press("c", "h")
+                await _wait_for_ui(pilot, lambda: "chANGE_STATUS" in _line_text(cmdline))
+                assert cmdline.value == "ch"
+                await pilot.press("tab")
+                await pilot.pause()
+                assert cmdline.value == "CHANGE_STATUS"
+                assert cmdline.cursor_position == len("CHANGE_STATUS")
+                assert app.focused is cmdline
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl516_right_takes_a_verb_and_a_job_from_the_status_answer(
+    short_root: Path,
+) -> None:
+    text = "insert_job: cw_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                cmdline = await _console_app(pilot, app, "cw_job")
+                await pilot.press("s", "t")
+                await _wait_for_ui(pilot, lambda: "stARTJOB" in _line_text(cmdline))
+                await pilot.press("right")
+                await pilot.pause()
+                assert cmdline.value == "STARTJOB"
+                await pilot.press("space", "c")
+                await _wait_for_ui(pilot, lambda: "STARTJOB cw_job" in _line_text(cmdline))
+                await pilot.press("right")
+                await pilot.pause()
+                assert cmdline.value == "STARTJOB cw_job"
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl516_change_status_su_tab_enter_sends_success_for_the_selected_row(
+    short_root: Path,
+) -> None:
+    text = "insert_job: cw_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        client = ControlClient(server.path)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                cmdline = await _console_app(pilot, app, "cw_job")
+                console = app.query_one("#console", RichLog)
+                await pilot.press(*"CHANGE_STATUS", "space", "s", "u")
+                await _wait_for_ui(pilot, lambda: "CHANGE_STATUS suCCESS" in _line_text(cmdline))
+                await pilot.press("tab")
+                await pilot.pause()
+                assert cmdline.value == "CHANGE_STATUS SUCCESS"
+                await pilot.press("enter")
+                await _wait_for_ui(
+                    pilot,
+                    lambda: any(
+                        "> CHANGE_STATUS cw_job SUCCESS: applied @ #" in ln.text
+                        for ln in console.lines
+                    ),
+                )
+            trace = await client.request({"cmd": "trace"})
+            # the engine took one injected status for the selected row, and it is SUCCESS
+            injected = [
+                entry["transition"]
+                for entry in trace["entries"]
+                if entry["job"] == "cw_job" and entry["cause"] == "injected STATUS"
+            ]
+            assert injected == ["INACTIVE->SUCCESS"]
+        finally:
+            await client.close()
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def _count_bells(app: RunnerApp) -> list[None]:
+    """Each ring of the app's bell, from now on."""
+    rings: list[None] = []
+    app.bell = lambda: rings.append(None)  # type: ignore[method-assign]
+    return rings
+
+
+def test_pilot_dl516_tab_never_leaves_the_console_line(short_root: Path) -> None:
+    """With nothing to take, or with the cursor inside the line, Tab rings the bell and changes
+    nothing: no focus move, no text, no cursor move."""
+    text = "insert_job: cw_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                cmdline = await _console_app(pilot, app, "cw_job")
+                rings = _count_bells(app)
+                await pilot.press("tab")  # an empty line
+                await pilot.pause()
+                assert app.focused is cmdline and cmdline.value == "" and len(rings) == 1
+
+                await pilot.press("x", "tab")  # a word that starts nothing
+                await pilot.pause()
+                assert app.focused is cmdline and cmdline.value == "x" and len(rings) == 2
+
+                cmdline.value = ""
+                await pilot.press("c", "h")
+                await _wait_for_ui(pilot, lambda: "chANGE_STATUS" in _line_text(cmdline))
+                await pilot.press("left", "tab")  # a suggestion shows, the cursor is inside
+                await pilot.pause()
+                assert app.focused is cmdline and cmdline.value == "ch"
+                assert cmdline.cursor_position == 1 and len(rings) == 3
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl516_a_job_name_typed_after_tab_stays_in_the_console_line(
+    short_root: Path,
+) -> None:
+    """Shell habit: a verb, a space, Tab, then the job's name. The name's letters include verb
+    keys of the jobs table (n, i, h, f); they all land in the line and send nothing."""
+    text = "insert_job: nightly_feed\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        client = ControlClient(server.path)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                cmdline = await _console_app(pilot, app, "nightly_feed")
+                console = app.query_one("#console", RichLog)
+                echoes = sum(1 for ln in console.lines if ln.text.startswith("> "))
+                await pilot.press(*"STARTJOB", "space", "tab", *"nightly_feed")
+                await pilot.pause()
+                assert app.focused is cmdline
+                assert cmdline.value == "STARTJOB nightly_feed"
+                assert not isinstance(app.screen, ConfirmScreen)
+                assert sum(1 for ln in console.lines if ln.text.startswith("> ")) == echoes
+            trace = await client.request({"cmd": "trace"})
+            assert [e for e in trace["entries"] if e.get("job") == "nightly_feed"] == []
+        finally:
+            await client.close()
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl516_k_tab_enter_sends_nothing(short_root: Path) -> None:
+    """KILLJOB is never suggested, so `k`, Tab, Enter is the line `k`: Tab rings, and Enter
+    is refused as an unknown verb. Nothing is sent and no confirm opens."""
+    text = "insert_job: cw_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        client = ControlClient(server.path)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                cmdline = await _console_app(pilot, app, "cw_job")
+                console = app.query_one("#console", RichLog)
+                rings = _count_bells(app)
+                await pilot.press("k")
+                await pilot.pause()
+                await pilot.press("tab")
+                await pilot.pause()
+                assert cmdline.value == "k" and len(rings) == 1
+                await pilot.press("enter")
+                await _wait_for_ui(
+                    pilot, lambda: any("unknown verb 'K'" in ln.text for ln in console.lines)
+                )
+                assert not isinstance(app.screen, ConfirmScreen)
+                assert not any(ln.text.startswith("> KILLJOB") for ln in console.lines)
+            trace = await client.request({"cmd": "trace"})
+            assert [e for e in trace["entries"] if e.get("job") == "cw_job"] == []
+        finally:
+            await client.close()
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def _screen_text(app: RunnerApp, size: tuple[int, int]) -> str:
+    """The text the screen shows now, as a terminal would draw it."""
+    console = Console(
+        width=size[0], height=size[1], file=io.StringIO(), record=True, legacy_windows=False
+    )
+    console.print(app.screen._compositor.render_update(full=True))
+    return console.export_text()
+
+
+@pytest.mark.parametrize("size", [(80, 24), (120, 40)])
+def test_pilot_dl516_f1_on_the_console_opens_the_verbs_screen(
+    short_root: Path, size: tuple[int, int]
+) -> None:
+    """F1 on the console line opens the verbs screen in place of the help panel. A verb row
+    shows; a status row and an example show or are reached by PageDown, which scrolls. No word
+    of a meaning is cut at either width."""
+    text = "insert_job: cw_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=size) as pilot:
+                await _console_app(pilot, app, "cw_job")
+                await pilot.press("f1")
+                await _wait_for_ui(pilot, lambda: isinstance(app.screen, ConsoleWordsScreen))
+                assert not app.screen.query(HelpPanel)
+                box = app.screen.query_one("#wordsbox", VerticalScroll)
+                assert app.focused is box
+                seen = _screen_text(app, size)
+                assert re.search(r"FORCE_STARTJOB +f, asks +start the job despite", seen)
+                while box.scroll_y < box.max_scroll_y:
+                    before = box.scroll_y
+                    await pilot.press("pagedown")
+                    await _wait_for_ui(pilot, lambda: box.scroll_y > before)
+                    seen += _screen_text(app, size)
+                assert re.search(r"SUCCESS +counts as succeeded", seen)
+                assert re.search(r"CHANGE_STATUS ex_load FAILURE 3 +ex_load counts as failed", seen)
+                words = set(seen.split())
+                flat = " ".join(seen.replace("│", " ").split())
+                assert "KILLJOB and FORCE_STARTJOB are typed in full" in flat
+                assert "On a box, ON_NOEXEC sets the box and every job in it INACTIVE" in flat
+                for row in [*VERB_ROWS, *STATUS_ROWS]:
+                    assert set(row.meaning.split()) <= words, row
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl516_pagedown_scrolls_the_verbs_screen_and_home_returns(
+    short_root: Path,
+) -> None:
+    text = "insert_job: cw_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(80, 24)) as pilot:
+                await _console_app(pilot, app, "cw_job")
+                await pilot.press("f1")
+                await _wait_for_ui(pilot, lambda: isinstance(app.screen, ConsoleWordsScreen))
+                box = app.screen.query_one("#wordsbox", VerticalScroll)
+                assert box.max_scroll_y > 0  # longer than an 80x24 screen
+                await pilot.press("pagedown")
+                await _wait_for_ui(pilot, lambda: box.scroll_y > 0)
+                await pilot.press("end")
+                await _wait_for_ui(pilot, lambda: box.scroll_y == box.max_scroll_y)
+                await pilot.press("up")
+                await _wait_for_ui(pilot, lambda: box.scroll_y == box.max_scroll_y - 1)
+                await pilot.press("home")
+                await _wait_for_ui(pilot, lambda: box.scroll_y == 0)
+                await pilot.press("down")
+                await _wait_for_ui(pilot, lambda: box.scroll_y == 1)
+                await pilot.press("pageup")
+                await _wait_for_ui(pilot, lambda: box.scroll_y == 0)
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("close", ["escape", "q", "f1"])
+def test_pilot_dl516_closing_the_verbs_screen_keeps_the_console_line(
+    short_root: Path, close: str
+) -> None:
+    text = "insert_job: cw_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                cmdline = await _console_app(pilot, app, "cw_job")
+                await pilot.press(*"STARTJOB cw", "left", "left")
+                await pilot.pause()
+                assert cmdline.cursor_position == len("STARTJOB ")
+                await pilot.press("f1")
+                await _wait_for_ui(pilot, lambda: isinstance(app.screen, ConsoleWordsScreen))
+                await pilot.press(close)
+                await _wait_for_ui(pilot, lambda: not isinstance(app.screen, ConsoleWordsScreen))
+                assert app.focused is cmdline
+                assert cmdline.value == "STARTJOB cw"
+                assert cmdline.cursor_position == len("STARTJOB ")
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl516_f1_off_the_console_line_toggles_the_help_panel(short_root: Path) -> None:
+    text = "insert_job: cw_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "cw_job" in app._rows)
+                app.query_one("#jobs", DataTable).focus()
+                await pilot.pause()
+                await pilot.press("f1")
+                await _wait_for_ui(pilot, lambda: bool(app.screen.query(HelpPanel)))
+                assert not isinstance(app.screen, ConsoleWordsScreen)
+                help_view = app.screen.query_one(HelpPanel).query_one("#widget-help")
+                assert help_view.source == textwrap.dedent(_JobsTable.HELP.rstrip())
+                await pilot.press("f1")
+                await _wait_for_ui(pilot, lambda: not app.screen.query(HelpPanel))
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl516_operator_keys_on_the_verbs_screen_send_nothing(short_root: Path) -> None:
+    """The verbs screen is read-only. The table's verb keys cannot reach the table under a
+    modal; `:`, `/` and `d` are app bindings that would, and the screen's bells shadow them
+    (DL-67): nothing opens, no line takes focus, nothing is sent."""
+    text = "insert_job: cw_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)  # inert: a started job stays RUNNING
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        client = ControlClient(server.path)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _console_app(pilot, app, "cw_job")
+                console = app.query_one("#console", RichLog)
+                echoes = sum(1 for ln in console.lines if ln.text.startswith("> "))
+                await pilot.press("f1")
+                await _wait_for_ui(pilot, lambda: isinstance(app.screen, ConsoleWordsScreen))
+                words_screen = app.screen
+                box = words_screen.query_one("#wordsbox", VerticalScroll)
+                rings = _count_bells(app)
+                await pilot.press("k", "s", "f", "h", "i", "n", "colon", "slash", "d")
+                await pilot.pause()
+                assert app.screen is words_screen
+                assert app.focused is box
+                assert len(rings) == 9
+                await pilot.press("escape")
+                await _wait_for_ui(pilot, lambda: not isinstance(app.screen, ConsoleWordsScreen))
+                assert not app.query_one("#filterline", Input).display
+                assert sum(1 for ln in console.lines if ln.text.startswith("> ")) == echoes
+            trace = await client.request({"cmd": "trace"})
+            assert [e for e in trace["entries"] if e.get("job") == "cw_job"] == []
+        finally:
+            await client.close()
             await _teardown(engine, server, loop_task)
 
     asyncio.run(scenario())

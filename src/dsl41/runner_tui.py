@@ -58,8 +58,13 @@ Contract detail for DL-46, within DL-41's frame:
   quitting stops the run and is confirmed first ("stop run").
 - Help (`F1`, and `?` outside the pager) toggles Textual's context help panel. Every pane and
   popup with keys of its own carries a short `HELP` string, read off the focused widget's
-  ancestors. The console's HELP lists every sendevent verb, and an unknown verb typed at `:` is
-  answered with the same sorted list (DL-187 item 7).
+  ancestors. An unknown verb typed at `:` is answered with the sorted list of verbs (DL-187
+  item 7). F1 on the console line opens a full-width screen of every verb with its key and
+  meaning, every status CHANGE_STATUS takes and three examples, from the tables in
+  `console_words`; it scrolls from the keyboard, and closing it returns to the line as it was
+  (DL-516). The line suggests the rest of the word being typed in grey, never a verb whose key
+  asks first; Right at the end of the line or Tab takes it. Tab never leaves the line: with
+  nothing to take it rings the bell (DL-516).
 - Triggers view (`t`, DL-68): "what fires next". It re-queries the ss10 `timers` verb (pending
   oracle timers merged with each scheduled job's next calendar tick, due-ordered by the server)
   every 2s while open, each row with a full host-local due (DL-473) and a countdown. Armed jobs
@@ -121,8 +126,11 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from rich import box
     from rich.cells import cell_len
+    from rich.console import Group
     from rich.style import Style
+    from rich.table import Table
     from rich.text import Text
     from textual import on
     from textual.app import App, ComposeResult, RenderResult
@@ -133,6 +141,7 @@ try:
     from textual.events import Click
     from textual.message import Message
     from textual.screen import ModalScreen
+    from textual.suggester import Suggester
     from textual.widgets import DataTable, Footer, Header, HelpPanel, Input, RichLog, Static
 
     # private textual module, deliberately: the Header composes its clock
@@ -144,6 +153,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover -- exercised via CLI guar
         "the dsl41 TUI needs the optional [ui] extra: pip install 'dsl41[ui]'"
     ) from exc
 
+from dsl41.console_words import STATUS_ROWS, VERB_ROWS, complete_line
 from dsl41.display_time import format_local_at
 from dsl41.job_filter import JobFilter, read_filter
 from dsl41.match_bound import Stopped, run_bounded
@@ -209,11 +219,55 @@ _COLUMN_WIDTHS = {
     "flags": 5,
     "alarms": 6,
 }
-#: every first token `:` accepts, sorted: what an unknown verb's error lists and what the
-#: console's HELP lists (DL-187 item 7), from this one source
+#: every first token `:` accepts, sorted: what an unknown verb's error lists (DL-187 item 7).
+#: The console's HELP lists `VERB_ROWS`, which a test holds to the same verbs (DL-516).
 _CONSOLE_VERBS = sorted(JOB_EVENT_VERBS | {"SET_GLOBAL", "CHANGE_STATUS"})
-#: the job-verb half of that list, for the console's HELP prose
-_JOB_VERB_PROSE = ", ".join(v for v in _CONSOLE_VERBS if v not in ("SET_GLOBAL", "CHANGE_STATUS"))
+
+
+#: the console's opening sentence, in its HELP and on the verbs screen (DL-516)
+_CONSOLE_OPENING = (
+    "Type a verb and Enter; a verb without a job acts on the selected row, and grey text is a"
+    " suggestion that Right or Tab takes."
+)
+
+
+def console_words_view() -> Group:
+    """The verbs screen's body, built from the word tables of `console_words` (DL-516): the
+    opening sentence, the verbs, the statuses and three examples. Cells are plain Text, so a
+    `[job]` is not read as markup. A cell wraps at spaces; each first column is as wide as its
+    longest word, so no word is cut at 80 columns."""
+    verbs = Table(box=box.SIMPLE_HEAD, show_edge=False, title="Verbs", title_justify="left")
+    verbs.add_column("Verb", min_width=max(len(row.verb) for row in VERB_ROWS))
+    verbs.add_column("Key", min_width=len("f, asks"))
+    verbs.add_column("Meaning")
+    for row in VERB_ROWS:
+        key = f"{row.key}, asks" if row.asks else (row.key or "")
+        verbs.add_row(Text(f"{row.verb} {row.args}".rstrip()), Text(key), Text(row.meaning))
+    statuses = Table(
+        box=box.SIMPLE_HEAD,
+        show_edge=False,
+        title="Statuses of CHANGE_STATUS",
+        title_justify="left",
+    )
+    statuses.add_column("Status", min_width=max(len(row.status) for row in STATUS_ROWS))
+    statuses.add_column("Meaning")
+    for status_row in STATUS_ROWS:
+        statuses.add_row(Text(status_row.status), Text(status_row.meaning))
+    examples = Table(box=box.SIMPLE_HEAD, show_edge=False, title="Examples", title_justify="left")
+    examples.add_column("Line", min_width=len("CHANGE_STATUS"))
+    examples.add_column("Meaning")
+    examples.add_row("CHANGE_STATUS SUCCESS", "the selected job counts as succeeded")
+    examples.add_row("CHANGE_STATUS ex_load FAILURE 3", "ex_load counts as failed, exit code 3")
+    examples.add_row("SET_GLOBAL NAME=value", "the global NAME takes the value")
+    notes = Text(
+        "A key marked asks opens a confirm first. KILLJOB and FORCE_STARTJOB are typed in"
+        " full; the line does not complete them.\n"
+        "ON_HOLD, ON_ICE and ON_NOEXEC do nothing to a job that is STARTING or RUNNING. On a"
+        " box, ON_NOEXEC sets the box and every job in it INACTIVE at once, SUCCESS included;"
+        " it does nothing if the box or a job in it is live, queued or on ice.",
+        style="dim",
+    )
+    return Group(Text(_CONSOLE_OPENING), Text(), verbs, notes, Text(), statuses, Text(), examples)
 
 
 def _is_scheduler_refusal(entry: Mapping[str, Any]) -> bool:
@@ -329,6 +383,16 @@ class _LocalHeader(Header):
 _HELP_BINDINGS = (
     Binding("f1", "app.toggle_help_panel", "help", show=False),
     Binding("question_mark", "app.toggle_help_panel", "help", show=False),
+)
+#: spliced into a read-only modal's BINDINGS: operator verbs and pane keys ring the bell as the
+#: log pager does; check_action=False would let the key fall through to the app binding it
+#: shadows (DL-67)
+_OPERATOR_BELLS = tuple(
+    Binding(key, "app.bell", "", show=False)
+    for key in (
+        *("s", "f", "k", "i", "I", "h", "H", "n", "N"),
+        *("d", "m", "o", "slash", "v", "space", "z", "colon", "]", "[", "}", "{"),
+    )
 )
 
 
@@ -532,6 +596,42 @@ def assemble_detail_trigger_lines(
     return lines
 
 
+class ConsoleWordsScreen(ModalScreen[None]):
+    """The event console's verbs and statuses on a screen of its own, at full width (DL-516):
+    the library's help panel is too narrow for them. F1 on the console line opens it; Escape,
+    `q` and F1 close it, and focus goes back to the line as it was. It scrolls from the
+    keyboard and the wheel, and it is read-only: the operator verbs ring the bell (DL-67)."""
+
+    HELP = """
+    The console's verbs, the statuses of CHANGE_STATUS and examples.
+    Up, Down, PageUp, PageDown, Home and End scroll; q, escape or F1
+    closes.
+    """
+    BINDINGS = [
+        Binding("escape", "dismiss", "close"),
+        Binding("q", "dismiss", "close", show=False),
+        Binding("f1", "dismiss", "close", show=False),
+        *_OPERATOR_BELLS,
+    ]
+    CSS = """
+    ConsoleWordsScreen { align: center middle; }
+    #wordsbox {
+        width: 100%; height: 100%;
+        border: round $primary; background: $surface; padding: 0 1;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="wordsbox"):
+            yield Static(console_words_view(), id="words")
+
+    def on_mount(self) -> None:
+        box = self.query_one("#wordsbox")
+        box.border_title = "console verbs and statuses"
+        box.border_subtitle = "q/esc/F1 close"
+        box.focus()
+
+
 class TriggersScreen(ModalScreen[None]):
     """DL-68 triggers view: the `timers` verb live (2s re-query while open) plus the armed
     latches from the last status snapshot. Read-only: every operator verb is shadowed to the
@@ -551,29 +651,7 @@ class TriggersScreen(ModalScreen[None]):
         Binding("t", "dismiss", "close", show=False),
         Binding("r", "refresh_now", "refresh", show=False),
         *_HELP_BINDINGS,
-        # operator verbs and pane keys ring the bell as the log pager does; check_action=False
-        # would let the key fall through to the app binding it shadows (DL-67)
-        Binding("s", "app.bell", "", show=False),
-        Binding("f", "app.bell", "", show=False),
-        Binding("k", "app.bell", "", show=False),
-        Binding("i", "app.bell", "", show=False),
-        Binding("I", "app.bell", "", show=False),
-        Binding("h", "app.bell", "", show=False),
-        Binding("H", "app.bell", "", show=False),
-        Binding("n", "app.bell", "", show=False),
-        Binding("N", "app.bell", "", show=False),
-        Binding("d", "app.bell", "", show=False),
-        Binding("m", "app.bell", "", show=False),
-        Binding("o", "app.bell", "", show=False),
-        Binding("slash", "app.bell", "", show=False),
-        Binding("v", "app.bell", "", show=False),
-        Binding("space", "app.bell", "", show=False),
-        Binding("z", "app.bell", "", show=False),
-        Binding("colon", "app.bell", "", show=False),
-        Binding("]", "app.bell", "", show=False),
-        Binding("[", "app.bell", "", show=False),
-        Binding("}", "app.bell", "", show=False),
-        Binding("{", "app.bell", "", show=False),
+        *_OPERATOR_BELLS,
     ]
     CSS = """
     TriggersScreen { align: center middle; }
@@ -664,6 +742,9 @@ class _JobsTable(DataTable[Any]):
     d or Enter opens details, t opens triggers, / filters (F1 in the
     filter line shows the syntax), v cycles all/problems/active, space
     folds a box, z folds every box. A click on a box's marker folds it.
+
+    F1 in the console line (`:`) lists every verb and every status
+    CHANGE_STATUS takes.
     """
     BINDINGS = [
         Binding("s", "app.send('STARTJOB')", "start"),
@@ -734,18 +815,42 @@ class _ConsoleInput(Input):
     table, as _FilterInput does, so an abandoned line cannot wait for a stray Enter (DL-187)."""
 
     HELP = f"""
-    Type a sendevent verb; an omitted job means the selected row:
-    {_JOB_VERB_PROSE}.
+    {_CONSOLE_OPENING}
 
-    SET_GLOBAL NAME=value sets a global. CHANGE_STATUS STATUS [exit] acts
-    on the selected job; CHANGE_STATUS job STATUS [exit] names one. Escape
-    clears the line.
+    F1 on this line shows every verb and status.
     """
-    BINDINGS = [Binding("escape", "cancel_command", "cancel")]
+    BINDINGS = [
+        Binding("escape", "cancel_command", "cancel"),
+        Binding("tab", "take_suggestion", "take suggestion", show=False),
+        Binding("f1", "app.console_words", "verbs"),
+    ]
 
     def action_cancel_command(self) -> None:
         self.value = ""
         self.app.query_one("#jobs", DataTable).focus()
+
+    def action_take_suggestion(self) -> None:
+        """Tab takes the grey suggestion as Right at the end of the line does. It never leaves
+        the line: with nothing to take, or the cursor inside the line, it rings the bell and
+        changes nothing; Escape is the way out (DL-516)."""
+        before = self.value
+        if self.cursor_at_end:
+            self.action_cursor_right()
+        if self.value == before:
+            self.app.bell()
+
+
+class _ConsoleSuggester(Suggester):
+    """The console line's completion (DL-516) over the job names of the present status answer,
+    read at each keystroke. The cache is off, since the job names change, and matching keeps
+    case, since job names match exactly."""
+
+    def __init__(self, jobs: Callable[[], Iterable[str]]) -> None:
+        super().__init__(use_cache=False, case_sensitive=True)
+        self._jobs = jobs
+
+    async def get_suggestion(self, value: str) -> str | None:
+        return complete_line(value, self._jobs())
 
 
 def compile_search(pattern: str) -> re.Pattern[str] | str:
@@ -1470,6 +1575,7 @@ class RunnerApp(App[None]):
                 placeholder="<VERB> [job] | SET_GLOBAL N=v | CHANGE_STATUS [job] STATUS"
                 " [exit] -- empty job = selected row; F1 lists verbs",
                 id="cmdline",
+                suggester=_ConsoleSuggester(lambda: self._jobs_snapshot),
             )
         yield Footer()
 
@@ -2060,6 +2166,10 @@ class RunnerApp(App[None]):
 
     def action_triggers(self) -> None:
         self.push_screen(TriggersScreen())
+
+    def action_console_words(self) -> None:
+        """F1 on the console line: the verbs screen in place of the help panel (DL-516)."""
+        self.push_screen(ConsoleWordsScreen())
 
     async def _show_details(self, job: str) -> None:
         """The spec popup: runtime facts from `status`, dependency lines from `deps` (the blast

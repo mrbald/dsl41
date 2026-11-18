@@ -176,6 +176,22 @@ def _browser_display_times(engine: str, url: str, diagnostics: Path) -> None:
             page.locator(".xterm-helper-textarea").focus()
             until("display_job")
             header_after(0)
+            # DL-516: Tab in the console line takes the grey suggestion rather than moving the
+            # browser's focus. The console's footer proves `:` moved focus before a letter can
+            # reach a table key. The parser's refusal names CHANGE_STATUS only if Tab completed
+            # "ch"; the table's footer after Escape keeps a later key out of the escape delay.
+            mark = len(output)
+            page.keyboard.type(":")
+            until("esc cancel", mark)
+            page.keyboard.type("ch")
+            until("chANGE_STATUS", mark)
+            page.keyboard.press("Tab")
+            page.keyboard.type(" x")
+            page.keyboard.press("Enter")
+            until("CHANGE_STATUS expects [job] STATUS [exit_code]", mark)
+            mark = len(output)
+            page.keyboard.press("Escape")
+            until("k kill", mark)
             page.keyboard.type("}}}")
             until("2026-07-02T01:30:00")
             until("schedule@2026-01-02T00:45:00")
