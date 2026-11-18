@@ -1359,7 +1359,15 @@ rebuilt without them, keeping its place when it was paused.
 Verb keys act only while the jobs table has focus; KILLJOB and
 FORCE_STARTJOB from a key confirm first, showing the target, its box
 members, and the revision the request will name, frozen when the modal
-opens (DL-187). Escape cancels a console line. F1 toggles the help panel.
+opens (DL-187). Keys can arrive in a burst, and the keys behind one that opens something are
+handled before it is open (DL-518). A key that opens a text line (`:`, `/`, and the pager's `/`,
+`?`, `&`) moves focus before its action returns, so no key queued behind it reaches a verb key of
+the table; a key behind `m` is a pager key, since focus goes to the log on purpose. From the
+moment `k`, `f`, `d`, Enter or a quit that asks is handled until its dialog or popup is open or
+refused, the table's verb keys ring the bell and send nothing. Quit is never held back: a viewer
+can always be left, also while the engine does not answer. Tab in the filter line
+stays in the line, as in the console line. A letter queued behind an opening key is dropped, not
+typed into what opens. Escape cancels a console line. F1 toggles the help panel.
 F1 on the console line opens a screen of its own, at full width, in place of the help panel
 (DL-516). It shows every verb with its key and meaning, every status `CHANGE_STATUS` takes, and
 three examples, and it scrolls from the keyboard. Escape, `q` or F1 closes it and returns to the

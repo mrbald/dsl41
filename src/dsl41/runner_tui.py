@@ -142,6 +142,7 @@ try:
     from textual.message import Message
     from textual.screen import ModalScreen
     from textual.suggester import Suggester
+    from textual.widget import Widget
     from textual.widgets import DataTable, Footer, Header, HelpPanel, Input, RichLog, Static
 
     # private textual module, deliberately: the Header composes its clock
@@ -802,12 +803,20 @@ class _FilterInput(Input):
 
     Example: `!status=su =core_*`. Enter keeps a good line, Esc clears.
     """
-    BINDINGS = [Binding("escape", "clear_filter", "clear")]
+    BINDINGS = [
+        Binding("escape", "clear_filter", "clear"),
+        Binding("tab", "stay", "", show=False),
+    ]
 
     def action_clear_filter(self) -> None:
         app = self.app
         assert isinstance(app, RunnerApp)
         app.clear_filter()
+
+    def action_stay(self) -> None:
+        """Tab has no completion here and does not leave the line (DL-518, as DL-516 for the
+        console line)."""
+        self.app.bell()
 
 
 class _ConsoleInput(Input):
@@ -1200,6 +1209,14 @@ class _LogTail(RichLog):
             self.border_title = title
 
 
+def _focus_now(widget: Widget) -> None:
+    """Move focus to the widget a key just opened, before the action returns. A key queued
+    behind the opening key must not reach the widget that had focus: `Widget.focus` defers the
+    move with `call_later`, and the table's verb keys fire in that gap."""
+    widget.refresh()
+    widget.screen.set_focus(widget)
+
+
 class _LogPane(Vertical):
     """The log column cell: the pager plus its prompt line. Maximizing this, not the bare
     RichLog, keeps the prompt visible, because maximize hides every widget outside the
@@ -1221,7 +1238,7 @@ class _LogPane(Vertical):
         prompt.placeholder = placeholder
         prompt.border_title = marker
         prompt.styles.display = "block"
-        prompt.focus()
+        _focus_now(prompt)
 
     def close_prompt(self) -> None:
         prompt = self.query_one("#logsearch", _LogSearchInput)
@@ -1503,6 +1520,10 @@ class RunnerApp(App[None]):
         self.sub_title = self._subtitle_base
         self._client = ControlClient(self.socket_path, person)
         self._selected: str | None = None
+        #: held from the moment a key whose dialog or popup opens from a worker is handled until
+        #: that dialog or popup is open or refused (DL-518); the table's verb keys ring the bell
+        #: meanwhile. Quit is never held back. The token tells a hold from a later one.
+        self._opening: object | None = None
         self._rows: set[str] = set()  # DataTable row keys we created
         self._trace_seq = 0
         self._trace_baseline: str | None = None
@@ -2158,11 +2179,31 @@ class RunnerApp(App[None]):
             self._selected = str(event.row_key.value)
         self.action_details()
 
+    def _hold(self) -> object:
+        """Hold the verb keys until what a key is opening is open or refused (DL-518)."""
+        self._opening = hold = object()
+        return hold
+
+    def _release(self, hold: object | None) -> None:
+        """End `hold`; a later hold stays."""
+        if hold is not None and self._opening is hold:
+            self._opening = None
+
     def action_details(self) -> None:
-        if self._selected is not None:
-            # partial, not a bare coroutine: a replaced worker must not leave it unawaited
-            work = functools.partial(self._show_details, self._selected)
-            self.run_worker(work, group="details", exclusive=True)  # type: ignore[arg-type]
+        if self._selected is None:
+            return
+        if self._opening:
+            self.bell()
+            return
+        # partial, not a bare coroutine: a replaced worker must not leave it unawaited
+        work = functools.partial(self._open_details, self._selected, self._hold())
+        self.run_worker(work, group="details", exclusive=True)  # type: ignore[arg-type]
+
+    async def _open_details(self, job: str, hold: object) -> None:
+        try:
+            await self._show_details(job, hold)
+        finally:
+            self._release(hold)
 
     def action_triggers(self) -> None:
         self.push_screen(TriggersScreen())
@@ -2171,7 +2212,7 @@ class RunnerApp(App[None]):
         """F1 on the console line: the verbs screen in place of the help panel (DL-516)."""
         self.push_screen(ConsoleWordsScreen())
 
-    async def _show_details(self, job: str) -> None:
+    async def _show_details(self, job: str, hold: object | None = None) -> None:
         """The spec popup: runtime facts from `status`, dependency lines from `deps` (the blast
         radius, DL-65), source from `spec`, and a short local log tail."""
         try:
@@ -2261,6 +2302,7 @@ class RunnerApp(App[None]):
                 for line in lines:
                     body.append(f"  {line}\n", style="dim")
         self.push_screen(SpecScreen(job, body))
+        self._release(hold)
 
     # ------------------------------------------------------- pane geometry
 
@@ -2276,7 +2318,7 @@ class RunnerApp(App[None]):
             self.screen.maximize(pane)
             # focus the log explicitly: focus is the pager mode switch, and textual would
             # focus the console Input, which consumes every letter key
-            self.query_one("#logtail", _LogTail).focus()
+            _focus_now(self.query_one("#logtail", _LogTail))
 
     def action_resize(self, pane: str, delta: int) -> None:
         span = range(1, self._SHARE_TOTAL)  # 1..4: neither side collapses
@@ -2297,44 +2339,66 @@ class RunnerApp(App[None]):
 
     _QUIT_BODY = "stop the run?\n\nlive jobs are cancelled; wrappers record the kills"
 
-    async def _confirm(self, title: str, body: str) -> bool:
+    async def _confirm(self, title: str, body: str, hold: object | None = None) -> bool:
         """The one confirm idiom for every destructive action. A confirm already open wins: a
-        ctrl+q or key that reaches through it is ignored, not stacked, read from screen state."""
+        ctrl+q or key that reaches through it is ignored, not stacked, read from screen state.
+        `hold` ends when the dialog is pushed, or at once when one is already open (DL-518);
+        from then the dialog's own bindings rule."""
         if isinstance(self.screen, ConfirmScreen):
+            self._release(hold)
             return False
-        # the plain assignment lets mypy bind push_screen_wait's type variable from the argument
-        # instead of widening it through bool(...)
-        confirmed = await self.push_screen_wait(ConfirmScreen(title, body))
-        return bool(confirmed)
+        answer: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        self.push_screen(
+            ConfirmScreen(title, body), callback=lambda result: answer.set_result(bool(result))
+        )
+        self._release(hold)
+        return await answer
 
     async def action_quit(self) -> None:
         """Quit by posture. A detached viewer (`dsl41 ui`) exits at once, since confirming a
         detach would train operators to press through the dialog that matters. `run --ui` owns
         the engine, so quit stops the run and is confirmed. Ctrl+Q and the command palette's
-        Quit route here. The confirm runs in a worker because `push_screen_wait` needs one."""
+        Quit route here. The confirm runs in a worker that awaits the answer. Quit is never held
+        back by a key that is opening something (DL-518)."""
         if not self.owns_run:
             self.exit()
             return
-        self.run_worker(self._confirm_quit(), group="quit", exclusive=False)
+        work = functools.partial(self._confirm_quit, self._hold())
+        self.run_worker(work, group="quit", exclusive=False)  # type: ignore[arg-type]
 
-    async def _confirm_quit(self) -> None:
-        if await self._confirm("stop run", self._QUIT_BODY):
-            self.exit()
+    async def _confirm_quit(self, hold: object) -> None:
+        try:
+            if await self._confirm("stop run", self._QUIT_BODY, hold):
+                self.exit()
+        finally:
+            self._release(hold)
 
     #: verbs a key press confirms first (DL-187): the two that destroy work in flight
     _CONFIRM_VERBS = frozenset({"KILLJOB", "FORCE_STARTJOB"})
 
     def action_send(self, verb: str) -> None:
+        if self._opening:
+            self.bell()
+            return
         request = parse_console_command(verb, self._selected)
         if isinstance(request, str):
             self._console_write(Text(request, style="red"))
             return
         if request.get("verb") in self._CONFIRM_VERBS:
-            self.run_worker(self._confirm_send(request), group="send", exclusive=False)
+            # partial, not a bare coroutine: a worker cancelled by a quit must not leave it
+            # unawaited
+            work = functools.partial(self._confirm_send, request, self._hold())
+            self.run_worker(work, group="send", exclusive=False)  # type: ignore[arg-type]
             return
         self.run_worker(self._do_sendevent(request), group="send", exclusive=False)
 
-    async def _confirm_send(self, request: dict[str, Any]) -> None:
+    async def _confirm_send(self, request: dict[str, Any], hold: object) -> None:
+        try:
+            await self._confirmed_send(request, hold)
+        finally:
+            self._release(hold)
+
+    async def _confirmed_send(self, request: dict[str, Any], hold: object) -> None:
         """Gate a destructive key press behind ConfirmScreen (DL-187). The precondition is read
         before the modal opens and carried through, so the operator agrees to the revision shown
         and a job that moved is refused by DL-90."""
@@ -2359,7 +2423,7 @@ class RunnerApp(App[None]):
             frozen[1],
             members,
         )
-        if not await self._confirm("confirm", body):
+        if not await self._confirm("confirm", body, hold):
             self._console_write(Text(f"{label}: cancelled", style="dim"))
             return
         await self._do_sendevent(request, frozen=frozen)
@@ -2380,7 +2444,7 @@ class RunnerApp(App[None]):
     def action_focus_console(self) -> None:
         if self.screen.maximized is not None:
             return  # never focus an input the maximized view is hiding
-        self.query_one("#cmdline", Input).focus()
+        _focus_now(self.query_one("#cmdline", Input))
 
     # -------------------------------------------- filter / view / fold (DL-65)
 
@@ -2391,7 +2455,7 @@ class RunnerApp(App[None]):
             return
         line = self.query_one("#filterline", Input)
         line.styles.display = "block"
-        line.focus()
+        _focus_now(line)
 
     def clear_filter(self) -> None:
         self.query_one("#jobs", DataTable).focus()

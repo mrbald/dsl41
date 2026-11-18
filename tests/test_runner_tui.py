@@ -34,12 +34,14 @@ import textwrap
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 pytest.importorskip("textual")
 
 from rich.console import Console
+from textual import events
 from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.widgets import DataTable, HelpPanel, Input, RichLog, Static
@@ -2280,6 +2282,408 @@ def test_pilot_colon_focuses_the_event_console(short_root: Path) -> None:
             await _teardown(engine, server, loop_task)
 
     asyncio.run(scenario())
+
+
+def _queue_keys(app: RunnerApp, *keys: tuple[str, str | None]) -> None:
+    """Post `(key, character)` events to the app with no await between them, so none is
+    handled before the next is queued: the shape of a paste or of a browser's key burst."""
+    for key, character in keys:
+        app.post_message(events.Key(key, character))
+
+
+def _letters(word: str) -> list[tuple[str, str | None]]:
+    return [(c, c) for c in word]
+
+
+async def _settle(pilot) -> None:
+    """Let a queued burst be handled and any verb it started reach the engine."""
+    await pilot.pause()
+    await asyncio.sleep(0.3)
+    await pilot.pause()
+
+
+async def _trace_length(server: ControlServer) -> int:
+    client = ControlClient(server.path)
+    try:
+        return len((await client.request({"cmd": "trace", "since": 0}))["entries"])
+    finally:
+        await client.close()
+
+
+def test_pilot_bug95_a_burst_after_colon_sends_no_verb(short_root: Path) -> None:
+    """BUG-95: the `s` of a `start` queued behind `:` does not reach the table's STARTJOB for
+    the selected job; focus is on the console line and nothing was sent."""
+    text = "insert_job: bu_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "bu_job" in app._rows)
+                table = app.query_one("#jobs", DataTable)
+                table.focus()
+                table.move_cursor(row=0)
+                await pilot.pause()
+                assert app._selected == "bu_job"
+                before = await _trace_length(server)
+
+                _queue_keys(app, ("colon", ":"), *_letters("start"))
+                await _settle(pilot)
+
+                assert app.focused is app.query_one("#cmdline", Input)
+                assert await _trace_length(server) == before
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_bug95_a_burst_after_slash_sends_no_verb(short_root: Path) -> None:
+    """BUG-95: the `s` of a `su` queued behind `/` does not reach STARTJOB; focus is on the
+    filter line and nothing was sent."""
+    text = "insert_job: bf_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "bf_job" in app._rows)
+                table = app.query_one("#jobs", DataTable)
+                table.focus()
+                table.move_cursor(row=0)
+                await pilot.pause()
+                assert app._selected == "bf_job"
+                before = await _trace_length(server)
+
+                _queue_keys(app, ("slash", "/"), *_letters("su"))
+                await _settle(pilot)
+
+                assert app.focused is app.query_one("#filterline", Input)
+                assert await _trace_length(server) == before
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_bug95_a_burst_after_the_pager_slash_keeps_focus_on_the_prompt(
+    short_root: Path,
+) -> None:
+    """BUG-95: with the log focused, the `q` queued behind `/` does not leave the pager; focus
+    is on the prompt."""
+    text = "insert_job: bp_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        adapter = FakeAdapter(default=None)  # stays RUNNING; the test owns the log
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                pager = await _seed_pager(pilot, app, "bp_job", ["one", "two"])
+                pager.focus()
+                await pilot.pause()
+                assert app.focused is pager
+
+                _queue_keys(app, ("slash", "/"), ("q", "q"))
+                await _settle(pilot)
+
+                assert app.focused is app.query_one("#logsearch", Input)
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_bug95_a_burst_after_m_sends_no_verb(short_root: Path) -> None:
+    """BUG-95: the `s` queued behind `m` does not reach the table's STARTJOB for the selected
+    job; focus is on the log and nothing was sent."""
+    text = "insert_job: bm_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "bm_job" in app._rows)
+                table = app.query_one("#jobs", DataTable)
+                table.focus()
+                table.move_cursor(row=0)
+                await pilot.pause()
+                assert app._selected == "bm_job"
+                before = await _trace_length(server)
+
+                _queue_keys(app, ("m", "m"), ("s", "s"))
+                await _settle(pilot)
+
+                assert app.focused is app.query_one("#logtail", _LogTail)
+                assert await _trace_length(server) == before
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+async def _select_job(pilot, app: RunnerApp, job: str) -> None:
+    await _wait_for_ui(pilot, lambda: job in app._rows)
+    table = app.query_one("#jobs", DataTable)
+    table.focus()
+    table.move_cursor(row=0)
+    await pilot.pause()
+    assert app._selected == job
+
+
+def _run_selected(short_root: Path, job: str, body, *, owns_run: bool = False) -> None:
+    """Serve one job, select it on the real app, and run `body(app, pilot, server)`."""
+    text = f"insert_job: {job}\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path, owns_run=owns_run)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _select_job(pilot, app, job)
+                await body(app, pilot, server)
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("opening", "queued"), [("k", "n"), ("f", "i"), ("k", "s")], ids=["k-n", "f-i", "k-s"]
+)
+def test_pilot_dl518_a_key_queued_behind_k_or_f_sends_nothing_and_the_confirm_opens(
+    short_root: Path, opening: str, queued: str
+) -> None:
+    """DL-518 rule 2: the confirm opens from a worker, so the `n` meant as its "no" would
+    reach the table's ON_NOEXEC first. Nothing is sent and the confirm opens."""
+
+    async def body(app: RunnerApp, pilot, server: ControlServer) -> None:
+        before = await _trace_length(server)
+        _queue_keys(app, (opening, opening), (queued, queued))
+        await _settle(pilot)
+        assert isinstance(app.screen, ConfirmScreen)
+        assert await _trace_length(server) == before
+
+    _run_selected(short_root, "dl518_c", body)
+
+
+def test_pilot_dl518_a_detached_viewer_quits_on_a_key_queued_behind_k(short_root: Path) -> None:
+    """DL-518: quit is never held back. `q` queued behind `k` leaves the viewer, and nothing
+    was sent."""
+
+    async def body(app: RunnerApp, pilot, server: ControlServer) -> None:
+        before = await _trace_length(server)
+        _queue_keys(app, ("k", "k"), ("q", "q"))
+        await asyncio.sleep(0.5)
+        assert app._exit is True
+        assert await _trace_length(server) == before
+
+    _run_selected(short_root, "dl518_q", body)
+
+
+@pytest.mark.parametrize(
+    ("opening", "quitting"),
+    [("d", "q"), ("k", "q"), ("d", "ctrl+q"), ("k", "ctrl+q")],
+    ids=["d-q", "k-q", "d-ctrlq", "k-ctrlq"],
+)
+def test_pilot_dl518_a_detached_viewer_quits_while_the_engine_does_not_answer(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, opening: str, quitting: str
+) -> None:
+    """DL-518: a request that never answers parks the popup or the confirm that was opening;
+    the viewer can still be left, by `q` and by Ctrl+Q."""
+
+    async def body(app: RunnerApp, pilot, server: ControlServer) -> None:
+        async def never(request: dict[str, Any]) -> dict[str, Any]:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        async def never_pinned(key: str) -> tuple[str, int]:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        monkeypatch.setattr(app._client, "request", never)
+        monkeypatch.setattr(app, "_precondition", never_pinned)
+        _queue_keys(app, (opening, opening))
+        await asyncio.sleep(0.2)
+        assert app._opening is not None  # the request is parked, the verb keys are held
+        _queue_keys(app, (quitting, None))
+        await asyncio.sleep(0.5)
+        assert app._exit is True
+
+    _run_selected(short_root, "dl518_w", body)
+
+
+def test_pilot_dl518_a_key_queued_behind_d_sends_nothing_and_the_details_open(
+    short_root: Path,
+) -> None:
+    """DL-518 rule 2: the details popup opens after four round trips; the `s` queued behind
+    `d` is not STARTJOB."""
+
+    async def body(app: RunnerApp, pilot, server: ControlServer) -> None:
+        before = await _trace_length(server)
+        _queue_keys(app, ("d", "d"), ("s", "s"))
+        await _settle(pilot)
+        assert isinstance(app.screen, SpecScreen)
+        assert await _trace_length(server) == before
+
+    _run_selected(short_root, "dl518_d", body)
+
+
+def test_pilot_dl518_a_key_queued_behind_the_quit_that_asks_sends_nothing(
+    short_root: Path,
+) -> None:
+    """DL-518 rule 2, `run --ui`: the quit confirm opens from a worker; the `h` queued behind
+    `q` is not ON_HOLD, and the confirm opens."""
+
+    async def body(app: RunnerApp, pilot, server: ControlServer) -> None:
+        before = await _trace_length(server)
+        _queue_keys(app, ("q", "q"), ("h", "h"))
+        await _settle(pilot)
+        assert isinstance(app.screen, ConfirmScreen)
+        assert await _trace_length(server) == before
+
+    _run_selected(short_root, "dl518_r", body, owns_run=True)
+
+
+@pytest.mark.parametrize("closing", ["n", "escape"])
+def test_pilot_dl518_the_verb_keys_work_again_once_the_confirm_is_closed(
+    short_root: Path, closing: str
+) -> None:
+    """DL-518 rule 2: the hold ends with the dialog. After it closes, `h` sends ON_HOLD."""
+
+    async def body(app: RunnerApp, pilot, server: ControlServer) -> None:
+        before = await _trace_length(server)
+        await pilot.press("k")
+        await _wait_for_ui(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press(closing)
+        await _wait_for_ui(pilot, lambda: not isinstance(app.screen, ConfirmScreen))
+        await _settle(pilot)
+        assert app._opening is None
+        assert await _trace_length(server) == before
+        await pilot.press("h")
+
+        async def sent() -> bool:
+            return await _trace_length(server) > before
+
+        await _wait_for_async(sent)
+
+    _run_selected(short_root, "dl518_x", body)
+
+
+def test_pilot_dl518_the_verb_keys_and_d_work_again_after_the_details_popup_closes(
+    short_root: Path,
+) -> None:
+    """DL-518: the hold ends when the popup opens. After it closes, `h` sends and `d` opens
+    the popup again."""
+
+    async def body(app: RunnerApp, pilot, server: ControlServer) -> None:
+        before = await _trace_length(server)
+        await pilot.press("d")
+        await _wait_for_ui(pilot, lambda: isinstance(app.screen, SpecScreen))
+        await pilot.press("escape")
+        await _wait_for_ui(pilot, lambda: not isinstance(app.screen, SpecScreen))
+        assert app._opening is None
+        await pilot.press("h")
+
+        async def sent() -> bool:
+            return await _trace_length(server) > before
+
+        await _wait_for_async(sent)
+        await pilot.press("d")
+        await _wait_for_ui(pilot, lambda: isinstance(app.screen, SpecScreen))
+
+    _run_selected(short_root, "dl518_p", body)
+
+
+def test_pilot_dl518_the_verb_keys_work_again_after_a_confirmed_send(short_root: Path) -> None:
+    """DL-518: the hold ends when the confirm opens, not when the send is answered. After
+    `k`, `y` a verb key sends."""
+
+    async def body(app: RunnerApp, pilot, server: ControlServer) -> None:
+        await pilot.press("k")
+        await _wait_for_ui(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        assert app._opening is None
+        await pilot.press("y")
+        await _wait_for_ui(pilot, lambda: not isinstance(app.screen, ConfirmScreen))
+        await _settle(pilot)
+        before = await _trace_length(server)
+        await pilot.press("h")
+
+        async def sent() -> bool:
+            return await _trace_length(server) > before
+
+        await _wait_for_async(sent)
+
+    _run_selected(short_root, "dl518_y", body)
+
+
+def test_pilot_dl518_the_verb_keys_work_again_after_a_cancelled_quit_that_asks(
+    short_root: Path,
+) -> None:
+    """DL-518: after the quit confirm is cancelled, `q` asks again and a verb key sends."""
+
+    async def body(app: RunnerApp, pilot, server: ControlServer) -> None:
+        before = await _trace_length(server)
+        for closing in ("n", "escape"):
+            await pilot.press("q")
+            await _wait_for_ui(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+            await pilot.press(closing)
+            await _wait_for_ui(pilot, lambda: not isinstance(app.screen, ConfirmScreen))
+            await _settle(pilot)
+            assert app._opening is None and app._exit is False
+        await pilot.press("h")
+
+        async def sent() -> bool:
+            return await _trace_length(server) > before
+
+        await _wait_for_async(sent)
+
+    _run_selected(short_root, "dl518_n", body, owns_run=True)
+
+
+def test_pilot_dl518_the_verb_keys_work_again_after_a_refused_precondition(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DL-518 rule 2: a confirm that is refused before it opens ends the hold too."""
+
+    async def body(app: RunnerApp, pilot, server: ControlServer) -> None:
+        async def unavailable(key: str) -> tuple[str, int]:
+            raise ControlClientError("engine unavailable")
+
+        before = await _trace_length(server)
+        with monkeypatch.context() as refused:
+            refused.setattr(app, "_precondition", unavailable)
+            await pilot.press("k")
+            await _settle(pilot)
+        assert app._opening is None
+        assert not isinstance(app.screen, ConfirmScreen)
+        await pilot.press("h")
+
+        async def sent() -> bool:
+            return await _trace_length(server) > before
+
+        await _wait_for_async(sent)
+
+    _run_selected(short_root, "dl518_u", body)
+
+
+def test_pilot_dl518_tab_in_the_filter_line_stays_in_the_line(short_root: Path) -> None:
+    """DL-518 rule 3: Tab in the filter line rings the bell and does not leave; the `s` typed
+    after it is in the line, not STARTJOB."""
+
+    async def body(app: RunnerApp, pilot, server: ControlServer) -> None:
+        before = await _trace_length(server)
+        await pilot.press("slash")
+        await pilot.press("r", "t", "tab", "s")
+        await pilot.pause()
+        line = app.query_one("#filterline", Input)
+        assert app.focused is line and line.value == "rts"
+        assert await _trace_length(server) == before
+
+    _run_selected(short_root, "dl518_f", body)
 
 
 def test_pilot_details_popup_shows_needs_blocks_and_a_log_tail(short_root: Path) -> None:

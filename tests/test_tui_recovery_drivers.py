@@ -176,6 +176,16 @@ def _browser_display_times(engine: str, url: str, diagnostics: Path) -> None:
             page.locator(".xterm-helper-textarea").focus()
             until("display_job")
             header_after(0)
+            # DL-518: the UI survives `:ch` typed with no wait between the keys and shows the
+            # console's footer. It does not prove that nothing was sent: this fake engine's rows
+            # carry no revision, so a sent verb ends the app and the footer never shows. The
+            # burst tests in test_runner_tui.py count what reached the engine.
+            mark = len(output)
+            page.keyboard.type(":ch")
+            until("esc cancel", mark)
+            mark = len(output)
+            page.keyboard.press("Escape")
+            until("k kill", mark)
             # DL-516: Tab in the console line takes the grey suggestion rather than moving the
             # browser's focus. The console's footer proves `:` moved focus before a letter can
             # reach a table key. The parser's refusal names CHANGE_STATUS only if Tab completed

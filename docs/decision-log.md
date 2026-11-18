@@ -27140,3 +27140,19 @@ relitigate an entry; append a new one.
   THE COST. The proof is the last fetch. Commits that someone else pushed to the branch since
   then, and that were not fetched, are lost with it. A delete written inside a longer command line
   still asks.
+- DL-518 A key queued behind a key that changes what keys mean fires no verb
+  (2026-11-18; src/dsl41/runner_tui.py; docs/runner-design.md ss11; BUG-95)
+  THE RULE. Keys can arrive in a burst, as in a served session under lag, and the keys behind
+  one that opens something are handled before that thing is open. (1) A key that opens a text
+  line (`:`, `/`, the pager's `/`, `?`, `&`) or hands focus to the log (`m`) moves focus before
+  its action returns. (2) From the moment `k`, `f`, `d`, Enter or a quit that asks is handled
+  until its dialog or popup is open or refused, the jobs table's verb keys ring the bell and
+  send nothing. Quit is never held back: a viewer can always be left, also while the engine
+  does not answer. (3) Tab in the filter line stays in the line, as in the console line
+  (DL-516). A letter queued behind an opening key is dropped, not typed into what opens.
+  WHY. Measured in tests on the real app: `:` then `start` sent STARTJOB for the selected job;
+  `k` then `n`, the confirm's own "no", sent ON_NOEXEC with no confirm; `d` then `s` sent
+  STARTJOB; `/rt`, Tab, `s` sent STARTJOB. The library defers a move of focus, and the confirm
+  and the details popup open from a worker, after the engine has answered.
+  THE COST. In such a burst the letters behind the opening key are lost, and the person types
+  them again.
