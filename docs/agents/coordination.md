@@ -204,8 +204,13 @@ budget for them, not for diff reads.
    Unproved equivalence pauses for acceptance of the new head.
    Main requires up-to-date branches: the tip must contain the current main
    and pass gates and CI on that head and base before merging. If main moves,
-   repeat this procedure for the tip only. Announce parallel work before it
-   starts and list it in train order.
+   repeat this procedure for the tip only. The train lands the tip by a
+   fast-forward push of its tested head to main, never forced, so main carries
+   the tested commit. It then waits up to `--merged-timeout` seconds for the PR
+   to read `MERGED`; on `merged-timeout`, restart the train once it does. A
+   failed read of GitHub or the remote runs again, three attempts in all; a
+   write runs once (DL-515). Announce parallel work before it starts and list
+   it in train order.
    On `atomic-base-guard-unavailable`, restore strict required-status-check
    protection and `enforce_admins` before restarting. On `rebase-conflict`,
    send the recorded commands to the implementer under rule 7.
@@ -221,7 +226,8 @@ budget for them, not for diff reads.
    `pending-conflict-not-tip` requires restoring it to the tip or withdrawing it.
    Other refusals retain evidence in `state.json` and `log.jsonl`.
    After an uncertain write, inspect remote state and use `--recover` only
-   when the recorded old ref, absent PR or still-open PR proves no delivery.
+   when the recorded old ref, absent PR, or a main without the tested head and
+   a still-open PR proves no delivery.
 2. One branch, one worktree, one writing agent per slice. Create worktrees
    with `scripts/worktree.sh BRANCH`. Edit the decision log and the todo on
    the tip only. Before dispatch, create an empty file for each new document the

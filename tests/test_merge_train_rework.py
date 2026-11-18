@@ -23,6 +23,7 @@ from test_merge_train import (
     checks,
     conflict,
     git,
+    is_landing,
     write,
 )
 from test_merge_train import train as train
@@ -73,7 +74,7 @@ def test_production_stops_without_an_atomic_base_precondition(train: Fixture) ->
         == state["tested"]
         == {"head": train.head, "base": git(train.slice, "rev-parse", "HEAD^")}
     )
-    assert not any("merge" in c for c in train.calls())
+    assert not train.landings()
     assert train.slice.exists() and len(queue_data(train)["entries"]) == 1
 
 
@@ -94,7 +95,7 @@ def test_incomplete_checks_have_a_bounded_deadline(train: Fixture, initial: list
     result = train.run(check_timeout="0.05")
     assert result.returncode != 0
     assert train.state()["reason"] == "checks-timeout"
-    assert not any("merge" in c for c in train.calls())
+    assert not train.landings()
 
 
 def test_detached_extra_worktree_is_not_a_queue_failure(train: Fixture) -> None:
@@ -128,9 +129,9 @@ def test_clean_rebase_preserves_whole_range_and_uses_the_recorded_lease(train: F
         f"--force-with-lease=refs/heads/slice:{accepted['accepted_commit']}" in c
         for c in train.calls()
     )
-    merge = next(c for c in train.calls() if "merge" in c)
-    assert merge[merge.index("--match-head-commit") + 1] == rebase["head"]
-    assert json.loads(train.config.read_text())["merge_attempts"][-1]["base"] == base
+    assert train.landings() == [["git", "push", "upstream", f"{rebase['head']}:refs/heads/trunk"]]
+    assert json.loads(train.config.read_text())["land_attempts"][-1]["base"] == base
+    assert git(train.bare, "rev-parse", "trunk") == rebase["head"]
 
 
 def test_two_accepted_entries_rebase_and_publish_without_manual_push(train: Fixture) -> None:
@@ -150,9 +151,9 @@ def test_two_accepted_entries_rebase_and_publish_without_manual_push(train: Fixt
     result = train.run()
     assert result.returncode == 0, result.stderr
     assert queue_data(train)["entries"] == [] and not second_path.exists()
-    merges = [c for c in train.calls() if "merge" in c]
+    merges = train.landings()
     assert len(merges) == 2
-    assert merges[1][merges[1].index("--match-head-commit") + 1] != head
+    assert merges[1][-1] != f"{head}:refs/heads/trunk"
     assert any(f"--force-with-lease=refs/heads/second:{head}" in c for c in train.calls())
     calls = train.calls()
     rebases = [c for c in calls if c[:2] == ["git", "rebase"] and "--onto" in c]
@@ -210,7 +211,7 @@ def test_publication_lease_rejects_a_remote_race(train: Fixture) -> None:
     assert train.state()["intent"]["kind"] == "push"
 
 
-@pytest.mark.parametrize("when", ["poll", "before_merge", "atomic_write"])
+@pytest.mark.parametrize("when", ["poll", "before_merge", "fetch", "atomic_write"])
 def test_base_movement_never_merges_an_untested_composition(train: Fixture, when: str) -> None:
     write(train.root, "advance.txt", "advance\n")
     git(train.root, "add", "--", "advance.txt")
@@ -221,14 +222,15 @@ def test_base_movement_never_merges_an_untested_composition(train: Fixture, when
     train.configure(
         advanced_base=advanced,
         advance_on_view={"poll": 2, "before_merge": 3}.get(when),
-        advance_at_merge=when == "atomic_write",
+        advance_on_fetch=2 if when == "fetch" else None,
+        advance_at_push=when == "atomic_write",
     )
     result = train.run()
     assert result.returncode == 0, result.stderr
     assert train.state()["status"] == "idle"
     cfg = json.loads(train.config.read_text())
     assert cfg["state"] == "MERGED" and not train.slice.exists()
-    attempts = cfg["merge_attempts"]
+    attempts = cfg["land_attempts"]
     assert attempts[-1]["base"] == advanced and attempts[-1]["head"] != train.head
     if when == "atomic_write":
         assert len(attempts) == 2 and not attempts[0]["contains_base"]
@@ -271,21 +273,22 @@ def test_strict_protection_enables_the_unmodified_cli_path(train: Fixture) -> No
     result = train.run(production=True)
     assert result.returncode == 0, result.stderr
     assert train.state()["status"] == "idle"
-    merge = next(c for c in train.calls() if "merge" in c)
-    assert "--match-head-commit" in merge and "--rebase" in merge
-    assert not {"--admin", "--auto", "--delete-branch"}.intersection(merge)
+    assert train.landings() == [["git", "push", "upstream", f"{train.head}:refs/heads/trunk"]]
+    assert not any(c[:1] == ["gh"] and "merge" in c for c in train.calls())
 
 
-def test_server_rejects_a_head_that_does_not_contain_main_despite_a_forged_tested_base(
+def test_a_head_that_does_not_contain_main_never_lands_despite_a_forged_tested_base(
     train: Fixture,
 ) -> None:
     base = advance_main(train)
     train.configure(record_base_without_rebase=True)
     result = train.run()
-    assert result.returncode != 0 and train.state()["reason"] == "command-failed", result.stderr
+    assert result.returncode != 0, result.stderr
+    assert train.state()["reason"] == "rebase-ancestry-unproven", result.stderr
     assert train.state()["tested"] == train.state()["ci"] == {"head": train.head, "base": base}
+    assert not train.state().get("intent")
     cfg = json.loads(train.config.read_text())
-    assert cfg["merge_attempts"] == [{"head": train.head, "base": base, "contains_base": False}]
+    assert "land_attempts" not in cfg and not train.landings()
     assert cfg["state"] == "OPEN" and train.slice.exists()
     assert git(train.bare, "rev-parse", "trunk") == base
 
@@ -488,7 +491,7 @@ def test_conflicting_base_move_resumes_only_after_implementer_and_integration_re
     git(train.root, "commit", "-qm", "future conflict")
     base = git(train.root, "rev-parse", "HEAD")
     git(train.root, "push", "-q", str(train.bare), "trunk:refs/heads/future")
-    train.configure(advance_at_merge=True, advanced_base=base)
+    train.configure(advance_at_push=True, advanced_base=base)
     result = train.run()
     assert result.returncode != 0 and train.state()["reason"] == "rebase-conflict", result.stderr
     assert not train.state().get("intent")
@@ -510,9 +513,9 @@ def test_conflicting_base_move_resumes_only_after_implementer_and_integration_re
     assert result.returncode == 0, result.stderr
     assert train.state()["status"] == "idle" and not train.slice.exists()
     cfg = json.loads(train.config.read_text())
-    assert len(cfg["merge_attempts"]) == 2
-    assert cfg["merge_attempts"][-1]["head"] == head and cfg["merge_attempts"][-1]["base"] == base
-    pushes = [c for c in train.calls() if c[:2] == ["git", "push"]]
+    assert len(cfg["land_attempts"]) == 2
+    assert cfg["land_attempts"][-1]["head"] == head and cfg["land_attempts"][-1]["base"] == base
+    pushes = [c for c in train.calls() if c[:2] == ["git", "push"] and not is_landing(c)]
     assert pushes == [
         ["git", "push", "--force-with-lease", "--force-if-includes", "upstream", "slice"]
     ]
@@ -525,7 +528,9 @@ def test_recovery_retries_only_after_proving_absence(train: Fixture, kind: str) 
         git(train.root, "--git-dir", str(train.bare), "update-ref", "-d", "refs/heads/slice")
     if kind == "create":
         train.configure(pr=False)
-    train.configure(fail=f"git {kind}" if kind == "push" else f"pr {kind}")
+    train.configure(
+        fail={"push": "git push", "create": "pr create", "merge": ":refs/heads/trunk"}[kind]
+    )
     assert train.run().returncode != 0
     train.configure(fail=None)
     result = train.run(recover=True)
@@ -548,7 +553,7 @@ def test_recovery_after_queue_pop_handles_idle_and_next_entry(train: Fixture, ta
         assert queue_data(train)["entries"][0]["branch"] == "later"
     else:
         assert result.returncode == 0 and train.state()["status"] == "idle", result.stderr
-    assert len([c for c in train.calls() if "merge" in c]) == 1
+    assert len(train.landings()) == 1
 
 
 def test_enqueue_while_running_preserves_the_tail_after_merge(train: Fixture) -> None:
@@ -740,3 +745,164 @@ def test_range_proof_checks_earlier_commits_and_order(train: Fixture, difference
         assert git(train.slice, "rev-parse", old + "^{tree}") == git(
             train.slice, "rev-parse", new + "^{tree}"
         )
+
+
+def future_base(train: Fixture, conflicting: bool) -> str:
+    """Store a later base in the remote without advancing its default branch."""
+    write(train.root, "README.md" if conflicting else "advance.txt", "# Upstream\n")
+    git(train.root, "add", "--", "README.md" if conflicting else "advance.txt")
+    git(train.root, "commit", "-qm", "advance later")
+    git(train.root, "push", "-q", str(train.bare), "trunk:refs/heads/future")
+    return git(train.root, "rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize("when", ["fetch", "push"])
+def test_dl515_base_moved_before_the_push_lands_nothing(train: Fixture, when: str) -> None:
+    advanced = future_base(train, conflicting=True)
+    train.configure(
+        advanced_base=advanced,
+        advance_on_fetch=2 if when == "fetch" else None,
+        advance_at_push=when == "push",
+    )
+    result = train.run()
+    # The moved base conflicts, so the retest after base-moved pauses at the rebase.
+    assert result.returncode != 0 and train.state()["reason"] == "rebase-conflict", result.stderr
+    assert any(e.get("event") == "base-moved" for e in train.events())
+    assert not train.state().get("intent")
+    assert git(train.bare, "rev-parse", "trunk") == advanced
+    cfg = json.loads(train.config.read_text())
+    assert cfg["state"] == "OPEN"
+    if when == "fetch":
+        assert not train.landings()
+    else:
+        assert cfg["land_attempts"] == [
+            {"head": train.head, "base": advanced, "contains_base": False}
+        ]
+
+
+@pytest.mark.parametrize("delivered", [False, True])
+def test_dl515_refused_push_on_an_unmoved_base_is_decided_by_recovery(
+    train: Fixture, delivered: bool
+) -> None:
+    base = git(train.bare, "rev-parse", "trunk")
+    train.configure(**({"lost_land_reply": True} if delivered else {"fail": ":refs/heads/trunk"}))
+    result = train.run()
+    assert result.returncode != 0 and train.state()["reason"] == "command-failed", result.stderr
+    assert train.state()["intent"]["kind"] == "merge"
+    assert git(train.bare, "rev-parse", "trunk") == (train.head if delivered else base)
+    train.configure(lost_land_reply=False, fail=None)
+    result = train.run(recover=True)
+    assert result.returncode == 0, result.stderr
+    assert train.state()["status"] == "idle" and not train.slice.exists()
+    assert git(train.bare, "rev-parse", "trunk") == train.head
+    assert len(train.landings()) == (1 if delivered else 2)
+
+
+def test_dl515_the_train_waits_for_the_merged_mark(train: Fixture) -> None:
+    train.configure(mark_delay=3)
+    result = train.run()
+    assert result.returncode == 0, result.stderr
+    assert train.state()["status"] == "idle" and not train.slice.exists()
+    events = train.events()
+    pushed = next(i for i, e in enumerate(events) if is_landing(list(e.get("command", []))))
+    states = [
+        json.loads(e["stdout"])["state"]
+        for e in events[pushed:]
+        if e.get("command", [None])[:1] == ["gh"] and "view" in e["command"]
+    ]
+    assert states == ["OPEN", "OPEN", "OPEN", "MERGED"]
+
+
+def test_dl515_a_missing_merged_mark_stops_and_a_restart_finishes(train: Fixture) -> None:
+    train.configure(never_mark=True)
+    result = train.run(merged_timeout="0.2")
+    assert result.returncode != 0 and train.state()["reason"] == "merged-timeout", result.stderr
+    assert "restart the train once it reads MERGED" in train.state()["detail"]
+    assert train.state()["intent"]["kind"] == "merge" and train.slice.exists()
+    assert git(train.bare, "rev-parse", "trunk") == train.head
+    train.configure(never_mark=False)
+    result = train.run()
+    assert result.returncode == 0, result.stderr
+    assert len(train.landings()) == 1 and not train.slice.exists()
+
+
+def attempts(train: Fixture, text: str) -> list[tuple[int | None, int | None]]:
+    return [
+        (e["status"], e.get("attempt"))
+        for e in train.events()
+        if "command" in e and text in " ".join(e["command"])
+    ]
+
+
+@pytest.mark.parametrize("read", ["pr view", "git fetch", "ls-remote", "pr list"])
+def test_dl515_a_read_that_fails_twice_runs_a_third_time(train: Fixture, read: str) -> None:
+    train.configure(flaky=[read, 2])
+    result = train.run()
+    assert result.returncode == 0, result.stderr
+    assert attempts(train, read)[:3] == [(9, 1), (9, 2), (0, 3)]
+
+
+@pytest.mark.parametrize("read", ["pr view", "git fetch", "ls-remote", "repo view"])
+def test_dl515_a_read_that_fails_three_times_stops(train: Fixture, read: str) -> None:
+    train.configure(flaky=[read, 3])
+    result = train.run()
+    assert result.returncode != 0
+    assert train.state()["reason"] == "command-failed", result.stderr
+    assert attempts(train, read) == [(9, 1), (9, 2), (9, 3)]
+    assert not train.landings()
+
+
+@pytest.mark.parametrize("write", ["git push --force-with-lease", "pr create", ":refs/heads/trunk"])
+def test_dl515_a_failed_write_runs_once(train: Fixture, write: str) -> None:
+    if write != ":refs/heads/trunk":
+        train.configure(pr=False)
+    if write.startswith("git push"):
+        git(train.root, "--git-dir", str(train.bare), "update-ref", "-d", "refs/heads/slice")
+    train.configure(fail=write)
+    result = train.run()
+    assert result.returncode != 0 and train.state()["reason"] == "command-failed", result.stderr
+    assert attempts(train, write) == [(9, None)]
+    assert len([c for c in train.calls() if write in " ".join(c)]) == 1
+
+
+@pytest.mark.parametrize(
+    ("flag", "value", "message"),
+    [
+        ("--merged-timeout", "0", "positive and finite"),
+        ("--merged-timeout", "inf", "positive and finite"),
+        ("--retry-pause", "-1", "zero or more and finite"),
+        ("--retry-pause", "nan", "zero or more and finite"),
+    ],
+)
+def test_dl515_wait_and_pause_bounds(train: Fixture, flag: str, value: str, message: str) -> None:
+    result = call([sys.executable, str(SCRIPT), flag, value], train.root, train.env)
+    assert result.returncode == 2 and message in result.stderr
+    result = call([sys.executable, str(SCRIPT), "--help"], train.root, train.env)
+    assert "(default: 120)" in result.stdout and "(default: 5)" in result.stdout
+
+
+def test_dl515_a_merge_commit_other_than_the_landed_head_is_unverified(train: Fixture) -> None:
+    base = git(train.bare, "rev-parse", "trunk")
+    train.configure(wrong_merge_commit=base)
+    result = train.run()
+    assert result.returncode != 0 and train.state()["reason"] == "merge-unverified", result.stderr
+    assert f"is not {train.head}" in train.state()["detail"]
+    assert train.state()["intent"]["kind"] == "merge"
+    assert git(train.bare, "rev-parse", "trunk") == train.head
+    assert train.slice.exists()
+    assert not any(c[:2] == ["wt", "remove"] for c in train.calls())
+
+
+def test_dl515_reconcile_refuses_an_undelivered_merge_whose_pr_is_not_open(
+    train: Fixture,
+) -> None:
+    base = git(train.bare, "rev-parse", "trunk")
+    train.configure(fail=":refs/heads/trunk")
+    assert train.run().returncode != 0
+    assert train.state()["intent"]["kind"] == "merge"
+    train.configure(fail=None, state="CLOSED")
+    result = train.run(recover=True)
+    assert result.returncode != 0 and train.state()["reason"] == "pr-not-open", result.stderr
+    assert train.state()["intent"]["kind"] == "merge"
+    assert git(train.bare, "rev-parse", "trunk") == base
+    assert len(train.landings()) == 1 and train.slice.exists()

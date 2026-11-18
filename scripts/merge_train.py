@@ -42,17 +42,28 @@ integration_reviewed_commit in queue.json, then restart with --recover. Recovery
 accepts only that reviewed remote head; never hand-edit state.json.
 A withdrawn pending entry clears its local journal state without publishing it.
 
-Before merging, the API must prove strict required-status-check protection and
+Before landing, the API must prove strict required-status-check protection and
 enforce_admins.enabled on the default branch, or the train stops with
 atomic-base-guard-unavailable.
-GitHub enforces the up-to-date base atomically; --match-head-commit pins the head.
-Base movement repeats rebase, gates and CI for the tip only (DL-442).
-No main push, administrator bypass or auto-merge is attempted.
+The train lands the tested head by git push REMOTE HEAD:refs/heads/BASE, never
+forced, after a fetch proves the remote base an ancestor of HEAD. The commit on the
+base is the commit CI passed on, with the same hash (DL-515). A base that moved
+before the push, or a push refused because the base moved, is base-moved: rebase,
+gates and CI repeat for the tip only (DL-442). Any other refusal stops the train
+and keeps the intent for --recover. Delivery is the fetched base containing HEAD and the PR
+reading MERGED with HEAD as its merge commit. GitHub marks the PR a few seconds
+after the push, so the train reads it every --poll-interval seconds for up to
+--merged-timeout seconds, then stops with merged-timeout; a restart resumes.
+No forced push, administrator bypass, auto-merge or gh pr merge is attempted.
 Only PRs whose branches are queued participate in the one-open-PR rule.
 
-An uncertain push/create/merge is journalled before sending. On restart remote
+A failed read of GitHub or the remote (gh repo view, pr list, pr view and api GET;
+git fetch and ls-remote) runs again after --retry-pause seconds, three attempts in
+all; log.jsonl records each attempt. A write (git push, gh pr create) runs once.
+An uncertain push/create/landing is journalled before sending. On restart remote
 state must prove completion. --recover also permits retry when remote state
-proves no delivery (the old leased ref, no PR, or the same PR still OPEN).
+proves no delivery (the old leased ref, no PR, or a base without HEAD while the
+same PR is still OPEN).
 Unexpected remote changes stop. Recovery also completes an interrupted queue pop.
 After a verified merge only that entry's clean, unlocked, linked worktree may
 be removed, via wt remove --discard-ignored. Failure evidence is retained.
@@ -91,6 +102,7 @@ GIT_ENV = (
     "GIT_PREFIX",
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
 )
+READ_ATTEMPTS = 3
 
 
 class Stop(Exception):
@@ -198,15 +210,37 @@ class Train:
         if self.records:
             atomic_json(self.records / "state.json", self.state)
 
-    def run(self, *cmd: str, cwd: Path | None = None, ok: tuple[int, ...] = (0,)) -> bytes:
+    def run(
+        self,
+        *cmd: str,
+        cwd: Path | None = None,
+        ok: tuple[int, ...] = (0,),
+        read: bool = False,
+    ) -> bytes:
+        # DL-515: a failed read runs again, three attempts in all; a write runs once.
+        attempt = 1
+        while True:
+            try:
+                return self.attempt(cmd, cwd or self.root, ok, attempt if read else None)
+            except Stop as exc:
+                if not read or exc.reason != "command-failed" or attempt == READ_ATTEMPTS:
+                    raise
+            attempt += 1
+            time.sleep(self.args.retry_pause)
+
+    def attempt(
+        self, cmd: tuple[str, ...], cwd: Path, ok: tuple[int, ...], attempt: int | None
+    ) -> bytes:
+        numbered = {} if attempt is None else {"attempt": attempt}
         try:
-            result = command(cmd, cwd or self.root, self.env, self.args.command_timeout)
+            result = command(cmd, cwd, self.env, self.args.command_timeout)
         except subprocess.TimeoutExpired as exc:
             self.event(
                 command=cmd,
                 status=None,
                 stdout=(exc.stdout or b"").decode(errors="replace"),
                 stderr=(exc.stderr or b"").decode(errors="replace"),
+                **numbered,
             )
             output = (
                 f"output: {self.records / 'log.jsonl'}" if self.records else "records unavailable"
@@ -221,16 +255,30 @@ class Train:
             status=result.returncode,
             stdout=result.stdout.decode(errors="replace"),
             stderr=result.stderr.decode(errors="replace"),
+            **numbered,
         )
         if result.returncode not in ok:
             raise Stop("command-failed", f"{cmd}: exit {result.returncode}", result.returncode)
         return result.stdout
 
-    def git(self, *args: str, cwd: Path | None = None) -> bytes:
-        return self.run("git", *args, cwd=cwd)
+    def git(self, *args: str, cwd: Path | None = None, read: bool = False) -> bytes:
+        return self.run("git", *args, cwd=cwd, read=read)
 
     def gh(self, *args: str) -> Any:
-        return json.loads(self.run("gh", "--repo", self.slug, *args))
+        # DL-515: every caller is a read, pr list or pr view.
+        return json.loads(self.run("gh", "--repo", self.slug, *args, read=True))
+
+    def fetch(self) -> None:
+        self.git("fetch", "--", self.remote, read=True)
+
+    def is_ancestor(self, older: str, newer: str) -> bool:
+        try:
+            self.git("merge-base", "--is-ancestor", older, newer)
+        except Stop as exc:
+            if exc.exit_status != 1:
+                raise
+            return False
+        return True
 
     def lock(self, path: Path) -> None:
         stream = path.open("a+")
@@ -330,6 +378,7 @@ class Train:
                 self.slug,
                 "--json",
                 "nameWithOwner,url,defaultBranchRef,deleteBranchOnMerge",
+                read=True,
             )
         )
         require(
@@ -400,7 +449,9 @@ class Train:
         return str(entry["accepted_commit"])
 
     def remote_head(self, entry: dict[str, Any]) -> str | None:
-        remote = self.git("ls-remote", "--heads", self.remote, f"refs/heads/{entry['branch']}")
+        remote = self.git(
+            "ls-remote", "--heads", self.remote, f"refs/heads/{entry['branch']}", read=True
+        )
         return remote.split()[0].decode() if remote else None
 
     def worktree(self, entry: dict[str, Any]) -> Path:
@@ -649,7 +700,7 @@ class Train:
     def prepare(self, entry: dict[str, Any], raw: bytes) -> bool:
         self.accepted_candidate(entry)
         path = self.worktree(entry)
-        self.git("fetch", "--", self.remote)
+        self.fetch()
         base = self.git("rev-parse", f"refs/remotes/{self.remote}/{self.base}").decode().strip()
         self.rebase(entry, path, base)
         self.no_markers(path)
@@ -851,16 +902,35 @@ class Train:
             require(time.monotonic() < deadline, "checks-timeout")
             time.sleep(min(self.args.poll_interval, max(0, deadline - time.monotonic())))
 
+    def landed(self, head: str) -> bool:
+        self.fetch()
+        return self.is_ancestor(head, f"refs/remotes/{self.remote}/{self.base}")
+
     def verified_merge(self, number: int, entry: dict[str, Any]) -> None:
-        pr = self.view(number, entry)
-        require(pr["state"] == "MERGED" and pr.get("mergeCommit"), "merge-unverified")
-        self.git("fetch", "--", self.remote)
-        self.git(
-            "merge-base",
-            "--is-ancestor",
-            pr["mergeCommit"]["oid"],
-            f"refs/remotes/{self.remote}/{self.base}",
+        # DL-515: the fetched base contains the tested head, and the PR reads MERGED at it.
+        head = self.head(entry)
+        require(
+            self.landed(head),
+            "merge-unverified",
+            f"{self.remote}/{self.base} does not contain {head}",
         )
+        deadline = time.monotonic() + self.args.merged_timeout
+        while True:
+            pr = self.view(number, entry)
+            if pr["state"] == "MERGED":
+                require(
+                    (pr.get("mergeCommit") or {}).get("oid") == head,
+                    "merge-unverified",
+                    f"pull request {number} merge commit {pr.get('mergeCommit')} is not {head}",
+                )
+                return
+            require(
+                time.monotonic() < deadline,
+                "merged-timeout",
+                f"{head} is on {self.base}, but pull request {number} reads {pr['state']} "
+                f"after {self.args.merged_timeout}s; restart the train once it reads MERGED",
+            )
+            time.sleep(min(self.args.poll_interval, max(0, deadline - time.monotonic())))
 
     def finish(self, number: int, entry: dict[str, Any], raw: bytes, queue: dict[str, Any]) -> None:
         self.verified_merge(number, entry)
@@ -929,10 +999,11 @@ class Train:
                 require(self.args.recover, "recovery-required", "run with --recover")
         else:
             require(kind == "merge", "invalid-intent")
-            pr = self.view(intent["pr"], entry)
-            if pr["state"] == "MERGED":
+            # DL-515: the fetched base decides whether the landing push was delivered.
+            if self.landed(intent["head"]):
                 self.finish(intent["pr"], entry, raw, queue)
                 return True
+            pr = self.view(intent["pr"], entry)
             require(pr["state"] == "OPEN", "pr-not-open")
             require(self.args.recover, "recovery-required", "run with --recover")
         self.event(event="write-reconciled", kind=kind, recovered=self.args.recover)
@@ -954,6 +1025,7 @@ class Train:
                     "--hostname",
                     host,
                     f"repos/{repository}/branches/{quote(self.base, safe='')}/protection",
+                    read=True,
                 )
             )
         except (Stop, ValueError) as exc:
@@ -972,30 +1044,35 @@ class Train:
         )
         pr = self.view(number, entry)
         require(pr["state"] == "OPEN" and not pr["isDraft"], "pr-not-open")
-        require(pr["baseRefOid"] == self.state["ci"]["base"], "base-moved")
+        tested_base = self.state["ci"]["base"]
+        require(pr["baseRefOid"] == tested_base, "base-moved")
+        # DL-515: the tested head lands by a fast-forward push, never forced.
+        head = self.head(entry)
+        ref = f"refs/remotes/{self.remote}/{self.base}"
+        self.fetch()
+        remote_base = self.git("rev-parse", ref).decode().strip()
+        if not self.is_ancestor(remote_base, head):
+            # A tested base that the head does not contain is no moved base (rule 46).
+            require(
+                remote_base != tested_base,
+                "rebase-ancestry-unproven",
+                f"cannot prove tested base {tested_base} is an ancestor of {head}",
+            )
+            raise Stop("base-moved", f"{self.base} moved to {remote_base}, outside {head}")
         self.unchanged(raw)
         self.intent("merge", entry, raw, pr=number)
         try:
-            self.run(
-                "gh",
-                "--repo",
-                self.slug,
-                "pr",
-                "merge",
-                str(number),
-                "--rebase",
-                "--match-head-commit",
-                self.head(entry),
-            )
+            self.git("push", self.remote, f"{head}:refs/heads/{self.base}")
         except Stop as exc:
             if exc.exit_status is None:
                 raise
             # Rule 46: only proven non-delivery at the pinned head permits a new attempt.
-            pr = self.view(number, entry)
-            if pr["state"] == "OPEN" and pr["baseRefOid"] != self.state["ci"]["base"]:
+            self.fetch()
+            remote_base = self.git("rev-parse", ref).decode().strip()
+            if remote_base != tested_base and not self.is_ancestor(head, ref):
                 self.save(intent=None)
                 raise Stop(
-                    "base-moved", "strict protection refused the obsolete tested base"
+                    "base-moved", f"the push was refused: {self.base} moved to {remote_base}"
                 ) from None
             raise
 
@@ -1066,7 +1143,21 @@ def main() -> int:
     parser.add_argument(
         "--check-timeout", type=float, default=7200, help="seconds waiting for CI (default: 7200)"
     )
-    parser.add_argument("--poll-interval", type=float, default=10, help="seconds between CI reads")
+    parser.add_argument(
+        "--poll-interval", type=float, default=10, help="seconds between CI and MERGED reads"
+    )
+    parser.add_argument(
+        "--merged-timeout",
+        type=float,
+        default=120,
+        help="seconds after the push waiting for the PR to read MERGED (default: 120)",
+    )
+    parser.add_argument(
+        "--retry-pause",
+        type=float,
+        default=5,
+        help="seconds before a failed read runs again; 0 allowed (default: 5)",
+    )
     recovery = parser.add_mutually_exclusive_group()
     recovery.add_argument(
         "--recover", action="store_true", help="reconcile before retrying a failed write"
@@ -1077,9 +1168,16 @@ def main() -> int:
     args = parser.parse_args()
     if not all(
         math.isfinite(value) and value > 0
-        for value in (args.command_timeout, args.check_timeout, args.poll_interval)
+        for value in (
+            args.command_timeout,
+            args.check_timeout,
+            args.poll_interval,
+            args.merged_timeout,
+        )
     ):
         parser.error("timeouts must be positive and finite")
+    if not (math.isfinite(args.retry_pause) and args.retry_pause >= 0):
+        parser.error("the retry pause must be zero or more and finite")
     train = Train(args)
 
     def interrupted(signum: int, frame: Any) -> None:

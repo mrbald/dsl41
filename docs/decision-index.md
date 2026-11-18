@@ -516,3 +516,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-512 | A click on a box's marker folds it, and the jobs table names the fold keys | [docs/cli-tui-qualification.md](cli-tui-qualification.md), [docs/runner-design.md](runner-design.md) |
 | DL-513 | A pull request merges by a fast-forward of its tested commit | [README.md](../README.md), [docs/agents/coordination.md](agents/coordination.md), [docs/agents/operating-model.md](agents/operating-model.md) |
 | DL-514 | A person's regular expression in the UI is matched under a processor-time limit | [README.md](../README.md), [docs/cli-tui-qualification.md](cli-tui-qualification.md), [docs/runner-design.md](runner-design.md) |
+| DL-515 | The merge train lands by a fast-forward push and runs a failed read again | [docs/agents/coordination.md](agents/coordination.md), [docs/agents/operating-model.md](agents/operating-model.md) |

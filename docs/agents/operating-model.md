@@ -48,7 +48,7 @@ its exact terms.
 24. Concurrency fixes prove the bad ordering is handled, not just that runs come up green.
 25. A local green run is not CI green; CI is the gate.
 26. A stamp or a later green run never closes an open failure.
-27. The operator merges without asking when the review is accepted, CI is green on that exact candidate and no blocking ruling is open; it fast-forwards `main` to that candidate, or lands it with the merge train, and deletes no branch (DL-513).
+27. The operator merges without asking when the review is accepted, CI is green on that exact candidate and no blocking ruling is open; it fast-forwards `main` to that candidate, itself or through the merge train, and deletes no branch (DL-513, DL-515).
 
 ## Limits on the operator
 28. The operator may make an exact, non-semantic fix that a reviewer or a ruling named; the raiser confirms it.

@@ -33,7 +33,6 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 - **BUG-3**: `config applied.stopped` reports `none` and `update --wait` misreports a stop-set job that an earlier committed plan reran under its new definition. No unplanned job runs (DL-432).
 - **BUG-8**: A run root started by the legacy unit cannot resume under the main-config unit; no migration path is documented (DL-437).
 - **BUG-58**: A reread or update reply can exceed the engine's 16 MiB one-line limit: the reasons in `lint_messages` and `non_idempotent` are unbounded (`src/dsl41/reread_worker.py`). The DL-482 budget covers the definition differences only.
-- **BUG-54**: A GitHub API connection failure stops the train; reads have no bounded retry (`scripts/merge_train.py:201-233`). It stopped the train four times on one day.
 
 ### Low
 
@@ -66,8 +65,8 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 - **BUG-12**: In the Codex macOS sandbox both real-terminal TUI cases held `recovery_other` as "interrupted attempt held" despite correct geometry. Cause unknown; reproduce in a supported environment (DL-424).
 - **BUG-21**: The peer alarm does not reliably stop Codex at its deadline; one build ran 4.5 h (`scripts/peer.sh:67-73`).
 - **BUG-22**: `test_socket_commands_report_plain_connect_errors[missing-serve]` once exceeded its 5 s child timeout with no output. Cause unknown; diagnose on recurrence (`tests/test_cli_control_read_errors.py`).
-- **BUG-23**: Merge-train tests run real setup commands with `production=True` and `--command-timeout 5`, so slow setup can stop the train early. The nonzero-exit assertion at `tests/test_merge_train_rework.py:567` also accepts a timeout; see also :66 and :271.
-- **BUG-24**: TERM or INT after process creation but before the `try` at `scripts/merge_train.py:157` skips timeout and group cleanup. `Popen.__exit__` then waits for the command to end; the signal-test driver would wait out the fake's 300 s lifetime.
+- **BUG-23**: Merge-train tests run real setup commands with `production=True` and `--command-timeout 5`, so slow setup can stop the train early. The nonzero-exit assertion at `tests/test_merge_train_rework.py:572` also accepts a timeout; see also :67 and :273.
+- **BUG-24**: TERM or INT after process creation but before the `try` at `scripts/merge_train.py:169` skips timeout and group cleanup. `Popen.__exit__` then waits for the command to end; the signal-test driver would wait out the fake's 300 s lifetime.
 - **BUG-25**: The equal-stamp test's `first-look` case passes without the fix; only `last-stop` proves update takes no step during catch-up (DL-433).
 - **BUG-27**: Darwin EPERM tests fake both killpg and `ps`, so real `ps` output for zombie groups is untested (DL-431).
 - **BUG-28**: Installed-CLI help coverage expects the retired `host` and omits `nav`, `reread`, `update` and `engine stop`. Align `tests/test_installed_cli.py` with `cli.py`; test core-only and UI-extra installs.
@@ -83,10 +82,10 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 - **BUG-42**: `test_b2_changed_host_requires_restart_before_reread` is misnamed: reread only reports, update refuses (`tests/test_main_config_restart.py`).
 - **BUG-43**: No `store_config` test refuses reordered jobs at the same retained revision. Only `src/dsl41/runner_update.py:867` guards it, because `catalog_hash_v2` sorts keys (`src/dsl41/canon.py:91`).
 - **BUG-44**: The clock drill's `timeout.txt` labels as `actual_us` a time measured from the unit assert, about 4 ms before process start (`examples/nightbank/deploy/clock-drill.sh:236`).
-- **BUG-51**: Fix commits and replacement PRs require fresh train records (`scripts/merge_train.py:469-528`).
-- **BUG-52**: A closed PR blocks reuse of its branch name with `pr-head-stale` (`scripts/merge_train.py:710-740,764`).
-- **BUG-53**: An open PR on a queued non-head branch stops the train with `other-queued-pr` (`scripts/merge_train.py:806-812`).
-- **BUG-55**: The local train pytest budget exceeds 1800 s under machine load; cause undiagnosed (`scripts/merge_train.py:1065`).
+- **BUG-51**: Fix commits and replacement PRs require fresh train records (`scripts/merge_train.py:520-579`).
+- **BUG-52**: A closed PR blocks reuse of its branch name with `pr-head-stale` (`scripts/merge_train.py:761-791,815`).
+- **BUG-53**: An open PR on a queued non-head branch stops the train with `other-queued-pr` (`scripts/merge_train.py:857-863`).
+- **BUG-55**: The local train pytest budget exceeds 1800 s under machine load; cause undiagnosed (`scripts/merge_train.py:1142`).
 - **BUG-62**: The Ubuntu service drill's storage row failed once: `test_frozen_unit` compares a run root that a live engine is writing (`examples/nightbank/deploy/storage_probe.py:271`).
 - **BUG-64**: After an engine restart whose new trace is already longer than the terminal UI's cursor, the UI does not see the restart: it skips the earlier entries, and a job's count of scheduler refusals can include entries twice (`src/dsl41/runner_tui.py`, the cursor check; DL-484).
 - **BUG-65**: A start that a run window postponed carries no origin when it is refused at the opening, so it prints every time and `rehearse` does not list it. The timer would have to carry the source, which changes derived state: do it with the next state-machine version step (DL-484).
@@ -119,7 +118,6 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get
 
 - **FEAT-42**: Build and check the single-package recipe with the UI profile. Its step 3 downloads, copies and installs `requirements-base.txt`, which omits the terminal UI that the web service runs for each tab; `scripts/export-release-inputs.sh` also writes `requirements-ui.txt`, and the recipe has not been built or checked with it (`examples/single-package/README.md`).
 - **FEAT-43**: Let the web service check a person again while a tab is open. `serve_people` calls the site's `resolve(headers)` once, when the tab opens, so a role removed later keeps its level until the tab closes (limit L2 of the web recipe in `docs/deploy.md`). Until then, restarting the web unit ends every open tab (`src/dsl41/runner_web.py`).
-- **FEAT-44**: Make the merge train land a pull request by a fast-forward push of its tested head commit (DL-513). `scripts/merge_train.py` rebase-merges, which gives the commit a new hash on `main`, so the commit that lands is not the one that was reviewed and tested.
 - **FEAT-31**: The update answer names the boxes it restarted and the boxes and members it held. `dsl41 update` prints only what its answer proves, so today it names neither (DL-482).
 
 ### After shipping

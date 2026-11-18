@@ -27043,6 +27043,7 @@ relitigate an entry; append a new one.
   of `main` lands.
   THE COST. `scripts/merge_train.py` still rebase-merges, so the commit it lands is not the
   commit that was reviewed (FEAT-44).
+  NARROWED BY DL-515: the merge train lands by the same fast-forward push.
 - DL-514 A person's regular expression in the UI is matched under a processor-time limit
   (2026-11-17; src/dsl41/match_bound.py, runner_tui.py; docs/runner-design.md ss11; BUG-92)
   THE RULE. Every match of a pattern a person typed, in the jobs filter and in the log pager's
@@ -27080,3 +27081,20 @@ relitigate an entry; append a new one.
   signal still pending would meet the default action and end the process); refusing nested
   quantifiers by inspection (misses `(a|a)*`, refuses good patterns); a third-party engine.
   NARROWS DL-511's cost: a regular expression has a limit, in the jobs filter and the pager.
+- DL-515 The merge train lands by a fast-forward push and runs a failed read again
+  (2026-11-18; scripts/merge_train.py; docs/agents/coordination.md; FEAT-44, BUG-54)
+  THE RULE. After its checks, the train lands the tested head by
+  `git push <remote> <head>:refs/heads/<base>`, never forced, where `<head>` is the full hash
+  that CI passed on. It fetches first and requires the remote base to be an ancestor of
+  `<head>`; otherwise the base moved. The landed commit is the tested commit, one hash.
+  Delivery is proven by the fetched base containing `<head>` and by the pull request reading
+  `MERGED` with that hash. The train awaits that reading for a bounded time, because GitHub
+  marks the pull request a few seconds after the push. A refused push is non-delivery only
+  when the remote state proves it, and `--recover` decides an interrupted landing by the
+  same proof.
+  A read of GitHub or of the remote that fails is run again, three attempts in all. An exit
+  status that its caller accepts is no failure. A write is never run twice.
+  WHY. DL-513 made the fast-forward the merge rule. The train still rebase-merged, so its
+  commit on `main` had a hash that no check had run on. One connection failure on a read
+  stopped the train four times in one day.
+  THE COST. A read that fails for a lasting reason stops the train two pauses later.

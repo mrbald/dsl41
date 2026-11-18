@@ -88,6 +88,15 @@ if cfg.get('queue_change') == tool:
     q.write_text(json.dumps(queue))
     cfg.pop('queue_change'); save()
 if cfg.get('fail') and cfg['fail'] in ' '.join([tool, *args]): sys.exit(9)
+if cfg.get('flaky') and cfg['flaky'][0] in ' '.join([tool, *args]) and cfg['flaky'][1] > 0:
+    cfg['flaky'][1] -= 1; save(); sys.exit(9)
+def mark(head):
+    # GitHub marks a pull request merged some reads after its head lands (DL-515).
+    if cfg.get('state') == 'OPEN' and cfg.get('head') == head and 'prs' not in cfg:
+        cfg['state'] = 'MERGED'; cfg['merge_commit'] = cfg.get('wrong_merge_commit') or head
+    for row in cfg.get('prs', []):
+        if row['state'] == 'OPEN' and row['head'] == head:
+            row.update(state='MERGED', merge_commit=cfg.get('wrong_merge_commit') or head)
 if cfg.get('hang') == tool:
     child = subprocess.Popen([sys.executable, '-c',
         'import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(300)'], env=env)
@@ -102,6 +111,25 @@ if tool == 'notify':
     with P(cfg['notifications']).open('a') as f: f.write(sys.stdin.read())
     sys.exit(9)
 if tool == 'git':
+    landing = args[0] == 'push' and args[-1].endswith(':refs/heads/trunk')
+    if landing:
+        assert args == ['push', 'upstream', args[-1]] and not args[-1].startswith('+'), args
+        if cfg.get('advance_at_push'):
+            cmd('--git-dir', cfg['bare'], 'update-ref', 'refs/heads/trunk', cfg['advanced_base'])
+            cfg['advance_at_push'] = False
+        source = args[-1].partition(':')[0]
+        base = cmd('--git-dir', cfg['bare'], 'rev-parse', 'refs/heads/trunk').strip()
+        ancestry = subprocess.run([cfg['git'], '--git-dir', cfg['bare'], 'merge-base',
+                                   '--is-ancestor', base, source], env=env, capture_output=True,
+                                  timeout=10, check=False)
+        cfg.setdefault('land_attempts', []).append(dict(head=source, base=base,
+                                                       contains_base=ancestry.returncode == 0))
+        save()
+        if cfg.get('false_land'): sys.exit(0)
+    if args[0] == 'fetch':
+        cfg['fetches'] = cfg.get('fetches', 0) + 1; save()
+        if cfg.get('advance_on_fetch') == cfg['fetches']:
+            cmd('--git-dir', cfg['bare'], 'update-ref', 'refs/heads/trunk', cfg['advanced_base'])
     if args[0] in ('fetch', 'push', 'ls-remote'):
         if args[0] == 'push' and cfg.get('change_before_push'):
             cmd('--git-dir', cfg['bare'], 'update-ref', 'refs/heads/slice', cfg['change_before_push'])
@@ -121,7 +149,13 @@ if tool == 'git':
         if branch == 'slice': cfg['head'] = head
         for row in cfg.get('prs', []):
             if row['branch'] == branch: row['head'] = head
+        if landing:
+            cfg['landed'] = head; cfg['mark_wait'] = cfg.get('mark_delay', 0)
+            if not cfg['mark_wait'] and not cfg.get('never_mark'): mark(head)
         save()
+    if landing and cfg.get('kill_land'): os.kill(os.getppid(), signal.SIGKILL)
+    if landing and cfg.get('lost_land_reply'): sys.exit(9)
+    if landing and cfg.get('dirty_after_land'): (P(cfg['slice']) / 'untracked').write_text('keep')
     if args[0] == 'push' and cfg.get('lost_push_reply'): sys.exit(9)
     sys.exit(0)
 if tool == 'wt':
@@ -183,6 +217,9 @@ elif args[:2] == ['pr', 'view']:
         r = subprocess.run([sys.executable, cfg['script'], '--enqueue', cfg['enqueue_file']],
                            env=env, capture_output=True, timeout=10, check=False)
         assert r.returncode == 0, r.stderr
+    if cfg.get('landed') and not cfg.get('never_mark'):
+        if cfg.get('mark_wait'): cfg['mark_wait'] -= 1
+        else: mark(cfg['landed'])
     save()
     number = int(args[2])
     p = next(p for p in cfg.get('prs', [dict(number=1, branch='slice', head=cfg['head'], state=cfg['state'],
@@ -204,37 +241,6 @@ elif args[:2] == ['pr', 'create']:
         head = cmd('--git-dir', cfg['bare'], 'rev-parse', 'refs/heads/' + branch).strip()
         cfg['prs'].append(dict(number=len(cfg['prs']) + 1, branch=branch, head=head, state='OPEN'))
     cfg['pr'] = True; save(); print('https://example.invalid/fixture/project/pull/1')
-elif args[:2] == ['pr', 'merge']:
-    assert '--rebase' in args and '--delete-branch' not in args
-    number = int(args[2])
-    p = next(p for p in cfg.get('prs', [dict(number=1, branch='slice', head=cfg['head'])]) if p['number'] == number)
-    head = p['head']
-    assert args[args.index('--match-head-commit') + 1] == head
-    assert '--admin' not in args and '--auto' not in args
-    assert '--expected-base-commit' not in args
-    assert protection['required_status_checks']['strict'] is True
-    assert protection['enforce_admins']['enabled'] is True
-    if cfg.get('advance_at_merge'):
-        cmd('--git-dir', cfg['bare'], 'update-ref', 'refs/heads/trunk', cfg['advanced_base'])
-        cfg['advance_at_merge'] = False; save()
-    base = cmd('--git-dir', cfg['bare'], 'rev-parse', 'refs/heads/trunk').strip()
-    ancestry = subprocess.run([cfg['git'], '--git-dir', cfg['bare'], 'merge-base',
-                               '--is-ancestor', base, head], env=env, capture_output=True,
-                               timeout=10, check=False)
-    cfg.setdefault('merge_attempts', []).append(dict(head=head, base=base,
-                                                   contains_base=ancestry.returncode == 0))
-    save()
-    if ancestry.returncode:
-        print('strict protection: branch is out of date', file=sys.stderr)
-        sys.exit(1)
-    if not cfg.get('false_merge'):
-        cmd('--git-dir', cfg['bare'], 'update-ref', 'refs/heads/trunk', head, base)
-    cfg['state'] = 'MERGED'; cfg['merge_commit'] = head
-    if 'prs' in cfg: p.update(state='MERGED', merge_commit=head)
-    save()
-    if cfg.get('kill_merge'): os.kill(os.getppid(), signal.SIGKILL)
-    if cfg.get('lost_merge_reply'): sys.exit(9)
-    if cfg.get('dirty_after_merge'): (P(cfg['slice']) / 'untracked').write_text('keep')
 else: sys.exit(92)
 """
 
@@ -276,7 +282,7 @@ def command(cmd, cwd, env, timeout, input_bytes=None):
         finally:
             subprocess.Popen = original_popen
     if tool == 'notify' or pathlib.Path(tool).name == 'notify' or cfg.get('hang') == tool or (
-        cfg.get('kill_merge') and 'merge' in cmd
+        cfg.get('kill_land') and cmd[:2] == ('git', 'push') and cmd[-1].endswith(':refs/heads/trunk')
     ):
         return original_command(cmd, cwd, env, timeout, input_bytes)
     executable = pathlib.Path(env['PATH'].split(os.pathsep)[0]) / tool
@@ -337,6 +343,7 @@ class Fixture:
         production: bool = False,
         recover: bool = False,
         check_timeout: str = "0.1",
+        merged_timeout: str = "5",
         **env_changes: str | None,
     ) -> subprocess.CompletedProcess[str]:
         env = dict(self.env)
@@ -356,6 +363,10 @@ class Fixture:
                 check_timeout,
                 "--poll-interval",
                 "0.01",
+                "--merged-timeout",
+                merged_timeout,
+                "--retry-pause",
+                "0",
                 *(["--recover"] if recover else []),
             ],
             self.root,
@@ -370,17 +381,24 @@ class Fixture:
             json.loads(line) for line in (self.config.parent / "calls").read_text().splitlines()
         ]
 
+    def landings(self) -> list[list[str]]:
+        return [c for c in self.calls() if is_landing(c)]
+
+    def events(self) -> list[dict]:
+        return [json.loads(line) for line in (self.records / "log.jsonl").read_text().splitlines()]
+
     def refused(self, reason: str) -> subprocess.CompletedProcess[str]:
         previous = len(self.calls()) if (self.config.parent / "calls").exists() else 0
         result = self.run()
         assert result.returncode != 0, result.stdout
         assert self.state()["reason"] == reason, result.stderr
-        assert not any(
-            c[:3] == ["gh", "--repo", "example.invalid/fixture/project"]
-            and c[3:5] == ["pr", "merge"]
-            for c in self.calls()[previous:]
-        )
+        assert not any(is_landing(c) for c in self.calls()[previous:])
         return result
+
+
+def is_landing(call: list[str]) -> bool:
+    """DL-515: the train lands by a push of the tested head to the base branch."""
+    return call[:2] == ["git", "push"] and call[-1].endswith(":refs/heads/trunk")
 
 
 @pytest.fixture(scope="session")
@@ -503,8 +521,10 @@ def test_merge_is_pinned_cleanup_is_scoped_and_notifier_failure_is_ignored(train
     assert git(train.root, "ls-remote", str(train.bare), "refs/heads/slice").startswith(train.head)
     calls = train.calls()
     assert ["wt", "remove", "--discard-ignored", "slice"] in calls
-    merge = next(c for c in calls if "merge" in c)
-    assert "--rebase" in merge and merge[merge.index("--match-head-commit") + 1] == train.head
+    # DL-515: the tested head lands by a fast-forward push and keeps its hash.
+    assert train.landings() == [["git", "push", "upstream", f"{train.head}:refs/heads/trunk"]]
+    assert git(train.bare, "rev-parse", "trunk") == train.head
+    assert not any(c[:1] == ["gh"] and "merge" in c for c in calls)
     assert not any("pytest" in c and "-n" in c for c in calls)
     assert len((train.config.parent / "notifications").read_text().splitlines()) == 1
 
@@ -765,28 +785,29 @@ def test_concurrent_start_is_refused_across_records_directories(train: Fixture) 
 def test_interruption_after_merge_reconciles_without_second_merge(
     train: Fixture, kill: bool
 ) -> None:
-    train.configure(kill_merge=kill, lost_merge_reply=not kill)
+    train.configure(kill_land=kill, lost_land_reply=not kill)
     result = train.run()
     assert result.returncode != 0
     assert train.state()["intent"]["kind"] == "merge"
     assert len(json.loads((train.records / "queue.json").read_text())["entries"]) == 1
-    train.configure(kill_merge=False, lost_merge_reply=False)
+    assert git(train.bare, "rev-parse", "trunk") == train.head
+    train.configure(kill_land=False, lost_land_reply=False)
     result = train.run()
     assert result.returncode == 0, result.stderr
-    assert len([c for c in train.calls() if "merge" in c]) == 1
+    assert len(train.landings()) == 1
     assert not train.slice.exists()
 
 
 def test_unproven_merge_is_never_retried(train: Fixture) -> None:
-    train.configure(fail="pr merge")
+    train.configure(fail=":refs/heads/trunk")
     assert train.run().returncode != 0
     train.configure(fail=None)
     train.refused("recovery-required")
-    assert len([c for c in train.calls() if "merge" in c]) == 1
+    assert len(train.landings()) == 1
 
 
 def test_queue_ownership_survives_restart(train: Fixture) -> None:
-    train.configure(lost_merge_reply=True)
+    train.configure(lost_land_reply=True)
     assert train.run().returncode != 0
     queue = json.loads((train.records / "queue.json").read_text())
     queue["entries"][0]["blocking_ruling"] = True
@@ -798,7 +819,7 @@ def test_queue_ownership_survives_restart(train: Fixture) -> None:
 
 
 def test_cleanup_refuses_dirty_candidate_after_merge(train: Fixture) -> None:
-    train.configure(dirty_after_merge=True)
+    train.configure(dirty_after_land=True)
     result = train.run()
     assert result.returncode != 0
     assert train.state()["reason"] == "worktree-dirty"
@@ -858,16 +879,16 @@ def test_unconsumed_entries_are_preserved(train: Fixture) -> None:
 
 def test_journal_contains_queue_prefix(train: Fixture) -> None:
     raw = (train.records / "queue.json").read_bytes()
-    train.configure(fail="pr merge")
+    train.configure(fail=":refs/heads/trunk")
     assert train.run().returncode != 0
     assert train.state()["intent"]["queue"] == json.loads(raw)
 
 
 def test_merge_reply_without_remote_ancestry_cannot_authorize_cleanup(train: Fixture) -> None:
-    train.configure(false_merge=True)
+    train.configure(false_land=True)
     result = train.run()
     assert result.returncode != 0
-    assert train.state()["reason"] == "command-failed"
+    assert train.state()["reason"] == "merge-unverified"
     assert train.state()["intent"]["kind"] == "merge"
     assert train.slice.exists()
     assert not any(c[:2] == ["wt", "remove"] for c in train.calls())
@@ -888,7 +909,8 @@ def test_uncertain_push_with_remote_proof_can_resume(train: Fixture) -> None:
     train.configure(lost_push_reply=False)
     result = train.run()
     assert result.returncode == 0, result.stderr
-    assert len([c for c in train.calls() if c[:2] == ["git", "push"]]) == 1
+    pushes = [c for c in train.calls() if c[:2] == ["git", "push"] and not is_landing(c)]
+    assert len(pushes) == 1
 
 
 @pytest.mark.parametrize("failure", ["before", "during"])
