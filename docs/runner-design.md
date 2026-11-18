@@ -1375,8 +1375,12 @@ line as it was. Tests hold its two tables in `console_words.py` to the verbs and
 engine accepts and to the table's keys. While a person types, the line suggests in grey a verb,
 after `CHANGE_STATUS` a status, then a job name from the present status answer. It never suggests
 `KILLJOB` or `FORCE_STARTJOB`, whose keys ask first: a typed verb is sent without a question
-because typing it in full is the intent (DL-187). Right at the end of the line or Tab takes the
-suggestion. Tab never leaves the line; with nothing to take it rings the bell, and Escape leaves.
+because typing it in full is the intent (DL-187). Right at the end of the line takes the grey
+suggestion. Tab, with the cursor at the end, takes the grey suggestion when one shows, so the
+line becomes what the person sees. When none shows, as after a focus event or before the
+suggestion is filled, it sets the line to what the completion rule gives for its text and the
+present job names, computed at that moment (DL-519). Tab never leaves the line; with no
+completion, or the cursor inside the line, it rings the bell, and Escape leaves.
 A refused query is reported in the console and the subtitle, never shown
 as an empty estate. A detached `dsl41 ui` exits 2 on a status answer with
 `ok: false` and `access_denied`, before asking for trace (DL-499).

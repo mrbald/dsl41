@@ -4195,6 +4195,91 @@ def test_pilot_dl516_ch_shows_the_suggestion_and_tab_takes_it(short_root: Path) 
     asyncio.run(scenario())
 
 
+def test_pilot_dl519_tab_completes_after_the_app_loses_and_regains_focus(
+    short_root: Path,
+) -> None:
+    """DL-519: a focus event empties the library's grey suggestion, as a Tab press does in a
+    browser. Tab completes by the rule all the same."""
+    text = "insert_job: cw_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                cmdline = await _console_app(pilot, app, "cw_job")
+                await pilot.press("c", "h")
+                await _wait_for_ui(pilot, lambda: "chANGE_STATUS" in _line_text(cmdline))
+                app.post_message(events.AppBlur())
+                app.post_message(events.AppFocus())
+                await pilot.pause()
+                assert cmdline._suggestion == "" and cmdline.value == "ch"
+                await pilot.press("tab")
+                await pilot.pause()
+                assert cmdline.value == "CHANGE_STATUS"
+                assert cmdline.cursor_position == len("CHANGE_STATUS")
+                assert app.focused is cmdline
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl519_tab_completes_before_the_suggestion_is_answered(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DL-519: `c`, `h` and Tab queued together, while the suggestion worker has not answered
+    and does not. The grey suggestion stays empty; Tab completes by the rule all the same."""
+    text = "insert_job: cw_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def unanswered(self: object, value: str) -> str | None:
+        await asyncio.Event().wait()
+        return None
+
+    monkeypatch.setattr(runner_tui._ConsoleSuggester, "get_suggestion", unanswered)
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                cmdline = await _console_app(pilot, app, "cw_job")
+                _queue_keys(app, ("c", "c"), ("h", "h"), ("tab", "\t"))
+                await pilot.pause()
+                assert cmdline._suggestion == ""
+                assert cmdline.value == "CHANGE_STATUS"
+                assert app.focused is cmdline
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl519_tab_takes_the_grey_job_after_the_job_names_change(short_root: Path) -> None:
+    """DL-519: `KILLJOB jo` shows the grey completion to the one job that starts with `jo`. A
+    status answer then adds a job that sorts before it and starts the same. Tab gives the job
+    that was shown, not the new one."""
+    text = "insert_job: job_b\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                cmdline = await _console_app(pilot, app, "job_b")
+                await pilot.press(*"KILLJOB", "space", "j", "o")
+                await _wait_for_ui(pilot, lambda: "KILLJOB job_b" in _line_text(cmdline))
+                assert cmdline._suggestion == "KILLJOB job_b"
+                app._jobs_snapshot = {**app._jobs_snapshot, "job_a": {"status": "INACTIVE"}}
+                _queue_keys(app, ("tab", "\t"))
+                await pilot.pause()
+                assert cmdline.value == "KILLJOB job_b"
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
 def test_pilot_dl516_right_takes_a_verb_and_a_job_from_the_status_answer(
     short_root: Path,
 ) -> None:

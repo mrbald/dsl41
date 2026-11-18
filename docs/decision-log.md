@@ -27156,3 +27156,16 @@ relitigate an entry; append a new one.
   and the details popup open from a worker, after the engine has answered.
   THE COST. In such a burst the letters behind the opening key are lost, and the person types
   them again.
+- DL-519 Tab in the console line completes also when the grey text is not showing
+  (2026-11-18; src/dsl41/runner_tui.py, console_words.py; docs/runner-design.md ss11)
+  THE RULE. Tab in the console line, with the cursor at the end, takes the grey suggestion when
+  one shows, so it completes to what the person sees. When none shows, it sets the line to what
+  the completion rule of DL-516 gives for its text and the present job names, computed at that
+  moment. With no completion, or the cursor inside the line, Tab rings the bell. Right at the end
+  of the line still takes the grey suggestion when one shows.
+  WHY. The library clears its suggestion on every focus event, as when the window loses and
+  regains focus, and fills it from a worker after each keystroke. A Tab pressed in either gap
+  found nothing to take and rang the bell; tests show both.
+  THE COST. After the window regains focus the grey text is gone until the next keystroke,
+  and Tab completes all the same. Printable keys that arrive within a millisecond of Tab
+  still land before it acts, so such a burst is left as typed (BUG-97).

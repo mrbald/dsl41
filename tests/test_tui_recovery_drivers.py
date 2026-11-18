@@ -125,10 +125,49 @@ async def _display_server(path: Path):
         await asyncio.gather(*pending, return_exceptions=True)
 
 
+#: page-side record of the keys the browser sees and the focus the terminal's textarea holds,
+#: kept so a failed key sequence can be read back from what the page did. `preventedAtWindow`
+#: is absent for a key the terminal consumed before the event bubbled to the window.
+_PAGE_KEY_LOG = """() => {
+    const describe = (el) => (el ? el.tagName + "." + el.className : null);
+    const log = (window.__events = []);
+    const area = document.querySelector(".xterm-helper-textarea");
+    document.addEventListener("keydown", (e) => {
+        const record = {
+            at: Math.round(performance.now()),
+            event: "keydown",
+            key: e.key,
+            active: describe(document.activeElement),
+            target: describe(e.target),
+        };
+        log.push(record);
+        const onLate = (late) => {
+            if (late === e) {
+                record.preventedAtWindow = late.defaultPrevented;
+                window.removeEventListener("keydown", onLate);
+            }
+        };
+        window.addEventListener("keydown", onLate);
+        setTimeout(() => { record.activeAfter = describe(document.activeElement); }, 0);
+    }, true);
+    for (const name of ["focus", "blur"]) {
+        area.addEventListener(name, () => {
+            log.push({
+                at: Math.round(performance.now()),
+                event: name,
+                active: describe(document.activeElement),
+            });
+        });
+    }
+}"""
+
+
 def _browser_display_times(engine: str, url: str, diagnostics: Path) -> None:
     from playwright.sync_api import sync_playwright
 
     output: list[bytes] = []
+    sent_frames: list[tuple[int, str]] = []
+    page_events: list[Any] = []
     geometry: tuple[int, int] | None = None
     with sync_playwright() as pw:
         browser = getattr(pw, engine).launch(headless=True)
@@ -144,6 +183,7 @@ def _browser_display_times(engine: str, url: str, diagnostics: Path) -> None:
 
             def sent(data: str | bytes) -> None:
                 nonlocal geometry
+                sent_frames.append((len(output), data if isinstance(data, str) else data.hex()))
                 frame = json.loads(data)
                 if frame[0] == "resize":
                     geometry = frame[1]["width"], frame[1]["height"]
@@ -190,12 +230,18 @@ def _browser_display_times(engine: str, url: str, diagnostics: Path) -> None:
             # browser's focus. The console's footer proves `:` moved focus before a letter can
             # reach a table key. The parser's refusal names CHANGE_STATUS only if Tab completed
             # "ch"; the table's footer after Escape keeps a later key out of the escape delay.
+            page.evaluate(_PAGE_KEY_LOG)
             mark = len(output)
             page.keyboard.type(":")
             until("esc cancel", mark)
             page.keyboard.type("ch")
             until("chANGE_STATUS", mark)
+            # The line is read before the next key: a key sent within a millisecond of Tab is
+            # handled by the line before Tab's binding has bubbled up to the app, so the ` x`
+            # would land in front of the completion.
+            mark = len(output)
             page.keyboard.press("Tab")
+            until("CHANGE_STATUS", mark)
             page.keyboard.type(" x")
             page.keyboard.press("Enter")
             until("CHANGE_STATUS expects [job] STATUS [exit_code]", mark)
@@ -227,6 +273,10 @@ def _browser_display_times(engine: str, url: str, diagnostics: Path) -> None:
             page.keyboard.press("q")
             page.locator("body.-closed").wait_for(state="attached")
         finally:
+            with contextlib.suppress(Exception):
+                page_events.extend(page.evaluate("window.__events || []"))
+            (diagnostics / "frames-sent.json").write_text(json.dumps(sent_frames, indent=1))
+            (diagnostics / "page-events.json").write_text(json.dumps(page_events, indent=1))
             (diagnostics / "display.raw").write_bytes(b"".join(output))
             browser.close()
 

@@ -520,3 +520,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-516 | The event console lists its verbs and statuses in its help and completes them | [README.md](../README.md), [docs/cli-tui-qualification.md](cli-tui-qualification.md), [docs/runner-design.md](runner-design.md) |
 | DL-517 | The guard lets the delete of a merged remote branch through without a question | [docs/agents/coordination.md](agents/coordination.md), [docs/agents/operating-model.md](agents/operating-model.md) |
 | DL-518 | A key queued behind a key that changes what keys mean fires no verb | [docs/cli-tui-qualification.md](cli-tui-qualification.md), [docs/runner-design.md](runner-design.md) |
+| DL-519 | Tab in the console line completes also when the grey text is not showing | [docs/runner-design.md](runner-design.md) |

@@ -839,14 +839,25 @@ class _ConsoleInput(Input):
         self.app.query_one("#jobs", DataTable).focus()
 
     def action_take_suggestion(self) -> None:
-        """Tab takes the grey suggestion as Right at the end of the line does. It never leaves
-        the line: with nothing to take, or the cursor inside the line, it rings the bell and
-        changes nothing; Escape is the way out (DL-516)."""
-        before = self.value
-        if self.cursor_at_end:
-            self.action_cursor_right()
-        if self.value == before:
-            self.app.bell()
+        """Tab, with the cursor at the end, takes the grey suggestion when one shows, so the line
+        becomes what the person sees. The library clears the suggestion on every change of the
+        line, so a showing one belongs to the present text. When none shows (it is empty after
+        a focus event and until a worker answers a keystroke), Tab sets the line to the
+        completion rule's answer for its text and the present job names, computed now
+        (DL-519). With no completion, or the cursor inside the line, Tab rings the bell and
+        changes nothing. It never leaves the line; Escape is the way out (DL-516)."""
+        app = self.app
+        assert isinstance(app, RunnerApp)
+        completed = (
+            (self._suggestion or complete_line(self.value, app._jobs_snapshot))
+            if self.cursor_at_end
+            else None
+        )
+        if completed is None:
+            app.bell()
+            return
+        self.value = completed
+        self.cursor_position = len(completed)
 
 
 class _ConsoleSuggester(Suggester):
