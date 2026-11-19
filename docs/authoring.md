@@ -15,7 +15,7 @@ The DSL uses the same pipeline: it emits JIL, parses it, and lowers it into a ca
 The main config can select JIL and trusted Python modules together.
 Preparation renders each module to captured JIL; the engine runs those bytes ([§6](#6-hand-over-for-rollout)).
 
-The [README's DSL example](../README.md#dsl---jil-build) declares an estate:
+This example declares a nightly box with three jobs.
 
 ```python
 from dsl41.dsl import CatalogBuilder
@@ -65,8 +65,7 @@ b.job(
 `dsl41 build` imports the module, which runs its code, so use it only on modules you trust.
 It lowers the JIL through the compiler before it writes.
 
-1. Save the README example as a Python file named after your estate (the commands below
-   call it catalog.py).
+1. Save the example above in your own file named catalog.py.
 
 2. Write the JIL.
 
@@ -106,8 +105,9 @@ A job declared in two files is refused.
 Then use the [checks in §4](#4-check-the-estate).
 
 The [examples index](../examples/README.md) links the worked estates.
-For JIL, start with [nightbank](../examples/nightbank/README.md).
-The [file-processing Python estate](../examples/file_processing/estate.py) uses the DSL.
+For JIL, start with [Nightbank](../examples/nightbank/README.md).
+The [file-processing exercise](../examples/file_processing/README.md#1-variables-the-estate-and-the-first-deliveries)
+shows how its Python command takes site settings and generates JIL.
 
 ### 1.1. Add file processing to an estate
 
@@ -420,21 +420,21 @@ It exits `0` after writing output, or `2` for rejected input or shaping options.
 ### 4.4. Run the checks in order
 
 These commands use `jobs.jil` and the scenario from [§4.2](#42-play-the-intended-night).
-Replace `<base-zone>` with the engine's zone from the operator.
+The example uses UTC. For your estate, use the engine's zone from the operator.
 Add `--strict` where the site requires it; an estate brought in under [§5](#5-bring-an-existing-autosys-estate-in) always lints with `--strict`, the [migration gate](../README.md#lint-a-catalog).
 Use [§6](#6-hand-over-for-rollout) to match the rollout profile.
 
 1. Lint the catalog; fix findings and repeat until the exit code passes.
 
    ```sh
-   dsl41 lint jobs.jil --timezone <base-zone>
+   dsl41 lint jobs.jil --timezone UTC
    ```
 
 2. Rehearse the chosen night using [§4.2](#42-play-the-intended-night).
 
    ```sh
    dsl41 rehearse jobs.jil --scenario scenario.json --start 2026-01-15T00:00:00 \
-       --hours 24 --timezone <base-zone> --format summary
+       --hours 24 --timezone UTC --format summary
    ```
 
 3. Inspect the graph using [§4.3](#43-inspect-the-graph).
@@ -451,39 +451,84 @@ The canonical form is the compiler's normalized representation for comparison.
 This check compares canonical form rather than original bytes.
 The [fidelity contract](jil-statement-syntax.md#fidelity-tests-normative) defines byte preservation separately.
 
-Decompile the template JIL, with its `~{$NAME}~` placeholders, not a copy bound with `-p`.
-The module keeps placeholders as written, but it cannot recover them from bound values.
-`--params` adds a `Params` dataclass with one field per placeholder, and a comment above each field names the attributes it fills.
-`estate()` with no argument keeps every token.
-`dsl41 build estate.py --stdout --param HOST=prod1` fills `HOST` for a local look.
-For rollout, the main config supplies the properties layers ([§6](#6-hand-over-for-rollout)).
+To keep placeholders, decompile the template without `-p`. This works for
+fields that accept unbound tokens, such as `command`.
+`--params` adds a `Params` dataclass with one field per placeholder and a
+comment naming the attributes it fills. `estate()` with no argument keeps the
+tokens. `dsl41 build estate.py --stdout --param HOST=prod1` fills `HOST` for a
+local check. For rollout, the main config supplies the properties layers
+([§6](#6-hand-over-for-rollout)).
 The authority for `estate build` and its `--param` boundary is [DL-413](decision-log.md), as ruled by DL-424.
 Decompile refuses a placeholder named as a Python keyword, starting with `__`, or named as a name the module itself uses, such as `str` or `Params`.
 
-Give several files, in the manifest's `files` order, and an output directory to get a package, one module per file ([§1](#1-write-jil-or-use-the-python-dsl)):
+Fields such as `start_times` need concrete values during lowering. When a
+template uses placeholders there, keep the template and its properties as
+source. Use `decompile -p` to convert one concrete variant. Binding replaces
+the tokens, so the generated module holds values for that variant.
+`--params` and `-p` cannot be combined.
+
+Try the bound variant in a scratch directory.
+
+1. Write a synthetic template and its properties.
+
+   ```sh
+   cat > template.jil <<'JIL'
+   insert_job: morning
+   job_type: c
+   command: /usr/bin/true
+   machine: localhost
+   date_conditions: 1
+   days_of_week: all
+   start_times: "~{$START}~"
+   JIL
+   printf '%s\n' 'START=01:00' > sample.properties
+   ```
+
+2. Convert the selected variant.
+
+   ```sh
+   dsl41 decompile -p sample.properties template.jil -o morning.py
+   ```
+
+3. Rebuild and compare against the same bound input.
+
+   ```sh
+   dsl41 build morning.py -o rebuilt.jil
+   dsl41 equiv -p sample.properties rebuilt.jil --against template.jil
+   ```
+
+To build a package with one module per file, give several files and an output
+directory. Use the manifest's `files` order when there is one. See [§1](#1-write-jil-or-use-the-python-dsl).
 
 1. Decompile the files.
 
    ```sh
-   dsl41 decompile --params calendars.jil eod.jil -o estate/
+   dsl41 decompile calendars.jil eod.jil -o estate/
    ```
 
-2. Rewrite the JIL files once from the package.
-   They are equal to the inputs in canonical form, not byte for byte: the builder orders attributes its own way and drops comments.
+2. Build the rollout files into one directory and compare them with the
+   original catalog. The builder orders attributes its own way and drops comments.
 
    ```sh
-   dsl41 build estate --out .
+   dsl41 build estate --out rebuilt
+   dsl41 equiv rebuilt/calendars.jil rebuilt/eod.jil --against calendars.jil --against eod.jil
    ```
 
-3. In CI, fail when a checked-in file is stale.
+3. Check in the Python package and the generated JIL. Set `[estate]` in the
+   rollout config to `include = ["rebuilt/calendars.jil", "rebuilt/eod.jil"]`.
+   A rehearsal manifest beside that config uses the same paths in `files`.
+   The package writes basenames, so update paths that used to name other
+   directories. Ship these checked-in files at the paths the config selects.
+
+4. In CI, run this check on a fresh checkout, before anything rewrites the
+   generated JIL. Exit 1 means the rollout files differ from the Python build.
 
    ```sh
-   dsl41 build estate --check .
+   dsl41 build estate --check rebuilt
    ```
 
 Each module holds its own file's jobs and folds within that file.
 A condition on another file's job stays an explicit string.
-The package names each file by its base name, so a manifest name with a directory, such as `jobs/eod.jil`, does not fit it.
 Decompile refuses two inputs whose names differ only in case, and a box whose jobs are in another file.
 
 1. Decompile the input catalog.

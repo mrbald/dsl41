@@ -76,14 +76,23 @@ does not contain this estate or its preparation helper.
    uv run dsl41 run --config /tmp/nightbank-training/dsl41.toml
    ```
 
-5. From another terminal, inspect it:
+5. From a second terminal in the same checkout, select the training engine
+   and inspect it. Keep these variables when following the
+   [incident guide](../../docs/incident-triage.md).
 
    ```sh
-   uv run dsl41 query status --socket /tmp/nightbank-training/engine/control.sock
+   DSL41=$(uv run sh -c 'command -v dsl41')
+   RUN_ROOT=/tmp/nightbank-training/engine
+   S="$RUN_ROOT/control.sock"
+   "$DSL41" query status -S "$S"
    ```
 
-   Use the [incident guide](../../docs/incident-triage.md) for interventions
-   and the [drain procedure](../../docs/deploy.md#drain-the-engine) to stop.
+6. When training is finished, stop that foreground engine from the second terminal:
+
+   ```sh
+   uv run dsl41 engine stop --wait -S /tmp/nightbank-training/engine/control.sock
+   ```
+
    A restart on this root resumes its stored revision; it does not prepare a
    fresh night or apply changed source files. Review changes through
    [reread and update](../../docs/deploy.md#reload-a-changed-estate).

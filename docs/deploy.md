@@ -648,41 +648,7 @@ The host's monitoring must watch disk space.
 
 ## Watch the engine and jobs
 
-The site's optional status hook receives JSON on stdin for job failure, termination,
-hold, SEM-34 deadline alarms and configured long-running intervals (DL-469). Startup refusal
-attempts delivery after valid hook settings load. The failure unit reports unit
-failure even when TOML or the store cannot be read. A normal systemd stop does
-not activate it. A crash may restart without a failure-unit activation;
-the service drills check refusal and restart exhaustion on both supported systems.
-
-Omitting `[engine] status_hook` disables engine notifications. If the site
-disables notifications altogether, also remove the engine unit's `OnFailure`
-setting. `status_hook_long_running_s` sets the global runtime-length threshold in seconds,
-default 0. The hook path and global threshold are host settings; restart after editing
-them. Positive job `max_run_alarm` overrides the global threshold in minutes × 60; zero or absence
-keeps the global threshold. An effective zero disables that job's length notifications.
-Failure and termination events carry resolved `alarm_if_fail` and `alarm_if_terminated`
-Booleans. Both default to true; the termination default is unverified against AutoSys.
-False retains the event; the site hook decides whether to alert. Rehearsal never invokes
-the hook.
-
-Delivery is best effort: one worker, 64 queued events, 16 KiB per payload,
-no retry or spool. New events are dropped on overflow or oversize. Shutdown
-drops the backlog. Process creation runs off the engine's event loop. Each
-invocation has five seconds. After every invocation, including exit 0, the worker
-TERMs its group, allows 0.5 seconds, then KILLs it and uses the remaining
-0.5 seconds to verify cleanup and reap. The slot stays occupied until cleanup
-finishes; unconfirmed cleanup disables delivery and always logs that transition.
-Other errors are counted in rate-limited journal diagnostics. Hooks must not
-detach: group cleanup cannot contain `setsid` escapees.
-Site hooks must not write inside the run root; that root belongs to the engine.
-The hook runs as `dsl41` from `/` with
-umask 077, closed inherited descriptors, only `PATH=/usr/bin:/bin` and
-`LANG=C`, and discarded stdout/stderr. It is trusted code with the service
-account's permissions. See the [payload and event contract](runner-design.md#4-engine-loop--single-writer)
-before writing a consumer; consumers must ignore unknown fields and unknown events (DL-446, DL-469).
-The hook protocol is `v=1`. Every key appears in every payload, null where it does not
-apply, including both alarm flags.
+Run the status query as the service user with this unit's owner-only socket.
 
 ```sh
 /opt/dsl41/releases/<version>/bin/dsl41 query status --json \
@@ -708,7 +674,6 @@ table with per-job revisions.
 
 Exit 0 means the engine answered, even if a job failed.
 Exit 2 means refusal or failure to reach the engine.
-Run socket commands as the service user with this unit's owner-only socket.
 For a configured access map, follow the [access model](access-model.md);
 stop, reread and update require its `adm` tier.
 A member of `socket_group` who may stop the engine can confirm its process exit with `engine stop --wait` when the peer pid is available (DL-496).
@@ -721,6 +686,29 @@ For AutoSys task equivalents, use the [operator command table](incident-triage.m
 8000. The server has no authentication of its own: keep the loopback default, or
 put an authenticating proxy or tunnel in front of it. Per-person access is in
 [Serve people behind the authenticating proxy](#serve-people-behind-the-authenticating-proxy).
+
+The optional status hook reports job failures, terminations, holds, deadline
+alarms and long-running jobs (DL-446, DL-469). The engine attempts to report
+startup refusals once valid hook settings load. The separate failure unit reports
+unit failure even when the TOML or store is unreadable. A normal stop leaves it
+inactive. A crash can restart without activating it.
+
+Restart after editing `[engine] status_hook` or `status_hook_long_running_s`.
+To disable engine notifications, first clear `send_notification` on every job
+that enables it. [Apply the changed estate](#reload-a-changed-estate) while the
+hook is still configured. Then remove `status_hook` from the main config and
+restart. Startup preflight requires a configured hook while any applied job
+enables `send_notification`.
+
+To disable unit notifications, remove `OnFailure` from the engine unit and run
+`systemctl daemon-reload` as root. Rehearsal never invokes the hook.
+
+Delivery is best effort. The engine can drop events without a retry or spool.
+Unconfirmed process cleanup disables delivery. Check the engine journal for
+delivery failures. The hook runs as the service account. Keep it in its process
+group and keep its writes outside the run root. Follow the
+[hook contract](runner-design.md#4-engine-loop--single-writer) for thresholds,
+alarm flags, payloads, delivery bounds and the hook environment.
 
 ## Drain the engine
 
@@ -788,62 +776,79 @@ view. Once the engine exits, its socket cannot answer status.
 
 ## Take a backup for restore
 
-Never copy `engine.db` and its sidecars from a running engine.
-Draining stops running commands with TERM, waits the configured grace, then
-sends KILL where needed. It cancels file watchers and records attempt outcomes.
-It does not wait for jobs to finish their work naturally.
-Choose a quiet window for a drained backup, or use an atomic snapshot.
-See [drain the engine](#drain-the-engine) for deadlines and shutdown records.
+Choose a quiet window. [Draining](#drain-the-engine) can interrupt jobs.
+As root, follow these steps for the installed Nightbank service.
 
-For the operator, use one of these backup methods:
-
-- Drain the engine, then copy the whole run root while it remains stopped.
-- Take an atomic filesystem snapshot of the whole run root, even while the
-  engine runs. A restore from a live snapshot recovers as after a crash.
-
-Keep a copy of the main config (`/etc/dsl41/dsl41.toml` in this example)
-with the backup and record the installed release version.
-Retain that release so restore can use the same interpreter and package.
-A different release may refuse the captured estate bytes.
-
-For a drained backup of the systemd service:
-
-1. As root, stop the unit:
+1. Stop the unit and keep it stopped until the copy finishes.
 
    ```sh
    systemctl stop dsl41-engine.service
    ```
 
-   The unit drains through `dsl41 engine stop --wait`.
-   For a foreground engine, use the [direct drain command](#drain-the-engine)
-   instead. Keep the engine stopped until the copy finishes.
+   For a foreground engine, use the [direct drain command](#drain-the-engine).
 
-2. As root, copy the whole run root to a fresh backup destination.
-   Choose a destination that does not exist:
+2. Read the [shutdown record](#drain-the-engine) and check independently that
+   no engine, wrapper or job writer remains. For this dedicated service
+   account, run:
 
    ```sh
-   install -d -m 0700 /srv/backups
-   cp -a /srv/dsl41/runs/nightbank /srv/backups/nightbank-backup
-   cp -a /etc/dsl41/dsl41.toml /srv/backups/nightbank-backup.toml
+   systemctl show -p ActiveState -p MainPID dsl41-engine.service
+   pgrep -a -u dsl41
    ```
 
-   Keep `engine.db`, its sidecars and all other root contents together.
-   Copying only the database omits attempt records and captured plans needed
-   for recovery.
+   For a drained backup, require `ActiveState=inactive`, `MainPID=0`, and `pgrep` exit 1
+   with no output. If the account is shared with other services, identify any
+   processes that can still write these files and wait for them to stop.
 
-3. As root, restart the service:
+3. Copy the complete set into a fresh backup directory. This command uses GNU
+   `cp` and `flock` from util-linux. Replace `VERSION` with the release
+   directory named by the installed unit's `ExecStart`.
+
+   ```sh
+   (
+     set -eu
+     install -d -m 0700 /srv/backups
+     backup=$(mktemp -d /srv/backups/nightbank.XXXXXXXX)
+     cd /
+     flock -n -x 9
+     cp -a --parents srv/dsl41/runs/nightbank etc/dsl41 opt/nightbank \
+       srv/dsl41/nightbank/night opt/dsl41/releases/VERSION \
+       etc/systemd/system/dsl41-engine.service \
+       etc/systemd/system/dsl41-engine-down.service "$backup"
+     printf 'Backup complete: %s\n' "$backup"
+   ) 9</srv/dsl41/runs/nightbank/leader.lock
+   ```
+
+   The leader lock excludes another engine during the copy. Keep the whole
+   run root, including the store, sidecars, attempts and plans, together.
+   The Nightbank copy also keeps the JIL, properties, worker scripts, job
+   profile and incident settings at their original relative paths. For a
+   site with different paths, include its required inputs, access map, hook,
+   unit drop-ins and runtime dependencies. Keep business data and external
+   job output under the site's backup policy.
+
+4. After a successful copy, restart the service when ready. For a package
+   upgrade, leave it stopped until the new runtime is ready.
 
    ```sh
    systemctl start dsl41-engine.service
    ```
 
-For an atomic snapshot, use the host filesystem's snapshot tools.
-The snapshot must capture the whole run root at one instant.
-Job output outside that root needs the site's separate backup policy.
-Restore the whole root together, with its main config and recorded release.
-If `engine.db` is missing, the engine starts fresh even when other runtime
-evidence survives. That loses recovery continuity; backing up and restoring
-the whole run root avoids this loss.
+If the engine must remain up, use an atomic filesystem snapshot of the whole
+run root. A restore from a live snapshot recovers as after a crash. Retain
+the matching config, release and external inputs from step 3 with the snapshot.
+
+To restore on an existing host, stop the service and repeat the no-writer
+check in step 2. On a replacement host, prepare the filesystems and recreate
+the service account with its original UID and GID. Keep the service stopped.
+Move any damaged root aside to an unused path on the same filesystem and keep
+it for diagnosis. Restore the complete backup tree to the original paths,
+keeping ownership and modes. Restore the run root as one directory at its
+original, now vacant path. Provide the same Python build the saved release venv uses at the
+same path. Restore any unit drop-ins. If you restore unit files, run
+`systemctl daemon-reload`. On a replacement host, run
+`systemctl enable dsl41-engine.service` if the service should start at boot. Follow
+[recovery](#recover-after-the-engine-or-box-dies) to start and check the engine.
 
 ## Reload a changed estate
 
@@ -967,24 +972,12 @@ Keep the release that wrote the root and a whole-root backup available.
 Do not replace engine files while the service runs.
 This variant follows the same [engine and client rollout rule](#upgrade-the-engine).
 
-1. As root, drain and stop the service:
+1. As root, [stop the service, check for writers and take the backup](#take-a-backup-for-restore).
+   Use the installed runtime and site paths in the backup command. Leave the
+   service stopped. Retain the old RPM and record the selected runtime. If the
+   runtime path is a symlink, preserve its target as well as the link.
 
-   ```sh
-   systemctl stop dsl41-engine.service
-   ```
-
-   Check the [shutdown record](#drain-the-engine) and confirm no engine, wrapper
-   or job writer remains before copying the root.
-
-2. As root, back up the stopped root and main config. Choose unused destinations:
-
-   ```sh
-   install -d -m 0700 /srv/backups
-   cp -a /srv/dsl41/runs/nightbank /srv/backups/nightbank-before-upgrade
-   cp -a /etc/dsl41/dsl41.toml /srv/backups/nightbank-before-upgrade.toml
-   ```
-
-3. As root, install the package. Select its runtime if the package requires it:
+2. As root, install the package. Select its runtime if the package requires it:
 
    ```sh
    rpm -Uvh PACKAGE.rpm
@@ -1011,13 +1004,13 @@ This variant follows the same [engine and client rollout rule](#upgrade-the-engi
    On rollback, reinstall the old RPM first: an upgrade removes its delivery
    directory. Then repeat these commands with the old delivery and its profile.
 
-4. As root, start the service:
+3. As root, start the service:
 
    ```sh
    systemctl start dsl41-engine.service
    ```
 
-5. As the service user, repeat this query until it prints `RUNNING`.
+4. As the service user, repeat this query until it prints `RUNNING`.
    It needs `jq`. A successful query can still report `STARTING` during catch-up.
    If startup refuses, read the journal and follow the refusal guidance below.
 
@@ -1026,7 +1019,7 @@ This variant follows the same [engine and client rollout rule](#upgrade-the-engi
      --socket /srv/dsl41/runs/nightbank/control.sock | jq -r .engine
    ```
 
-6. Only when the package changed estate files, preview them as the service user:
+5. Only when the package changed estate files, preview them as the service user:
 
    ```sh
    sudo -u dsl41 ENGINE reread \
@@ -1126,13 +1119,10 @@ These are new events; they do not recover history or scheduler state.
 ## Recover after the engine or box dies
 
 Keep the durable run root, including `engine.db`, `runs/` and `plans/`.
-For backup, stop the unit and independently prove no engine, wrapper or job
-writer remains. Copy the entire stopped root, including any SQLite sidecars,
-spools and settings, together with the main config and required inputs.
-Restore the complete copy at the same path before starting. A missing store
-with surviving runtime evidence refuses; preserve that damaged root and
-recover the missing backup material (DL-443). Scheduler restoration does not
-restore a business database or undo job effects. Back those up separately.
+If a restore is needed, follow the [backup and restore checklist](#take-a-backup-for-restore)
+before starting. Startup refuses a missing store with surviving runtime
+evidence (DL-443). Preserve the damaged root and recover the complete backup.
+Restore business data separately and account for effects already produced by jobs.
 Startup validation uses Python's temporary directory selection (`TMPDIR`
 when usable). Allow space for one complete
 copy of `engine.db` and its present `-wal`, `-shm` and `-journal` files,

@@ -7,8 +7,11 @@ The rest of the track is under **Operator** in the
 
 ## Set the variables and the account
 
-Read this page at a terminal on the run host. Select the executable version
-from the installed unit:
+Use the executable and run root for the engine you are investigating.
+For a foreground training run, keep the variables from the
+[Nightbank quick start](../examples/nightbank/README.md#quick-start) and go
+straight to [the job's state](#read-the-jobs-state).
+For an installed service, read its unit on the run host:
 
 ```sh
 systemctl cat dsl41-engine.service
@@ -104,7 +107,7 @@ A filtered summary row is `job CMD INACTIVE - 0 - - - 1`; `REV` is last.
 | Test job success from a script | `"$DSL41" query is-success --job NAME -S "$S"` |
 | Test job failure from a script | `"$DSL41" query is-failed --job NAME -S "$S"` |
 | `autostatus -G` / `autorep -G` | `"$DSL41" query global -N GLOBAL -S "$S"` |
-| All globals at once | `"$DSL41" query globals -S "$S"`; add `-N GLOBAL`, repeated, to name them |
+| Read several named globals | `"$DSL41" query globals -N GATE -N REGION -S "$S"` |
 | Follow journal records as they happen | `"$DSL41" query subscribe --since N -S "$S"` |
 | Watch the jobs in a terminal | `"$DSL41" ui -S "$S"` |
 | `autorep -q` | `"$DSL41" query spec --job NAME -S "$S"` |
@@ -205,12 +208,61 @@ Times use the engine host's local display (DL-473). `dsl41 run --ui` prints
 the report before the terminal UI attaches. No remaining missed starts means no report.
 See [outage bounds](deploy.md#recover-after-the-engine-or-box-dies) for what
 `from` and `to` mean after an unclean stop or a backward clock step.
-The durable `drop` evidence lives in `engine.db`; `wal/*.jsonl` resolves to
-the [SQLite store rule (DL-428)](decision-log.md).
+The engine records each missed tick as a `drop` in `engine.db`.
 Catch-up needs an explicit `FORCE_STARTJOB` after checking downstream effects.
 
 **Outside `run_window`.** `"$DSL41" query spec -S "$S" --job NAME` shows the loaded window.
 `FORCE_STARTJOB` still respects it; the next start follows SEM-33.
+
+## A start was refused while the box was running
+
+1. With the engine running, find the refusal in `query trace`. This command
+   uses `jq` to select refusals for one box. Replace `nightly` with its name.
+
+   ```sh
+   box=nightly
+   "$DSL41" query trace -S "$S" --since 0 |
+     jq --arg box "$box" '.entries[] | select(.job == $box and .transition == "START_REFUSED")'
+   ```
+
+2. Read the refusal fields. `start_source=scheduler` identifies a scheduled
+   request. `control` identifies a control request. An absent source means the
+   origin is unknown. `refused_status` and `run_number`, when present, give the
+   state and run at that instant.
+
+3. Read the box's schedule and member names, then read the unfiltered trace.
+   Work backward from the refusal to the start of the box run. Its `cause`
+   tells you what started it. Follow the members forward to see which were
+   still active when the next request arrived. A trace that begins at a
+   restart may omit the opening transition.
+
+   ```sh
+   "$DSL41" query spec -J "$box" -S "$S"
+   "$DSL41" query deps -J "$box" -S "$S"
+   "$DSL41" query trace -S "$S" --since 0
+   ```
+
+   With the engine stopped, run `"$DSL41" journal "$RUN_ROOT"` and follow the
+   box and its members in time order. Each line gives the time, job,
+   transition and cause. Both the live JSON trace and `rehearse --format json`
+   include the structured refusal fields when available.
+
+These selected entries come from the JSON trace of a rehearsal of `nightly`,
+a box with one member. Times and causes are shortened here.
+
+| Time | Job | Transition | Cause or refusal fields |
+| --- | --- | --- | --- |
+| 10:01:00 | nightly | `INACTIVE->STARTING` | `STARTJOB event (scheduler)` |
+| 10:01:00 | extract | `INACTIVE->STARTING` | `box 'nightly' started` |
+| 10:02:00 | nightly | `START_REFUSED` | `start_source=scheduler`, `refused_status=RUNNING`, `run_number=1` |
+| 10:02:30 | extract | `RUNNING->SUCCESS` | Member completed |
+| 10:02:30 | nightly | `RUNNING->SUCCESS` | All members succeeded |
+
+The 10:01 tick started the box. Its member was still running at the 10:02
+tick, so that request started no second run. The box completed when its member
+finished. The UI groups repeated scheduler refusals. The
+[trace](control-protocol.md#4-query-verbs-frozen-response-shapes) shows the
+individual refusal entries still available to inspect.
 
 ## The job is late
 
@@ -223,7 +275,7 @@ A run that has not started by its `must_start_times` deadline writes `MUST_START
 `"$DSL41" query timers -S "$S"` lists the job's pending `must_start`, `must_complete` and `term_run_time` timers.
 When `term_run_time` passes, the engine ends the run `TERMINATED`.
 For a synthetic hung-job exercise, use [Nightbank](../examples/nightbank/README.md#quick-start)
-and its incident settings; `RUNBOOK.md` exercise 5 resolves to that preparation.
+and its incident settings.
 
 ## The job failed or was terminated
 
@@ -256,10 +308,7 @@ The trace's `transition` and `cause` name what happened.
 Reset its cursor to `0` when `baseline_id` changes or `last_seq` falls below
 the cursor. A restart from a snapshot can begin with `RESTART`; `CONFIG`
 marks a configuration change. Trace is a view, not complete retained history.
-DL-210's period-roll instructions resolve to the
-[current trace contract](control-protocol.md#4-query-verbs-frozen-response-shapes).
-`RUNBOOK.md` exercise 4 resolves to [Nightbank preparation](../examples/nightbank/README.md#quick-start);
-use the intervention below only after correcting the application's fault.
+Correct the application's fault before sending an intervention.
 
 ## The job shows RUNNING or STARTING and nothing runs
 
@@ -283,7 +332,6 @@ held even after an outcome. Do not infer a missing process from status alone.
 Command evidence is under `runs/<job>.<run>/<ordinal>/` in the run root;
 `spawn.json` and `status.json` identify that attempt.
 Do not signal an unverified PID or edit those records.
-`wrapper_alive` inspection resolves to this attempt and cleanup evidence.
 
 An engine death ends the attempt. A restart can launch a replacement of the
 same run; marked non-idempotent jobs, quarantined records and the attempt
@@ -297,7 +345,6 @@ A quarantined engine input or repeated cleanup fault needs
 
 Read the [intervention contract](control-protocol.md#3-mutating-verb-sendevent)
 and the [job's interruption requirements](authoring.md#62-write-every-job-to-survive-interruption).
-The `deployment-runbook.md` Manual intervention table resolves to those rules.
 An intervention can start or end work; choose it from the cause before sending it.
 For `CHANGE_STATUS`, add `-s STATUS` to the form below.
 For `SET_GLOBAL`, use `-G KEY=value` instead of `-J NAME`; read `REV` with `"$DSL41" query global -N KEY -S "$S"`.
@@ -424,17 +471,3 @@ store, plans or spool to bypass a refusal.
 - JIL edits and rollback by a reviewed candidate: [reload a changed estate](deploy.md#reload-a-changed-estate).
 - Application idempotence and manual hold release: [authoring contract](authoring.md#62-write-every-job-to-survive-interruption).
 - Read access at a desk: [access model](access-model.md#1-the-model).
-
-The `deployment-runbook.md` installation, job recipe, Which move and What to
-watch references resolve to these procedures. Its section 6a sealing and
-opening instructions resolve to the [v2 charter (DL-424)](decision-log.md).
-
-`anchor.json` resolves to engine status and the stored revision (DL-424).
-Periods, seals, detached runs and `run` exit `3` resolve to DL-424 in the [decision log](decision-log.md).
-`supervise` resolves to the engine queries and offline readers above (DL-424).
-`host` resolves to the one-box scope in DL-424.
-`release status` resolves to the applied `config_rev` in engine status (DL-424).
-`dsl41-supervisor.service` resolves to the engine unit's journal (DL-424).
-`supervisor.log` resolves to that same journal (DL-424).
-`$ESTATE_ANCHOR` resolves to the run-root evidence above (DL-424).
-`.venv` and `.venvs` executable references resolve to the unit's versioned `ExecStart` path.

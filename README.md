@@ -38,9 +38,9 @@ implementation. A site may adapt and repackage them for its Python runtime requi
 
 **Job author**: write an estate in JIL or the Python DSL, or bring an existing one in, and get it accepted.
 
-1. [docs/authoring.md](docs/authoring.md) - write or import JIL or Python estates, check the main-config inputs, preview and apply engine configuration, and make jobs safe across interrupted attempts; estate.toml supports tests and rehearsal
-2. [Lint a catalog](#lint-a-catalog) - the rules L001-L025 and `known-unsupported`, and `rehearse` and `viz` under [CLI](#cli)
-3. [DSL -> JIL (build)](#dsl---jil-build) - the Python DSL builders (`job`, `box`, `sequence`, `parallel`) and `to_jil()`; [examples/file_processing/estate.py](examples/file_processing/estate.py) is a worked Python estate
+1. [docs/authoring.md](docs/authoring.md) - write or import an estate, check the candidate inputs, and hand the estate to the operator for rollout. Covers jobs that can be interrupted.
+2. [Check the estate](docs/authoring.md#4-check-the-estate) - lint, rehearse and inspect the dependency graph
+3. [DSL -> JIL (build)](#dsl---jil-build) - build a Python estate. The [file-processing exercise](examples/file_processing/README.md#1-variables-the-estate-and-the-first-deliveries) generates JIL with its own Python command.
 4. [JIL -> DSL (decompile)](#jil---dsl-decompile) and [Prove two catalogs equivalent](#prove-two-catalogs-equivalent) - bring an existing estate in and check a rewrite
 5. [examples/README.md](examples/README.md) - choose a worked estate: file archival and processing, or fulfilment carrier reconciliation; [workflow setup](examples/workflows/README.md) is shared by fulfilment and [media publication](examples/media/README.md)
 6. [docs/deploy.md#reload-a-changed-estate](docs/deploy.md#reload-a-changed-estate) - the operator's adoption procedure for the checked candidate; authoring defines replacement and hold outcomes
@@ -101,26 +101,28 @@ then `uv run dsl41 --help`.
 ## CLI
 
 There is one entry point, `dsl41`. Run `uv run dsl41 --help` in a checkout,
-or install the package and run `dsl41`. Every compiler command except
-`build` takes one or more JIL files, which together form one catalog. The
-files may include `autocal_asc` calendar exports (`calendar`, `cycle`,
-`extended_calendar`, and `ext_calendar` statements) next to job definitions.
+or install the package and run `dsl41`. When a command accepts multiple JIL
+files, they form one catalog. The files may include `autocal_asc` calendar exports
+(`calendar`, `cycle`, `extended_calendar` and `ext_calendar` statements)
+next to job definitions.
 
 Exit codes: 0 is success or clean. 2 means the input never reached the
 tool: an unreadable file, a JIL parse error, a lowering refusal, or a
 preflight refusal. Findings exit 1: `lint`, `equiv`, a failed `decompile` check, and a `build --check` difference. A mid-run engine
 failure in `run` or `rehearse` exits 1 as well. `minify` refusals and a
 `rehearse --check-cadence` deviation exit 3. The control verb `sendevent`
-spends a code per outcome: 0 applied, 2 refused, 3
-rejected, 4 outcome unknown. On 4, retry with the printed `request_id`
-instead of re-sending. Each verb's
-`--help` states its own codes.
+reports 0 for applied, 2 for refused, 3 for rejected and 4 for outcome unknown.
+On 4, re-read the target first. Any retry repeats the same arguments with
+the printed `--request-id`, `--expect`, `--baseline` and `--claimed-actor`.
+Follow the [intervention guide](docs/incident-triage.md#send-the-intervention)
+for the retry identity and retention rules. Each verb's `--help` states its own
+exit codes.
 
 Lowering refuses unknown attributes (DL-07). `--permit-unknown` carries them
-verbatim instead. Every command that loads a catalog takes it, except
-`minify`, which refuses what it cannot classify. The same commands take
-`-p/--properties`, which resolves `~{$NAME}~` placeholders from properties
-files before parsing.
+verbatim where the command offers that option. `minify` refuses what it cannot
+classify. On JIL input, `-p/--properties` resolves `~{$NAME}~` placeholders
+before parsing. Use the [main config](docs/authoring.md#6-hand-over-for-rollout)
+to bind properties for rollout.
 
 Lowering refuses a job name containing `/` or a NUL byte, or equal to `.` or `..` (DL-494).
 Lowering reads a job's name without surrounding closed block comments and refuses a comment with name text on both sides (DL-495).
@@ -317,70 +319,33 @@ prove that nothing changed.
 dsl41 decompile jobs.jil -o catalog.py
 ```
 
-The command emits a Python module over the DSL builders. Its `estate()`
-function returns a `CatalogBuilder`; importing the module builds nothing.
-The rebuilt catalog's canonical form equals the original's, and this
-round-trip property is tested over the whole corpus. Recognized structural
+The command emits a Python module whose `estate()` returns a
+`CatalogBuilder`. By default it checks that the rebuilt catalog matches
+the input's canonical form. Recognized structural
 patterns fold into builder calls from a closed registry, which `dsl41 folds`
-lists. `--no-fold CODE` disables the named fold; the option is repeatable and
-accepts comma-separated codes. Decompile the template JIL, not a bound copy:
-`-p` fills the `~{$NAME}~` placeholders first, and the module cannot recover
-them.
+lists. `--no-fold CODE` disables the named fold. Repeat it or pass
+comma-separated codes. Follow the [migration procedure](docs/authoring.md#5-bring-an-existing-autosys-estate-in)
+to preserve placeholders that can stay unbound or convert a bound variant.
 
 ```sh
-dsl41 decompile --params calendars.jil eod.jil -o estate/
+dsl41 decompile calendars.jil eod.jil -o estate/
 ```
 
-An `-o` that ends in `/` or names a directory gets a package: one module per
-input file and an `__init__.py` whose `estate()` composes them in the order
-given; give the manifest's `files` order. Each module builds its own file's
-jobs; a condition on another file's job stays an explicit string. The package
-names each file by its base name, so a manifest name with a directory, such as
-`jobs/eod.jil`, is not supported, and `--emit` names the base name.
-`--params` adds a `Params` dataclass with one field per placeholder, each
-`None` by default, and `estate(params)` fills the fields that are set
-(DL-418).
+An `-o` that ends in `/` or names a directory gets a package with one module
+per input file and an `__init__.py` whose `estate()` composes them in the order
+given. Use the manifest's `files` order when there is one. Each module
+builds its own file's jobs. A condition on another file's job stays an
+explicit string. A package uses each input's basename for its rebuilt JIL.
 
 ### DSL -> JIL (build)
 
-```sh
-dsl41 build catalog.py -o jobs.jil          # write the JIL
-dsl41 build catalog.py --check jobs.jil     # exit 1 and a diff if jobs.jil is stale
-```
+Follow the [Python walkthrough](docs/authoring.md#1-write-jil-or-use-the-python-dsl)
+to write a module and build its JIL. In Python, `to_jil()` returns JIL text
+and `build()` returns the in-process catalog.
 
-A Python estate is a module whose `estate()` function returns a
-`CatalogBuilder`:
-
-```python
-from dsl41.dsl import CatalogBuilder
-
-
-def estate() -> CatalogBuilder:
-    b = CatalogBuilder()
-    b.machine("prod1")
-    with b.box("nightly"):
-        b.job("extract", command="/opt/etl/extract.sh", machine="prod1")
-        b.job("transform", command="/opt/etl/transform.sh", machine="prod1")
-        b.job("load", command="/opt/etl/load.sh", machine="prod1")
-    b.sequence("extract", "transform", "load")
-    return b
-```
-
-`dsl41 build` imports the module, which runs its code, so use it only on
-modules you trust. It calls `estate()`, lowers the JIL through the compiler,
-and writes it through a temporary file and a rename. `--check FILE` compares
-bytes and writes nothing; `--stdout` prints. For a package, `--out DIR` writes
-and `--check DIR` compares one JIL per module under its file's name.
-`--param NAME=VALUE` fills a placeholder for a local check; the estate
-manifest fills them through its layers. `dsl41 run` and the run root take
-JIL bytes only. In Python, the builder's `to_jil()` returns the JIL
-text, and its `build()` returns the in-process catalog.
-
-`job()` keyword names are JIL attribute names. `sequence()` wires `s()`
-chains; `parallel()` wires a fan-out and a fan-in. Both refuse to merge into
-an existing condition. There is no second lowering path: the builder
-generates JIL and reuses parse and lower, so `lint`, `viz`, and `equiv`
-apply unchanged to DSL-built catalogs.
+For rollout, the [main config](docs/authoring.md#6-hand-over-for-rollout)
+can select JIL and trusted Python modules together. Preparation renders the
+Python inputs to JIL and binds the configured properties before compiling.
 
 ### De-identify an estate (minify)
 
