@@ -102,7 +102,7 @@ normal successors. A crash after `config applied` can leave a box stopped: put i
 non-INACTIVE members on hold before force-starting it. No automatic completion after that record
 is promised (DL-489).
 
-The CLI/TUI status annotation caches the last reread forecast in memory. New/failed reread replaces it; applied update and restart clear it. Update never consumes it.
+The CLI/TUI status annotation caches the last reread forecast in memory. A new reread replaces it when the revision it read is still the applied one (DL-521); a failed reread, an applied update and a restart clear it. Update never consumes it.
 Forecast labels follow the first-match rule in the [control protocol](../control-protocol.md#2-transport-and-framing-frozen) (DL-490).
 `restart_box` names only roots the update starts again. Jobs of both catalogs
 inside such a root in the candidate carry `restart`, retyped jobs and sub-boxes

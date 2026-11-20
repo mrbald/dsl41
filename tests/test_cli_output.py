@@ -618,7 +618,9 @@ def test_engine_state_prevents_affirmative_reread_advice(
 
     server = ControlServer.__new__(ControlServer)
     server.engine = SimpleNamespace(
-        draining=draining, update=SimpleNamespace(token="open" if open_update else None)
+        draining=draining,
+        config_rev=1,
+        update=SimpleNamespace(token="open" if open_update else None),
     )
     server._preparing_update = object() if preparing else None
 

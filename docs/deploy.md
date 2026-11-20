@@ -889,8 +889,9 @@ and 2 means no diff or failure to reach the engine.
 
 Status in the CLI and TUI annotates changed/removed jobs and unchanged members
 of boxes update would restart with this forecast.
-It describes reread time. Another reread replaces it; failed reread, applied
-update and engine restart clear it. It is held only in engine memory.
+It describes reread time. Another reread replaces it when the revision it read
+is still the applied one (DL-521); failed reread, applied update and engine
+restart clear it. It is held only in engine memory.
 
 Update rereads the files itself. Edits made after preview are included.
 It prints a request ID before sending. Use `--request-id ID` only to look up

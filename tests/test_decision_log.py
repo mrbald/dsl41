@@ -23,6 +23,7 @@ WIDE: frozenset[str] = frozenset(
         "DL-416",
         "DL-424",
         "DL-446",  # DL-446: its narrowed-by mark is line 41
+        "DL-463",  # DL-463: its narrowed-by mark is line 41
     }
 )
 #: DL-379: the lines of the log up to the end of DL-379. A compression tranche lowers this in

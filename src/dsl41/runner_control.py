@@ -788,7 +788,10 @@ class ControlServer:
         ):
             return _failure("invalid_argument", "reread accepts only claimed_actor", refused=True)
         answer = await self._prepare_reload(update=False)
-        self.engine.reread_marks = answer.get("preview", {}).pop("marks", {})
+        marks = answer.get("preview", {}).pop("marks", {})
+        # A forecast is cached only for the revision still applied; a failure clears it (DL-521).
+        if not answer.get("ok") or answer.get("live_rev") == self.engine.config_rev:
+            self.engine.reread_marks = marks
         details = answer.get("preview", {}).get("definition_changes")
         if details is not None:
             if self.engine.draining:

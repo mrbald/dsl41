@@ -615,8 +615,9 @@ A row may add `reread: {change, action}` (DL-463).
 as the preview's effects, with the first-match rule in §2's reread forecast
 (DL-490), or `null` when the forecast assigns no action.
 It is the cached forecast
-at the last reread, not a live plan. New or failed reread replaces it; applied
-update and engine restart clear it. It is absent for unmarked rows. CLI and TUI
+at the last reread, not a live plan. A new reread replaces it when the revision it
+read is still the applied one (DL-521); a failed reread, an applied update and an
+engine restart clear it. It is absent for unmarked rows. CLI and TUI
 append an annotation; a client may ignore this additive answer field.
 
 `{"ok": true, "jobs": {<name>: {…}}, "spec_drift": bool|null}`. Omitting

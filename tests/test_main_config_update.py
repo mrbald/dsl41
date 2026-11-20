@@ -210,6 +210,92 @@ def test_bug57_unchanged_update_preserves_marks_until_next_reread(tmp_path, monk
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("newer_reread", [False, True])
+def test_bug16_late_reread_keeps_the_forecast_of_the_applied_revision(
+    tmp_path, monkeypatch, newer_reread
+):
+    from dataclasses import asdict
+    from dsl41.reread_worker import run
+    from dsl41.runner_control import ControlServer
+
+    path = estate_file(tmp_path)
+    job_b = JOB.replace("insert_job: A", "insert_job: B")
+    (tmp_path / "a.jil").write_text(JOB + "\n" + job_b)
+    initial = main.prepare(path)
+    root = tmp_path / "run"
+
+    async def scenario():
+        engine = start_run(
+            initial.catalog,
+            root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter()},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        engine.launch_settings = initial.metadata["launch"]
+        server = ControlServer(engine, root / "control.sock")
+        gate = asyncio.Event()
+        held = []
+
+        async def prepare(*, update):
+            live = engine.update.live()
+            answer = run(
+                {
+                    "source": str(path),
+                    "run_root": str(root),
+                    "update": update,
+                    "live": {**asdict(live), "catalog": live.catalog.model_dump(mode="json")},
+                }
+            )
+            if not held:
+                held.append(True)
+                await gate.wait()
+            return answer
+
+        monkeypatch.setattr(server, "_prepare_reload", prepare)
+        try:
+            await engine.run_until_quiescent(T0)
+            (tmp_path / "a.jil").write_text(JOB.replace("true", "echo changed") + "\n" + job_b)
+            late = asyncio.create_task(server._reread({"v": 5, "cmd": "reread"}))
+            while not held:
+                await asyncio.sleep(0)
+            plan = reread(
+                engine.update.live(),
+                root / "plans",
+                candidate=main.prepare(path),
+                start=T0,
+            )
+            pending = engine.request_update(
+                UpdateRequest(plan.token, 1, engine.baseline_id, "changed")
+            )
+            await engine.run_until_quiescent(T0)
+            assert pending.result().applied.result()["rev"] == 2
+            assert engine.config_rev == 2 and engine.reread_marks == {}
+            newer = {}
+            if newer_reread:
+                (tmp_path / "a.jil").write_text(
+                    JOB.replace("true", "echo changed") + "\n" + job_b.replace("true", "echo b")
+                )
+                assert (await server._reread({"v": 5, "cmd": "reread"}))["ok"]
+                newer = dict(engine.reread_marks)
+                assert set(newer) == {"B"} and newer["B"]["change"] == "changed"
+            gate.set()
+            answer = await late
+            assert answer["ok"] and answer["live_rev"] == 1
+            assert "marks" not in answer["preview"]
+            assert engine.reread_marks == newer
+            if newer_reread:
+                assert server._status({})["jobs"]["B"]["reread"] == newer["B"]
+            else:
+                assert "reread" not in server._status({})["jobs"]["A"]
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("after", ["application", "restart"])
 def test_bug57_equal_update_after_application_or_restart(tmp_path, after):
     path = estate_file(tmp_path)
@@ -2214,7 +2300,7 @@ def test_dl490_forecast_labels_follow_candidate_membership(short_root: Path, mon
 
             async def prepare(*, update):
                 assert not update
-                return {"ok": True, "preview": preview(candidate, live)}
+                return {"ok": True, "live_rev": live.revision, "preview": preview(candidate, live)}
 
             monkeypatch.setattr(server, "_prepare_reload", prepare)
             view = (await server._reread({"v": 5, "cmd": "reread"}))["preview"]

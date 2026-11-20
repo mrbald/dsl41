@@ -1257,8 +1257,9 @@ frozen inventory; what follows is what each is for.
   object (DL-68), and a `spec_drift` flag — a lazy fingerprint re-check of the
   loaded input files; the flag tells the operator the running catalog
   differs from disk. `reread` reports disk changes; `update` adopts them (DL-463). The optional
-  per-job reread annotation is the last preview, cleared by failed/new reread,
-  applied update and restart. Drift still compares against the applied capture. The CLI adds
+  per-job reread annotation is the last preview stored: a new reread replaces it only
+  while the revision it read is still the applied one (DL-521), and a failed reread,
+  an applied update and a restart clear it. Drift still compares against the applied capture. The CLI adds
   scriptable predicates `is-success`/`is-failed` (print status, exit
   0/1) over the status verb.
 - **subscribe** — stream the store's wire records from a seq (the UI feed;

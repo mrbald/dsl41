@@ -25889,6 +25889,7 @@ relitigate an entry; append a new one.
   A reread that finishes while an update applies can store stale marks. This is a TODO
   candidate; this item does not add revision fencing to the memory-only view.
   NARROWED BY DL-498: v5 carries reread and the tokenless update; the v3 exception is gone.
+  NARROWED BY DL-521: a reread stores its forecast only for the revision still applied.
 - DL-465 Five-day dependency cooldown (2026-11-04; owner ruling; README Release)
   uv excludes registry artifacts younger than five days through
   `[tool.uv] exclude-newer = "5 days"`. Both Dependabot ecosystems, uv and
@@ -27190,3 +27191,19 @@ relitigate an entry; append a new one.
   filter, the fold-key hint and the pager's notes); saving the layout (each tab is its own
   process with no place of its own to keep it).
   THE COST. A press on a border line no longer does nothing: it starts a drag.
+- DL-521 A reread stores its forecast only for the configuration revision still applied
+  (2026-11-20; src/dsl41/runner_control.py; docs/control-protocol.md `status`; narrows DL-463)
+  THE RULE. When a reread succeeds, its marks replace the cached forecast that
+  `status` shows only if the configuration revision the diff was read against (`live_rev`) is
+  still the applied one. Otherwise the cached forecast stays as it is. The reread's answer is
+  the same either way and names the revision it was diffed against. A failed reread still
+  replaces the cached forecast with nothing.
+  WHY. Preparation runs in a worker while the engine goes on. A reread that started under
+  revision 1 and ended after an update had applied revision 2 stored revision 1's marks over
+  the forecast the update had cleared, and `status` showed a job `changed` that the update had
+  already applied. Reproduced in memory with the production handlers (BUG-16).
+  NOT BUILT. An order between two rereads that overlap: each stores a forecast for the applied
+  revision, and an edit of the sources outdates any forecast the same way until the next
+  reread.
+  THE COST. After a reread that an applied update outran, `status` shows no forecast until
+  the next reread, unless a newer reread has stored one.

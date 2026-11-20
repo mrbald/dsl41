@@ -17,14 +17,13 @@ None open.
 
 ### Medium
 
-In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-16 to BUG-19 get one pass that proves or dismisses each.
+In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-17 to BUG-19 get one pass that proves or dismisses each.
 
 - **BUG-10**: Restart ignores unknown `[engine]` keys such as `machine_polcy` and uses defaults until reread refuses them (DL-437).
 - **BUG-13**: The engine prints `clean_shutdown` before it exits; TERM in that window ends it with -15. With no socket while the lock is held, or with no peer pid from the socket, `engine stop --wait` waits for lock release rather than process exit, which exposes systemd ExecStop (DL-496).
 - **BUG-20**: Bounds and per-input scan cost of the live oracle's `_emitted` and `_kill_emissions` histories are unqualified (`src/dsl41/oracle_writers.py:135`, `src/dsl41/oracle.py:361-365`).
 - **BUG-48**: Update plan directories accumulate, even after stale refusals. Define their retention separately from attempt records (`src/dsl41/reread_worker.py:158`, `src/dsl41/runner_update.py:91`).
 - **BUG-50**: Retention for per-attempt `runs/<job>.<run>/<n>/` records (`spawn.json`, `status.json`) is undefined and unverified; they consume inodes. Keep it separate from job-output archiving.
-- **BUG-16**: Unproved race: reread finishing during update can store stale status marks (`src/dsl41/runner_control.py`, `_reread`, the `reread_marks` assignment).
 - **BUG-17**: Unproved race: an unchanged member can start while update stops other members of its restarting box (`src/dsl41/runner_update.py:354-440`).
 - **BUG-18**: A moved-out `job_terminator` can be killed by its old box's KILLJOB cascade without a rerun (`src/dsl41/runner_update.py:640-664`).
 - **BUG-19**: Unproved race: a box with only membership edits can start after admission and have its running membership replaced without restart (`src/dsl41/runner_update.py:354-440`).
