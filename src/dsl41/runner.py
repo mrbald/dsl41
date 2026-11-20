@@ -877,9 +877,10 @@ class Engine:
         self, job: str, run_number: int, run_id: str | None, *, take_up: bool
     ) -> None:
         """A task the update cancelled (a file watch): launched again under its run id when the
-        application chose to (`takes_up`), as a restart takes up a watch; else its attempt is
-        closed with no plan."""
-        if take_up:
+        application chose to and it still qualifies now, after the application's time advance
+        and box actions (`takes_up`), as a restart takes up a watch; else its attempt is closed
+        once with no plan (DL-526)."""
+        if take_up and self.takes_up(job, run_number):
             job_ir = self.oracle.catalog.jobs[job]
             self._launch(
                 job_ir,

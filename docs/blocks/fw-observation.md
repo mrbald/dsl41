@@ -69,11 +69,11 @@ This shows log recovery and polling; it leaves out engine outcome settlement.
 ## Failure and recovery
 
 - An incomplete legacy wildcard log keeps its scalar prefix, deadline and original poll count, then starts fresh pathname streaks with `sample` lines (DL-461).
-- The engine dies after the `start` line. Resume relaunches an incomplete watch while its oracle run remains live; it rebuilds progress from the log and appends no second `start` line (PR-34a; DL-129, DL-425).
+- The engine dies after the `start` line. Resume relaunches an incomplete watch while its oracle run remains live; it rebuilds progress from the log and appends no second `start` line (PR-34a; DL-129, DL-425). While an update that is stopping holds the watch's job or has selected the watch for a stop, the watch is not relaunched; the update takes it up or closes it after its application (DL-526).
 - The engine dies after a completing poll and before the STATUS input is durable. `_resume_watch` injects the completion from scalar or sampled evidence without observing the file again (PR-34a, DL-461).
-- A run directory exists with no `start` line. Resume dispatches the watch again under the bound `run_id`.
+- A run directory exists with no `start` line. Resume dispatches the watch again under the bound `run_id`. The same update rule applies (DL-526).
 - The run root's lock proof fails. The check raises before the append, so no line lands (PR-03, narrowed by DL-424).
-- A log that cannot be read, or that names another run, stops the engine with an error. It is never read as "not dispatched".
+- A log that cannot be read, or that names another run, is never read as "not dispatched". At a restart, recovery quarantines the attempt and the engine continues; anywhere else it stops the engine with an error.
 - A resume whose catalog has an FW run and no FW adapter wired refuses.
 
 ## Owning modules

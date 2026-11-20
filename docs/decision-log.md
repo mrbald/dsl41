@@ -27328,3 +27328,31 @@ relitigate an entry; append a new one.
   setting that is part of every job's definition names every job. Such an update therefore also
   waits for the cleanup of a job that has ended and left a process behind, and that cleanup
   runs to its end under the leak policy it started with.
+- DL-526 A file watch an update holds or has stopped is not launched while the update waits
+  (2026-11-20; src/dsl41/runner_startup.py, src/dsl41/runner_update.py, src/dsl41/runner.py,
+  tests/test_update_watches.py, docs/blocks/fw-observation.md, docs/runner-design.md; closes
+  BUG-100, a hole in DL-522)
+  THE RULE. A restart reads an open watch's evidence first, as before: a complete log is fed as
+  an outcome, a watch whose run has ended is closed, and a log that is not this attempt's is
+  quarantined. An unfinished watch of a live run is launched again unless an update in STOPPING
+  holds its job in the recorded dispatch filter or names this attempt in its recorded stop
+  list. Such a watch is handed to the update as a task it cancelled. The update does not wait
+  for it. After the application the update takes it up once, under the applied definition and
+  the same run id, or closes it. That choice is made before the `config applied` record, which
+  names it for a watch the update selected for a stop, and again at the launch, after the
+  application's time advance and box actions. A watch whose run has ended by then is closed
+  once with no plan and is not launched.
+  THE DEFECT. After a restart during an update's wait, a watch the update had cancelled was
+  launched under the old definition and polled while the update waited. The restored update did
+  not know of it, so the application did not take it up under the new definition either. And
+  the choice to take a watch up was made only before the time advance: a watch whose
+  `term_run_time` deadline fell at the application was launched again for a run that had just
+  been TERMINATED.
+  UNCHANGED. No record kind, record field or version constant. A root an earlier build wrote
+  restores and holds the watch back.
+  THE COST. `config applied.stopped` names what the update chose for each stop, not what then
+  happened. It can say `rerun` for a watch that the time advance or a box action then ended;
+  that watch is closed and not launched. It says `none` for a watch the restart completed from
+  its log or quarantined.
+  THE LIMIT. A watch cancelled by an update that finishes while the engine drains is still
+  launched again (BUG-101).

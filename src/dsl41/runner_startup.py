@@ -1473,7 +1473,9 @@ def _resume_watch(engine: Engine, job_ir: JobIR, attempt: OpenAttempt, last_at: 
     """One open FW watch, from its spool (period-model ss2.2). A watcher has no attempt to rerun:
     it resumes only while the oracle's current run for its job is this run in STARTING or
     RUNNING; a complete log is fed through the stale-completion gate, never re-watched; a watch
-    whose run ended is closed with no plan."""
+    whose run ended is closed with no plan. An unfinished watch of a live run is not launched
+    while an update in STOPPING holds its job in the dispatch filter or its stop list names
+    this attempt: the update takes it up or closes it after its application (DL-526)."""
     from dsl41.runner_adapters import FileWatcherAdapter
     from dsl41.semantics import fw_existence_immediate
 
@@ -1513,6 +1515,10 @@ def _resume_watch(engine: Engine, job_ir: JobIR, attempt: OpenAttempt, last_at: 
         # DL-242: only a live row is watched again; the oracle ended the run, so plan `none`
         engine.adopt_attempt(_facts_of(attempt), observed=False)
         engine.record_outcome(attempt.attempt, AttemptOutcome("stopped", cause="run ended"))
+        return
+    if engine.update.holds(job) or engine.update.stops(job, attempt.attempt):
+        # DL-526: a watch the update holds or stops is not launched while it waits
+        engine.update.hold_watch(job, run, attempt.attempt)
         return
     # an idempotent read: the adapter reconstructs progress from the log and appends no second
     # `start` line, under the attempt's recorded id (DL-118)

@@ -18,7 +18,8 @@ An attempt of the stop set that ends while the update stops keeps its outcome ba
 and its follow-up plan are appended after the application, under the applied catalog and
 marked set (spec-wiring 2b, the interruption rule's step 1). A task the attempt tier does not run
 (a file watch) is cancelled; after the application it is launched again under its run id while
-its job is in the catalog and its run is live, and closed with no plan otherwise.
+its job is in the catalog and its run is live, and closed with no plan otherwise. That is decided
+again at the launch, after the application's time advance and box actions (DL-526).
 
 When the last selected stop is finished, the application swaps the oracle's catalog and settings
 (`reload_update.apply_application`), the scheduler's plans (`Scheduler.replace`), the marked set
@@ -30,7 +31,9 @@ A restart that finds a `config intent` with no `config applied` resumes the upda
 (spec-restart §2): the catch-up observes the attempts it stops like any open one, and it applies
 as a step of the loop once its stops are finished. The recovered outcomes of jobs outside its
 stop set are fed under the old catalog before it; no job of its plan dispatches and no outcome
-it keeps commits before it (spec-restart §6, ruling R1, DL-433).
+it keeps commits before it (spec-restart §6, ruling R1, DL-433). An unfinished file watch of a
+live run whose job the dispatch filter names, or whose attempt the stop list names, is not
+launched: the restart hands it to the update as a task it cancelled (`hold_watch`, DL-526).
 
 An exact retry of an admitted request binds operation, baseline and actor (DL-463),
 and is answered from its `config intent` record and, once applied, from its
@@ -288,6 +291,11 @@ class EngineUpdate:
         """Whether the dispatch filter keeps `job` from starting now."""
         return self.tier is not None and job in self.tier.dispatch_filter
 
+    def stops(self, job: str, attempt: str) -> bool:
+        """Whether the update in STOPPING stops attempt `attempt` of `job`: its stop list names
+        that attempt, as admitted or as `resume` restored it from the intent (DL-526)."""
+        return self.stopping and self._attempts.get(job) == attempt
+
     def keeps(self, run_id: str, job: str, outcome: AttemptOutcome) -> bool:
         """Whether the outcome of attempt `run_id` of `job` waits for the application, where
         the interruption rule's plan for it is chosen under the applied catalog and marked set
@@ -515,9 +523,10 @@ class EngineUpdate:
     def resume(self, intent: Mapping[str, Any], *, opened: OpenedPlan) -> None:
         """Restore the update a restart found in STOPPING from its `config intent` record (the
         fold, spec-restart §2): its dispatch filter holds from here, and it waits for each
-        attempt of its stop set the open table holds, file watches excepted (the fold takes a
-        watch up). The catch-up observes those attempts like any open one; their ends are steps
-        of the single writer, and the catch-up's owed step queues the first look at a stop set
+        attempt of its stop set the open table holds, file watches excepted (the fold reads a
+        watch's log, and `hold_watch` takes an unfinished one it holds or stops, DL-526). The
+        catch-up observes those attempts like any open one; their ends are steps of the single
+        writer, and the catch-up's owed step queues the first look at a stop set
         already down (`look`), so the update applies in the loop (DL-432, spec-restart §6).
         Nothing is appended or applied here."""
         engine = self.engine
@@ -535,7 +544,8 @@ class EngineUpdate:
         still = {
             job: run_id
             for job, run_id in attempts.items()
-            if run_id in table and catalog[job].job_type != "FW"  # the fold takes a watch up
+            # a watch is no clearance to wait for: the fold reads its log (DL-526)
+            if run_id in table and catalog[job].job_type != "FW"
         }
         # an attempt whose outcome is in while its cleanup was cut short is down once the
         # catch-up's cleanup step has finished it (`cleaned`)
@@ -552,6 +562,13 @@ class EngineUpdate:
         self._answer = UpdateAnswer(admitted)
         self._answer.applied = asyncio.get_running_loop().create_future()
         self._post(lambda tier: tier.resume(admitted, still.keys()))
+
+    def hold_watch(self, job: str, run_number: int, run_id: str) -> None:
+        """An unfinished file watch of a live run that a restart found while the update stops,
+        its job held by the dispatch filter or this attempt named by the stop list (`holds`,
+        `stops`): it is not launched, and the application takes it up or closes it as a task
+        this update cancelled (`finish`). It is no stop the update waits for (DL-526)."""
+        self._cancelled.append((job, run_number, run_id))
 
     def look(self) -> None:
         """Queue the loop's first look at a resumed update's stop set, after every catch-up
@@ -757,12 +774,13 @@ class EngineUpdate:
         step 1): a kept outcome's plan (`complete`, `rerun`, `hold` or `none`), which `finish`
         commits as chosen; `rerun` for a cancelled task taken up again; `none` for a task
         closed, and for a job the update found no attempt of (its held start goes under the new
-        definition)."""
+        definition). A cancelled task is decided again at its launch, after the time advance
+        and the box actions; the record keeps this choice (DL-526)."""
         engine = self.engine
         assert self._admitted is not None
         cancelled = {job: run for job, run, _ in self._cancelled}
         self._chosen = {}
-        self._takes_up = {}
+        self._takes_up = {job: engine.takes_up(job, run) for job, run in cancelled.items()}
         stopped: list[tuple[str, OnStop]] = []
         for job in self._admitted.stop_set:
             attempt = self._attempts.get(job)
@@ -770,8 +788,7 @@ class EngineUpdate:
                 plan = self._chosen[attempt] = engine.plan_for(attempt, self._kept[attempt])
                 stopped.append((job, plan.kind))
             elif job in cancelled:
-                again = self._takes_up[job] = engine.takes_up(job, cancelled[job])
-                stopped.append((job, "rerun" if again else "none"))
+                stopped.append((job, "rerun" if self._takes_up[job] else "none"))
             else:
                 stopped.append((job, "none"))
         for attempt in self._others:
@@ -783,7 +800,8 @@ class EngineUpdate:
     def finish(self) -> None:
         """What follows an application, once the time advance is fed or queued: the outcomes
         kept back are committed with their plans under the applied catalog, the cancelled tasks
-        are taken up or closed, the held starts are released, and the request is answered."""
+        are taken up or closed (`Engine.resume_cancelled` decides again on the rows as they are
+        now, DL-526), the held starts are released, and the request is answered."""
         engine = self.engine
         kept, self._kept = self._kept, {}
         # in the stop set's order, by job, whatever order the attempts ended in
