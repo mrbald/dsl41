@@ -351,8 +351,12 @@ def test_restart_resumes_the_box_roots_of_a_stopping_update(short_root):
 
 
 @linux_only
-def test_restart_uses_leak_policy_updated_during_natural_cleanup(short_root):
-    """t2 18: the applied switch leaves a closing natural attempt's cookie alone."""
+def test_an_update_of_the_leak_policy_waits_for_a_running_natural_cleanup_then_applies(short_root):
+    """t2 18, DL-525: `j` exits 0 and leaves a child that ignores TERM, so the cleanup of its
+    natural end runs under `process-leak=terminate`. An update that changes only the switch
+    names every job, `j` included, and waits for that cleanup: while the child lives the
+    update stops `j` and rev 1 stays applied. Once the child exits the cleanup ends, and the
+    update applies once, after `ladder_done`. `j` is not launched again."""
     childfile = short_root / "child"
     body = _stubborn(childfile)
     body += f"while [ ! -s {childfile} ]; do sleep 0.01; done\nexit 0\n"
@@ -361,23 +365,33 @@ def test_restart_uses_leak_policy_updated_during_natural_cleanup(short_root):
     root = short_root / "run"
 
     async def scenario():
-        async with _cli(path) as (client, engine):
+        async with _cli(path) as (client, _):
             await client.event("STARTJOB")
             child = await _written(childfile)
             await _until(lambda: bool(_records(root, "outcome")))
-            assert _records(root, "outcome")[0]["ladder"] == "running"
+            [outcome] = _records(root, "outcome")
+            assert (outcome["outcome"], outcome["ladder"]) == ("natural", "running")
             _config(short_root, text, semantics='[estate.semantics]\nprocess-leak = "leak"\n')
-            await client.update(wait=True)
+            admitted = await client.update()
+            assert admitted["stop"] == ["j"] and admitted["application"] is None
+            status = await client.ask("status")
+            assert status["config_rev"] == 1 and status["update"]["stopping"] == ["j"]
             assert not _ladder_done(root) and _live(child)
-            await _kill_engine(engine)
-        async with _cli(path) as (client, _):
-            assert (await client.ask("status"))["config_rev"] == 2
-            assert _live(child)
-            await _until(lambda: bool(_ladder_done(root)))
-            assert _live(child) and len(_records(root, "dispatch")) == 1
-            assert "j.1.1: leaked: 1, left running" in (short_root / "live-engine.log").read_text()
             _release_child(childfile)
-            await _until(lambda: not _live(child))
+            applied = await client.update(wait=True)
+            assert applied["application"]["rev"] == 2 and not _live(child)
+            journal = rows(root)
+            done = next(
+                s for s, k, b in journal if k == "follow_up" and b["event"] == "ladder_done"
+            )
+            [rev2] = [
+                s
+                for s, k, b in journal
+                if k == "config" and b["event"] == "applied" and b.get("rev") == 2
+            ]
+            assert done < rev2
+            assert len(_records(root, "dispatch")) == 1
+            assert (await client.ask("status"))["jobs"]["j"]["status"] == "SUCCESS"
 
     try:
         asyncio.run(scenario())

@@ -860,6 +860,79 @@ def test_a_restart_stops_the_leak_a_record_it_reads_shows(
     assert "ladder_done" in events
 
 
+def test_under_leak_a_natural_end_held_by_a_failed_reading_is_left_running_by_the_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """DL-431, DL-433: under `process-leak=leak` the command exits 0 while the reading of what
+    it left fails, so the attempt is held, signalled never, and its natural outcome is journaled
+    closing. The engine dies. The restart's first reading finds the leftover of that closing
+    natural attempt and names it without signalling it; its cleanup closes the attempt
+    (`ladder_done`) and nothing is launched again."""
+    world = _World(monkeypatch)
+    _leak(monkeypatch)
+    world.scans = [_found(error=errno.EMFILE)]
+    run_root = tmp_path / "run"
+
+    async def first() -> str:
+        engine = _engine(tmp_path)
+        monkeypatch.setattr(engine.stops, "watch_groups", lambda: None)  # the engine dies held
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "j"}))
+        await engine.run_until_quiescent(T0)
+        assert engine.journal is not None
+        [(attempt, open_)] = list(engine.journal.open.attempts.items())
+        assert open_.spool is not None
+        spool = Path(open_.spool)
+        spool.mkdir(parents=True, exist_ok=True)
+        spawn = {**SPAWN, "run_id": attempt, "boot_id": runner_procid.current_boot_id()}
+        (spool / "spawn.json").write_text(json.dumps(spawn))
+        stand_in = engine._live.pop("j").task  # the observed attempt is the wrapper's
+        stand_in.cancel()
+        engine._reaping.append(stand_in)
+        env = {**open_.env, "DSL41_COOKIE": runner_procid.cookie("inst", attempt)}
+        engine.adopt_attempt(AttemptFacts(attempt, "j", 1, 1, spool, env))
+        engine._restored.discard(attempt)
+        engine.stops.scan_available = True
+        engine.stops.note_boot(spawn)
+        engine.attempts.spawn_recorded(attempt, spawn)
+        exited = {"version": 1, "outcome": "exited", "exit_code": 0}
+        engine.attempts.status_recorded(attempt, exited)
+        await engine.run_until_quiescent(T0)
+        assert attempt in engine.held_groups
+        await engine.shutdown()
+        _close(engine)  # the engine dies: no shutdown record
+        return attempt
+
+    attempt = asyncio.run(first())
+    [(seq, dispatch)] = [(q, b) for q, k, b in rows(run_root) if k == "dispatch"]
+    cookie = runner_procid.cookie("inst", attempt)
+    update(run_root, seq, {**dispatch, "env": {**dispatch["env"], "DSL41_COOKIE": cookie}})
+    [ended] = [b for _, k, b in rows(run_root) if k == "outcome"]
+    assert (ended["outcome"], ended["ladder"]) == ("natural", "running")
+    monkeypatch.setattr(runner_stops, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(runner_procid, "pidfd_supported", lambda: True)
+    world.scans = [_found(42, run_id=attempt)]
+
+    async def restart() -> None:
+        engine = await resume_run(
+            lower_source(_JIL),
+            run_root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+            settings=EngineSettings(grace_term_s=0.05, grace_kill_s=0.1),
+        )
+        await engine.run_until_quiescent(T0)
+        await engine.attempts.join()
+        await engine.shutdown()
+        _close(engine)
+
+    asyncio.run(restart())
+    assert world.sent == []
+    assert "j.1.1: leaked: 1, left running (pids 42)" in capfd.readouterr().err
+    events = [b.get("event") for _, k, b in rows(run_root) if k == "follow_up"]
+    assert events.count("ladder_done") == 1
+    assert len([b for _, k, b in rows(run_root) if k == "dispatch"]) == 1
+
+
 # ------------------------------------------------------------------- round 3: the two rules
 
 

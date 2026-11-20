@@ -27324,4 +27324,7 @@ relitigate an entry; append a new one.
   waits until the hold is released. That is when a reading finds nothing left, or, for a leak
   held under `process-leak=leak`, at the first reading that succeeds, which names what is left
   and signals nothing (DL-426). While the readings fail, or while a process survives KILL, this
-  update waits and a later one is refused with `update_in_progress`.
+  update waits and a later one is refused with `update_in_progress`. A change of an estate
+  setting that is part of every job's definition names every job. Such an update therefore also
+  waits for the cleanup of a job that has ended and left a process behind, and that cleanup
+  runs to its end under the leak policy it started with.
