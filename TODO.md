@@ -11,25 +11,32 @@ None open.
 
 State handled outside a state machine and duplicated logic make the whole system fragile, so they rank here, not under maintenance (owner, 2026-11-10).
 
-None open.
+- **FEAT-45**: The update's `direct` flag has several owners and the first check after recovery shares an input with a job's stop notice. Give the first check its own input and let `Engine._update_step` alone own the flag (`src/dsl41/runner_update.py`, `src/dsl41/runner.py`). No defect is known.
+  Next: after BUG-19, write the change against the pinned notice orders in `tests/`.
+- **FEAT-46**: Whether a selected job is down is decided in two places, live and after a restart, with `_cleaning` as shared bookkeeping. Make it one operation over stated evidence (`src/dsl41/runner_update.py`, `src/dsl41/runner_startup.py`). No defect is known.
+  Next: after FEAT-45.
 
 ## Known bugs
 
 ### Medium
 
-In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-17 to BUG-19 get one pass that proves or dismisses each.
+In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-17, BUG-19 and BUG-98 to BUG-100 are the known holes in the atomic update rule (DL-522), fixed in this order: BUG-98, BUG-99, BUG-100, BUG-17, BUG-19. BUG-18 gets a pass that proves or dismisses it.
 
 - **BUG-10**: Restart ignores unknown `[engine]` keys such as `machine_polcy` and uses defaults until reread refuses them (DL-437).
 - **BUG-13**: The engine prints `clean_shutdown` before it exits; TERM in that window ends it with -15. With no socket while the lock is held, or with no peer pid from the socket, `engine stop --wait` waits for lock release rather than process exit, which exposes systemd ExecStop (DL-496).
 - **BUG-20**: Bounds and per-input scan cost of the live oracle's `_emitted` and `_kill_emissions` histories are unqualified (`src/dsl41/oracle_writers.py:135`, `src/dsl41/oracle.py:361-365`).
 - **BUG-48**: Update plan directories accumulate, even after stale refusals. Define their retention separately from attempt records (`src/dsl41/reread_worker.py:158`, `src/dsl41/runner_update.py:91`).
 - **BUG-50**: Retention for per-attempt `runs/<job>.<run>/<n>/` records (`spawn.json`, `status.json`) is undefined and unverified; they consume inodes. Keep it separate from job-output archiving.
-- **BUG-17**: Unproved race: an unchanged member can start while update stops other members of its restarting box (`src/dsl41/runner_update.py:354-440`).
+- **BUG-98**: A status record that arrives after a stop sequence's body returned and before its completion is consumed releases the attempt with no survivor reading. An update can then apply, and a replacement can be dispatched, while the old process group is alive (`src/dsl41/runner_attempts.py`, `_ladder`, `_ladder_done`, `_what_is_left`; DL-522).
+- **BUG-99**: An update selects its stops from job rows that are STARTING or RUNNING and from the row's current run only. A changed job set INACTIVE while its command runs (DL-235), and a job whose earlier run is still being stopped while a newer run has opened, are not waited for: the update applies beside the live old process (`src/dsl41/reload_plan.py` `stop_set`, `src/dsl41/runner.py` `attempt_of_run`; DL-522).
+- **BUG-100**: File watches around an update. After a restart, an unfinished watch that the open update holds back is launched before the update applies, also when the update did not select it for a stop. A watch whose run the application's time advance ended is launched again (`src/dsl41/runner_startup.py`, `src/dsl41/runner_update.py`; DL-522).
+- **BUG-17**: An unchanged member can start while an update stops other members of its restarting box; the box restart then ends it. Rule: no process is launched for a member whose old work the recorded root restart will end (`src/dsl41/runner_update.py:354-440`; DL-522).
 - **BUG-18**: A moved-out `job_terminator` can be killed by its old box's KILLJOB cascade without a rerun (`src/dsl41/runner_update.py:640-664`).
-- **BUG-19**: Unproved race: a box with only membership edits can start after admission and have its running membership replaced without restart (`src/dsl41/runner_update.py:354-440`).
-- **BUG-45**: The DST drill runs at 60 times real speed. Above speed 1 it scales the engine's `grace_term_s` and `grace_kill_s` by the speed, so the wait for a wrapper's record after a kill is 5 s real; runs [43324516341](https://github.com/mrbald/dsl41/actions/runs/43324516341) and [41924127515](https://github.com/mrbald/dsl41/actions/runs/41924127515) missed that wait when it was 83 ms real (an `unobservable` kill with the wrapper's record on disk). Open: a kill's signal came at +8.8 s ([41817527860](https://github.com/mrbald/dsl41/actions/runs/41817527860)) and +6.8 s ([43195162599](https://github.com/mrbald/dsl41/actions/runs/43195162599)) of engine time, beyond the drill's own `KILL_S` bound of 0.1 s real (6 s at speed 60); their cause is not shown. Also open: three fixed waits stay at 5 engine seconds, about 83 ms real at speed 60: between selected signals, `DRAIN_MARGIN_S` and `SPOOL_EXIT_MARGIN_S`. No run has shown one of them missed (`examples/dst-drill/drill.py`, `src/dsl41/runner_adapters.py`, `src/dsl41/engine_charts.py`).
+- **BUG-19**: A box with only membership edits can start after admission and have its running membership replaced without a restart. Shown at the oracle: the box then stays RUNNING with no member event left to end it. Rule: such a box opens no run while the update waits; it waits as a queued job waits and opens after the application (`src/dsl41/runner_update.py:354-440`; DL-522).
+- **BUG-45**: The DST drill runs at 60 times real speed. Above speed 1 it scales the engine's `grace_term_s` and `grace_kill_s` by the speed, so the wait for a wrapper's record after a kill is 5 s real; runs [43324516341](https://github.com/mrbald/dsl41/actions/runs/43324516341) and [41924127515](https://github.com/mrbald/dsl41/actions/runs/41924127515) missed that wait when it was 83 ms real (an `unobservable` kill with the wrapper's record on disk). Open: a kill's signal came at +8.8 s ([41817527860](https://github.com/mrbald/dsl41/actions/runs/41817527860)) and +6.8 s ([43195162599](https://github.com/mrbald/dsl41/actions/runs/43195162599)) of engine time, beyond the drill's own `KILL_S` bound of 0.1 s real (6 s at speed 60); their cause is not shown. Also open: three fixed waits stay at 5 engine seconds, about 83 ms real at speed 60: between selected signals, `DRAIN_MARGIN_S` and `SPOOL_EXIT_MARGIN_S`. No run has shown one of them missed. A follow-on start came 17 s of engine time late in run [44715735094](https://github.com/mrbald/dsl41/actions/runs/44715735094), 0.28 s real at speed 60 (`examples/dst-drill/drill.py`, `src/dsl41/runner_adapters.py`, `src/dsl41/engine_charts.py`).
+- **BUG-101**: A file watch that an update cancelled is launched again when that update finishes while the engine drains: taking the watch up again does not check the drain (`src/dsl41/runner_update.py`, `finish`, `resume_cancelled`, `takes_up`).
 - **BUG-2**: `runs` refuses the whole report when an older open attempt pins pruning over an expired completed run whose revision is missing (DL-432).
-- **BUG-3**: `config applied.stopped` reports `none` and `update --wait` misreports a stop-set job that an earlier committed plan reran under its new definition. No unplanned job runs (DL-432).
+- **BUG-3**: `config applied.stopped` reports `none` and `update --wait` misreports a stop-set job that an earlier committed plan reran under its new definition. No unplanned job runs (DL-432). The same list names a job `none` when its command ended by itself just before the admission and its SUCCESS is fed after the application.
 - **BUG-8**: A run root started by the legacy unit cannot resume under the main-config unit; no migration path is documented (DL-437).
 - **BUG-58**: A reread or update reply can exceed the engine's 16 MiB one-line limit: the reasons in `lint_messages` and `non_idempotent` are unbounded (`src/dsl41/reread_worker.py`). The DL-482 budget covers the definition differences only.
 
@@ -112,7 +119,7 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-17 to BUG-19 get
 ### Next, in priority order
 
 - **FEAT-2**: Select and act on jobs by `application` and `group` in the CLI and TUI.
-- **FEAT-3**: "we plan to spec and implement the clean (QUEUE)": a running affected job finishes on its old definition; the new one applies at its next start.
+- **FEAT-3**: "we plan to spec and implement the clean (QUEUE)": an update that stops nothing. Every running job it names finishes on its old definition, and the update applies once, after the last of them has ended (DL-522). Needs a specification first: holding the named jobs' starts in that mode can leave a running box unable to end.
 - **FEAT-4**: Provide `dsl41 backup` to capture the store and open-attempt records consistently online, with accepted restoration evidence.
 - **FEAT-5**: Support `update NAME...` for partial apply.
 

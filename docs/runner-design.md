@@ -122,6 +122,12 @@ steps:
    appends its `dispatch` record and then launches; each kill cancels the
    live task.
 
+The writer finishes a step before another task runs, and no thread writes engine
+state. A process report (a record, a wrapper exit, a timeout, the end of a stop
+sequence, an adapter completion) runs between writer steps and takes effect in that
+turn, before a request queued earlier or a timer that is overdue. The plan's feed to
+the oracle is a later queued input (DL-523).
+
 In the real domain `Engine.now_admitted()` gives the latest of the wall,
 the admission frontier and the last value it gave (DL-493). Present records
 and queued steps that mean now take this stamp. Requests keep arrival order,
@@ -782,6 +788,9 @@ put marked non-INACTIVE members on hold before force-starting it. Successors obs
 the old run's end. No automatic completion after `config applied` is promised
 (DL-463, DL-489).
 An unfinished stop keeps the update in STOPPING; this path has no cancel verb.
+An update is atomic across the jobs it adds, changes or removes and the members of a
+box it restarts: their processes are stopped, none of them is launched while the update waits, and the new definitions are
+published once, after every stopped process is gone (DL-522).
 
 Without `engine.db`, genesis is allowed only without surviving runtime
 evidence (DL-443, DL-445). Attempt entries under `runs/`, material under

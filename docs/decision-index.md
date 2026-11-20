@@ -523,3 +523,5 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-519 | Tab in the console line completes also when the grey text is not showing | [docs/runner-design.md](runner-design.md) |
 | DL-520 | Panes resize by dragging their border, and `+` and `-` resize the focused pane | [README.md](../README.md), [docs/cli-tui-qualification.md](cli-tui-qualification.md), [docs/runner-design.md](runner-design.md) |
 | DL-521 | A reread stores its forecast only for the configuration revision still applied | [docs/blocks/update.md](blocks/update.md), [docs/control-protocol.md](control-protocol.md), [docs/deploy.md](deploy.md), [docs/runner-design.md](runner-design.md) |
+| DL-522 | An update is atomic across the jobs it names | [docs/runner-design.md](runner-design.md) |
+| DL-523 | A process report takes effect in the turn it arrives | [docs/runner-design.md](runner-design.md) |

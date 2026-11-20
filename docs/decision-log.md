@@ -27207,3 +27207,59 @@ relitigate an entry; append a new one.
   reread.
   THE COST. After a reread that an applied update outran, `status` shows no forecast until
   the next reread, unless a newer reread has stored one.
+- DL-522 An update is atomic across the jobs it names
+  (2026-11-20; docs/runner-design.md ss7, tests/test_update_atomic.py; states the purpose of
+  DL-427 and DL-432)
+  THE RULE. An update is atomic across the jobs it names: the jobs it adds, changes or
+  removes, and the members of a box it restarts (DL-463). The rule is about processes. Every
+  named job with a process the engine owns is stopped. No process of a named job is launched
+  while the update waits. The new definitions are published once, after every stopped
+  process is gone. A process dispatched
+  before admission that spawns afterwards is one of the stopped ones and is waited for.
+  "Gone" is what the engine's ownership evidence shows, under the leak rule in force
+  (DL-431). The row of a held job may open a run and show RUNNING while its launch waits; the
+  launch follows the publication and uses the published definition. Only named jobs are
+  stopped; any other job runs on.
+  WHY. Jobs changed together may depend on each other's new behaviour, such as a producer and
+  its consumer whose file format changes. A new producer beside an old consumer gives wrong
+  data. DL-427 set the wait before the swap for mechanical reasons. The owner states it as a
+  feature (2026-11-20).
+  NOT BUILT. Publication at admission behind a per-job fence, and any cutover of one job on
+  its own: rejected. An identity check on a job's stop notice, which carries the job name
+  only: one update is open at a time, a member is reported down once, and a restart rebuilds
+  the queue from the intent, so no notice reaches a later update. Decide again if updates
+  may overlap, a member can be reported down twice, or a notice can outlive a publication.
+  The known holes in the rule are open in `TODO.md`: BUG-17, BUG-19, BUG-98, BUG-99 and
+  BUG-100.
+  THE COST. A process that survives its kill keeps the whole update waiting, and this path
+  has no cancel verb. A job whose script changed on disk while its definition did not is not
+  named by the update: it is neither stopped nor held.
+- DL-523 A process report takes effect in the turn it arrives
+  (2026-11-20; docs/runner-design.md ss4, tests/test_report_arbitration.py; records what
+  DL-426 and DL-432 built)
+  THE RULE. The writer finishes its current step before another task runs. No admission step
+  suspends, on the real clock or on the stock virtual clock, and no thread writes engine
+  state. A process report is a spawn record, a status record, a wrapper exit, a record
+  timeout, the end of a stop sequence, a survivor reading or an adapter completion. It runs
+  between writer steps and takes effect in that turn. It can classify the attempt, commit an
+  ordinary outcome with its chosen plan and dispatch a replacement, before the writer takes
+  a request queued earlier or a timer that is overdue. A selected outcome is kept for the
+  update's application instead. The plan's feed to the oracle is a later queued input. A
+  satisfied selected stop is delivered in the admission step, buffered during catch-up, or
+  queued as a notice for its job. The notice consumes only its member; the update's check
+  decides whether publication follows.
+  EXAMPLES. A KILLJOB is queued and the job's ordinary exit arrives before the writer takes
+  it: the attempt is recorded as a natural end and the run ends TERMINATED. Exit 0 arrives
+  and a KILLJOB follows, with a job waiting on success: the run is SUCCESS and the dependent
+  job runs. A deadline is overdue and a failing exit eligible for a retry arrives first: the
+  retry is dispatched before the deadline is served.
+  WHY. The owner chose this over giving reports a place in the writer's queue (2026-11-20).
+  Each step and each report is one whole turn of one thread, so the order of turns decides
+  the result and nothing is half done.
+  NOT BUILT. Reports queued behind earlier requests and due timers. It would change which
+  work runs in the examples above.
+  THE COST. A request's place in the queue does not alone predict the result when a report
+  competes with it; one must know which turn came first.
+  OPEN. Decide again on a requirement that fixes an outcome by a request's place in the queue
+  against a report or a due timer, or when a production clock, store, hook, subscriber or
+  task factory can suspend or re-enter an admission step.
