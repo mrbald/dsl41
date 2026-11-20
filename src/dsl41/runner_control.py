@@ -1177,8 +1177,8 @@ class ControlServer:
                 # DL-87: the revision an `expect` precondition names for this entity, on
                 # every read so a client can say WHAT it saw
                 "state_rev": rt.state_rev,
-                # control-protocol ss4's held flag: one engine dispatches every start it
-                # decides, so no start is held
+                # DL-94, DL-528: the field keeps its place in the row and is always false;
+                # a start that waits shows in `attempt`
                 "held": False,
                 "pending_timers": pending.get(name, []),
                 "log_out": log_out,

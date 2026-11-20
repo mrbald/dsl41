@@ -1263,7 +1263,7 @@ frozen inventory; what follows is what each is for.
   status response also carries per-job `job_type`/`box_name` (the §11
   tree), `started_by` — the trace cause of the most recent actual start
   — `state_rev` (the revision an `expect` may name, DL-87), `held` (always
-  false: one engine dispatches every start it decides, DL-94), plus,
+  false; it only keeps its place in the row, DL-94 and DL-528), plus,
   for a live FW run, a `watching {file, interval, min_size}`
   object (DL-68), and a `spec_drift` flag — a lazy fingerprint re-check of the
   loaded input files; the flag tells the operator the running catalog

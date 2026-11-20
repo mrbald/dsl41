@@ -27389,3 +27389,15 @@ relitigate an entry; append a new one.
   every job the restart ends. Two versions of it were each incomplete, and each held jobs the
   restart never ends. Reconsider only with a case where an unnamed job's start during the wait
   does harm that its end by the cascade does not already do.
+- DL-528 The job row's `held` field says nothing about a start that waits
+  (2026-11-20; owner approval; docs/control-protocol.md, docs/runner-design.md,
+  src/dsl41/runner_control.py; corrects the reason DL-94's field carried in the two
+  documents and in one comment)
+  THE RULE. The per-job `held` field of the `status` reply keeps its place and is always false.
+  A start kept back by an unsettled attempt is reported by the row's `attempt` object, whose
+  own `held` can be true.
+  THE DEFECT. The documents and the comment gave the reason "one engine dispatches every start
+  it decides, so no start is held". A decided start can wait behind an earlier attempt's
+  cleanup or an update's dispatch filter (DL-426, DL-522), and can be discharged with no
+  dispatch.
+  UNCHANGED. The field, its value and every reply. Wording only.

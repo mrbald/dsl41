@@ -636,8 +636,9 @@ from the current catalog or environment (DL-447); CMD only), `job_type`
 and `box_name` (catalog placement, so a tree renders
 without a second query; null for ghosts).
 
-`held` (DL-94) keeps its place in the row and is always false: one engine
-dispatches every start it decides, so no start is held.
+`held` (DL-94) keeps its place in the row and is always false. It says
+nothing about a start that waits: `attempt` (below) reports a start kept
+back by an unsettled attempt (DL-528).
 
 `watching` (`{file, interval, min_size}`) is present **only** for a live
 FW run. Its interval is the in-flight launch interval, retained until the watch ends
