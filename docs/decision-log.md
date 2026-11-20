@@ -25890,6 +25890,7 @@ relitigate an entry; append a new one.
   candidate; this item does not add revision fencing to the memory-only view.
   NARROWED BY DL-498: v5 carries reread and the tokenless update; the v3 exception is gone.
   NARROWED BY DL-521: a reread stores its forecast only for the revision still applied.
+  NARROWED BY DL-527: while the update waits, no member of a box it restarts is launched.
 - DL-465 Five-day dependency cooldown (2026-11-04; owner ruling; README Release)
   uv excludes registry artifacts younger than five days through
   `[tool.uv] exclude-newer = "5 days"`. Both Dependabot ecosystems, uv and
@@ -27356,3 +27357,35 @@ relitigate an entry; append a new one.
   its log or quarantined.
   THE LIMIT. A watch cancelled by an update that finishes while the engine drains is still
   launched again (BUG-101).
+- DL-527 While an update waits, no job it names is launched, unchanged box members included
+  (2026-11-20; src/dsl41/reload_update.py, src/dsl41/runner_update.py,
+  tests/test_update_member_holds.py, tests/test_update_watches.py, docs/blocks/update.md;
+  narrows DL-463; closes BUG-17, a hole in DL-522)
+  THE RULE. The dispatch filter an update records at admission is the set of jobs the update
+  names: the jobs the plan adds, changes or removes, the boxes it restarts, and their members
+  in the old and in the new catalog. It is the name set the stops are chosen from (DL-525). A
+  start the oracle decides for a named job during the wait opens its run and is kept back, with
+  no process. After the application a kept start whose run the restart ended is discharged with
+  no launch; the new run of a restarted box starts the members that box keeps, as they become
+  eligible, under the applied definition. A kept start whose run survived is launched once, if
+  the run is still wanted then. The holds of marked members follow DL-463 unchanged.
+  THE DEFECT. The filter named only the plan's added, changed and removed jobs. An unchanged
+  idle member of a box the update restarts could start during the wait: its process was
+  launched under the old definition and the box restart then ended it.
+  UNCHANGED. The intent record's format: the wider set goes in its existing `filter` field. A
+  restart holds exactly the names recorded, so a root an earlier build wrote keeps its narrower
+  filter. The UPDATE chart and `reread`'s output.
+  THE COST. A named job's start waits for the application also when the restart does not end
+  its run: an unchanged job in a sub-box the plan moves out of the restarting box. Its run is
+  open while it waits, so a `term_run_time` that passes meanwhile ends it TERMINATED with no
+  launch.
+  THE LIMIT. A job outside the named set is not kept back, also when the estate's own failure
+  policy ties it to a restarting box: a parent box that fails or completes because the box was
+  killed, the former siblings of a `box_terminator` member that the plan moves in from another
+  box, a condition that reads the kill. If it starts during the wait, the cascade of the box
+  KILLJOBs can end it, as it can end one that was already running at admission. And a box whose
+  members the update changes and that is idle at admission is still not held back (BUG-19).
+  NOT BUILT. A selector that follows the old catalog's terminator and completion rules to name
+  every job the restart ends. Two versions of it were each incomplete, and each held jobs the
+  restart never ends. Reconsider only with a case where an unnamed job's start during the wait
+  does harm that its end by the cascade does not already do.

@@ -528,3 +528,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-524 | An attempt that ends as its stop sequence finishes still gets its survivor reading | [docs/blocks/attempts.md](blocks/attempts.md) |
 | DL-525 | An update stops every process the engine owns for a job it names, whatever the row says | [docs/blocks/update.md](blocks/update.md) |
 | DL-526 | A file watch an update holds or has stopped is not launched while the update waits | [docs/blocks/fw-observation.md](blocks/fw-observation.md), [docs/runner-design.md](runner-design.md) |
+| DL-527 | While an update waits, no job it names is launched, unchanged box members included | [docs/blocks/update.md](blocks/update.md) |

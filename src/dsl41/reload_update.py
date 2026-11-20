@@ -44,7 +44,7 @@ from dsl41.ir import CatalogIR
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import JobRuntime
 from dsl41.reload_diff import Change, Plan, catalog_hash_v2, retyped_jobs
-from dsl41.reload_plan import BoxScope, Live, stop_set
+from dsl41.reload_plan import BoxScope, Live, box_scope, stop_set
 from dsl41.semantics import SemanticSwitches
 from dsl41.semantics import resolve as resolve_switches
 from dsl41.state_machine import (
@@ -111,9 +111,11 @@ type OnStop = Literal["complete", "rerun", "hold", "none"]
 @dataclass(frozen=True)
 class Admitted:
     """The admission's yes: the plan's token, the jobs it stops, sorted, and the names no
-    dispatch may start while it stops (the plan's added, changed and removed). The jobs it
-    stops are the rows' `stop_set` and, at the engine, every named job with a process the
-    engine owns, whatever its row says (DL-525)."""
+    dispatch may start while it stops (`filter_of`, DL-527): the jobs the update names, which
+    are the plan's added, changed and removed jobs, the admitted box roots and their
+    descendants in the old and in the new catalog. The jobs it stops are the rows' `stop_set`
+    and, at the engine, every named job with a process the engine owns, whatever its row says
+    (DL-525)."""
 
     token: str
     stop_set: tuple[str, ...]
@@ -157,6 +159,15 @@ def _touched(plan: Plan) -> frozenset[str]:
     return frozenset([*plan.added, *(change.name for change in plan.changed), *plan.removed])
 
 
+def filter_of(plan: Plan, scope: BoxScope) -> frozenset[str]:
+    """The names no dispatch may start while the update stops (DL-522, DL-525, DL-527): the
+    jobs the update names. They are the plan's added, changed and removed jobs, the admitted
+    box roots, and the roots' descendants in the old and in the new catalog (`scope.members`).
+    It is computed once, at admission, and recorded in the intent's `filter`; a restart holds
+    exactly the names recorded there."""
+    return _touched(plan) | set(scope.roots) | scope.members
+
+
 def admission_data(
     plan_doc: Mapping[str, Any],
     *,
@@ -167,9 +178,11 @@ def admission_data(
     """Build admitted data for a current prepared candidate and its stop set (DL-463)."""
     token = str(plan_doc["token"])
     plan = plan_of(plan_doc, live.catalog)
+    if scope is None:
+        scope = box_scope(plan, live, candidate)
     stops = stop_set(plan, live, candidate, scope=scope)
     runs = tuple((job, live.runs.get(job, 0)) for job in stops)
-    return Admitted(token, stops, _touched(plan), runs)
+    return Admitted(token, stops, filter_of(plan, scope), runs)
 
 
 # -- the chart
@@ -504,8 +517,8 @@ class UpdateTier:
 
     @property
     def dispatch_filter(self) -> frozenset[str]:
-        """The names no dispatch may start: the plan's added, changed and removed while the
-        update stops, none otherwise."""
+        """The names no dispatch may start: while the update stops, the jobs it names
+        (`filter_of`, DL-527); none otherwise."""
         return self._filter if self.state == "STOPPING" else frozenset()
 
     def admit(self, decision: Admitted | Refused) -> Admitted | Refused:

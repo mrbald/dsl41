@@ -11,8 +11,12 @@ request's id and fingerprint), then
 stops each attempt of the stop set with cause `update_stop` through the attempt tier. The stop
 set holds every job the plan names with a process the engine owns, whatever its row says,
 under the run of that process, and every named job whose row is STARTING or RUNNING (DL-525). While the
-update stops, no job of the plan's added, changed and removed sets is dispatched: a start the
-oracle decides for one is held as `dispatch_pending`.
+update stops, no job of its recorded dispatch filter is dispatched: the jobs it names, which are
+the plan's added, changed and removed jobs, the admitted box roots and their descendants in the
+old and in the new catalog (`reload_update.filter_of`, DL-527). A start the oracle decides for one
+is held as `dispatch_pending`. After the application each held start is released: one whose run
+is no longer wanted is discharged with no launch, any other is launched under the applied
+definition.
 
 An attempt of the stop set that ends while the update stops keeps its outcome back: the outcome
 and its follow-up plan are appended after the application, under the applied catalog and
@@ -69,7 +73,7 @@ from dsl41.reload_plan import (
     marked_holds,
     root_starts,
 )
-from dsl41.reload_diff import Plan, catalog_hash_v2, diff
+from dsl41.reload_diff import catalog_hash_v2, diff
 from dsl41.reload_update import (
     STALE_PLAN,
     UPDATE_IN_PROGRESS,
@@ -410,8 +414,6 @@ class EngineUpdate:
                 candidate=opened.estate.catalog,
                 scope=scope,
             ),
-            plan,
-            scope,
             live.catalog,
         )
         self._begin(request, opened, decision, scope)
@@ -430,16 +432,15 @@ class EngineUpdate:
     def _no_application(admitted: Admitted) -> Application:
         raise AssertionError(f"a refused update {admitted.token} reached its application")
 
-    def _owned_stops(
-        self, admitted: Admitted, plan: Plan, scope: BoxScope, catalog: CatalogIR
-    ) -> Admitted:
+    def _owned_stops(self, admitted: Admitted, catalog: CatalogIR) -> Admitted:
         """The admission with every named job that has a process the engine owns in its stop
-        set, whatever the job's row says, each with the run of that process: a job the plan
-        changes or removes, or a member of a box it restarts, never a box (DL-525). A job of
-        the rows' stop set with no such process keeps its row's run and is down at once."""
+        set, whatever the job's row says, each with the run of that process: a job of the
+        admitted filter in the live catalog, never a box (DL-525, DL-527). So the filter's added
+        jobs and its roots count only when the plan retypes them, and then it removes them too.
+        A job of the rows' stop set with no such process keeps its row's run and is down at
+        once."""
         runs = dict(admitted.stop_runs)
-        named = {change.name for change in plan.changed} | set(plan.removed) | scope.members
-        for job in named:
+        for job in admitted.dispatch_filter:
             if job in catalog.jobs and catalog.jobs[job].job_type != "BOX":
                 run = self.engine.owned_run(job)
                 if run is not None:

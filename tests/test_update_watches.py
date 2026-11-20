@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 from reload_fixtures import prepare_estate, write_config
 from store_surgery import rows
+from store_surgery import update as rewrite
 from test_engine_stops_cookie import PGID, T0, _Procs
 from test_update_atomic import _Ladders, _update_steps
 from test_update_owned_processes import _crash, _observed, _started, _teardown
@@ -300,12 +301,15 @@ def test_an_unchanged_watch_of_a_restarted_box_is_not_launched_while_the_update_
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str
 ) -> None:
     """DL-526, DL-463, DL-525: an update that adds a member to the running box `b` restarts it.
-    It stops `c` and `w`, the members with a process, though the plan leaves both unchanged and
-    its dispatch filter names neither. It waits for `c`'s stop. On the live path, and after the
-    engine dies and restarts during that wait, `w` neither launches nor polls before the
-    application. After it, the box's restart ends run 1 and opens run 2: run 1 of `w` is closed
-    once with no plan, `config applied` names it `none`, and run 2 is dispatched and launched
-    once under the applied revision."""
+    It stops `c` and `w`, the members with a process, though the plan leaves both unchanged. It
+    waits for `c`'s stop. On the live path, and after the engine dies and restarts during that
+    wait, `w` neither launches nor polls before the application. After it, the box's restart
+    ends run 1 and opens run 2: run 1 of `w` is closed once with no plan, `config applied` names
+    it `none`, and run 2 is dispatched and launched once under the applied revision.
+
+    On the restart path the test narrows the recorded intent's `filter` by hand to the plan's
+    added, changed and removed jobs, the filter an earlier build wrote (DL-491, DL-527). The
+    stop list still names `w`'s attempt, so the restart holds the watch through it alone."""
     _Procs(monkeypatch)
     launches = _launches(monkeypatch)
     probe = _at_application(monkeypatch, tmp_path)
@@ -325,7 +329,7 @@ def test_an_unchanged_watch_of_a_restarted_box_is_not_launched_while_the_update_
         answer = await _request(engine, _plan(engine, tmp_path))
         decision = answer.decision
         assert isinstance(decision, Admitted)
-        assert "w" in decision.stop_set and "w" not in decision.dispatch_filter
+        assert "w" in decision.stop_set
         await _started(ladders, PGID)
         seen["polls"] = _polls(tmp_path)
         del launches[:]
@@ -348,6 +352,13 @@ def test_an_unchanged_watch_of_a_restarted_box_is_not_launched_while_the_update_
 
     asyncio.run(first())
     if path == "restart":
+        [(seq, intent)] = [
+            (seq, body)
+            for seq, kind, body in rows(tmp_path / "run")
+            if (kind, body.get("event")) == ("config", "intent")
+        ]
+        assert "w" in intent["filter"]
+        rewrite(tmp_path / "run", seq, {**intent, "filter": ["n"]})
         at = T0 + timedelta(minutes=2)
         restarted = asyncio.run(_restart(tmp_path, monkeypatch, {"j": seen["c"]}, at, apply=True))
         assert restarted[0] == (True, 1, [])
