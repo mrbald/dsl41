@@ -27295,3 +27295,33 @@ relitigate an entry; append a new one.
   THE LIMIT. A cancelled `join` is final for its tier: no later completion is handed off,
   and a ladder that raises after it is not reported. `Engine.shutdown` is the only caller,
   and the restart reads the attempt again.
+- DL-525 An update stops every process the engine owns for a job it names, whatever the row says
+  (2026-11-20; src/dsl41/runner.py, src/dsl41/runner_update.py,
+  tests/test_update_owned_processes.py, docs/blocks/update.md; closes BUG-99, a hole in
+  DL-522)
+  THE RULE. At admission the engine adds to the update's stops every named job with a
+  process it still owns: an attempt that has not ended, an ended attempt whose stop is not
+  done (its stop sequence still runs or its group is held), or a live task outside the
+  attempt tier. A named job is one the plan changes or removes, or a member of a box the
+  update restarts; never a box. The job's row status does not matter, and neither does the
+  row's current run: the stop is recorded under the run of that process. The update stops
+  it if it is not being stopped already, keeps the stop cause it has, and waits for its
+  physical clearance as for any other stop. A job has one such attempt at a time.
+  THE DEFECT. The stops were chosen from rows that were STARTING or RUNNING, and the attempt
+  was looked up under the row's current run. A changed job set INACTIVE while its command
+  ran (DL-235) was not selected. A job whose earlier run was still being stopped while its
+  row had opened a newer run was selected under the newer run, which had no attempt, and
+  counted as down at once. A job whose row had turned terminal while its stop sequence still
+  ran, after a KILLJOB or a status overwrite, was not selected either. In each case the
+  update applied beside the live old process.
+  UNCHANGED. `stop_set` is a function of rows, and `reread` previews with it. The UPDATE
+  chart, the intent record's format, the `update` reply and `config applied.stopped`.
+  THE COST. `reread` does not list a named job whose row is not live while its process runs;
+  the update's reply does. What follows such a stop is chosen at the application, as for any
+  stop: an interrupted attempt that is then not of a live row's current run gets none. A newer
+  run's start that was kept back is launched once, after the application, under the new
+  definition, if its run is still wanted then. An update that names a job whose group is held
+  waits until the hold is released. That is when a reading finds nothing left, or, for a leak
+  held under `process-leak=leak`, at the first reading that succeeds, which names what is left
+  and signals nothing (DL-426). While the readings fail, or while a process survives KILL, this
+  update waits and a later one is refused with `update_in_progress`.

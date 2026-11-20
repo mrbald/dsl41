@@ -79,7 +79,8 @@ class Live:
     revision: int
     status: Mapping[str, str]
     tombstones: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
-    #: each row's current run number, beside its status: the run a stop interrupts
+    #: each row's current run number, beside its status: the run a stop of a live row
+    #: interrupts, unless the engine owns a process of another run of the job (DL-525)
     runs: Mapping[str, int] = field(default_factory=dict)
     launch: Mapping[str, object] = field(default_factory=dict)
     path_environment: Mapping[str, str] | None = None
@@ -316,8 +317,10 @@ def stop_set(
     *,
     scope: BoxScope | None = None,
 ) -> tuple[str, ...]:
-    """Changed or removed jobs with a process that is up, sorted. A box has none (spec-reload
-    step 5). `reread` previews it and the update's admission finds it again."""
+    """Changed or removed jobs and members of the box scope whose row is STARTING or RUNNING,
+    sorted; never a box (spec-reload step 5). `reread` previews with it. The update's admission
+    starts from it and adds every named job with a process the engine owns, whatever its row
+    says (DL-525)."""
     names = {change.name for change in plan.changed} | set(plan.removed)
     if scope is None and candidate is not None:
         scope = box_scope(plan, live, candidate)

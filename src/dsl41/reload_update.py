@@ -110,13 +110,16 @@ type OnStop = Literal["complete", "rerun", "hold", "none"]
 
 @dataclass(frozen=True)
 class Admitted:
-    """The admission's yes: the plan's token, the RUNNING or STARTING jobs it stops, sorted, and
-    the names no dispatch may start while it stops (the plan's added, changed and removed)."""
+    """The admission's yes: the plan's token, the jobs it stops, sorted, and the names no
+    dispatch may start while it stops (the plan's added, changed and removed). The jobs it
+    stops are the rows' `stop_set` and, at the engine, every named job with a process the
+    engine owns, whatever its row says (DL-525)."""
 
     token: str
     stop_set: tuple[str, ...]
     dispatch_filter: frozenset[str]
-    #: (job, run number) for each job of the stop set: the run its stop interrupts
+    #: (job, run number) for each job of the stop set: the run its stop interrupts, the run
+    #: of the process the engine owns when it owns one (DL-525)
     stop_runs: tuple[tuple[str, int], ...] = ()
 
 

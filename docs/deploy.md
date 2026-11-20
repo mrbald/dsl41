@@ -917,6 +917,17 @@ Unmarked members run through normal box-start semantics. Removed boxes stay
 stopped. The new box start opens a new run, and normal successors and
 terminators can observe the old run's end (DL-463).
 
+A box that is idle when the update is admitted is not restarted. If the
+update changes that box's members, and the box starts while the update is
+still stopping other jobs, the box can stay RUNNING after the application
+with no member left to end it (BUG-19). Before such an update, check the
+box's status. If it is not on hold, run `sendevent ON_HOLD --job BOX`, and
+after the update has applied run `sendevent OFF_HOLD --job BOX`; releasing
+the hold can start the box if it is eligible. If the box was already on
+hold, leave that hold alone: releasing it would undo a hold someone set.
+A box has one hold flag, so agree with the other operators that nobody
+changes the hold on that box until you have released it.
+
 A crash during box restart can leave the box stopped. Before operator
 force-start, put its marked non-INACTIVE members on hold, including members
 that finished earlier. Then force-start the retained unmarked box. There is

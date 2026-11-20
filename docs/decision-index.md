@@ -526,3 +526,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-522 | An update is atomic across the jobs it names | [docs/runner-design.md](runner-design.md) |
 | DL-523 | A process report takes effect in the turn it arrives | [docs/runner-design.md](runner-design.md) |
 | DL-524 | An attempt that ends as its stop sequence finishes still gets its survivor reading | [docs/blocks/attempts.md](blocks/attempts.md) |
+| DL-525 | An update stops every process the engine owns for a job it names, whatever the row says | [docs/blocks/update.md](blocks/update.md) |

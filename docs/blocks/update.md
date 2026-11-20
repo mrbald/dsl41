@@ -3,7 +3,7 @@
 ## Purpose
 
 `dsl41 reread` reports current launch-config sources against the engine catalog (DL-463).
-`dsl41 update` prepares and applies current sources to the running engine: it stops the running jobs the plan changes or removes, swaps the catalog, the settings and the marked set, and keeps the engine running throughout ([DL-427](../decision-log.md)).
+`dsl41 update` prepares and applies current sources to the running engine: it stops every process the engine owns at admission for a job the plan changes or removes or for a member of a box it restarts ([DL-525](../decision-log.md)), swaps the catalog, the settings and the marked set, and keeps the engine running throughout ([DL-427](../decision-log.md)).
 
 ## Fate
 
@@ -33,7 +33,7 @@ The [chart lifecycles](../chart-lifecycles.md) view lists each target state with
 - Admission rechecks revision and current stops. Running boxes do not refuse; structural edits restart outermost affected boxes and their running members (DL-463).
 - The engine loads the main-config candidate from the version 2 plan's captured inputs and runs it under the captured settings (DL-486).
 - While the update stops, no job of the plan's added, changed and removed sets is dispatched: a start the oracle decides for one waits as `dispatch_pending` and goes after the application.
-- An attempt the update stops keeps its outcome back until the application, so its follow-up plan is chosen under the applied catalog and marked set, once, and the `config applied` record names it: a removed job gets none, a marked one is held, any other reruns the same run under its new definition ([DL-424](../decision-log.md)).
+- An attempt the update stops keeps its outcome back until the application, so its follow-up plan is chosen under the applied catalog and marked set, once, and the `config applied` record names it: a removed job gets none, a marked one is held, any other reruns the same run under its new definition ([DL-424](../decision-log.md)). An interrupted attempt that at the application is not of a live row's current run gets none ([DL-525](../decision-log.md)).
 - A stop is finished when its job's next run could go: its ladder done and a reading finding nothing of it left, not at its record ([DL-431](../decision-log.md)). The update applies only once every stop is finished, an attempt that ended before the admission while its cleanup still runs included.
 - An interrupted attempt of a job whose `non-idempotent.toml` mark the plan changes keeps its outcome back too, so its plan follows the applied mark; the update neither stops nor waits for it.
 - The intent records each attempt with the cause of its first stop: `update_stop`, or the cause of a stop it already takes, which a restart keeps.

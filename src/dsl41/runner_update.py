@@ -8,7 +8,9 @@ preconditions against the engine's state now (`EngineUpdate.admit`). A refusal i
 reply and writes nothing. An admission appends `config intent` (the token, the stop set with the
 attempt each stop interrupts, the dispatch filter, the admitted box roots (DL-489), and the
 request's id and fingerprint), then
-stops each attempt of the stop set with cause `update_stop` through the attempt tier. While the
+stops each attempt of the stop set with cause `update_stop` through the attempt tier. The stop
+set holds every job the plan names with a process the engine owns, whatever its row says,
+under the run of that process, and every named job whose row is STARTING or RUNNING (DL-525). While the
 update stops, no job of the plan's added, changed and removed sets is dispatched: a start the
 oracle decides for one is held as `dispatch_pending`.
 
@@ -18,7 +20,7 @@ marked set (spec-wiring 2b, the interruption rule's step 1). A task the attempt 
 (a file watch) is cancelled; after the application it is launched again under its run id while
 its job is in the catalog and its run is live, and closed with no plan otherwise.
 
-When the last attempt has ended, the application swaps the oracle's catalog and settings
+When the last selected stop is finished, the application swaps the oracle's catalog and settings
 (`reload_update.apply_application`), the scheduler's plans (`Scheduler.replace`), the marked set
 and the profile; one `config applied` record and a configuration row carry the new rev. The
 engine then feeds one time advance, so the queue scan the swap owes runs before anything else
@@ -64,7 +66,7 @@ from dsl41.reload_plan import (
     marked_holds,
     root_starts,
 )
-from dsl41.reload_diff import catalog_hash_v2, diff
+from dsl41.reload_diff import Plan, catalog_hash_v2, diff
 from dsl41.reload_update import (
     STALE_PLAN,
     UPDATE_IN_PROGRESS,
@@ -391,12 +393,18 @@ class EngineUpdate:
                 unchanged={"rev": engine.config_rev, "catalog_hash": applied.catalog_hash},
             )
         live = self.live()
-        scope = box_scope(plan_of(opened.plan, live.catalog), live, opened.estate.catalog)
-        decision = admission_data(
-            opened.plan,
-            live=live,
-            candidate=opened.estate.catalog,
-            scope=scope,
+        plan = plan_of(opened.plan, live.catalog)
+        scope = box_scope(plan, live, opened.estate.catalog)
+        decision = self._owned_stops(
+            admission_data(
+                opened.plan,
+                live=live,
+                candidate=opened.estate.catalog,
+                scope=scope,
+            ),
+            plan,
+            scope,
+            live.catalog,
         )
         self._begin(request, opened, decision, scope)
         answer = self._answer = UpdateAnswer(decision)
@@ -413,6 +421,23 @@ class EngineUpdate:
     @staticmethod
     def _no_application(admitted: Admitted) -> Application:
         raise AssertionError(f"a refused update {admitted.token} reached its application")
+
+    def _owned_stops(
+        self, admitted: Admitted, plan: Plan, scope: BoxScope, catalog: CatalogIR
+    ) -> Admitted:
+        """The admission with every named job that has a process the engine owns in its stop
+        set, whatever the job's row says, each with the run of that process: a job the plan
+        changes or removes, or a member of a box it restarts, never a box (DL-525). A job of
+        the rows' stop set with no such process keeps its row's run and is down at once."""
+        runs = dict(admitted.stop_runs)
+        named = {change.name for change in plan.changed} | set(plan.removed) | scope.members
+        for job in named:
+            if job in catalog.jobs and catalog.jobs[job].job_type != "BOX":
+                run = self.engine.owned_run(job)
+                if run is not None:
+                    runs[job] = run
+        stops = tuple(sorted(runs))
+        return replace(admitted, stop_set=stops, stop_runs=tuple((job, runs[job]) for job in stops))
 
     def _begin(
         self, request: UpdateRequest, opened: OpenedPlan, admitted: Admitted, scope: BoxScope

@@ -1238,6 +1238,23 @@ class Engine:
         live = self._live.get(job)
         return live.attempt if live is not None and live.run_number == run_number else None
 
+    def owned_run(self, job: str) -> int | None:
+        """The run number of `job`'s attempt whose process the engine still owns, whatever the
+        row says and whichever run it is: an observed attempt not yet ENDED or whose stop is
+        not done (its ladder or its held group), else a live task the attempt tier does not
+        run; None when there is none. A job has one such attempt at a time (`_must_wait`),
+        and an update stops it (DL-525)."""
+        tier = self.attempts
+        for attempt, facts in self._facts.items():
+            if facts.job != job:
+                continue
+            if (tier.knows(attempt) and tier.state(attempt) in UNSETTLED) or not self.stop_done(
+                attempt
+            ):
+                return facts.run_number
+        live = self._live.get(job)
+        return live.run_number if live is not None and live.attempt not in self._facts else None
+
     def stop_done(self, attempt: str) -> bool:
         """Whether an ended attempt's stop is finished as its job's next run would wait for
         it: its ladder done and its group not held, so a reading found nothing of it left
