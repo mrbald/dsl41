@@ -20,14 +20,13 @@ State handled outside a state machine and duplicated logic make the whole system
 
 ### Medium
 
-In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-17, BUG-19 and BUG-98 to BUG-100 are the known holes in the atomic update rule (DL-522), fixed in this order: BUG-98, BUG-99, BUG-100, BUG-17, BUG-19. BUG-18 gets a pass that proves or dismisses it.
+In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-17, BUG-19, BUG-99 and BUG-100 are the known holes in the atomic update rule (DL-522), fixed in this order: BUG-99, BUG-100, BUG-17, BUG-19. BUG-18 gets a pass that proves or dismisses it.
 
 - **BUG-10**: Restart ignores unknown `[engine]` keys such as `machine_polcy` and uses defaults until reread refuses them (DL-437).
 - **BUG-13**: The engine prints `clean_shutdown` before it exits; TERM in that window ends it with -15. With no socket while the lock is held, or with no peer pid from the socket, `engine stop --wait` waits for lock release rather than process exit, which exposes systemd ExecStop (DL-496).
 - **BUG-20**: Bounds and per-input scan cost of the live oracle's `_emitted` and `_kill_emissions` histories are unqualified (`src/dsl41/oracle_writers.py:135`, `src/dsl41/oracle.py:361-365`).
 - **BUG-48**: Update plan directories accumulate, even after stale refusals. Define their retention separately from attempt records (`src/dsl41/reread_worker.py:158`, `src/dsl41/runner_update.py:91`).
 - **BUG-50**: Retention for per-attempt `runs/<job>.<run>/<n>/` records (`spawn.json`, `status.json`) is undefined and unverified; they consume inodes. Keep it separate from job-output archiving.
-- **BUG-98**: A status record that arrives after a stop sequence's body returned and before its completion is consumed releases the attempt with no survivor reading. An update can then apply, and a replacement can be dispatched, while the old process group is alive (`src/dsl41/runner_attempts.py`, `_ladder`, `_ladder_done`, `_what_is_left`; DL-522).
 - **BUG-99**: An update selects its stops from job rows that are STARTING or RUNNING and from the row's current run only. A changed job set INACTIVE while its command runs (DL-235), and a job whose earlier run is still being stopped while a newer run has opened, are not waited for: the update applies beside the live old process (`src/dsl41/reload_plan.py` `stop_set`, `src/dsl41/runner.py` `attempt_of_run`; DL-522).
 - **BUG-100**: File watches around an update. After a restart, an unfinished watch that the open update holds back is launched before the update applies, also when the update did not select it for a stop. A watch whose run the application's time advance ended is launched again (`src/dsl41/runner_startup.py`, `src/dsl41/runner_update.py`; DL-522).
 - **BUG-17**: An unchanged member can start while an update stops other members of its restarting box; the box restart then ends it. Rule: no process is launched for a member whose old work the recorded root restart will end (`src/dsl41/runner_update.py:354-440`; DL-522).

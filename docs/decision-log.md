@@ -27263,3 +27263,35 @@ relitigate an entry; append a new one.
   OPEN. Decide again on a requirement that fixes an outcome by a request's place in the queue
   against a report or a due timer, or when a production clock, store, hook, subscriber or
   task factory can suspend or re-enter an admission step.
+- DL-524 An attempt that ends as its stop sequence finishes still gets its survivor reading
+  (2026-11-20; src/dsl41/runner_attempts.py, src/dsl41/runner_stops.py, src/dsl41/runner.py,
+  tests/test_stop_handoff.py, docs/blocks/attempts.md; narrows DL-431 and DL-433; closes
+  BUG-98, a hole in DL-522)
+  THE RULE. The completion of a stop sequence decides. When the sequence ended without
+  error, no survivor check was made, and the attempt has ended meanwhile, the completion
+  takes the reading that a record after the sequence takes. If something of the command may
+  be left, the survivor check takes over the attempt's ladder slot before anything is
+  released: the attempt stays unsettled, no listener is called, and the check's own
+  completion is the one hand-off. A check is made once, whatever it finds. Its grace runs
+  from the end of the stop sequence, not from the hand-off. A reading at the hand-off that
+  raises is a failed stop: the attempt is held and `ladder_failed` reports it before
+  anything is released. The tier keeps its own record of every task that took a ladder slot.
+  `AttemptTier.join` works from that record: it waits until each task's completion has been
+  taken, and so for a check that took over; it raises the first failure, also that of a
+  check whose attempt was forgotten meanwhile; and a cancelled `join` cancels the tasks it
+  waits for. Once a `join` has been cancelled the engine is leaving: a completion that
+  arrives after it hands nothing off, as a cancelled ladder ends nothing (DL-426).
+  `Engine.shutdown` waits through `join` and leaves no timer and no held-group poll armed.
+  THE DEFECT. The sequence's body returned with the attempt still STOPPING and armed the
+  record timer. Until its done callback ran, the ladder still counted as running. A status
+  record taken in that interval skipped the survivor reading because a ladder was running,
+  and the callback then released the attempt without one. An update that had selected the
+  attempt applied, and a replacement was dispatched, while the old process group was alive.
+  `join` could also return before a finished task's callback had run.
+  UNCHANGED. A record during the signals, and a record after the completion was taken, keep
+  their timing. The ATTEMPT chart, the UPDATE chart and the dispatch filter.
+  THE COST. In that interval an update waits up to `grace_kill_s` longer, and a group that
+  survives holds the job's next run until a reading finds nothing left.
+  THE LIMIT. A cancelled `join` is final for its tier: no later completion is handed off,
+  and a ladder that raises after it is not reported. `Engine.shutdown` is the only caller,
+  and the restart reads the attempt again.

@@ -301,11 +301,15 @@ class EngineStops:
         (`left` under `NO_GROUP`, spec-restart §4)."""
         return self.left(NO_GROUP, attempt, attempt).alive
 
-    async def outlives(self, pgid: int, start_token: str, grace_kill_s: float) -> bool:
-        """Whether anything of the command is left `grace_kill_s` after the ladder's KILL,
-        looked at every `SETTLE_POLL_S`: a process still tearing down at the KILL is given the
-        grace the record timeout gives a stopping attempt."""
-        deadline = time.monotonic() + grace_kill_s
+    async def outlives(
+        self, pgid: int, start_token: str, grace_kill_s: float, since: float | None = None
+    ) -> bool:
+        """Whether anything of the command is left `grace_kill_s` after `since`, the sequence's
+        end `ladder` answered, else after this call, looked at every `SETTLE_POLL_S`: a process
+        still tearing down is given the grace the record timeout gives a stopping attempt
+        (DL-431). A first look at or past the grace's end that finds something left is the
+        verdict (DL-524)."""
+        deadline = (time.monotonic() if since is None else since) + grace_kill_s
         while self.command_alive(pgid, start_token):
             if time.monotonic() >= deadline:
                 return True
@@ -314,11 +318,11 @@ class EngineStops:
 
     # -- Processes
 
-    async def ladder(self, pgid: int, start_token: str, grace_term_s: float) -> None:
+    async def ladder(self, pgid: int, start_token: str, grace_term_s: float) -> float:
         """The ladder, by process where the cookie decides, else on the group; it ends at its
-        KILL, where the tier arms the record timeout. An attempt whose processes the restart's
-        first reading TERMed starts at the grace: that TERM was its first rung (spec-restart
-        §3)."""
+        KILL, where the tier arms the record timeout, and answers that end on the clock
+        `outlives` reads (DL-524). An attempt whose processes the restart's first reading
+        TERMed starts at the grace: that TERM was its first rung (spec-restart §3)."""
         self.note_laddered(pgid)
         members = self._ladder_members(pgid, start_token)
         attempt = self._attempt_of(pgid, start_token)
@@ -335,6 +339,7 @@ class EngineStops:
             )
         else:
             await stop_ladder(pgid, start_token, grace_term_s, members=members, pidfd=self.pidfd)
+        return time.monotonic()
 
     def leaked(self, attempt: str) -> bool:
         """The attempt's command ended with no stop while processes of it are left: under

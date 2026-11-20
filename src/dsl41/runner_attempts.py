@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Final, Literal, Protocol
 
@@ -398,9 +398,10 @@ def _wire_int(value: object) -> int | None:
 class Processes(Protocol):
     """What the attempt tier asks of the world. Each call returns at once except `ladder`."""
 
-    async def ladder(self, pgid: int, start_token: str, grace_term_s: float) -> None:
+    async def ladder(self, pgid: int, start_token: str, grace_term_s: float) -> float | None:
         """Run selected KILLJOB signals, otherwise TERM, grace, KILL (DL-462).
-        Ownership uses the existing cookie or group proof (docs/wrapper-protocol.md)."""
+        Ownership uses the existing cookie or group proof (docs/wrapper-protocol.md). Answers
+        when the sequence ended, on the clock `outlives` reads, or None where none is read."""
 
     def kill_wrapper(self, attempt: str) -> bool:
         """Abort an unrecorded launch; True while a selected kill awaits its spawn (DL-462)."""
@@ -426,10 +427,13 @@ class Processes(Protocol):
         """Report a command still alive when its record timeout fired; the attempt stays
         STOPPING."""
 
-    async def outlives(self, pgid: int, start_token: str, grace_kill_s: float) -> bool:
-        """Whether anything of the command is still left `grace_kill_s` after its ladder's
-        KILL: an ended attempt's survivor verdict, taken where a stopping one's record timeout
-        takes it."""
+    async def outlives(
+        self, pgid: int, start_token: str, grace_kill_s: float, since: float | None = None
+    ) -> bool:
+        """Whether anything of the command is still left `grace_kill_s` after `since`, the stop
+        sequence's end as `ladder` answered it, or after this call when `since` is None: an
+        ended attempt's survivor verdict (DL-431). The tier passes `since` only at the hand-off
+        of a sequence's completion (DL-524)."""
 
     def leaked(self, attempt: str) -> bool:
         """Report an attempt that ends with no stop while processes of its command are left:
@@ -442,9 +446,15 @@ class _Attempt:
     """The tier's own facts about one attempt: its spawn record and its ladder task."""
 
     spawn: Mapping[str, Any] | None = None
+    #: its ladder task, or the survivor check that took over from it
     ladder: asyncio.Task[None] | None = None
-    #: The ladder owns the attempt until its done callback takes completion (DL-433).
+    #: The ladder, or the survivor check that took over from it, owns the attempt until its
+    #: done callback takes completion (DL-433, DL-524).
     ladder_pending: bool = False
+    #: when its stop sequence ended, as `Processes.ladder` answered it
+    sequence_end: float | None = None
+    #: a survivor check was made: a finished one never starts another (DL-524)
+    checked: bool = False
     plan_done: bool = False
     #: its group still had a live member after the ladder's KILL
     survived: bool = False
@@ -454,6 +464,19 @@ class _Attempt:
     quiet: bool = False
     #: a selected stop is waiting for its live wrapper's spawn record (DL-462)
     awaiting_spawn: bool = False
+
+
+@dataclass
+class _Owned:
+    """One task that took an attempt's ladder slot, and what its completion left: `taken` is
+    resolved once its done callback has taken the completion, `error` is the failure that
+    callback reported. It is kept while its attempt is known, and after a `forget` until no
+    `join` is waiting (DL-524)."""
+
+    attempt: str
+    taken: asyncio.Future[None]
+    error: BaseException | None = None
+    forgotten: bool = False
 
 
 class AttemptTier:
@@ -489,6 +512,11 @@ class AttemptTier:
         #: records that came after their attempt ended: evidence, never an outcome (DL-424)
         self.late_records: dict[str, list[ExitRecord]] = {}
         self._attempts: dict[str, _Attempt] = {}
+        #: every task that took a ladder slot, by task (`_Owned`), and the `join`s waiting
+        self._owned: dict[asyncio.Task[None], _Owned] = {}
+        self._joins = 0
+        #: a `join` was cancelled: the engine is leaving, and a completion hands nothing off
+        self._leaving = False
 
     def key(self, attempt: str) -> tuple[AttemptTier, str]:
         """The executor's key of an attempt: this tier and the id."""
@@ -559,7 +587,9 @@ class AttemptTier:
             self.on_settled()
 
     def ladder_running(self, attempt: str) -> bool:
-        """Whether the ladder's done callback still owes its completion (DL-433)."""
+        """Whether the attempt's ladder, or the survivor check that took over from it, still
+        owes its completion hand-off (DL-433, DL-524). It can be false while a hold (`held`)
+        keeps the job's next run back."""
         return self._known(attempt).ladder_pending
 
     def hold_unread(self, attempt: str) -> None:
@@ -731,13 +761,41 @@ class AttemptTier:
             raise ValueError(f"attempt {attempt!r}: its plan or its ladder is not done")
         self.machines.forget(self.key(attempt))
         del self._attempts[attempt]
+        for task, owned in list(self._owned.items()):
+            if owned.attempt == attempt:
+                owned.forgotten = True
+                if not self._joins:
+                    del self._owned[task]
 
     async def join(self) -> None:
-        """Wait for every ladder still running, and raise the first failure."""
-        tasks = [a.ladder for a in self._attempts.values() if a.ladder is not None]
-        for result in await asyncio.gather(*tasks, return_exceptions=True):
-            if isinstance(result, Exception):
-                raise result
+        """Wait until the completion of every task that holds or took a ladder slot has been
+        taken (`_ladder_done`), a survivor check that takes over from one included, then raise
+        the first failure a completion reported. A task whose attempt is forgotten meanwhile is
+        still read. A cancelled task raises nothing. Cancelling the join means the engine is
+        leaving: every task the tier owns is cancelled, and a completion taken afterwards hands
+        nothing off, as a cancelled task's does (DL-426, DL-524)."""
+        self._joins += 1
+        waited: set[asyncio.Task[None]] = set()
+        failure: BaseException | None = None
+        try:
+            while pending := [(t, o) for t, o in self._owned.items() if t not in waited]:
+                for task, owned in pending:
+                    waited.add(task)
+                    await asyncio.shield(owned.taken)
+                    if failure is None and isinstance(owned.error, Exception):
+                        failure = owned.error
+        except asyncio.CancelledError:
+            self._leaving = True
+            for task in self._owned:
+                task.cancel()
+            raise
+        finally:
+            self._joins -= 1
+            if not self._joins:
+                for task in [t for t, o in self._owned.items() if o.forgotten]:
+                    del self._owned[task]
+        if failure is not None:
+            raise failure
 
     # -- inside
 
@@ -772,47 +830,78 @@ class AttemptTier:
 
     def _what_is_left(self, attempt: str, outcome: AttemptOutcome) -> None:
         """At the record, before the outcome is journaled, a reading of what is left of the
-        command (`command_alive`). Nothing left, or a ladder still running (it takes the
-        verdict at its end), changes nothing. Something left after a `natural` exit is a leak:
-        under `process-leak=terminate` (`Processes.leaked`) the ladder runs on it. Something
-        left after a stop is the stop's, whatever the switch: a stop whose ladder already ended
-        takes the survivor verdict (`_survivor_verdict`), one that ran no ladder (its wrapper was
-        killed before `spawn.json`) gets the ladder now. Either way the task holds the
-        attempt's ladder slot, so the outcome is journaled `ladder: running` and the job's next
-        run waits until a reading finds nothing left. Where only the leader can be told apart,
-        `command_alive` is false once it exited, and nothing is done. With no recorded group,
-        the processes carrying the attempt's cookie are what is left (`unnamed_alive`); a
-        quarantined attempt with a valid spawn keeps the group a reading proved; an unreadable
-        spawn names no group (DL-431, spec-restart §7)."""
+        command (`_left_to_stop`). Nothing left, or a ladder still running (its end takes the
+        verdict, `_ladder_done`), changes nothing. Something left after a `natural` exit is a
+        leak: under `process-leak=terminate` (`Processes.leaked`) the ladder runs on it.
+        Something left after a stop is the stop's, whatever the switch: a stop whose ladder
+        already ended takes the survivor verdict (`_survivor_verdict`), one that ran no ladder
+        (its wrapper was killed before `spawn.json`) gets the ladder now. Either way the task
+        holds the attempt's ladder slot, so the outcome is journaled `ladder: running` and the
+        job's next run waits until a reading finds nothing left (DL-431)."""
         known = self._attempts[attempt]
-        if self.ladder_running(attempt) or known.failed:
-            return  # a failed ladder stays held; a later record confirms no KILL (DL-431)
+        if self.ladder_running(attempt):
+            return
+        group = self._left_to_stop(attempt, outcome)
+        if group is None:
+            return
+        if known.ladder is None:
+            generation = self.machines.generation(self.key(attempt), RECORD_TIMEOUT)
+            self._own(attempt, self._ladder(attempt, *group, generation))
+        else:
+            self._own(attempt, self._survivor_verdict(attempt, *group))
+
+    def _left_to_stop(self, attempt: str, outcome: AttemptOutcome) -> tuple[int, str] | None:
+        """The group whose remains the stop still owns after `outcome`, or None: a reading of
+        what is left of the command (`command_alive`). Where only the leader can be told apart,
+        `command_alive` is false once it exited. With no recorded group, the processes carrying
+        the attempt's cookie are what is left (`unnamed_alive`); a quarantined attempt with a
+        valid spawn keeps the group a reading proved; an unreadable spawn names no group. After
+        a `natural` exit only a leak the switch terminates is the stop's (`Processes.leaked`,
+        which may hold the attempt itself under `process-leak=leak`). A failed ladder stays held
+        and owns nothing new (DL-431, spec-restart §7)."""
+        known = self._attempts[attempt]
+        if known.failed:
+            return None  # a failed ladder stays held; a later record confirms no KILL (DL-431)
         group = command_group(known.spawn)
         if group is None:
             # no recorded group: the processes carrying its cookie (spec-restart §4)
             if self.unnamed_alive is None or not self.unnamed_alive(attempt):
-                return
+                return None
             group = (NO_GROUP, attempt)
         elif not self.command_alive(*group):
-            return
+            return None
         if outcome.kind == "natural" and not self.processes.leaked(attempt):
-            return
-        if known.ladder is None:
-            generation = self.machines.generation(self.key(attempt), RECORD_TIMEOUT)
-            task = self._ladder(attempt, *group, generation)
-        else:
-            task = self._survivor_verdict(attempt, *group)
-        known.ladder = asyncio.get_running_loop().create_task(task)
+            return None
+        return group
+
+    def _own(self, attempt: str, operation: Coroutine[Any, Any, None]) -> None:
+        """Start `operation` as the task that owns the attempt's ladder slot until its done
+        callback takes completion (`_ladder_done`, DL-433)."""
+        known = self._attempts[attempt]
+        loop = asyncio.get_running_loop()
+        known.ladder = loop.create_task(operation)
         known.ladder_pending = True
+        self._owned[known.ladder] = _Owned(attempt, loop.create_future())
         known.ladder.add_done_callback(lambda done: self._ladder_done(attempt, done))
 
-    async def _survivor_verdict(self, attempt: str, pgid: int, token: str) -> None:
+    async def _survivor_verdict(
+        self, attempt: str, pgid: int, token: str, since: float | None = None
+    ) -> None:
         """An ended attempt's survivor verdict, taken where a stopping one's record timeout
-        takes it: anything of its command still left `grace_kill_s` after the KILL
-        (`Processes.outlives`) has survived its stop (`Processes.command_survived`), and the
-        attempt is held until a reading finds nothing left."""
-        if await self.processes.outlives(pgid, token, self.grace_kill_s):
-            self._attempts[attempt].survived = True
+        takes it: anything of its command still left `grace_kill_s` after `since`, the
+        sequence's end, or after this call when `since` is None (`Processes.outlives`), has
+        survived its stop (`Processes.command_survived`), and the attempt is held until a
+        reading finds nothing left (DL-431). The check is made once (DL-524)."""
+        known = self._attempts[attempt]
+        known.checked = True
+        # `since` is passed only when known: its default runs the grace from now
+        verdict = (
+            self.processes.outlives(pgid, token, self.grace_kill_s)
+            if since is None
+            else self.processes.outlives(pgid, token, self.grace_kill_s, since)
+        )
+        if await verdict:
+            known.survived = True
             self.processes.command_survived(attempt)
 
     def _start_stop(self, attempt: str) -> None:
@@ -828,11 +917,7 @@ class AttemptTier:
         else:
             group = command_group(known.spawn)
             if group is not None:
-                known.ladder = asyncio.get_running_loop().create_task(
-                    self._ladder(attempt, *group, generation)
-                )
-                known.ladder_pending = True
-                known.ladder.add_done_callback(lambda task: self._ladder_done(attempt, task))
+                self._own(attempt, self._ladder(attempt, *group, generation))
                 return
         self.processes.arm_timer(attempt, generation, self.grace_kill_s)
 
@@ -840,32 +925,57 @@ class AttemptTier:
         """Run the ladder to its end, then arm `record_timeout` at its KILL. A ladder that raises
         arms nothing: the stop was not carried out, so the attempt stays STOPPING and unsettled,
         and `_ladder_done` reports the failure. An attempt that ended while the ladder ran gets
-        no timer and takes the survivor verdict (`_survivor_verdict`)."""
-        await self.processes.ladder(pgid, token, self.grace_term_s)
+        no timer and takes the survivor verdict (`_survivor_verdict`). One that ends after this
+        body returned takes it at the hand-off (`_ladder_done`, DL-524)."""
+        known = self._attempts[attempt]
+        known.sequence_end = await self.processes.ladder(pgid, token, self.grace_term_s)
         if self.state(attempt) != "ENDED":
             self.processes.arm_timer(attempt, generation, self.grace_kill_s)
         else:
             await self._survivor_verdict(attempt, pgid, token)
 
     def _ladder_done(self, attempt: str, task: asyncio.Task[None]) -> None:
-        """Retrieve a finished ladder's failure and report it: a ladder that raised leaves its
-        group unproven, so the attempt is held (`held`). The attempt may be settled now
-        (`on_ladder_done`, `on_settled`). A cancelled ladder ended nothing: the engine is
-        leaving, and the restart finishes it (DL-426)."""
-        if task.cancelled():
-            return
-        error = task.exception()
-        known = self._attempts[attempt]
-        if error is not None:
-            known.failed = True
-            self.processes.ladder_failed(attempt, error)
-        # Failure holds precede release; this callback takes every closing effect without
-        # yielding, including replacement dispatch and forget (spec-restart, DL-433).
-        known.ladder_pending = False
-        if self.on_ladder_done is not None:
-            self.on_ladder_done(attempt)
-        if self.on_settled is not None:
-            self.on_settled()
+        """Take a finished ladder's or survivor check's completion. An attempt that ended after
+        its sequence's body returned and before this hand-off has had no survivor reading: when
+        something may be left (`_left_to_stop`), the survivor check takes over the ladder slot
+        before anything is released, with the grace running from the sequence's end, and its
+        own completion is the one hand-off (DL-524). A failure, of the task or of that reading,
+        is reported: the group is unproven, so the attempt is held (`held`) before it may be
+        settled (`on_ladder_done`, `on_settled`). A cancelled task ended nothing: the engine is
+        leaving, and the restart finishes it (DL-426). So does any task whose completion is
+        taken after a `join` was cancelled (DL-524). Either way `join` may read the result."""
+        owned = self._owned[task]
+        try:
+            if task.cancelled() or self._leaving:
+                return
+            known = self._attempts[attempt]
+            error = task.exception()
+            if error is None and not known.checked and self.state(attempt) == "ENDED":
+                known.checked = True  # this reading decides; a finished check starts no other
+                outcome = self.outcome(attempt)
+                assert outcome is not None  # an ENDED attempt carries its outcome
+                try:
+                    group = self._left_to_stop(attempt, outcome)
+                except Exception as exc:  # noqa: BLE001
+                    error = exc  # a failed reading is held as a failed sequence (DL-524)
+                else:
+                    if group is not None:
+                        since = known.sequence_end
+                        self._own(attempt, self._survivor_verdict(attempt, *group, since=since))
+                        return
+            if error is not None:
+                owned.error = error
+                known.failed = True
+                self.processes.ladder_failed(attempt, error)
+            # Failure holds precede release; this callback takes every closing effect without
+            # yielding, including replacement dispatch and forget (spec-restart, DL-433).
+            known.ladder_pending = False
+            if self.on_ladder_done is not None:
+                self.on_ladder_done(attempt)
+            if self.on_settled is not None:
+                self.on_settled()
+        finally:
+            owned.taken.set_result(None)  # this callback runs once per task (`_own`)
 
 
 # -- the engine lifecycle tier

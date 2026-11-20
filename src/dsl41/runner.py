@@ -2410,6 +2410,9 @@ class Engine:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         # the stop ladders end within their grace; a ladder that raised was reported already
         await asyncio.gather(self.attempts.join(), return_exceptions=True)
+        # a verdict taken while the join waited may have armed the held poll: teardown leaves
+        # no timer armed (DL-524)
+        self.stops.cancel_all()
         for task, result in zip(tasks, results, strict=True):
             if id(task) in self._corpses_raised:
                 continue  # _settle already raised this failure to a caller
