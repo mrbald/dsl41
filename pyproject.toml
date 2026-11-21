@@ -10,8 +10,6 @@ authors = [{ name = "dsl41 authors", email = "mail@bobah.net" }]
 keywords = [
     "autosys",
     "jil",
-    "stonebranch",
-    "universal-controller",
     "workload-automation",
     "scheduler",
     "migration",

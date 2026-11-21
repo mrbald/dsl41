@@ -530,3 +530,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-526 | A file watch an update holds or has stopped is not launched while the update waits | [docs/blocks/fw-observation.md](blocks/fw-observation.md), [docs/runner-design.md](runner-design.md) |
 | DL-527 | While an update waits, no job it names is launched, unchanged box members included | [docs/blocks/update.md](blocks/update.md) |
 | DL-528 | The job row's `held` field says nothing about a start that waits | [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md) |
+| DL-529 | Release 2.0.0: the exports stay and the installed package is checked by hand | [README.md](../README.md), [docs/cli-tui-qualification.md](cli-tui-qualification.md), [docs/integration-testing-inventory.md](integration-testing-inventory.md) |

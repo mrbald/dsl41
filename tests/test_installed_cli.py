@@ -43,6 +43,7 @@ def invoke(cli: Path, work: Path, *args: str) -> subprocess.CompletedProcess[str
                 "equiv",
                 "decompile",
                 "build",
+                "nav",
                 "folds",
                 "minify",
                 "resolve",
@@ -53,11 +54,14 @@ def invoke(cli: Path, work: Path, *args: str) -> subprocess.CompletedProcess[str
                 "query",
                 "sendevent",
                 "off-hold-all",
-                "host",
+                "reread",
+                "update",
+                "engine",
                 "ui",
                 "serve",
             )
         ),
+        ("engine", "stop"),
     ],
 )
 def test_installed_public_help(
@@ -149,8 +153,6 @@ def test_installed_mutation_outcomes_and_no_resend(
             "original-id",
             "--expect",
             "7",
-            "--epoch",
-            "3",
             "--baseline",
             "original-baseline",
             "--claimed-actor",
@@ -168,7 +170,7 @@ def test_installed_mutation_outcomes_and_no_resend(
     if answer != "partial":
         mutation = requests[1]
         assert mutation["request_id"] == "original-id"
-        assert mutation["baseline_id"] == "original-baseline" and mutation["epoch"] == 3
+        assert mutation["baseline_id"] == "original-baseline"
         assert mutation["expect"] == {"global:FLAG": 7}
         assert mutation["claimed_actor"] == "actor@host"
 
@@ -188,9 +190,7 @@ def test_installed_socket_permissions_refuse_before_write(
         finally:
             endpoint.chmod(0o600)
         assert result.returncode == 2
-        assert "Permission denied" in result.stderr or "not readable" in result.stderr, (
-            result.stderr
-        )
+        assert "no permission to use the control socket" in result.stderr, result.stderr
         listener.setblocking(False)
         with pytest.raises(BlockingIOError):
             listener.accept()

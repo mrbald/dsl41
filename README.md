@@ -722,7 +722,7 @@ Runner:
   catalog, the profile and the marked set, and `engine.toml`'s stop grace,
   snapshot cadence and retention.
 - `src/dsl41/idempotence.py`: the idempotence declaration:
-  `non-idempotent.toml` in the manifest's directory names the jobs whose interrupted
+  `non-idempotent.toml` beside the main config names the jobs whose interrupted
   attempt waits for the operator, with its canonical bytes for the reload
   token, and the four `DSL41_*` variables each `dispatch` record carries.
 - `src/dsl41/runner_environment.py`: literal job environments and stream
@@ -1194,6 +1194,13 @@ gh run list --workflow release.yml --limit 1
 
 The tag checks in `build` run whenever the ref is a tag, on a push or a
 manual run.
+
+No workflow job checks the installed package (DL-529). Check it by hand on
+that commit before the tag, in a core-only environment and in one with the
+`ui` extra: install the built wheel with its locked closure into a fresh
+environment, run `pip check`, run `tests/test_installed_cli.py` with
+`DSL41_INSTALLED_EXECUTABLE` naming the installed `dsl41`, and let the
+installed engine run one command to SUCCESS.
 
 Build locally first. `dist/` must hold only this build's two files:
 

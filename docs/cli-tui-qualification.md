@@ -64,9 +64,8 @@ A source import and `python -m dsl41` are different evidence.
 Three test files run an installed executable.
 `tests/test_installed_cli.py` runs the executable named by `DSL41_INSTALLED_EXECUTABLE`.
 It contains help, usage-refusal, mutation/no-resend and socket-permission checks.
-Its help parameters include the excluded `host` command and omit `nav`, `reread`,
-`update` and `engine stop`. That is an evidence gap; the file does not establish
-current public-help qualification until its parameters match the registry.
+Its help parameters match the command registry (DL-529). No workflow sets the
+variable, so the file runs by hand before a tag.
 `tests/test_installed_tui_recovery.py` installs the wheel named by `DSL41_RELEASE_WHEEL` offline, under the interpreter named by `DSL41_RECOVERY_PYTHON`, with the UI dependency wheels from `DSL41_RECOVERY_WHEELHOUSE` (default: the wheel's directory).
 It runs a complete recovery command from that install (DL-393).
 `tests/test_tui_recovery_drivers.py` runs the executable named by `DSL41_TUI_EXECUTABLE` or `DSL41_INSTALLED_EXECUTABLE`, and `python -m dsl41` when neither is set.

@@ -13713,6 +13713,7 @@ relitigate an entry; append a new one.
   after 1.7.0 on; releases through 1.7.0 carry no assets and keep the PyPI
   install. A same-venv patch upgrade installs the same way instead of with
   `pip install -U`.
+  NARROWED BY DL-529: `publish` needs `gates` and `build`; the installed wheel is checked by hand.
 
 - DL-216 A client that attempted a write reports any failure as delivered,
   and the server drops an unterminated request (2026-09-28)
@@ -24150,6 +24151,7 @@ relitigate an entry; append a new one.
   DL-389's target checks, binary-wheel hashes, preparation, receipts, retention
   and separate activation rules remain in force.
   NARROWED BY DL-424: release exports are retired in 2.0.0; offline manufacturing is decided later.
+  NARROWED BY DL-529: the release exports stay; only the offline rehearsal job retired.
 - DL-398 One verb stops a shape 1 estate: `dsl41 estate quiesce` (2026-10-25;
   src/dsl41/cli_estate.py, cli_common.py, cli_control.py, cli.py;
   examples/nightbank/deploy/drill-lib.sh, dsl41-supervisor.service; docs/deployment-runbook.md
@@ -27401,3 +27403,24 @@ relitigate an entry; append a new one.
   cleanup or an update's dispatch filter (DL-426, DL-522), and can be discharged with no
   dispatch.
   UNCHANGED. The field, its value and every reply. Wording only.
+- DL-529 Release 2.0.0: the exports stay and the installed package is checked by hand
+  (2026-11-21; owner asked for the release; tests/test_installed_cli.py,
+  tests/test_decision_log.py, pyproject.toml, docs/deploy.md,
+  docs/integration-testing-inventory.md, docs/cli-tui-qualification.md, README.md, TODO.md;
+  narrows DL-215; corrects the narrowed-by line DL-424 left on DL-397; closes BUG-28 and
+  FEAT-1)
+  THE RULE. `publish` needs `gates` and `build`. The workflow's `smoke` and `offline` jobs went
+  with the features they exercised (DL-424). Until an installed-artifact lane exists again
+  (FEAT-7), the maintainer checks the installed wheel by hand before each tag, in a core-only
+  environment and in one with the `ui` extra: a fresh environment, the wheel with its locked
+  closure, `pip check`, the installed command's help through `tests/test_installed_cli.py`, and
+  one command run to SUCCESS by the installed engine. The release exports stay: `build` writes
+  the locked requirements and their manifest, and the packager recipe and the RPM variant read
+  them.
+  THE DEFECT. DL-215 still said `publish` needs `smoke`. DL-397 carried "release exports are
+  retired in 2.0.0", which the tree never did. The installed-command help test named the
+  retired `host` command, missed `engine`, `nav`, `reread` and `update`, passed the retired
+  `--epoch` option to `sendevent` and expected an older refusal text (BUG-28). The package
+  keywords named the retired backend. `docs/deploy.md` did not say that a 1.x site cannot
+  upgrade in place.
+  UNCHANGED. The release workflow and the exports.

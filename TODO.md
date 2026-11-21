@@ -75,7 +75,6 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-19 is the known 
 - **BUG-24**: TERM or INT after process creation but before the `try` at `scripts/merge_train.py:169` skips timeout and group cleanup. `Popen.__exit__` then waits for the command to end; the signal-test driver would wait out the fake's 300 s lifetime.
 - **BUG-25**: The equal-stamp test's `first-look` case passes without the fix; only `last-stop` proves update takes no step during catch-up (DL-433).
 - **BUG-27**: Darwin EPERM tests fake both killpg and `ps`, so real `ps` output for zombie groups is untested (DL-431).
-- **BUG-28**: Installed-CLI help coverage expects the retired `host` and omits `nav`, `reread`, `update` and `engine stop`. Align `tests/test_installed_cli.py` with `cli.py`; test core-only and UI-extra installs.
 - **BUG-29**: Workflow teardown raises tag-removal errors in `finally`, hiding a simultaneous setup failure except in `session.json` (`examples/workflows/tests/conftest.py`).
 - **BUG-30**: The TUI terminal model clears the screen on unlisted non-painting controls, including autowrap `ESC[?7l` and kitty keyboard codes, which Textual sends at start and exit. Later ones cause labelled timeouts, never false passes (`tests/tui_terminal.py`).
 - **BUG-31**: A CI Python 3.12 worker inherited `COLUMNS=80` and `LINES=24` from an unknown setter; the TUI driver drops both at spawn, masking the leak. Any leaking test must restore them (`tests/tui_terminal.py`).
@@ -108,10 +107,6 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-19 is the known 
 - **BUG-56**: When the engine or a wrapper dies on Linux, are job processes lost or left behind? macOS measured clean; Linux not measured. Not approved until its plan is accepted.
 
 ## Features
-
-### Release 2.0.0 (on hold)
-
-- **FEAT-1**: Release 2.0.0: clean packages, rehearse the release workflow, check the installed package and get the owner's tag approval.
 
 ### Next, in priority order
 

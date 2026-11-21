@@ -307,7 +307,7 @@ assertion-specific gap found in this inspection, not universal coverage.
 | Z05 | `f873d7d:scripts/release_smoke.sh` L153 | O: installation is not editable | gap | [offline smoke] rejects editable installs; no tested real-wheel replacement lane | — | G-artifact |
 | Z06 | `f873d7d:scripts/release_smoke.sh` L153 | O: py.typed is installed | gap | No replacement installed file assertion | — | G-artifact |
 | Z07 | `f873d7d:scripts/release_smoke.sh` L153 | O: all four declared license files are installed | gap | No replacement installed license payload assertion | — | G-artifact |
-| Z08 | `f873d7d:scripts/release_smoke.sh` L153 | O: installed CLI help exits 0 | ported | [test_installed_cli.py](../tests/test_installed_cli.py) `test_installed_public_help` Opt-in; the stale public-help expectation is a Known bug. | M | G-artifact |
+| Z08 | `f873d7d:scripts/release_smoke.sh` L153 | O: installed CLI help exits 0 | ported | [test_installed_cli.py](../tests/test_installed_cli.py) `test_installed_public_help` Opt-in; run by hand before a tag (DL-529). | M | G-artifact |
 | Z09 | `f873d7d:scripts/release_smoke.sh` L208 | O: UC bundle has records and candidate tool version | retired | Charter excludes UC/another scheduler as target | — | — |
 | Z10 | `f873d7d:scripts/release_smoke.sh` L208 | O: html embeds installed Mermaid/ELK bytes | gap | Source browser tests do not prove installed wheel assets | — | G-artifact |
 | Z11 | `f873d7d:scripts/release_smoke.sh` L208 | O: html-chart embeds installed Mermaid/ELK bytes | gap | No installed real-wheel replacement | — | G-artifact |

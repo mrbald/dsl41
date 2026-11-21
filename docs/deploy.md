@@ -947,6 +947,19 @@ those definitions; the old root's state is not migrated.
 
 ## Upgrade the engine
 
+This section upgrades one 2.x release to another. A 1.x site does not
+upgrade in place: 2.0.0 refuses a 1.x run root and has no supervisor.
+Under 1.x, stopping the engine unit stops no job, so drain and retire the
+1.x estate as the 1.13.0 deployment runbook says under "Retiring an
+estate", and remove its two units. Record the held and iced jobs first:
+a fresh root does not know them, so a job held under 1.x would run on
+schedule. Then install 2.0.0 as a new site, following
+[Install the package and unit](#install-the-package-and-unit), on an empty
+run root. Write a `non-idempotent.toml` that names every job that must not
+rerun after an engine death, and hold again the jobs you recorded, before
+the first start. Keep 1.13.0 at hand to read the old root's history. From
+2.0.0 on, stopping the engine unit stops every running job.
+
 Change the engine and every client together (DL-498).
 Restart terminal UIs and the served UI from the selected build.
 An old UI is refused by name and must be restarted.
