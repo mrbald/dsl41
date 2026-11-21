@@ -418,6 +418,28 @@ def test_l005_falsy_date_conditions_inline_fires() -> None:
     assert violations[0].detail == "start_times"
 
 
+def test_l005_quiet_for_a_lone_timezone() -> None:
+    """DL-530: a time zone alone asks for no scheduling, so it is not ignored scheduling."""
+    for switch in ("", "date_conditions: 0\n"):
+        text = (
+            "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
+            f"{switch}timezone: Europe/Zurich\n"
+        )
+        catalog = lower_source(text)
+        assert "timezone" in catalog.jobs["j"].passthrough
+        assert rule_l005(catalog) == []
+
+
+def test_l005_timezone_with_start_times_fires_and_names_both() -> None:
+    text = (
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
+        'timezone: Europe/Zurich\nstart_times: "10:00"\n'
+    )
+    (violation,) = rule_l005(lower_source(text))
+    assert violation.detail == "start_times,timezone"
+    assert "(start_times, timezone)" in violation.message
+
+
 # --------------------------------------------------------------------- 6. L015
 
 
@@ -449,6 +471,56 @@ def test_l015_quiet_on_all_clean_lookback_forms() -> None:
     assert rule_l015(catalog) == []
 
 
+_SCHEDULED = 'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+
+
+@pytest.mark.parametrize(
+    "code,text",
+    [
+        (
+            "L015",
+            "insert_job: a\njob_type: c\ncommand: x\nmachine: m1\n\n"
+            "insert_job: b\njob_type: c\ncommand: x\nmachine: m1\n\n"
+            "insert_job: c\njob_type: c\ncommand: x\nmachine: m1\n"
+            "condition: s(a, 12) & s(b, 12)\n",
+        ),
+        (
+            "L008",
+            "insert_job: bx\njob_type: b\nbox_failure: s(X) | f(X)\n\n"
+            "insert_job: m\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bx\n\n"
+            "insert_job: X\njob_type: c\ncommand: x\nmachine: m1\n",
+        ),
+        (
+            "L009",
+            "insert_job: X\njob_type: c\ncommand: x\nmachine: m1\n\n"
+            "insert_job: c\njob_type: c\ncommand: x\nmachine: m1\n"
+            + _SCHEDULED
+            + "condition: s(X) & s(X)\n",
+        ),
+    ],
+)
+def test_lint_catalog_reports_a_repeated_finding_once(code: str, text: str) -> None:
+    """DL-530: findings with the same code, severity, place and message print once."""
+    catalog = lower_source(text)
+    rules = dict(RULES)
+    if code in rules:
+        raw = rules[code](catalog)
+    else:
+        raw = dict(GRAPH_RULES)[code](catalog, derive_graph(catalog))
+    assert len(raw) == 2 and raw[0] == raw[1]  # the rule itself repeats the finding
+    assert lint_catalog(catalog).by_code(code) == raw[:1]
+
+
+def test_lint_catalog_keeps_findings_that_differ() -> None:
+    text = (
+        "insert_job: a\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: b\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: c\njob_type: c\ncommand: x\nmachine: m1\n"
+        "condition: s(a, 12) & s(b, 13)\n"
+    )
+    assert [v.detail for v in lint_catalog(lower_source(text)).by_code("L015")] == ["12", "13"]
+
+
 # ------------------------------------------------- 6b. L016/L017 dangling names (DL-25)
 
 
@@ -468,8 +540,9 @@ def test_l016_quiet_when_every_resource_is_defined() -> None:
 
 def test_l019_fires_for_schedule_plus_condition_composition() -> None:
     """L019 (Q3 cited-resolved, DL-58): a date_conditions job that also
-    carries a condition arms and fires late without expiry -- a migration-
-    attention item because the UC mapping (M02) has no arm concept."""
+    carries a condition can arm on a blocked tick and, while the arm lasts,
+    start late. The message promises no start, claims no expiry rule and cites
+    no retired backend (DL-530)."""
     text = (
         "insert_job: l19_both\njob_type: c\ncommand: x\nmachine: m1\n"
         'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
@@ -480,8 +553,12 @@ def test_l019_fires_for_schedule_plus_condition_composition() -> None:
     (violation,) = rule_l019(catalog)
     assert violation.severity == "warn"
     assert violation.jobs == ["l19_both"]
-    assert "arm-and-wait" in violation.message
-    assert "no arm concept" in violation.message
+    assert violation.message == (
+        "'l19_both' combines date_conditions scheduling with a condition -- a tick with a"
+        " false condition can arm the job; while the arm lasts, the job starts late when the"
+        " condition turns true (SEM-32 arm-and-wait, cited DL-58)"
+    )
+    assert "expiry" not in violation.message
 
 
 def test_l019_quiet_for_schedule_only_and_condition_only_jobs() -> None:
@@ -609,6 +686,18 @@ def test_lint_catalog_runs_the_whole_lowerable_corpus_without_crashing() -> None
     assert isinstance(report, LintReport)
 
 
+@pytest.mark.parametrize(
+    "paths",
+    [[p] for p in LOWERABLE_CORPUS] + [LOWERABLE_CORPUS],
+    ids=[p.name for p in LOWERABLE_CORPUS] + ["whole-corpus"],
+)
+def test_no_rule_repeats_a_finding(paths: list[Path]) -> None:
+    """DL-530: no two findings print the same code, place and message, per file and corpus-wide."""
+    catalog = lower_catalog([parse_file(p) for p in paths])
+    keys = Counter(v.render() for v in lint_catalog(catalog).violations)
+    assert [key for key, count in keys.items() if count > 1] == []
+
+
 def test_lint_catalog_is_deterministic_across_runs() -> None:
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     first = lint_catalog(catalog).violations
@@ -632,7 +721,7 @@ def test_lint_catalog_whole_corpus_fires_only_reachable_rules() -> None:
     (Q3, DL-54/58) joined via consumer_stale -- sem04_lookback.jil's scheduled
     consumer with a condition is exactly the schedule+condition composition
     the rule flags (one job, two distinct hazards: L009 staleness, L019
-    arm-and-wait with no UC arm concept). L020 (M19, DL-151) joined with
+    arm-and-wait). L020 (M19, DL-151) joined with
     l020_iced_consumer.jil's all-iced consumer. L021 (DL-180) joined with
     l021_multifire.jil's l21_daily -- and seven other fixtures whose
     condition-only consumers genuinely multi-fire (the counts test names
@@ -668,9 +757,9 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
     now fires twice (m07_mutex.jil's mutex pair + self-exclusion group).
     L001 dropped 7 -> 6 with the review fixes: upstream_daily is now defined
     in sem04_lookback.jil (on its own cadence) so consumer_stale's L009
-    trigger survives L009's new undefined-producer skip. L005 1 -> 2 with
-    sem24_status_resource.jil (DL-18): LOAD_C's timezone without
-    date_conditions is the estate shape's deliberate dead config.
+    trigger survives L009's new undefined-producer skip. L005 x1 via
+    sem30_dead_config.jil; sem24_status_resource.jil's LOAD_C carries a lone
+    timezone without date_conditions, which stays quiet (DL-530).
     L002 1 -> 3 with the DL-25 v() extension: the corpus already carried
     two dangling v() reads nothing checked (consumer_window's $REGION and
     gate_box's $ABORT_FLAG -- the latter IS sem12's intended external
@@ -710,7 +799,9 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
     counts = Counter(v.code for v in report.violations)
     assert counts == Counter(
         {
-            "known-unsupported": 8,  # DL-485: CMD retries are supported; tags, pool and xinst warn.
+            # DL-485: CMD retries are supported; tags, pool and xinst warn. DL-530: one
+            # finding per job attribute, so sem24's three application tags are one.
+            "known-unsupported": 6,
             "L001": 6,
             # +2 at DL-192: viz_locks.jil's lk_x3/lk_x4 hold a resource and
             # nothing else -- a requirement is not wiring
@@ -722,7 +813,7 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
             # self-exclusion
             "L012": 13,  # + names_colon_join.jil's etl:load/etl:probe pair (DL-39)
             "L002": 3,
-            "L005": 2,
+            "L005": 1,
             "L009": 1,
             "L016": 1,
             "L018": 1,
@@ -838,6 +929,35 @@ def test_known_unsupported_dedup() -> None:
     assert rule_known_unsupported(CatalogIR()) == []
 
 
+def test_known_unsupported_is_one_finding_per_job_attribute() -> None:
+    """DL-530: N jobs with one attribute give one finding naming N and the first job."""
+    jobs = "".join(f"insert_job: J{i}\njob_type: c\ncommand: true\ngroup: g\n" for i in (3, 1, 2))
+    (finding,) = rule_known_unsupported(lower_source(jobs))
+    assert (finding.jobs, finding.detail) == (["J1", "J2", "J3"], "group")
+    assert finding.message == (
+        "job attribute group: set on 3 jobs (first: J1): known but unsupported;"
+        " it has no effect in this release"
+    )
+    catalog = lower_source(jobs + "insert_job: J4\njob_type: c\ncommand: true\napplication: a\n")
+    assert finding.span == catalog.jobs["J1"].span
+    application, group = rule_known_unsupported(catalog)
+    assert (application.detail, application.jobs) == ("application", ["J4"])
+    assert application.message.startswith("job J4: application: known but unsupported")
+    assert (group.detail, group.jobs) == ("group", ["J1", "J2", "J3"])
+
+
+def test_known_unsupported_preflight_names_a_job_only_for_a_single_job_finding() -> None:
+    from dsl41.runner_preflight import preflight
+
+    jobs = "".join(f"insert_job: J{i}\njob_type: c\ncommand: true\ngroup: g\n" for i in (1, 2))
+    catalog = lower_source(jobs + "application: a\n")
+    items = [i for i in preflight(catalog, execution=False) if i.code == "known-unsupported"]
+    assert [(i.job, i.message.split(":")[0]) for i in items] == [
+        ("J2", "job J2"),
+        (None, "job attribute group"),
+    ]
+
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -871,9 +991,9 @@ runner = CliRunner()
 
 def test_report_suppress_drops_code_from_findings_and_exit() -> None:
     """DL-23: suppression is a reporting choice on the complete report."""
-    catalog = lower_catalog([parse_file(CORPUS_DIR / "sem24_status_resource.jil")])
+    catalog = lower_catalog([parse_file(SEM30_DEAD_CONFIG)])
     report = lint_catalog(catalog)
-    assert report.by_code("L005")  # the fixture's deliberate dead-config timezone
+    assert report.by_code("L005")  # the fixture's deliberate dead configuration
     slim = report.suppress({"L005"})
     assert not slim.by_code("L005")
     assert len(slim.violations) == len(report.violations) - len(report.by_code("L005"))
@@ -886,7 +1006,7 @@ def test_cli_suppress_l005_flips_strict_exit(tmp_path: Path) -> None:
         "insert_job: tz_conv\njob_type: c\ncommand: x\nmachine: m1\n"
         'date_conditions: 1\nstart_times: "10:00"\ntimezone: Zurich\n\n'
         "insert_job: tz_dead\njob_type: c\ncommand: y\nmachine: m1\n"
-        "condition: s(tz_conv)\ntimezone: Zurich\n",
+        'condition: s(tz_conv)\ntimezone: Zurich\nstart_times: "11:00"\n',
         encoding="utf-8",
     )
     strict = runner.invoke(app, ["lint", str(dead), "--strict"])
@@ -906,7 +1026,7 @@ def test_cli_suppress_l005_flips_strict_exit(tmp_path: Path) -> None:
 def test_cli_suppress_accepts_comma_lists_and_case(tmp_path: Path) -> None:
     dead = tmp_path / "dead.jil"
     dead.write_text(
-        "insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\ntimezone: Zurich\n",
+        'insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\nstart_times: "10:00"\n',
         encoding="utf-8",
     )
     result = runner.invoke(app, ["lint", str(dead), "--strict", "--suppress", "l005,L011"])

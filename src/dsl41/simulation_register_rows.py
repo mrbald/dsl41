@@ -4077,7 +4077,7 @@ PREFLIGHT_CODE_ROWS: tuple[Row, ...] = (
         member="known-unsupported",
         klass=SUPPORTED,
         cite="lint.rule_known_unsupported, DL-53, DL-466",
-        effect="requested inert attributes warn once per record and attribute; neutral values stay quiet",
+        effect="requested inert attributes warn once per job attribute across jobs and once per other record and attribute (DL-530); neutral values stay quiet",
         trigger=_job(n_retrys="2", job_type="b", command=None),
     ),
     _row(

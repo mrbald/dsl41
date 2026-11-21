@@ -730,7 +730,7 @@ nothing.
 | preflight_code:heartbeat-unsupported | refused | runner_preflight.execution_policy_preflight, runtime_policy.job_policy | - |  |  |  | generic | positive heartbeat intervals are refused |
 | preflight_code:job-class | refused | runner_preflight.execution_policy_preflight, runtime_policy.job_policy | - |  |  |  | generic | unqualified job classes are refused |
 | preflight_code:job-type | refused | runner_preflight._job_type_preflight | - |  |  |  | unreachable | a job_type with no adapter refuses the run; no JIL reaches this gate, because lowering already refuses every type outside CMD/BOX/FW |
-| preflight_code:known-unsupported | supported | lint.rule_known_unsupported, DL-53, DL-466 | - |  |  |  | generic | requested inert attributes warn once per record and attribute; neutral values stay quiet |
+| preflight_code:known-unsupported | supported | lint.rule_known_unsupported, DL-53, DL-466 | - |  |  |  | generic | requested inert attributes warn once per job attribute across jobs and once per other record and attribute (DL-530); neutral values stay quiet |
 | preflight_code:machine | refused | runner_preflight._machine_preflight, DL-49 | - |  |  |  | generic | a job whose machine does not resolve to this host refuses the run: there is no remote fabric |
 | preflight_code:machine-mixed | supported | runner_preflight._machine_preflight, DL-49 | - |  |  |  | generic | a pool with some members here and some elsewhere runs here under local-eligible, with a warning that pool placement was ignored |
 | preflight_code:n-retrys | refused | runtime_policy.job_policy | - |  |  |  | generic | retry counts outside 0 through 20 refuse (DL-466) |

@@ -923,11 +923,12 @@ def preflight(
 
     if known_unsupported is None:
         known_unsupported = rule_known_unsupported(catalog)
+    # one item per lint finding; a finding over several jobs names no one job (DL-530)
     items.extend(
         PreflightItem(
             severity="WARN",
             code="known-unsupported",
-            job=finding.jobs[0] if finding.jobs else None,
+            job=finding.jobs[0] if len(finding.jobs) == 1 else None,
             message=finding.message,
         )
         for finding in known_unsupported

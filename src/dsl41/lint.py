@@ -18,7 +18,7 @@ Rule readings:
   L004 is a defensive scan: a SEM-31-violating ScheduleBlock survives only if model_construct
   is used at every containing level. L003 is a tripwire: GlobalAtom has no lookback field.
 - L005 reads the SEM-30 dead-config routing: time attributes with falsy or absent
-  date_conditions sit verbatim in JobIR.passthrough.
+  date_conditions sit verbatim in JobIR.passthrough. A lone timezone stays quiet (DL-530).
 - L020 iced consumer (M19/M21) reads the consumer's condition tree, so it is an IR-F rule
   (DL-243, DL-281). When every immediate predecessor translates to a UC Skip, AutoSys runs
   the consumer (SEM-05/SEM-20/SEM-22) and UC cascades the skip (UCS-02). One live predecessor
@@ -37,7 +37,7 @@ Graph-rule readings:
 - L011: no schedule, no derived edges in or out (global and mutex participation count as
   wiring), not in a box, not a box with members, not an FW source. Purely manual utility
   jobs are the accepted false positive.
-- L012 info: one finding per mutex group (M07), suggesting the UC construct.
+- L012 info: one finding per mutex group (M07); an n() guard is not a dependency (R6).
 - L013: a box member with its own date_conditions schedule needs the box RUNNING too (SEM-31).
 - L014 UC-side name collision (UCS-12): lowering refuses exact duplicates, so the rule checks
   case-insensitive collision. Error severity per ss9.
@@ -370,12 +370,14 @@ def rule_l005(catalog: CatalogIR) -> list[Violation]:
     """Time attributes present while date_conditions is falsy or absent (SEM-30): dead config.
 
     Timezone is dead here too, because the since-last-end anchor is tz-independent (SEM-35,
-    Q2, Q2a, DL-54). `dsl41 lint --suppress L005` drops the code (DL-23).
+    Q2, Q2a, DL-54). A lone timezone asks for no scheduling, so it alone stays quiet; when the
+    rule fires, the message lists it with the rest (DL-530). `dsl41 lint --suppress L005` drops
+    the code (DL-23).
     """
     out: list[Violation] = []
     for job in catalog.jobs.values():
         dead = sorted(k for k in job.passthrough if k.lower() in TIME_CLUSTER)
-        if dead:
+        if any(k.lower() != "timezone" for k in dead):
             out.append(
                 Violation(
                     code="L005",
@@ -547,8 +549,10 @@ def rule_l018(catalog: CatalogIR) -> list[Violation]:
 def rule_l019(catalog: CatalogIR) -> list[Violation]:
     """Schedule plus condition (ir-design ss11; Q3 resolved by DL-58).
 
-    A date_conditions job with a `condition` arms on a tick blocked by a false condition
-    (SEM-32) and fires late, with no expiry. UC has no arm concept (M02).
+    A date_conditions job with a `condition` can arm on a tick blocked by a false condition
+    (SEM-32); while the arm lasts, the job starts late when the condition turns true. The
+    message promises no start, because a box member's arm ends with its box run (SEM-32 pins,
+    Q3c; DL-530).
     """
     out: list[Violation] = []
     for job in catalog.jobs.values():
@@ -560,10 +564,9 @@ def rule_l019(catalog: CatalogIR) -> list[Violation]:
                 severity="warn",
                 message=(
                     f"{job.name!r} combines date_conditions scheduling with a"
-                    f" condition -- a tick with a false condition arms and fires"
-                    f" late, without expiry (SEM-32 arm-and-wait, cited DL-58);"
-                    f" the UC mapping has no arm concept (M02): review before"
-                    f" migrating"
+                    f" condition -- a tick with a false condition can arm the job; while"
+                    f" the arm lasts, the job starts late when the condition turns true"
+                    f" (SEM-32 arm-and-wait, cited DL-58)"
                 ),
                 jobs=[job.name],
                 span=job.span,
@@ -832,19 +835,19 @@ def rule_l011(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
 
 
 def rule_l012(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
-    """n() mutex candidates (M07, R6): not dependencies. Suggests the UC construct per group."""
+    """n() mutex candidates (M07, R6): not dependencies. One finding per group.
+
+    A pair forms from a guard in either direction, so a one-way guard leaves both jobs free to
+    run at once; the message claims no exclusion (DL-530).
+    """
     out: list[Violation] = []
     for group in graph.mutex_groups:
         if len(group) == 1:
-            message = (
-                f"{group[0]!r} declares n({group[0]}) self-exclusion: model as UC"
-                f" Instance Wait (serialize successive runs; M07/UCS-09)"
-            )
+            message = f"{group[0]!r} declares n({group[0]}) self-exclusion (R6)"
         else:
             message = (
-                f"jobs {group[0]!r} and {group[1]!r} are mutually exclusive via n():"
-                f" model as UC Mutually Exclusive Tasks or a Virtual Resource, not an"
-                f" edge (M07/UCS-09; an edge would fabricate ordering)"
+                f"jobs {group[0]!r} and {group[1]!r} are linked by an n() guard:"
+                f" not a dependency (R6)"
             )
         out.append(
             Violation(
@@ -1591,8 +1594,14 @@ def rule_l025(catalog: CatalogIR, exceptions: Exceptions | None = None) -> list[
 
 
 def rule_known_unsupported(catalog: CatalogIR) -> list[Violation]:
-    """DL-466: report requested, unapplied behavior; descriptions and neutral values are quiet."""
+    """DL-466: report requested, unapplied behavior; descriptions and neutral values are quiet.
+
+    A job attribute is one finding however many jobs set it: it names the count and the first
+    job in name order, takes that job's span, and lists every job in `jobs` (DL-530). Other
+    record kinds give one finding per record and attribute.
+    """
     out: list[Violation] = []
+    tail = "known but unsupported; it has no effect in this release"
 
     def warn(kind: str, name: str, attribute: str, span: SourceSpan | None = None) -> None:
         target = f"engine.{attribute}" if kind == "engine" else f"{kind} {name}: {attribute}"
@@ -1600,12 +1609,14 @@ def rule_known_unsupported(catalog: CatalogIR) -> list[Violation]:
             Violation(
                 code="known-unsupported",
                 severity="warn",
-                message=f"{target}: known but unsupported; it has no effect in this release",
+                message=f"{target}: {tail}",
                 jobs=[name] if kind == "job" else [],
                 detail=attribute,
                 span=span,
             )
         )
+
+    job_sites: dict[str, list[tuple[str, SourceSpan | None]]] = {}
 
     text_attrs = {
         "application",
@@ -1652,8 +1663,25 @@ def rule_known_unsupported(catalog: CatalogIR) -> list[Violation]:
                     attributes.add("job_load")
             except ValueError:
                 pass  # Resource preflight owns invalid-value refusals (DL-466).
-        for attribute in sorted(attributes):
-            warn("job", name, attribute, job.span)
+        for attribute in attributes:
+            job_sites.setdefault(attribute, []).append((name, job.span))
+    for attribute, sites in sorted(job_sites.items()):
+        first, span = sites[0]
+        if len(sites) == 1:
+            warn("job", first, attribute, span)
+            continue
+        out.append(
+            Violation(
+                code="known-unsupported",
+                severity="warn",
+                message=(
+                    f"job attribute {attribute}: set on {len(sites)} jobs (first: {first}): {tail}"
+                ),
+                jobs=[name for name, _ in sites],
+                detail=attribute,
+                span=span,
+            )
+        )
 
     for name, machine in sorted(catalog.machines.items()):
         live = {"description", "node_name"}
@@ -1745,7 +1773,7 @@ def lint_catalog(
     The derived graph is computed once unless the caller passes it. `base_tz`, `tz_aliases`
     and `today` reach L023 only: the zone for a schedule without `timezone` (UTC when None),
     the `--timezone-map` table, and the reference date. `exceptions` reaches L024 and L025 only;
-    with None both are inert.
+    with None both are inert. A repeated finding is reported once (DL-530).
     """
     if graph is None:
         graph = derive_graph(catalog)
@@ -1763,4 +1791,13 @@ def lint_catalog(
             violations.extend(rule(catalog))
     for _code, graph_rule in GRAPH_RULES:
         violations.extend(graph_rule(catalog, graph))
-    return LintReport(violations=violations)
+    # a finding with the same code, severity, place and message as an earlier one is dropped;
+    # the first stays (DL-530)
+    seen: set[str] = set()
+    unique: list[Violation] = []
+    for violation in violations:
+        key = violation.model_dump_json(include={"code", "severity", "span", "message"})
+        if key not in seen:
+            seen.add(key)
+            unique.append(violation)
+    return LintReport(violations=unique)

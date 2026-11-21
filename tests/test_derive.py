@@ -1014,7 +1014,7 @@ def test_l011_dl175_a_local_dangler_is_not_shielded_by_a_cross_instance_display_
     assert edge.src in catalog.jobs
 
 
-def test_l012_fires_per_group_from_m07_mutex_self_exclusion_mentions_instance_wait() -> None:
+def test_l012_fires_per_group_from_m07_mutex_and_cites_r6() -> None:
     catalog = lower_catalog([parse_file(M07_MUTEX)])
     graph = derive_graph(catalog)
     violations = rule_l012(catalog, graph)
@@ -1022,7 +1022,25 @@ def test_l012_fires_per_group_from_m07_mutex_self_exclusion_mentions_instance_wa
     assert all(v.severity == "info" for v in violations)
     by_jobs = {tuple(v.jobs): v for v in violations}
     assert set(by_jobs) == {("mutex_a", "mutex_b"), ("mutex_serial",)}
-    assert "Instance Wait" in by_jobs[("mutex_serial",)].message
+    # an n() guard is not a dependency (R6); the retired UC backend is not named (DL-530)
+    assert all("(R6)" in v.message and "UC" not in v.message for v in violations)
+    assert by_jobs[("mutex_serial",)].message == (
+        "'mutex_serial' declares n(mutex_serial) self-exclusion (R6)"
+    )
+
+
+def test_l012_one_way_guard_claims_no_exclusion() -> None:
+    """DL-530: `a` guards on n(b) and `b` has no condition, so both can run at once; the pair
+    finding says the jobs are linked by an n() guard and claims no exclusion."""
+    text = (
+        "insert_job: a\njob_type: c\ncommand: x\nmachine: m1\ncondition: n(b)\n\n"
+        "insert_job: b\njob_type: c\ncommand: x\nmachine: m1\n"
+    )
+    catalog = lower_source(text)
+    (violation,) = rule_l012(catalog, derive_graph(catalog))
+    assert violation.jobs == ["a", "b"]
+    assert violation.message == "jobs 'a' and 'b' are linked by an n() guard: not a dependency (R6)"
+    assert "exclusive" not in violation.message
 
 
 def test_l013_fires_on_a_box_member_with_its_own_schedule() -> None:

@@ -1068,7 +1068,7 @@ def test_known_unsupported_restart_reports_without_refusal(short_root, ignored):
         ""
         if ignored
         else (
-            "known-unsupported warn: 4 findings\n"
+            "known-unsupported warn: 2 findings\n"
             f"files on disk (may differ from applied estate until update): dsl41 lint --config {path}\n"
         )
     )
@@ -1078,18 +1078,20 @@ def test_known_unsupported_restart_reports_without_refusal(short_root, ignored):
     assert "job A: group:" not in output
     assert "job B: group:" not in output
     assert "job A: application:" not in output
+    assert "job attribute" not in output
     assert "preflight WARN [skeleton-cycle]: cycle in the AND-success skeleton" in output
     warnings = [
         item for _, kind, body in rows(root) if kind == "preflight" for item in body["items"]
     ]
+    # one finding per job attribute; it names no one job (DL-530)
     expected = [
         {
             "severity": "WARN",
             "code": "known-unsupported",
-            "job": name,
-            "message": f"job {name}: {attribute}: known but unsupported; it has no effect in this release",
+            "job": None,
+            "message": f"job attribute {attribute}: set on 2 jobs (first: A): known but"
+            " unsupported; it has no effect in this release",
         }
-        for name in ("A", "B")
         for attribute in ("application", "group")
     ]
     assert warnings == [

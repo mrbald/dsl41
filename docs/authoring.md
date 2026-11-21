@@ -194,8 +194,11 @@ Hand over changed definitions through [§6](#6-hand-over-for-rollout).
 The operational boundary for `deployment-runbook.md` is [DL-424](decision-log.md).
 
 The following accepted JIL inputs request behavior that this release does not
-apply (DL-466). Each active attribute produces one `known-unsupported` warning
-per record at startup and reread. Defaults and neutral values stay quiet.
+apply (DL-466). Each active job attribute produces one `known-unsupported` warning
+at startup and reread, however many jobs set it. It names the job, or for several
+jobs their count and the first one (DL-530). Other records warn once per record and
+attribute.
+Defaults and neutral values stay quiet.
 
 | Record | Attribute | Warns when |
 | --- | --- | --- |

@@ -267,6 +267,7 @@ relitigate an entry; append a new one.
   suppressed codes drop from both the output and the exit code; unknown
   codes in --suppress are an exit-2 error, because a typo silently
   suppressing nothing would be its own silent loss.
+  NARROWED BY DL-530: a lone `timezone` no longer fires L005, so it needs no suppression.
 - DL-24 L015 severity split (2026-07-09). Estates use
   bare-hours lookbacks (`s(job, 12)` = 12 hours) deliberately; the shape
   is valid, Broadcom-documented, and unambiguous to the ENGINE -- the
@@ -1758,6 +1759,7 @@ relitigate an entry; append a new one.
   ON_ICE/OFF_ICE untouched; run_window gates an armed start exactly like an
   unarmed one; the zero-lookback tie (predecessor end == anchor instant) is
   satisfied (>= inclusive).
+  NARROWED BY DL-530: L005 stays quiet when `timezone` is the only time attribute.
 - DL-55 U3 base-serializer unit (2026-07-28; the DL-53 audit's last actionable
   item). Verbatim wire evidence captured BEFORE the freeze
   (the DL-53 method) from the current docs.stonebranch.com site
@@ -25938,6 +25940,7 @@ relitigate an entry; append a new one.
   Old warning records remain readable. The `n-retrys` refusal code remains;
   the previous retry and pool-job-load warnings use `known-unsupported`.
   No stopping path is added.
+  NARROWED BY DL-530: a job attribute is one finding however many jobs set it.
 - DL-467 Sampled file watchers keep sampling across target edits (2026-11-05;
   owner 2026-11-05 RC1=FIX; runner-design §6, protocol-evolution §1)
   THE GAP. Update takes up a waiting FW under the same run directory. An exact
@@ -27424,3 +27427,31 @@ relitigate an entry; append a new one.
   keywords named the retired backend. `docs/deploy.md` did not say that a 1.x site cannot
   upgrade in place.
   UNCHANGED. The release workflow and the exports.
+- DL-530 The linter says each thing once
+  (2026-11-22; owner asked for a linter that is useful rather than noisy;
+  src/dsl41/lint.py, src/dsl41/runner_preflight.py, src/dsl41/simulation_register_rows.py,
+  docs/ir-design.md, docs/authoring.md, docs/autosys-semantics.md,
+  docs/simulation-coverage.md, tests/test_lint.py, tests/test_derive.py,
+  tests/test_main_config.py, tests/test_decision_log.py, tests/corpus/m07_mutex.jil, TODO.md;
+  narrows DL-23, DL-54 and DL-466)
+  THE RULE. L005 fires when a job without date conditions carries a time attribute other
+  than `timezone`; its message then lists every time attribute present. A
+  `known-unsupported` job attribute is one finding however many jobs set it: for several
+  jobs the message gives their count and the first job in name order, and the finding takes
+  that job's place in the file and lists every job. A preflight item made from a finding
+  over several jobs names no job. The report keeps the first of two findings with the same
+  code, severity, place and message. L012 says two jobs are linked by an `n()` guard and
+  claims no exclusion: a pair forms from a guard in either direction. L019 says a tick with
+  a false condition can arm the job; a box member's arm ends with its box run (SEM-32).
+  Neither gives advice for the retired backend (DL-424).
+  THE DEFECT. An estate that sets `timezone` and a label attribute on every job got two
+  lines per job, so nearly all of the output was two sentences repeated, and the engine
+  start counted one `known-unsupported` finding per job for a handful of attributes. L008,
+  L009 and L015 could print the same line twice for one condition. L012 called a one-way
+  guard mutual exclusion, and L019 said an arm has no expiry.
+  UNCHANGED. Severities, the exit code for the findings that remain, `--suppress`,
+  `lint.ignore`, `lint.refuse`, the DL-483 count lines and the text of a
+  `known-unsupported` finding on one job. The texts of L008 and L016 still name the retired
+  backend, and L014 and L020 rest on it (BUG-103).
+  COST. A site with `lint.refuse = "warn"` that was refused only for lone `timezone` lines
+  is now admitted.

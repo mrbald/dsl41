@@ -1,7 +1,7 @@
 /* M07 mutex-candidate detector (dossier R6): n() atoms are NOT dependencies --
    mutex_a/mutex_b mutually exclude via n(); mutex_serial self-excludes via
-   n(mutex_serial) (UC Instance Wait, UCS-09). L012 suggests the UC construct
-   per group shape. mutex_feeder is a plain scheduled producer whose s() edge
+   n(mutex_serial). L012 reports one finding per group, a pair or a
+   self-exclusion. mutex_feeder is a plain scheduled producer whose s() edge
    must still surface despite the sibling n() atoms. (Renamed from the
    job_a/job_b/job_serial/feeder shape to avoid colliding with
    sem10_box_basic.jil's job_a/job_b in the whole-corpus catalog.) Synthetic. */

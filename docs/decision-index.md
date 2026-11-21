@@ -531,3 +531,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-527 | While an update waits, no job it names is launched, unchanged box members included | [docs/blocks/update.md](blocks/update.md) |
 | DL-528 | The job row's `held` field says nothing about a start that waits | [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md) |
 | DL-529 | Release 2.0.0: the exports stay and the installed package is checked by hand | [README.md](../README.md), [docs/cli-tui-qualification.md](cli-tui-qualification.md), [docs/integration-testing-inventory.md](integration-testing-inventory.md) |
+| DL-530 | The linter says each thing once | [docs/authoring.md](authoring.md), [docs/autosys-semantics.md](autosys-semantics.md), [docs/ir-design.md](ir-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |

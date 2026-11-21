@@ -741,6 +741,7 @@ The scheduler honors the time attributes (`days_of_week`, `run_calendar`, `exclu
 `timezone`) only when `date_conditions: 1`. Without it, the job runs purely on
 conditions and manual events, and the scheduler ignores the time attributes. Linter rule
 L005 warns on time attributes present with date_conditions absent or 0: dead configuration.
+A lone `timezone` asks for no scheduling, so L005 stays quiet on it (DL-530).
 
 ### SEM-31 · Mutual exclusivity **[V]**
 - `start_times` XOR `start_mins`. Both together are a JIL error, and both are ignored.
@@ -1077,8 +1078,9 @@ Scope (DL-23): TechDocs' own `date_conditions` page lists `timezone`, with `run_
 only "the job's time settings". So timezone without truthy date_conditions is dead
 configuration (SEM-30, L005). The zero-lookback anchor is the dependent's own last end
 (SEM-04, Q2a). That is a comparison of two instants, which no timezone re-basing can affect.
-So timezone on a condition-only job is always dead, and L005 fires on it. An
-estate that carries timezone by convention can run `dsl41 lint --suppress L005`.
+So timezone on a condition-only job is always dead. A lone timezone asks for no
+scheduling, so L005 stays quiet on it; when another time attribute fires the rule, the
+message lists timezone too (DL-530).
 
 **Name resolution [V]** (DL-62; 12.1 `timezone` attribute page and the `autotimezone` command
 page). The value is "a string that corresponds to an entry in the ujo_timezones table or is
