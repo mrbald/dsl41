@@ -27656,3 +27656,28 @@ relitigate an entry; append a new one.
   NOT BUILT. After a bypass or a start that was never dispatched, an injected STARTING makes
   the engine dispatch that run (BUG-107). `dsl41 runs` still refuses a pruned root whose
   snapshot was written earlier, where a job bypassed and then ran (BUG-108).
+- DL-538 `scripts/refs.py` answers where a name is defined, referenced or called
+  (2026-11-22; owner chose a command over a language-server bridge; scripts/refs.py,
+  tests/test_refs_script.py, pyproject.toml, uv.lock, docs/agent-workflow.md,
+  docs/agents/review.md)
+  THE RULE. `ty` is a locked dev dependency used for navigation only. `scripts/refs.py`
+  takes a name or `PATH:LINE[:COL]`, starts one `ty server` over stdio for the call, prints
+  each definition with its references or its callers, and stops the server. It needs no
+  network and no write access, so it runs inside a read-only sandbox, for any agent with a
+  shell. `ty` may unpack its bundled stubs into `~/.cache/ty`; where it cannot, the answer
+  loses only the header of a definition in those stubs. `mypy` stays the type gate;
+  `ty check` runs nowhere.
+  THE DEFECT. Grep finds text, not a symbol. A search for the text of a start missed one of
+  the two senders of `actual start`; the references of the event's name list both.
+  MEASURED. Started cold, `ty server` answers a references request on this repository in 0.2
+  to 1.2 s. A Pyright server started cold answers before it has indexed and returns only the
+  declaration, so it needs a server kept running.
+  LIMITS. The answer is as complete as the server's types. It misses an instance attribute,
+  a local or a parameter asked by name, a pytest fixture's uses by parameter name, and a call
+  on a receiver it cannot type. A hit is a fact; an empty answer is not proof, and an absence
+  is confirmed with grep. The statecharts dispatch by row id and by writer name in tables, so
+  a call list stops at those tables.
+  REJECTED. A bridge that serves a language server to the agent as tools: it runs outside the
+  sandbox and adds its tool definitions to every turn. An editor's own server: it answers
+  only while the editor is open.
+  COST. One dev dependency at a 0.0.x release, locked under the project's `exclude-newer`.

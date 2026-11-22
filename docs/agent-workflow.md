@@ -31,6 +31,19 @@ Read the [approved operating model](agents/operating-model.md) for authority, ro
   Judge whether a case can occur from validated input and the machine's inputs,
   never from state built by hand. Report a case that only hand-built state
   reaches as unreachable (DL-491).
+- To find where a name is defined, referenced or called, run
+  `.venv/bin/python scripts/refs.py NAME` before grep (DL-538). It also works where
+  a sandbox blocks `uv run`. It starts `ty server` for the one call and prints each
+  definition with its references; `--callers` lists the calling functions, `--defs`
+  only the definitions, and `PATH:LINE[:COL]` names a position instead of a name.
+  Grep is still right for text, strings and documents.
+- `refs.py` does not find these. A NAME that is an instance attribute, a local or a
+  parameter: give its position instead. A pytest fixture's uses by parameter name.
+  A call on a receiver the server cannot type. A dotted name, which it refuses.
+  A hit is a fact. An empty or short answer is not proof: confirm an absence with grep.
+- The statecharts dispatch by row id and by writer name in tables
+  (`"job.430": "_w_actual_start"`), so a call list stops at those tables: read the
+  chart rows for what reaches a writer.
 - Identify the candidate by commit or file hash. The operator arranges review.
   Address all open findings in each rework round and return them to their raisers.
   Wait for the operator's go-ahead if a round limit or shape note is due.

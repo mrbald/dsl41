@@ -16,6 +16,9 @@ Read the [approved operating model](operating-model.md) for authority, role limi
   Verify load-bearing external citations against their sources.
   Check the implementer's evidence and its provenance. Use permitted targeted probes;
   request any needed probe your tools cannot run. Run the full suite only when the brief asks.
+- Find the references and callers of a changed name with `.venv/bin/python scripts/refs.py`,
+  and read what it does not find, as [Your task](../agent-workflow.md#your-task) says.
+  An empty answer is not proof; confirm an absence with grep.
 - Keep the candidate read-only. Write findings to the assigned scratch file if permitted;
   otherwise return the full findings for the operator to save.
   Name the failure scenario, file and line, and an acceptance check for each finding.

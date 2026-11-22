@@ -61,6 +61,9 @@ dev = [
     # the browsers themselves are a separate `playwright install` (absent = the
     # test skips), so a plain `pytest -q` needs neither.
     "playwright>=1.50",
+    # DL-538: `scripts/refs.py` starts `ty server` to answer where a name is
+    # defined, referenced or called. Navigation only, never a gate (mypy is).
+    "ty>=0.0.105",
 ]
 
 [project.urls]
