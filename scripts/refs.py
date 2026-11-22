@@ -31,6 +31,7 @@ from urllib.request import pathname2url
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
 POSITION = re.compile(r"(?P<path>.+?):(?P<line>[0-9]+)(?::(?P<col>[0-9]+))?")
 STOP_GRACE = 3.0
+JOIN_GRACE = 1.0  # per reader thread, after the server has ended
 
 
 class Failure(Exception):
@@ -82,12 +83,30 @@ class Server:
             raise Failure(f"cannot start {exe}: {error}") from error
         assert self.proc.stdin and self.proc.stdout and self.proc.stderr
         self.stdin = self.proc.stdin
-        for target, stream in ((self._read, self.proc.stdout), (self._drain, self.proc.stderr)):
-            threading.Thread(target=target, args=(stream,), daemon=True).start()
+        self.readers = [
+            threading.Thread(target=target, args=(stream,), daemon=True)
+            for target, stream in ((self._read, self.proc.stdout), (self._drain, self.proc.stderr))
+        ]
+        for reader in self.readers:
+            reader.start()
 
+    # Only a reader thread touches the stream it reads, and it closes that stream itself;
+    # `finish` ends the process and waits for the readers to see end of file (DL-538).
     def _drain(self, stream: Any) -> None:
-        for chunk in iter(lambda: stream.read(4096), b""):
-            self.stderr_chunks.append(chunk)
+        try:
+            for chunk in iter(lambda: stream.read(4096), b""):
+                self.stderr_chunks.append(chunk)
+        except Exception:  # a thread must print nothing; the exit code carries the failure
+            pass
+        finally:
+            self._close_quietly(stream)
+
+    @staticmethod
+    def _close_quietly(stream: Any) -> None:
+        try:
+            stream.close()
+        except Exception:
+            pass
 
     def _read(self, stream: Any) -> None:
         try:
@@ -108,9 +127,10 @@ class Server:
                 if len(body) < length:
                     return
                 self.inbox.put(json.loads(body))
-        except (OSError, ValueError):
+        except Exception:  # a thread must print nothing; `request` reports the closed output
             pass
         finally:
+            self._close_quietly(stream)
             self.inbox.put(None)
 
     def send(self, message: dict[str, Any]) -> None:
@@ -185,17 +205,24 @@ class Server:
             self.deadline = max(self.deadline, time.monotonic() + STOP_GRACE)
             self.request("shutdown", {})
             self.notify("exit", {})
-            self.stdin.close()
+            self._close_quietly(self.stdin)
             self.proc.wait(timeout=STOP_GRACE)
         except (Failure, OSError, subprocess.TimeoutExpired):
             self.kill()
+        else:
+            self.join_readers()
 
     def kill(self) -> None:
         self.proc.kill()
         self.proc.wait()
-        for stream in (self.stdin, self.proc.stdout, self.proc.stderr):
-            if stream is not None:
-                stream.close()
+        self._close_quietly(self.stdin)
+        self.join_readers()
+
+    def join_readers(self) -> None:
+        """Wait, bounded, for both readers to see end of file; a process the server left
+        holding a pipe cannot keep this command waiting."""
+        for reader in self.readers:
+            reader.join(timeout=JOIN_GRACE)
 
     def stderr_text(self) -> str:
         return b"".join(self.stderr_chunks).decode(errors="replace").strip()

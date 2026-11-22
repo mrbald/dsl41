@@ -4,8 +4,10 @@ started for the call (DL-538)."""
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -279,6 +281,31 @@ def test_a_server_that_never_answers_times_out_and_leaves_no_child(
     pid = int(pidfile.read_text(encoding="utf-8"))
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+def test_a_process_left_holding_the_pipes_does_not_hold_the_command(
+    project: Path, tmp_path: Path
+) -> None:
+    pidfile = tmp_path / "grandchild.pid"
+    script = stand_in(
+        tmp_path,
+        "import subprocess\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],"
+        " stdin=subprocess.DEVNULL)\n"
+        f"open({str(pidfile)!r}, 'w').write(str(child.pid))\n"
+        "sys.stdin.buffer.read()\nimport time\ntime.sleep(600)",
+    )
+    started = time.monotonic()
+    try:
+        done = refs(project, "--timeout", "3", "--ty", str(script), "compute")
+        elapsed = time.monotonic() - started
+    finally:
+        if pidfile.exists():
+            os.kill(int(pidfile.read_text(encoding="utf-8")), signal.SIGKILL)
+    assert done.returncode == 2
+    assert done.stderr.splitlines()[0].startswith("refs.py: timeout")
+    assert "Traceback" not in done.stderr
+    assert elapsed < 15  # the grandchild lives 30 s and holds both pipes open
 
 
 def test_a_server_that_exits_at_once_is_a_protocol_error(project: Path, tmp_path: Path) -> None:
