@@ -8,7 +8,8 @@ built by hand that the offline replay refuses is not compared.
 A test that edits a store on a connection of its own (`store_surgery`, or `sqlite3` in the
 test module) leaves a store the engine did not write, so its roots are left out; `edited` names
 the tests that did. Appending a valid journal record is not an edit. Whether the check compared
-anything is asserted by an explicit test over named scenarios, not here.
+anything is asserted by an explicit test over named scenarios, not here. The comparison runs
+once per store, when the module's tests are done, so no test pays for a replay of its own.
 """
 
 from __future__ import annotations
@@ -137,9 +138,23 @@ def check_roots(directory: Path) -> int:
     return matched
 
 
+@pytest.fixture(autouse=True, scope="module")
+def rows_equal_their_replay_once() -> Any:
+    """At the module's end, each store a test of it left is compared once (module docstring)."""
+    left: list[Path] = []
+    yield left
+    for directory in left:
+        check_roots(directory)
+
+
 @pytest.fixture(autouse=True)
-def rows_equal_their_replay(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Any:
-    """Every scenario's stores pass the equality check at teardown (module docstring)."""
+def rows_equal_their_replay(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    rows_equal_their_replay_once: list[Path],
+) -> Any:
+    """Note the stores a test leaves for the module's one comparison, unless it edited one by
+    hand (module docstring)."""
     touched: list[str] = []
     real = sqlite3.connect
 
@@ -151,7 +166,6 @@ def rows_equal_their_replay(request: pytest.FixtureRequest, monkeypatch: pytest.
         return db
 
     monkeypatch.setattr(sqlite3, "connect", watched)
-    # taken before the test, so the directory outlives this fixture's teardown
     directory = request.getfixturevalue("tmp_path") if "tmp_path" in request.fixturenames else None
     yield
     if directory is None:
@@ -159,4 +173,4 @@ def rows_equal_their_replay(request: pytest.FixtureRequest, monkeypatch: pytest.
     if touched:
         edited.append(request.node.nodeid)
         return
-    check_roots(directory)
+    rows_equal_their_replay_once.append(directory)

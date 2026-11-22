@@ -29,7 +29,10 @@ from typing import Any
 
 import pytest
 from model_harness import _lose_the_decision_for
-from transitions_check import rows_equal_their_replay  # noqa: F401 -- autouse
+from transitions_check import (  # noqa: F401 -- autouse
+    rows_equal_their_replay,
+    rows_equal_their_replay_once,
+)
 from typer.testing import CliRunner
 
 from dsl41 import runner_history

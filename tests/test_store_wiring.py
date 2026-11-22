@@ -20,7 +20,10 @@ from typing import Any
 
 import pytest
 from store_surgery import append, rows
-from transitions_check import rows_equal_their_replay  # noqa: F401 -- autouse
+from transitions_check import (  # noqa: F401 -- autouse
+    rows_equal_their_replay,
+    rows_equal_their_replay_once,
+)
 
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle

@@ -24,7 +24,10 @@ from typing import Any
 
 import pytest
 from store_surgery import rows as journal_rows
-from transitions_check import rows_equal_their_replay  # noqa: F401 -- autouse
+from transitions_check import (  # noqa: F401 -- autouse
+    rows_equal_their_replay,
+    rows_equal_their_replay_once,
+)
 
 from dsl41 import runner_startup, runner_transitions
 from dsl41.canon import CanonError, canonical_bytes, decode
@@ -309,6 +312,43 @@ def test_an_entry_the_store_cannot_hold_is_refused_before_anything_is_written(
             store.append(transitions=[_entry()])
         assert store.append() == 0
         assert store.last_seq() == 0 and _everything(store) == []
+
+
+def _commits(store: SqliteStore) -> list[str]:
+    """The statements that end a transaction on `store`'s connection, as they run."""
+    ended: list[str] = []
+    store._db.set_trace_callback(
+        lambda statement: ended.append(statement) if statement.startswith("COMMIT") else None
+    )
+    return ended
+
+
+def test_an_admission_is_one_transaction_and_a_start_with_nothing_to_do_adds_one(
+    tmp_path: Path,
+) -> None:
+    """An admission with its rows and its coverage is one commit, as it was before the rows.
+    A start with nothing to trim and no gap to record writes its history row alone, in one
+    commit; a fresh root the same."""
+    path = tmp_path / "s.db"
+
+    def record(n: int) -> Record:  # no engine start: there is no earlier start to bound
+        return Record(T0, "input", None, None, {"n": n})
+
+    with closing(SqliteStore(path)) as store:
+        ended = _commits(store)
+        assert begin(store, where="t") is None
+        assert len(ended) == 1
+        ended.clear()
+        store.append(record(0), record(1), transitions=[_entry(0), _entry(1)])
+        assert len(ended) == 1
+        ended.clear()
+        store.append(record(2))  # no rows: coverage still grows in the same commit
+        assert len(ended) == 1
+    with closing(SqliteStore(path)) as store:  # a restart
+        ended = _commits(store)
+        assert begin(store, where="t") is None
+        assert len(ended) == 1
+        assert store.transitions_coverage() == [Interval(1, 3, True)]
 
 
 # ------------------------------------------------------------------ restart
@@ -906,7 +946,16 @@ def _filled(path: Path, records: int, per: int) -> SqliteStore:
     _cover(
         store,
         [
-            (seq, n, _entry(n, job=jobs[(seq + n) % 4], transition=f"T{n % 3}"))
+            (
+                seq,
+                n,
+                _entry(
+                    n,
+                    job=jobs[(seq + n) % 4],
+                    transition=f"T{n % 3}",
+                    cause="c" * (3000 if seq % 12 == 0 else 5),
+                ),
+            )
             for seq in range(1, records + 1)
             for n in range(per)
         ],
@@ -915,43 +964,53 @@ def _filled(path: Path, records: int, per: int) -> SqliteStore:
     return store
 
 
-def _pages(store: Store, *, backward: bool, limit: int, start: Any = None) -> Iterator[Any]:
+#: A page's entry limit and byte cap small enough that a few hundred rows cross both.
+_PAGE_LIMIT, _PAGE_BYTES = 40, 9000
+
+
+def _pages(store: Store, *, backward: bool, start: Any = None) -> Iterator[Any]:
     cursor = start
     while True:
-        read = store.read_transitions(
-            TransitionQuery(cursor, backward, limit, upto=store.last_seq())
+        query = TransitionQuery(cursor, backward, _PAGE_LIMIT, upto=store.last_seq())
+        answer = runner_transitions.answer(
+            store, Request(query, None), header={}, byte_cap=_PAGE_BYTES
         )
-        request = Request(TransitionQuery(cursor, backward, limit, upto=store.last_seq()), None)
-        answer = reply(read, request)
         yield answer
         if not answer["more"]:
             return
         cursor = tuple(answer["next"])
 
 
-def test_paging_both_ways_over_200000_rows_returns_every_row_once_across_a_restart(
-    tmp_path: Path,
-) -> None:
-    """Forward and backward pages cover every row exactly once, in key order, and a cursor
-    taken before the store is closed and reopened by a restart resumes exactly."""
+def test_paging_both_ways_returns_every_row_once_across_a_restart(tmp_path: Path) -> None:
+    """Forward and backward pages cover every row exactly once, in key order; some pages stop at
+    the entry limit and some at the byte cap; a cursor taken before the store is closed and
+    reopened by a restart resumes exactly. A test of the rule needs only enough rows to cross
+    both caps several times."""
     path = tmp_path / "s.db"
-    store = _filled(path, 200, 1000)
-    expected = [(seq, n) for seq in range(1, 201) for n in range(1000)]
+    records, per = 60, 5
+    store = _filled(path, records, per)
+    expected = [(seq, n) for seq in range(1, records + 1) for n in range(per)]
     for backward in (False, True):
         seen: list[tuple[int, int]] = []
-        pages = _pages(store, backward=backward, limit=5000)
-        for _ in range(20):
+        sizes: list[tuple[int, bool]] = []
+        pages = _pages(store, backward=backward)
+        for _ in range(3):
             page = next(pages)
             keys = [(e["seq"], e["n"]) for e in page["entries"]]
             seen.extend(reversed(keys) if backward else keys)
+            sizes.append((len(keys), page["more"]))
         cursor = tuple(page["next"])
         store.close()
         store = SqliteStore(path)  # a restart reopens the store and begins a history
         assert begin(store, where="test") is None
-        for page in _pages(store, backward=backward, limit=5000, start=cursor):
+        for page in _pages(store, backward=backward, start=cursor):
             keys = [(e["seq"], e["n"]) for e in page["entries"]]
             seen.extend(reversed(keys) if backward else keys)
+            sizes.append((len(keys), page["more"]))
+            assert _encoded(page) <= _PAGE_BYTES
         assert seen == (list(reversed(expected)) if backward else expected)
+        assert (_PAGE_LIMIT, True) in sizes  # a page the entry limit stopped
+        assert any(size < _PAGE_LIMIT and more for size, more in sizes)  # the byte cap stopped
     store.close()
 
 
@@ -973,15 +1032,15 @@ def _plans_of(store: SqliteStore, query: TransitionQuery) -> list[str]:
 @pytest.mark.parametrize("job", [None, "a"])
 @pytest.mark.parametrize("transition", [None, "T1"])
 @pytest.mark.parametrize("backward", [False, True])
-@pytest.mark.parametrize("cursor", [None, (100, 3)])
+@pytest.mark.parametrize("cursor", [None, (10, 3)])
 def test_each_filter_combination_reads_through_an_index(
     tmp_path: Path, job: str | None, transition: str | None, backward: bool, cursor: Any
 ) -> None:
     """The plan of every page and of the counts names the key or an index and searches it from
     the cursor: no read scans the table."""
-    with closing(_filled(tmp_path / "s.db", 200, 4)) as store:
+    with closing(_filled(tmp_path / "s.db", 20, 4)) as store:
         query = TransitionQuery(
-            cursor, backward, 50, upto=200, job=job, transition=transition, counts=("T1",)
+            cursor, backward, 50, upto=20, job=job, transition=transition, counts=("T1",)
         )
         plans = _plans_of(store, query)
         page, counts = plans[0], plans[1]

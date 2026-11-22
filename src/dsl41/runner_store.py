@@ -160,7 +160,8 @@ class Store(Protocol):
         ...
 
     def trim_transitions(self) -> None:
-        """Drop the rows and coverage outside the retained records (DL-536)."""
+        """Drop the rows and coverage outside the retained records; with nothing outside them,
+        write nothing (DL-536)."""
         ...
 
     def begin_history(self, history: str, first_seq: int | None = None) -> None:
@@ -1047,8 +1048,17 @@ class SqliteStore:
             self._set_coverage(_overlaid(self.transitions_coverage(), intervals))
 
     def trim_transitions(self) -> None:
+        first, last = self.first_seq(), self.last_seq()
+        coverage = self.transitions_coverage()
+        outside = self._db.execute(
+            "SELECT 1 FROM transitions WHERE seq < ? UNION ALL"
+            " SELECT 1 FROM transitions WHERE seq > ? LIMIT 1",
+            (first, last),
+        ).fetchone()
+        if outside is None and _trimmed(coverage, first, last) == coverage:
+            return  # a start with nothing to trim commits nothing for it
         with self._transaction():
-            self._trim(self.first_seq(), self.last_seq())
+            self._trim(first, last)
 
     def begin_history(self, history: str, first_seq: int | None = None) -> None:
         with self._transaction():
