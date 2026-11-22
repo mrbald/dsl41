@@ -130,7 +130,7 @@ class OracleWriters(OracleCascade):
         emission."""
         old = self._runtime(job).status
         self.store.transition(job, new, self._now, line.code, clear_exit_code=line.clear)
-        self._record(job, f"{old}->{new}", line.cause)
+        self._record(job, f"{old}->{new}", line.cause, run_number=line.run)
         if line.kill:
             self._kill_emissions.append(len(self._emitted))
         self._emit("STATUS", job=job, status=new)
@@ -194,8 +194,11 @@ class OracleWriters(OracleCascade):
         )
 
     def _w_bypass(self, job: str, outcome: Outcome) -> StatusLine:
+        """job.101: a bypass's SUCCESS begins the run its extent's `actual start` gives
+        (job.424), the one after the row's, so its entry carries that number (DL-537)."""
         attempt = cast(StartFacts, outcome.event.payload)
-        return StatusLine(f"ON_NOEXEC bypass ({attempt.cause})")
+        run = self._runtime(job).run_number + 1
+        return StatusLine(f"ON_NOEXEC bypass ({attempt.cause})", run=run)
 
     def _w_queue(self, job: str, outcome: Outcome) -> StatusLine:
         """job.103: an idle job enters QUE_WAIT with a new rank. A rank the row still carries is
@@ -275,9 +278,10 @@ class OracleWriters(OracleCascade):
 
     def _w_starting(self, job: str, outcome: Outcome) -> StatusLine:
         """ADMITTED's completion: STARTING, with the cause of the run the payload that entered
-        ADMITTED carries (DL-364)."""
+        ADMITTED carries (DL-364). ADMITTED's entry sent the run's `actual start` first, so the
+        row's run is the one this STARTING begins, and its entry carries it (DL-537)."""
         admission = cast(AdmissionFacts, outcome.event.payload.admission)
-        return StatusLine(admission.cause)
+        return StatusLine(admission.cause, run=self._runtime(job).run_number)
 
     def _w_running(self, job: str, outcome: Outcome) -> StatusLine:
         started = cast(Started, outcome.event.payload)

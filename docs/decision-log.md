@@ -4982,6 +4982,7 @@ relitigate an entry; append a new one.
   end to end against a real journal, manifest and spool -- 29 tests.
   2165 -> 2194 passed; ruff, mypy, arch_check clean (baseline updated:
   `cli.py`'s advisory line count moved with the new command).
+  NARROWED BY DL-537: a run opens at the entry that carries its number, not the Nth STARTING.
 - DL-114 the period model is frozen (2026-08-20). `docs/period-model.md` is
   normative for periods, seals, the carry, the lineage fence and the optional
   run root, in the way `docs/concurrency-model.md` is for admission and
@@ -27623,3 +27624,35 @@ relitigate an entry; append a new one.
   begins at the upgrade. After going back a build and forward again, the earlier build's
   interval is a gap.
   NOT BUILT. The terminal UI still reads `trace`. Past runs are the next slices.
+- DL-537 A run opens where the oracle starts it
+  (2026-11-22; BUG-106, found while designing the read of past runs;
+  src/dsl41/oracle_writers.py, src/dsl41/oracle_intents.py, src/dsl41/runner_history.py,
+  docs/control-protocol.md, docs/runner-design.md, docs/ir-design.md,
+  tests/test_run_openings.py, tests/transitions_check.py; narrows DL-113; additive in
+  dialect 5, DL-217; no state-machine version change; closes BUG-106)
+  THE RULE. The status entry of the trace that begins a run carries the run's number: the
+  STARTING of a start, or the SUCCESS of an ON_NOEXEC bypass, which is its run's only entry.
+  No other status entry carries one. The run-history fold opens a run's window at such an
+  entry and numbers it with that number; a bypass's window closes where it opens. A
+  `->STARTING` with no number, which an injected status writes, opens no run and leaves the
+  current window as it is.
+  THE DEFECT. The fold counted a job's `->STARTING` entries and the oracle counts starts. An
+  injected STARTING invented a run, and every later run of the job was read under the
+  neighbouring window: its `started_by`, its revision and its trace close. A box retyped to a
+  command then showed one run number twice. A bypass opened no window, and its SUCCESS
+  replaced the end and the status of the run before it. The snapshot's `runs` shared the
+  function and the defects.
+  UNCHANGED. Every oracle decision, the charts, the records and the snapshot format. A leaf
+  run still has a row only when it has a `dispatch` record, so a bypassed leaf has none.
+  COST. One optional field on one trace entry per run, in `trace` and in `transitions`. A
+  `transitions` row stored before this rule has no number on its start, so there a start
+  without one proves nothing. History that a snapshot holds from before this rule is read as
+  it was written and is not repaired. Where a job had an injected STARTING or a bypass, that
+  history can misnumber the job's runs, show a run under its neighbour's times or hold an
+  invented run, until retention drops it; a run it left open stays, since retention keeps
+  every run with no end. The next start of such a job takes its true number, and its window
+  replaces an older one of that number. The rehearsal rollup still counts STARTING entries
+  (DL-184).
+  NOT BUILT. After a bypass or a start that was never dispatched, an injected STARTING makes
+  the engine dispatch that run (BUG-107). `dsl41 runs` still refuses a pruned root whose
+  snapshot was written earlier, where a job bypassed and then ran (BUG-108).

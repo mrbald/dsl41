@@ -499,7 +499,8 @@ class Oracle:                             # one concrete interpreter, no protoco
 
 A `TraceEntry` has three more optional fields, `start_source`, `run_number` and
 `refused_status`. The oracle sets them on the `START_REFUSED` line of an input's own start
-(DL-484).
+(DL-484). It also sets `run_number` on the status entry that begins a run: its STARTING, or
+the SUCCESS of an ON_NOEXEC bypass (DL-537).
 
 `Event`, `TraceEntry`, `RuntimeState` and its rows live in `oracle_state.py`; the interpreter
 in `oracle.py` imports them and `oracle_state.py` imports nothing from it (DL-91).

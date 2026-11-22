@@ -759,7 +759,10 @@ verdict (DL-156).
 An open run gets a row with a null `ended_at` and a null duration, never a
 fabricated one. Every CMD and FW start gets a `dispatch` record, so a file
 watch has a row like a command. A box's row comes from replay, as does a
-leaf run that KILLJOB or a `term_run_time` kill ended.
+leaf run that KILLJOB or a `term_run_time` kill ended. In the replayed
+trace, a run opens at the status entry that carries its run number, and
+an entry without one, such as an injected STARTING, opens no run
+(DL-537).
 A duration series breaks where the row's `job_hash` moved, falling back to
 `catalog_hash` only when either row lacks a job hash; both ride on every
 row in the JSON and CSV formats, so an external consumer can segment

@@ -10,6 +10,10 @@ test module) leaves a store the engine did not write, so its roots are left out;
 the tests that did. Appending a valid journal record is not an edit. Whether the check compared
 anything is asserted by an explicit test over named scenarios, not here. The comparison runs
 once per store, when the module's tests are done, so no test pays for a replay of its own.
+
+The same replay checks how runs are numbered (DL-537): for every row and tombstone the replay
+leaves, the status entries that carry a run number are exactly the runs from the one after the
+snapshot row's (or 1) to the row's run number (`runs_open_in_order`).
 """
 
 from __future__ import annotations
@@ -28,7 +32,7 @@ from dsl41 import runner_journal
 from dsl41.canon import canonical_bytes, decode
 from dsl41.oracle_reads import OracleReads
 from dsl41.runner_clock import EngineError
-from dsl41.runner_journal import CONFIG_MARKER, STORE_NAME, replay_store
+from dsl41.runner_journal import CONFIG_MARKER, STORE_NAME, StoreReplay, replay_store
 from dsl41.runner_store import SqliteStore
 
 #: tests left out because they edited a store by hand
@@ -82,6 +86,7 @@ def rows_and_replay(path: Path) -> tuple[list[Row], list[Row]] | None:
                 found = replay_store(store, where=str(path))
         except EngineError:
             return None  # a store built by hand that the offline replay refuses
+        runs_open_in_order(found)
         after = 0 if found.anchor is None else found.anchor.seq
         covered = [(i.first, i.last) for i in store.transitions_coverage() if i.covered]
 
@@ -96,6 +101,25 @@ def rows_and_replay(path: Path) -> tuple[list[Row], list[Row]] | None:
             if counted(int(seq))
         ]
     return stored, [row for row in replayed if counted(row[0])]
+
+
+def runs_open_in_order(found: StoreReplay) -> None:
+    """For every live row and every tombstone after the replay, the job's numbered status
+    entries are exactly the runs from the one after its anchor row's (or 1) to the row's
+    `run_number`, none included (DL-537)."""
+    rows = None if found.anchor is None else found.anchor.rows
+    before = {} if rows is None else {**rows.tombstones, **rows.jobs}
+    numbered: dict[str, list[int]] = {}
+    for entry in found.oracle.trace():
+        if "->" in entry.transition and entry.run_number is not None:
+            numbered.setdefault(entry.job, []).append(entry.run_number)
+    store = found.oracle.store
+    after = {**store.tombstones, **store.job}
+    assert set(numbered) <= set(after), sorted(set(numbered) - set(after))
+    for job, row in after.items():
+        first = before[job].run_number + 1 if job in before else 1
+        runs = numbered.get(job, [])
+        assert runs == list(range(first, row.run_number + 1)), (job, runs, row.run_number)
 
 
 def _canon(entry: Any) -> Any:

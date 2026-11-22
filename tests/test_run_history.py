@@ -301,7 +301,11 @@ def test_a_killjob_terminated_run_closes_via_the_trace_not_a_status_input() -> N
     records = [_header(), _dispatch("j1", 1, run_dir=None, started_at=T0)]
     trace = [
         TraceEntry(
-            at=T0, job="j1", transition="INACTIVE->STARTING", cause="STARTJOB event (control)"
+            at=T0,
+            job="j1",
+            transition="INACTIVE->STARTING",
+            cause="STARTJOB event (control)",
+            run_number=1,
         ),
         TraceEntry(at=T0, job="j1", transition="STARTING->RUNNING", cause="admitted"),
         TraceEntry(
@@ -322,15 +326,19 @@ def test_a_killjob_terminated_run_closes_via_the_trace_not_a_status_input() -> N
 def test_box_row_folds_entirely_from_the_trace() -> None:
     """(DL-113 decision 2): a box gets no dispatch record
     (runner-design ss4's dispatch table) and its fold is emitted, never
-    journaled -- the row comes from the Nth `*->STARTING` transition to the
-    next terminal one."""
+    journaled -- the row comes from the STARTING entry that carries its run number to
+    the next terminal one (DL-537)."""
     catalog = lower_source(
         "insert_job: b1\njob_type: b\n\n"
         "insert_job: j1\njob_type: c\ncommand: exit 0\nmachine: m1\nbox_name: b1\n"
     )
     trace = [
         TraceEntry(
-            at=T0, job="b1", transition="INACTIVE->STARTING", cause="STARTJOB event (control)"
+            at=T0,
+            job="b1",
+            transition="INACTIVE->STARTING",
+            cause="STARTJOB event (control)",
+            run_number=1,
         ),
         TraceEntry(at=T0, job="b1", transition="STARTING->RUNNING", cause="admitted"),
         TraceEntry(
@@ -354,7 +362,11 @@ def test_a_box_still_running_at_journal_end_gets_a_null_duration_too() -> None:
     catalog = lower_source("insert_job: b1\njob_type: b\n")
     trace = [
         TraceEntry(
-            at=T0, job="b1", transition="INACTIVE->STARTING", cause="STARTJOB event (control)"
+            at=T0,
+            job="b1",
+            transition="INACTIVE->STARTING",
+            cause="STARTJOB event (control)",
+            run_number=1,
         ),
         TraceEntry(at=T0, job="b1", transition="STARTING->RUNNING", cause="admitted"),
     ]
@@ -367,7 +379,7 @@ def test_a_box_still_running_at_journal_end_gets_a_null_duration_too() -> None:
 def test_a_second_box_run_opens_its_own_window_after_the_first_closes() -> None:
     catalog = lower_source("insert_job: b1\njob_type: b\n")
     trace = [
-        TraceEntry(at=T0, job="b1", transition="INACTIVE->STARTING", cause="first"),
+        TraceEntry(at=T0, job="b1", transition="INACTIVE->STARTING", cause="first", run_number=1),
         TraceEntry(at=T0, job="b1", transition="STARTING->RUNNING", cause="first"),
         TraceEntry(
             at=T0 + timedelta(minutes=1), job="b1", transition="RUNNING->SUCCESS", cause="fold"
@@ -377,6 +389,7 @@ def test_a_second_box_run_opens_its_own_window_after_the_first_closes() -> None:
             job="b1",
             transition="SUCCESS->STARTING",
             cause="FORCE_STARTJOB event (control)",
+            run_number=2,
         ),
         TraceEntry(
             at=T0 + timedelta(hours=1), job="b1", transition="STARTING->RUNNING", cause="second"

@@ -742,9 +742,13 @@ def test_trace_query_since_filtering(short_root: Path) -> None:
             assert full["ok"] is True
             assert len(full["entries"]) == full["last_seq"]
             assert [e["seq"] for e in full["entries"]] == list(range(1, full["last_seq"] + 1))
-            assert all(
-                set(e) == {"seq", "at", "job", "transition", "cause"} for e in full["entries"]
-            )
+            # DL-537: the entry that begins the run adds its number
+            base = {"seq", "at", "job", "transition", "cause"}
+            assert [set(e) for e in full["entries"]] == [
+                base | {"run_number"},
+                *[base] * (len(full["entries"]) - 1),
+            ]
+            assert full["entries"][0]["run_number"] == 1
 
             partial = await _control_call(server.path, {"cmd": "trace", "since": 1})
             assert [e["seq"] for e in partial["entries"]] == list(range(2, full["last_seq"] + 1))

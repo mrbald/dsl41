@@ -828,7 +828,12 @@ def test_sem10_refusal_stamps_source_run_and_status_through_start_relay(
         1,
         status,
     )
-    assert all(t.run_number is None for t in o.trace() if t.transition != "START_REFUSED")
+    # DL-537: besides a refusal, only the status entry that begins a run carries a number
+    assert [
+        (t.transition, t.run_number)
+        for t in o.trace()
+        if t.transition != "START_REFUSED" and t.run_number is not None
+    ] == [("INACTIVE->STARTING", 1)]
 
 
 def test_sem10c_explicit_startjob_refused_at_a_sem10_gate_leaves_a_trace_record() -> None:

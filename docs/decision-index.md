@@ -538,3 +538,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-534 | `explain` answers why a job has not started | [docs/control-protocol.md](control-protocol.md), [docs/protocol-evolution.md](protocol-evolution.md) |
 | DL-535 | The terminal UI shows why a job has not started and goes to each cause | [README.md](../README.md), [docs/cli-tui-qualification.md](cli-tui-qualification.md), [docs/runner-design.md](runner-design.md) |
 | DL-536 | Transitions are committed with the journal record that produced them | [README.md](../README.md), [docs/access-model.md](access-model.md), [docs/control-protocol.md](control-protocol.md), [docs/gateway.md](gateway.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |
+| DL-537 | A run opens where the oracle starts it | [docs/control-protocol.md](control-protocol.md), [docs/ir-design.md](ir-design.md), [docs/runner-design.md](runner-design.md) |

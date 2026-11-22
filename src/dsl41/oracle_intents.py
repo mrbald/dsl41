@@ -56,6 +56,9 @@ class StatusLine:
     code: int | None = None
     clear: bool = False
     kill: bool = False  # DL-462: emission provenance only, never stored event data.
+    #: the run this status write begins, which its trace entry carries; None on every other
+    #: status write (DL-537)
+    run: int | None = None
 
 
 class Move:

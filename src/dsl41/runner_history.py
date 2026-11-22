@@ -19,12 +19,14 @@ five decisions shape it.
    clocks. A run still open takes spool's `started_at` from a valid spawn.json alone.
 
 2. **Boxes get rows, from the trace.** A box has no `dispatch` record (runner-design ss4) and
-   its fold is emitted, never journaled (ss7), so a box row is built from the replayed trace:
-   the Nth `*->STARTING` transition for the job opens run N, and the next terminal transition
-   closes it (SEM-01 latching: a later CHANGE_STATUS overwrites the recorded close). A box set
-   INACTIVE while it runs closes its window as INACTIVE at that instant (SEM-18, DL-242).
-   `clock_source` is always "journal". `started_by` for every row, box or leaf, is the cause
-   the STARTING transition carries, which a `dispatch` record does not.
+   its fold is emitted, never journaled (ss7), so a box row is built from the replayed trace.
+   The status entry that begins run N carries N (DL-537): a STARTING, or an ON_NOEXEC bypass's
+   SUCCESS, which also closes its run. A status entry with no number, an injected STARTING
+   among them, opens nothing. The next terminal transition closes the run (SEM-01 latching: a
+   later CHANGE_STATUS overwrites the recorded close). A box set INACTIVE while it runs closes
+   its window as INACTIVE at that instant (SEM-18, DL-242). `clock_source` is always
+   "journal". `started_by` for every row, box or leaf, is the cause the run's opening entry
+   carries, which a `dispatch` record does not.
 
    The trace also closes the leaf runs that produce no `STATUS` input: KILLJOB and a
    term_run_time auto-TERMINATE are decided by the oracle while it processes the KILLJOB or
@@ -62,12 +64,12 @@ five decisions shape it.
 
 6. **A pruned store anchors at its snapshot.** Retention deletes the oldest records, and the
    replay starts from the latest snapshot (`runner_journal.replay_store`), so the trace covers
-   only what follows it. The snapshot's job rows are the anchor: a job's run numbering continues
-   from the row's `run_number`, and that run's window opens or closes as the row says. A run
-   that began at or before the anchor is `partial`: its status comes from its retained
-   completion, the anchor row and the trace after it, and a run that ended before the anchor
-   with none of those is `UNKNOWN`, never RUNNING. `full` is only for a run the trace covers
-   from its start.
+   only what follows it. The snapshot's job rows are the anchor: the row's `run_number` is the
+   job's latest run, and that run's window opens or closes as the row says. A run that began
+   at or before the anchor is `partial`: its status comes from its retained completion, the
+   anchor row and the trace after it, and a run that ended before the anchor with none of
+   those is `UNKNOWN`, never RUNNING. `full` is only for a run the trace covers from its
+   start.
 """
 
 from __future__ import annotations
@@ -160,10 +162,10 @@ class SpoolRead:
 
 @dataclass(frozen=True)
 class _TraceWindow:
-    """One run's boundaries in the replayed trace (decision 2): the Nth `*->STARTING` transition for
-    a job opens it, the next terminal transition closes it (None if none shows). `partial` marks
-    a run that began before the trace (decision 6); `approximate` one whose start only an anchor
-    row gives, as the row's last status change."""
+    """One run's boundaries in the replayed trace (decision 2): the status entry that carries its
+    run number opens it, the next terminal transition closes it (None if none shows). `partial`
+    marks a run that began before the trace (decision 6); `approximate` one whose start only an
+    anchor row gives, as the row's last status change."""
 
     run_number: int
     started_at: datetime
@@ -216,11 +218,12 @@ def _windows_from_entries(
 ) -> list[_TraceWindow]:
     """One job's trace entries, filtered to that job and in trace order, folded into run windows
     (decision 2). Out-of-band markers (`SCHED_DISARM`, `START_REFUSED`, ...) carry no "->" and are
-    skipped. The first window is run 1. A pruned store's replay starts at a snapshot (decision
-    6): the snapshot's run history gives the runs before the trace and the trace continues the
-    last; with no history for the job, the anchor row gives its run, opened or closed as the row
-    says. The trace's first start is the run after it. `revs` is the configuration rev each
-    entry ran under, in step with `entries`; a window takes its opening entry's."""
+    skipped. A status entry that carries a run number opens that run's window; one that does
+    not opens none (DL-537). A pruned store's replay starts at a snapshot (decision 6): the
+    snapshot's run history gives the runs before the trace and the trace continues the last;
+    with no history for the job, the anchor row gives its run, opened or closed as the row
+    says. `revs` is the configuration rev each entry ran under, in step with `entries`; a
+    window takes its opening entry's."""
     windows: list[_TraceWindow] = []
     rev: int | None = None
     run_number = 0
@@ -236,8 +239,8 @@ def _windows_from_entries(
         ended_at, status, partial, approximate = last.ended_at, last.status, True, last.approximate
         rev = last.rev
     elif anchor is not None and anchor.run_number:
-        # the history kept nothing of the row's run (retention dropped it): the row still
-        # numbers the next run
+        # the history kept nothing of the row's run (retention dropped it): the row gives that
+        # run's window, and the next run's opening entry carries its own number
         windows = list(history)
         run_number, partial, approximate = anchor.run_number, True, True
         started_at = anchor.status_at or datetime.min
@@ -248,7 +251,9 @@ def _windows_from_entries(
         old, sep, new = entry.transition.partition("->")
         if not sep:
             continue
-        if new == "STARTING":
+        if entry.run_number is not None:
+            # the status entry that begins a run names it: a STARTING, or a bypass's own
+            # SUCCESS, which also closes it (DL-537)
             if started_at is not None:
                 windows.append(
                     _TraceWindow(
@@ -262,8 +267,10 @@ def _windows_from_entries(
                         rev,
                     )
                 )
-            run_number += 1
+            run_number = entry.run_number
             started_at, started_by, ended_at, status = entry.at, entry.cause, None, None
+            if new in TERMINAL:
+                ended_at, status = entry.at, new
             partial = approximate = False
             rev = revs[position] if position < len(revs) else None
         elif new in TERMINAL and started_at is not None:

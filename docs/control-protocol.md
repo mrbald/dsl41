@@ -780,6 +780,10 @@ exclusive.
 
 Refusals may also carry `start_source` (the input's source), `run_number`
 (the job's run when refused), and `refused_status` (its status when refused).
+The status entry that begins a run carries that run's `run_number`: its
+STARTING, or the SUCCESS of an ON_NOEXEC bypass. No other status entry
+carries one, so an injected STARTING has none (DL-537). A start entry
+reads `{"seq": 1, …, "transition": "INACTIVE->STARTING", "run_number": 1}`.
 Unset fields are omitted. These are optional answer fields under DL-217.
 Missing provenance means an unknown origin; clients must not infer it from `cause`.
 
@@ -826,7 +830,7 @@ next start tries again.
 {"ok": true,
  "entries": [{"seq": 41, "n": 0, "at": "2026-07-01T08:00:00",
               "job": "j", "transition": "INACTIVE->STARTING",
-              "cause": "STARTJOB event (control)"}],
+              "cause": "STARTJOB event (control)", "run_number": 1}],
  "next": [41, 0], "more": true,
  "floor": 12, "expired": false, "pruned": [],
  "covered": [[41, 90]], "gaps": [],
@@ -854,7 +858,10 @@ expires.
 `entries` are in key order whatever the direction. Each has the `trace`
 entry's fields, written as `trace` writes them (`at` included), unset
 optional ones omitted, with `seq` the journal seq of its record and `n` its
-ordinal there. `next` is the cursor that continues the page in its
+ordinal there. A row is the entry as it was committed: a row written before
+the start entry carried its number (DL-537) has no `run_number` on its
+start, so a stored STARTING row without the field proves nothing there.
+`next` is the cursor that continues the page in its
 direction: the key of its last entry in that direction, or the request's
 cursor when the page is empty; it is never above `[watermark, 2^63 - 1]`, so
 a cursor past the watermark goes on from the watermark. `more` says whether

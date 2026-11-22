@@ -72,6 +72,12 @@ def _old_trace_response(oracle: Oracle, since: int) -> dict[str, Any]:
                 "job": entry.job,
                 "transition": entry.transition,
                 "cause": entry.cause,
+                # the optional fields, each only where the entry sets it (DL-484, DL-537)
+                **{
+                    key: value
+                    for key in ("start_source", "run_number", "refused_status")
+                    if (value := getattr(entry, key)) is not None
+                },
             }
             for seq, entry in enumerate(entries, start=1)
             if seq > since
@@ -88,6 +94,9 @@ def test_the_trace_verb_answers_the_same_bytes_as_the_full_copy(tmp_path: Path) 
     engine.oracle = _traced_oracle()
     server = ControlServer(engine, tmp_path / "control.sock")
     n = len(engine.oracle.trace())
+    # the trace holds the starts that carry their run's number, so the comparison covers it
+    numbered = [(e.job, e.run_number) for e in engine.oracle.trace() if e.run_number is not None]
+    assert [run for job, run in numbered if job == "pa"] == [1, 2, 3, 4]
     for since in (-3, 0, 1, 4, n - 1, n, n + 7):
         new = server._trace({"cmd": "trace", "since": since})
         old = _old_trace_response(engine.oracle, since)
