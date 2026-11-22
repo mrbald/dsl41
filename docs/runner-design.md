@@ -774,6 +774,13 @@ An update whose prepared candidate equals the applied configuration (catalog has
 job order, runtime profile, marks, captured bytes and mapping) and the live profile
 admits nothing: no intent, revision, configuration record or stop. Its answer
 carries `unchanged: {rev, catalog_hash}` (DL-478).
+A kept job whose definition differs only in its `status:` line is seed-only: the plan
+lists it in `unchanged` and in `seed_only` with both definition hashes, and the edit adds
+no reason to stop, filter or mark it. A box scope that holds it treats it as an
+unchanged member. It applies as a new revision with the row untouched; `config applied`
+lists it in `seed_only` for display (SEM-24, DL-533). Recovery checks each seed-only
+entry by name and both hashes, as it checks a changed one. A restart's comparison of the
+launched estate with the stored one still counts such an edit as a change.
 Ordinary jobs keep the interruption rule:
 stop, swap, then choose rerun/hold/none under the new catalog. Structural running-box
 changes stop members, commit KILLJOBs before application to prevent old-run replacement,

@@ -36,7 +36,6 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-19 is the known 
 - **BUG-3**: `config applied.stopped` reports `none` and `update --wait` misreports a stop-set job that an earlier committed plan reran under its new definition. No unplanned job runs (DL-432). The same list names a job `none` when its command ended by itself just before the admission and its SUCCESS is fed after the application.
 - **BUG-8**: A run root started by the legacy unit cannot resume under the main-config unit; no migration path is documented (DL-437).
 - **BUG-58**: A reread or update reply can exceed the engine's 16 MiB one-line limit: the reasons in `lint_messages` and `non_idempotent` are unbounded (`src/dsl41/reread_worker.py`). The DL-482 budget covers the definition differences only.
-- **BUG-104**: An edit of only the `status:` line of a job an update keeps counts as a change: the job is in `reread`'s difference and in the set the update names, and a running attempt of it is stopped (`initial_status` is part of the job's definition hash). The line itself moves no flag, because `Oracle.replace_catalog` leaves a kept row untouched; the stop is then settled by the interruption rule, which runs the job again or holds a job marked non-idempotent. The edit can have no effect except that stop. Rule to build: such an edit names and stops nothing, and `reread` says the line only seeds a new job (DL-531).
 
 ### Low
 

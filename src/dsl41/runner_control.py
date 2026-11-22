@@ -240,10 +240,12 @@ def _update_refusal(code: Code, error: str, names: Sequence[str] = ()) -> dict[s
 
 def _applied(body: Mapping[str, Any]) -> dict[str, Any]:
     """What an update's answer says of its application: its `config applied` record's rev,
-    catalog hash and job sets."""
-    return {
+    catalog hash and job sets. A record without `seed_only` has none (DL-533)."""
+    answer = {
         key: body.get(key) for key in ("rev", "catalog_hash", *APPLICATION_KEYS) if key != "token"
     }
+    answer["seed_only"] = body.get("seed_only") or []
+    return answer
 
 
 def _failure(code: Code, error: str, *, refused: bool = False) -> dict[str, Any]:

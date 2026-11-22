@@ -559,3 +559,55 @@ def test_a_re_added_name_shows_the_flags_its_tombstone_kept(tmp_path: Path) -> N
     document = read_plan(tmp_path / "plans", result.token)
     assert document is not None
     assert document["restored"] == [{"name": "OPS_FAIL_ALERT_C", "flags": ["ON_HOLD"]}]
+
+
+# ---- a `status:` line alone is seed-only (DL-533)
+
+
+def _seed(estate: Path, job: str, status: str) -> None:
+    """JOB's definition says `status: STATUS`."""
+    _edit(
+        estate,
+        "global.jil",
+        f"insert_job: {job}\njob_type: c\n",
+        f"insert_job: {job}\njob_type: c\nstatus: {status}\n",
+    )
+
+
+@pytest.mark.parametrize("status", ["ON_HOLD", "ON_ICE", "ON_NOEXEC"])
+def test_a_running_seed_only_job_is_not_stopped_or_filtered(tmp_path: Path, status: str) -> None:
+    from dsl41.reload_update import filter_of, plan_of
+
+    estate = _nightbank(tmp_path)
+    live = _live(estate, status={"OPS_SPOOL_C": "RUNNING"})
+    _seed(estate, "OPS_SPOOL_C", status)
+    result = _reread(estate, live, tmp_path / "plans")
+    assert result.plan.changed == ()
+    assert [change.name for change in result.plan.seed_only] == ["OPS_SPOOL_C"]
+    assert result.stop == ()
+    document = read_plan(tmp_path / "plans", result.token)
+    assert document is not None
+    (seed,) = result.plan.seed_only
+    assert document["seed_only"] == [
+        {"name": "OPS_SPOOL_C", "old_hash": seed.old_hash, "new_hash": seed.new_hash}
+    ]
+    assert document["changed"] == [] and document["stop"] == []
+    assert "OPS_SPOOL_C" in document["unchanged"]
+    plan = plan_of(document, live.catalog)
+    assert plan == result.plan
+    candidate = prepare_estate(estate).catalog
+    scope = reload_plan.box_scope(plan, live, candidate)
+    assert scope == reload_plan.BoxScope((), frozenset())
+    assert "OPS_SPOOL_C" not in filter_of(plan, scope)
+
+
+def test_a_plan_without_a_seed_only_edit_still_carries_the_empty_key(tmp_path: Path) -> None:
+    from dsl41.reload_update import plan_of
+
+    estate = _nightbank(tmp_path)
+    live = _live(estate)
+    result = _reread(estate, live, tmp_path / "plans")
+    document = read_plan(tmp_path / "plans", result.token)
+    assert document is not None and document["seed_only"] == []
+    older = {key: value for key, value in document.items() if key != "seed_only"}
+    assert plan_of(older, live.catalog) == plan_of(document, live.catalog) == result.plan

@@ -8,6 +8,12 @@ resource it references, plus the estate settings except `job_env`, `kill_signals
 A calendar edit changes every referencing job, and `Change` says so.
 A change in any other estate setting changes every job.
 
+A kept job whose two records differ only in `sem.initial_status` is seed-only: it is listed in
+`unchanged` and in `seed_only`, never in `changed`. The `status:` line seeds a row only when the
+row is made, so the edit stops, holds and names nothing by itself (SEM-24, DL-533). Its hash still
+moves; `diff(..., seed_rule=False)` classifies it as changed, the rule of a plan stored without
+the `seed_only` key.
+
 Positional fields dropped before hashing (they move with whitespace and comments, never with
 meaning):
 
@@ -71,8 +77,10 @@ class Change:
 class Plan:
     """The diff of a live catalog and a candidate; every name tuple is sorted.
 
-    `prior_boxes` is (job, live box name or None) for each removed or changed job. It lets
-    `running_boxes` see a move out of a box, which the candidate alone cannot show.
+    `seed_only` is each kept job whose definition differs only in its `status:` line, with its
+    two hashes; each is also in `unchanged` (DL-533). `prior_boxes` is (job, live box name or
+    None) for each removed or changed job. It lets `running_boxes` see a move out of a box,
+    which the candidate alone cannot show.
     `edited_boxes` names the removed jobs that are boxes in the live catalog. A changed box
     whose members stay the same is not structural; the stop path covers it.
     """
@@ -83,6 +91,7 @@ class Plan:
     unchanged: tuple[str, ...]
     prior_boxes: tuple[tuple[str, str | None], ...]
     edited_boxes: tuple[str, ...]
+    seed_only: tuple[Change, ...] = ()
 
 
 def _strip_cond(node: dict[str, Any]) -> None:
@@ -287,6 +296,13 @@ def _reason(
     return "; ".join(reasons)
 
 
+def _without_seed(record: Mapping[str, Any]) -> dict[str, Any]:
+    """`record` with the job's `sem.initial_status` blanked (DL-533)."""
+    job = dict(record["job"])
+    job["sem"] = {**job["sem"], "initial_status": None}
+    return {**record, "job": job}
+
+
 def retyped_jobs(live: CatalogIR, candidate: CatalogIR) -> frozenset[str]:
     """The names in both catalogs whose job type differs."""
     return frozenset(
@@ -301,13 +317,17 @@ def diff(
     candidate: CatalogIR,
     live_settings: Mapping[str, object],
     candidate_settings: Mapping[str, object],
+    *,
+    seed_rule: bool = True,
 ) -> Plan:
     """Compare by job name: added, removed, changed (hash differs), unchanged.
 
     A settings difference, except `job_env`, `kill_signals` and `fw_default_interval_s`, changes
     every kept job (DL-447, DL-462, DL-469). A job whose type
     changes (CMD, BOX, FW) is another job under the same name: it is in both removed and added,
-    so the update retires the old row and admits a new one.
+    so the update retires the old row and admits a new one. Under `seed_rule`, a kept job whose
+    records are equal once `initial_status` is blanked on both sides is unchanged and seed-only;
+    without it, that job is changed, as a plan stored without `seed_only` recorded it (DL-533).
     """
     live_names = live.jobs.keys()
     cand_names = candidate.jobs.keys()
@@ -316,6 +336,7 @@ def diff(
     removed = tuple(sorted((live_names - cand_names) | retyped))
     changed: list[Change] = []
     unchanged: list[str] = []
+    seed_only: list[Change] = []
     prior: list[tuple[str, str | None]] = [(name, live.jobs[name].box.box_name) for name in removed]
     for name in sorted((live_names & cand_names) - retyped):
         old, new = live.jobs[name], candidate.jobs[name]
@@ -325,6 +346,10 @@ def diff(
         new_hash = digest(new_record)
         if old_hash == new_hash:
             unchanged.append(name)
+            continue
+        if seed_rule and digest(_without_seed(old_record)) == digest(_without_seed(new_record)):
+            unchanged.append(name)
+            seed_only.append(Change(name, old_hash, new_hash))
             continue
         changed.append(
             Change(
@@ -342,6 +367,7 @@ def diff(
         unchanged=tuple(unchanged),
         prior_boxes=tuple(sorted(prior)),
         edited_boxes=tuple(name for name in removed if live.jobs[name].job_type == "BOX"),
+        seed_only=tuple(seed_only),
     )
 
 

@@ -32,6 +32,7 @@ The [chart lifecycles](../chart-lifecycles.md) view lists each target state with
 - One update is in flight at a time; a second is refused with `update_in_progress` ([DL-427](../decision-log.md)).
 - Admission rechecks revision and current stops. Running boxes do not refuse; structural edits restart outermost affected boxes and their running members (DL-463).
 - The engine loads the main-config candidate from the version 2 plan's captured inputs and runs it under the captured settings (DL-486).
+- A kept job whose definition differs only in its `status:` line is unchanged and seed-only: the edit adds no reason to stop, filter or mark it, and removes none ([DL-533](../decision-log.md)).
 - While the update stops, no job of its recorded dispatch filter is dispatched: the plan's added, changed and removed jobs, the boxes it restarts, and their members in the old and in the new catalog ([DL-527](../decision-log.md)). A start the oracle decides for one waits as `dispatch_pending`. After the application it goes if its run is still wanted, or it is discharged with no launch when the restart ended its run.
 - An attempt the update stops keeps its outcome back until the application, so its follow-up plan is chosen under the applied catalog and marked set, once, and the `config applied` record names it: a removed job gets none, a marked one is held, any other reruns the same run under its new definition ([DL-424](../decision-log.md)). An interrupted attempt that at the application is not of a live row's current run gets none ([DL-525](../decision-log.md)).
 - A stop is finished when its job's next run could go: its ladder done and a reading finding nothing of it left, not at its record ([DL-431](../decision-log.md)). The update applies only once every stop is finished, an attempt that ended before the admission while its cleanup still runs included.
@@ -93,6 +94,7 @@ The [chart lifecycles](../chart-lifecycles.md) view lists each target state with
 - `test_box_restart_commits_kills_and_holds_finished_marked_members`
 - `test_box_scope_compatibility_and_refusals`
 - `test_retyped_command_box_scope_recovers_as_the_uncut_update`
+- `test_a_status_only_update_applies_live_with_no_stop_and_restart_keeps_the_rows`
 
 DL-463 box orchestration commits KILLJOBs before application; otherwise kept member
 outcomes would choose old-run replacements. After the swap, ON_HOLD every marked
@@ -111,9 +113,7 @@ a stop or is not INACTIVE inside the box scope. A retyped job's INACTIVE row is
 not held by its mark (DL-490, D12=MARK).
 The stop list includes every running box that ends with the roots.
 The forecast reads statuses, not flags or the terminator cascade: held or iced
-members can read `restart` without running. A running `job_terminator` member whose own box the update ends, moved to outside every restarting root, is ended
-with the old box run; the forecast reads
-`rerun` for a command and nothing for a sub-box (DL-490, BUG-69).
+members can read `restart` without running. A running `job_terminator` member whose own box the update ends, moved to outside every restarting root, is ended with the old box run; the forecast reads `rerun` for a command and nothing for a sub-box (DL-490, BUG-69).
 
 ## Open findings
 

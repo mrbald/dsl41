@@ -709,6 +709,134 @@ def test_a_released_hold_of_a_kept_job_whose_jil_says_on_hold_stays_released(
     assert not world.row("OPS_FAIL_ALERT_C").on_hold
 
 
+def _seed(world: World, job: str, status: str) -> None:
+    """JOB's definition gains `status: STATUS`."""
+    world.edit(
+        "global.jil",
+        f"insert_job: {job}\njob_type: c\n",
+        f"insert_job: {job}\njob_type: c\nstatus: {status}\n",
+    )
+
+
+@pytest.mark.parametrize("status", ["ON_HOLD", "ON_ICE", "ON_NOEXEC"])
+def test_a_running_jobs_status_only_edit_applies_with_no_stop_and_keeps_the_row(
+    tmp_path: Path, status: str
+) -> None:
+    """DL-533: a `status:` line alone names and stops nothing; the application swaps the catalog,
+    moves the revision and leaves the kept row as it was (SEM-24)."""
+    world = _world(tmp_path)
+    world.feed("FORCE_STARTJOB", job="OPS_HEARTBEAT_C")
+    row = world.row("OPS_HEARTBEAT_C")
+    assert (row.status, row.on_hold, row.on_ice, row.on_noexec) == (
+        "RUNNING",
+        False,
+        False,
+        False,
+    )
+    plan_before = world.scheduler._plans["OPS_HEARTBEAT_C"]
+    _seed(world, "OPS_HEARTBEAT_C", status)
+    result, document, candidate = world.reread()
+    assert result.plan.changed == () and result.stop == ()
+    assert [change.name for change in result.plan.seed_only] == ["OPS_HEARTBEAT_C"]
+    tier, effects = world.update(document, candidate)
+    assert tier.state == "APPLIED"
+    assert effects.log[0] == (JOURNAL_INTENT, document["token"], ())
+    assert not [entry for entry in effects.log if entry[0] == STOP_ATTEMPT]
+    assert tier.application is not None
+    assert (tier.application.changed, tier.application.added, tier.application.removed) == (
+        (),
+        (),
+        (),
+    )
+    assert tier.application.seed_only == (("OPS_HEARTBEAT_C", None, status),)
+    assert world.rev == 2
+    assert world.oracle.catalog.jobs["OPS_HEARTBEAT_C"].sem.initial_status == status
+    assert world.row("OPS_HEARTBEAT_C") == row
+    assert world.scheduler._plans["OPS_HEARTBEAT_C"] is plan_before
+    assert world.scheduler.catalog_hash == catalog_hash_v2(candidate)
+
+
+def test_a_seed_only_job_removed_and_re_added_takes_the_new_seed_and_its_tombstones_flags(
+    tmp_path: Path,
+) -> None:
+    """DL-533, SEM-24: a later update that adds the name back seeds the row as it seeds any
+    added job: the `status:` line's flag plus each flag the tombstone kept."""
+    world = _world(tmp_path)
+    _seed(world, "OPS_FAIL_ALERT_C", "ON_HOLD")
+    _, document, candidate = world.reread()
+    tier, _ = world.update(document, candidate)
+    assert tier.application is not None and tier.application.seed_only
+    row = world.row("OPS_FAIL_ALERT_C")
+    assert (row.on_hold, row.on_ice) == (False, False)
+    world.feed("ON_ICE", job="OPS_FAIL_ALERT_C")
+    text = world.remove("global.jil", "OPS_FAIL_ALERT_C")
+    _, document, candidate = world.reread()
+    tier, _ = world.update(document, candidate)
+    assert tier.application is not None and tier.application.removed == ("OPS_FAIL_ALERT_C",)
+    with (world.estate / "global.jil").open("a") as handle:
+        handle.write("\n" + text)
+    result, document, candidate = world.reread()
+    assert result.plan.added == ("OPS_FAIL_ALERT_C",) and result.plan.seed_only == ()
+    tier, _ = world.update(document, candidate)
+    assert tier.application is not None
+    assert tier.application.restored == (("OPS_FAIL_ALERT_C", ("ON_ICE",)),)
+    row = world.row("OPS_FAIL_ALERT_C")
+    assert (row.status, row.on_hold, row.on_ice) == ("INACTIVE", True, True)
+
+
+def _in_running_box(tmp_path: Path, *, seed: bool) -> tuple[World, Any, dict[str, Any]]:
+    """OPS_B runs with OPS_SPOOL_C; the update adds sibling ZZ_NEW_C, and with `seed` also
+    gives OPS_SPOOL_C a `status:` line."""
+    from reload_fixtures import prepare_estate as prepared
+    from dsl41.reload_plan import box_scope
+    from dsl41.reload_update import plan_of
+    from dsl41.reread_worker import preview
+
+    tmp_path.mkdir()
+    world = _world(tmp_path)
+    world.feed("FORCE_STARTJOB", job="OPS_B")
+    assert world.row("OPS_SPOOL_C").status == "RUNNING"
+    with (world.estate / "global.jil").open("a") as handle:
+        handle.write(
+            "\ninsert_job: ZZ_NEW_C\njob_type: c\nbox_name: OPS_B\ncommand: true\n"
+            "machine: ops_util\nowner: ~{$OWNER}~\n"
+        )
+    if seed:
+        _seed(world, "OPS_SPOOL_C", "ON_HOLD")
+    result, document, candidate = world.reread()
+    live = world.live()
+    admitted = admission_data(document, live=live, candidate=candidate)
+    scope = box_scope(plan_of(document, live.catalog), live, candidate)
+    forecast = preview(prepared(world.estate), live)
+    return (
+        world,
+        result,
+        {
+            "stop": result.stop,
+            "admitted": (admitted.stop_set, admitted.dispatch_filter, admitted.stop_runs),
+            "roots": scope.roots,
+            "forecast": (forecast["stop"], forecast["effects"], forecast["marks"]),
+        },
+    )
+
+
+def test_a_seed_only_member_of_a_restarted_box_is_scoped_as_an_unchanged_member(
+    tmp_path: Path,
+) -> None:
+    """DL-533 with DL-463 and DL-527: the seed-only edit adds nothing and removes nothing. The
+    member is stopped, filtered and marked exactly as it is without the edit."""
+    _, plain, unchanged = _in_running_box(tmp_path / "plain", seed=False)
+    _, seeded, edited = _in_running_box(tmp_path / "seeded", seed=True)
+    assert [change.name for change in seeded.plan.seed_only] == ["OPS_SPOOL_C"]
+    assert plain.plan.seed_only == ()
+    assert seeded.plan.changed == plain.plan.changed == ()
+    assert edited == unchanged
+    assert unchanged["roots"] == ("OPS_B",)
+    assert "OPS_SPOOL_C" in unchanged["stop"]
+    assert "OPS_SPOOL_C" in unchanged["admitted"][1]
+    assert unchanged["forecast"][2]["OPS_SPOOL_C"] == {"change": "unchanged", "action": "restart"}
+
+
 def test_a_removed_jobs_tombstone_keeps_its_hold_and_shows_on_re_add(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

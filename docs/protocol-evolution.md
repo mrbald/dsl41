@@ -169,6 +169,17 @@ Older engines refuse without client fallback.
 
 Main-config plans use version 2. Version 1 and an absent version refuse as
 retired, citing DL-486, including interrupted-update recovery before writes or signals.
+`plan.json` carries `seed_only`, a list of `{name, old_hash, new_hash}`, present
+even when empty. An absent key means the plan was classified with seed-only edits as
+changed, and recovery recomputes the difference that way. A build that does not know
+the key reads such a job as changed and refuses to resume the plan, so let an open
+update finish before going back. The `config applied` record adds an optional
+`seed_only` list of `[job, before, after]` for display; a reader takes an absent key
+as empty. Plan, journal and state versions stay unchanged (DL-533).
+A client that predates `preview.seed_only` ignores it: it leaves the seed-only jobs
+out of every count (with one such job among 300 it prints `unchanged 299`) and can
+print "estate files changed, but no job or setting did", while its exit codes and
+the update itself stay right.
 `main-inputs.json` binds
 config bytes, environment, lint policy, source mapping, membership and part
 names. Each Python part retains its generated JIL. Every part has a SHA-256

@@ -19,10 +19,11 @@ clock; `UpdateTier` posts its events and performs its intents through `UpdateInt
 engine binds to the store and to the attempt chart (`stop` with cause `update_stop`).
 
 The application is computed (`plan_application`) and then applied to the oracle in memory
-(`apply_application`, through `Oracle.replace_catalog`). Per job: unchanged, nothing; added, an
-INACTIVE row; removed, the row ends into a tombstone that keeps its run number and flags, and a
-later update that adds the name back carries them; changed, the definition is replaced in place
-and the row keeps status, ON_HOLD, ON_ICE, ON_NOEXEC, run counters, run history and lookback.
+(`apply_application`, through `Oracle.replace_catalog`). Per job: unchanged or seed-only,
+nothing (DL-533); added, an INACTIVE row; removed, the row ends into a tombstone that keeps its
+run number and flags, and a later update that adds the name back carries them; changed, the
+definition is replaced in place and the row keeps status, ON_HOLD, ON_ICE, ON_NOEXEC, run
+counters, run history and lookback.
 Globals, consumed capacity and the clock are untouched; a resource a changed definition no
 longer names keeps its consumed bucket. The schedule plans follow in `Scheduler.replace`.
 
@@ -137,11 +138,16 @@ class Refused:
 
 def plan_of(document: Mapping[str, Any], live: CatalogIR) -> Plan:
     """The `Plan` a stored `plan.json` describes, read against the live catalog it was diffed
-    with: the live box of each removed or changed job and the removed boxes come from there."""
+    with: the live box of each removed or changed job and the removed boxes come from there. A
+    plan without `seed_only` has none (DL-533)."""
     removed = tuple(document["removed"])
     changed = tuple(
         Change(item["name"], item["old_hash"], item["new_hash"], item["reason"])
         for item in document["changed"]
+    )
+    seed_only = tuple(
+        Change(item["name"], item["old_hash"], item["new_hash"])
+        for item in document.get("seed_only", ())
     )
     prior = [(name, live.jobs[name].box.box_name) for name in removed]
     prior += [(change.name, live.jobs[change.name].box.box_name) for change in changed]
@@ -152,6 +158,7 @@ def plan_of(document: Mapping[str, Any], live: CatalogIR) -> Plan:
         unchanged=tuple(document["unchanged"]),
         prior_boxes=tuple(sorted(prior)),
         edited_boxes=tuple(name for name in removed if live.jobs[name].job_type == "BOX"),
+        seed_only=seed_only,
     )
 
 
@@ -331,7 +338,8 @@ class Application:
     """What applying a plan does: the new catalog with its revision and hash, the hash of the
     live catalog `reread` diffed against, the per-job sets, the flags a re-added name gets back
     from its tombstone, and, for each job of the admitted stop set, the interruption rule's
-    answer (spec-wiring 2b steps 2 to 5)."""
+    answer (spec-wiring 2b steps 2 to 5). `seed_only` is (job, live seed, candidate seed) for each
+    kept job whose `status:` line alone changed: shown, never acted on (DL-533)."""
 
     token: str
     rev: int
@@ -345,6 +353,7 @@ class Application:
     stopped: tuple[tuple[str, OnStop], ...] = ()
     #: the candidate's estate settings (`reload_plan.estate_settings`), swapped with the catalog
     settings: Mapping[str, Any] = field(default_factory=dict)
+    seed_only: tuple[tuple[str, str | None, str | None], ...] = ()
 
     @property
     def timezone(self) -> str | None:
@@ -409,8 +418,11 @@ def plan_application(
     removed = tuple(sorted((live_names - cand_names) | retyped))
     changed = tuple(sorted(item["name"] for item in plan["changed"]))
     kept = sorted([*changed, *plan["unchanged"]])
-    if (tuple(plan["added"]), tuple(plan["removed"])) != (added, removed) or kept != sorted(
-        (live_names & cand_names) - retyped
+    seeds = sorted(item["name"] for item in plan.get("seed_only", ()))
+    if (
+        (tuple(plan["added"]), tuple(plan["removed"])) != (added, removed)
+        or kept != sorted((live_names & cand_names) - retyped)
+        or not set(seeds) <= set(plan["unchanged"])
     ):
         raise ValueError(f"plan {plan['token']} does not describe the live catalog")
     tombstones = live_state.store.tombstones
@@ -429,6 +441,14 @@ def plan_application(
             if name in tombstones and flags_of(tombstones[name])
         ),
         settings=dict(plan["settings"]),
+        seed_only=tuple(
+            (
+                name,
+                live_state.catalog.jobs[name].sem.initial_status,
+                candidate.jobs[name].sem.initial_status,
+            )
+            for name in seeds
+        ),
     )
 
 

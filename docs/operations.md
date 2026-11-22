@@ -44,11 +44,16 @@ questions.
   did outside the engine.
 - **Notice.** Who is told before an update that stops jobs, and after it?
 
-Known defect (BUG-104): editing only the `status:` line of a job still counts as a
-change of its definition. If the job is running, the update stops it. The line moves no
-flag. The interruption rule then settles the stop: a job not marked non-idempotent runs
-again, and a marked one is put on hold (DL-424, DL-432). Do not edit `status:` lines of
-running jobs until it is fixed. `reread` shows the stop before you apply it
+An edit of only the `status:` line of a job that stays in the estate is not a reason to
+stop it (DL-533). The update records the new line, stops nothing for it and sets no flag
+for it, so a running job runs on. `reread` and `update` show the line
+with that note and count such jobs on their own, as `status line only`. A box whose
+own edit is its `status:` line and whose members change is the exception: `reread`
+counts it as changed (membership) and `update` counts it under `status line only`, and
+each command's counts add up to its jobs. The line takes
+effect when the job's row is made again: on a fresh root, or when a later update adds
+the job back. To hold or release the job now, use `sendevent`. A job inside a box that
+the update restarts is still stopped with the box (DL-463)
 ([reload a changed estate](deploy.md#reload-a-changed-estate)).
 
 ## Release a go-live that loads every job on hold

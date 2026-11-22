@@ -105,7 +105,16 @@ if TYPE_CHECKING:  # annotation only: the engine imports this module
 PLANS: Final = "plans"
 
 #: The `config applied` fields an update adds to the segment's: what the application did.
-APPLICATION_KEYS: Final = ("token", "added", "changed", "removed", "restored", "stopped")
+#: `seed_only` is shown only; a record without it has none (DL-533).
+APPLICATION_KEYS: Final = (
+    "token",
+    "added",
+    "changed",
+    "removed",
+    "restored",
+    "stopped",
+    "seed_only",
+)
 
 
 @dataclass(frozen=True)
@@ -186,6 +195,7 @@ def application_body(application: Application) -> dict[str, Any]:
         "removed": list(application.removed),
         "restored": [[name, list(flags)] for name, flags in application.restored],
         "stopped": [[job, choice] for job, choice in application.stopped],
+        "seed_only": [[job, before, after] for job, before, after in application.seed_only],
     }
 
 
@@ -901,12 +911,14 @@ def reopen_plan(run_root: Path, token: str, *, configuration: Configuration) -> 
         old_settings = settings_of(configuration.profile, catalog)
         new_settings = opened.estate.settings
         # Missing definition settings use earlier-behaviour defaults; kills are host policy
-        # (DL-468, DL-462).
+        # (DL-468, DL-462). A plan without `seed_only` is compared under the rule it was
+        # classified by, seed-only edits as changed (DL-533).
         compiled = diff(
             catalog,
             opened.estate.catalog,
             {key: value for key, value in old_settings.items() if key not in omitted},
             {key: value for key, value in new_settings.items() if key not in omitted},
+            seed_rule="seed_only" in opened.plan,
         )
         recorded = plan_of(opened.plan, catalog)
         if (
@@ -921,6 +933,8 @@ def reopen_plan(run_root: Path, token: str, *, configuration: Configuration) -> 
             or compiled.unchanged != recorded.unchanged
             or [(c.name, c.old_hash, c.new_hash) for c in compiled.changed]
             != [(c.name, c.old_hash, c.new_hash) for c in recorded.changed]
+            or [(c.name, c.old_hash, c.new_hash) for c in compiled.seed_only]
+            != [(c.name, c.old_hash, c.new_hash) for c in recorded.seed_only]
         ):
             raise EngineError(
                 f"update {token} recovery refused: compiled job diff differs from the recorded plan."

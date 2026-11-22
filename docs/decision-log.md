@@ -27475,6 +27475,7 @@ relitigate an entry; append a new one.
   an update stops the job if it runs. The line itself moves no flag; the stop is then
   settled by the interruption rule, which runs the job again or holds a job marked
   non-idempotent (BUG-104).
+  NARROWED BY DL-533: such an edit no longer stops the job; BUG-104 is closed.
 - DL-532 The terminal UI's selection is a job, not a row
   (2026-11-22; owner's first priority among the operator-surface findings;
   src/dsl41/runner_tui.py, tests/test_runner_tui.py, tests/test_tui_recovery_drivers.py,
@@ -27496,3 +27497,31 @@ relitigate an entry; append a new one.
   COST. A pick that a rebuild overtakes is dropped and must be made again. After a filter
   or view round trip a box no longer stands in for a member hidden by a fold; nothing is
   selected until a pick.
+- DL-533 An edit of only a `status:` line is not a reason to stop a job
+  (2026-11-22; BUG-104, found while stating DL-531; src/dsl41/reload_diff.py,
+  src/dsl41/reload_plan.py, src/dsl41/reload_update.py, src/dsl41/reread_worker.py,
+  src/dsl41/runner_update.py, src/dsl41/runner_startup.py, src/dsl41/runner_control.py,
+  src/dsl41/cli_output.py, src/dsl41/cli_reload.py, docs/blocks/update.md,
+  docs/runner-design.md, docs/control-protocol.md, docs/protocol-evolution.md,
+  docs/deploy.md, docs/operations.md, docs/autosys-semantics.md, TODO.md; narrows DL-531;
+  closes BUG-104)
+  THE RULE. A kept job whose two definitions differ only in `sem.initial_status` is
+  seed-only: the difference lists it as unchanged and, with both definition hashes, in
+  `seed_only`. A seed-only edit adds nothing to the stop set, the dispatch filter or the
+  forecast marks, and takes nothing out of them: a member of a box the update restarts is
+  stopped and held back as any unchanged member is (DL-463, DL-527). The update still
+  applies: the catalog is replaced whole, a new revision is recorded and the job's row is
+  untouched (SEM-24, DL-531). `reread` and `update` show the changed line once, say that
+  the edit itself leaves the job's flags as they are, and give each job one summary count.
+  STORED FORMS, additive. The reload plan and the `config applied` record gain an optional
+  `seed_only` key. A plan without the key was made under the earlier rule and is reopened
+  under it, so an update in flight across the upgrade resumes; the restart comparison of
+  the launched catalog keeps the earlier rule. An older build may refuse to resume a plan
+  that has a seed-only entry: finish an update before going back to an older build.
+  THE DEFECT. `initial_status` is part of the definition hash, so the edit made the job
+  changed and the update stopped its running attempt, although the line moves no flag of a
+  kept job. The interruption rule then ran the job again or held a job marked
+  non-idempotent.
+  UNCHANGED. Definition hashes, catalog hashes, history fingerprints and the state-machine
+  version. An edit of the line together with any other difference in the job's hashed
+  definition record is a change as before.

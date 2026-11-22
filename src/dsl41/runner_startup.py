@@ -1069,7 +1069,8 @@ def _check_updated(
         estate = reopen_plan(run_root, str(intent["token"]), configuration=configuration).estate
         target, target_settings = estate.catalog, dict(estate.settings)
     given = target_settings if declared is None else settings_of(declared, launched)
-    moved = diff(target, launched, target_settings, given)
+    # a restart runs exactly the stored estate: a seed-only edit counts as a change (DL-533)
+    moved = diff(target, launched, target_settings, given, seed_rule=False)
     if moved.added or moved.removed or moved.changed:
         raise EngineError(
             "catalog hash mismatch: the estate changed since this store was written"

@@ -179,6 +179,7 @@ def update_reply_of(answer: Mapping[str, Any]) -> UpdateReply:
         removed=tuple(body["removed"]),
         restored=tuple((name, tuple(flags)) for name, flags in body["restored"]),
         stopped=tuple((job, choice) for job, choice in body["stopped"]),
+        seed_only=tuple((job, before, after) for job, before, after in body.get("seed_only") or ()),
     )
     return UpdateReply(decision, application, request_id=str(answer.get("request_id", "")))
 

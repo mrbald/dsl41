@@ -1563,3 +1563,216 @@ def test_reload_uses_latest_launch_config_but_drift_uses_applied_capture(short_r
         assert status["spec_drift"] is True
         assert "reread" not in status["jobs"]["A"]
         assert roundtrip(socket, {"v": 5, "cmd": "reread"})["ok"]
+
+
+def _seed_only_root(short_root: Path, *, old_shape: bool):
+    """A root whose update of a running A's `status:` line alone was journalled and not applied.
+    With `old_shape`, its plan is the one a build before DL-533 stored: no `seed_only` key, A
+    changed and stopped."""
+    from dsl41.canon import canonical_bytes
+
+    path = estate_file(short_root)
+    root = short_root / "run"
+    initial = main.prepare(path)
+
+    async def seed():
+        clock = RealClock()
+        engine = start_run(
+            initial.catalog,
+            root,
+            clock=clock,
+            adapters={"CMD": FakeAdapter(default=None)},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        try:
+            engine.inject(Event(at=clock.now(), kind="FORCE_STARTJOB", payload={"job": "A"}))
+            loop = asyncio.create_task(engine.run_until_quiescent(datetime.max))
+            try:
+                async with asyncio.timeout(5):
+                    while "A" not in engine._live:
+                        await asyncio.sleep(0.01)
+            finally:
+                loop.cancel()
+                await asyncio.gather(loop, return_exceptions=True)
+            (path.parent / "a.jil").write_text(JOB + "status: ON_HOLD\n")
+            result = reread(engine.update.live(), root / "plans", candidate=main.prepare(path))
+            assert [change.name for change in result.plan.seed_only] == ["A"]
+            document = json.loads(result.plan_json.read_bytes())
+            stop: list[dict[str, object]] = []
+            if old_shape:
+                (entry,) = document.pop("seed_only")
+                document["changed"] = [{**entry, "reason": None}]
+                document["unchanged"].remove("A")
+                document["stop"] = ["A"]
+                result.plan_json.write_bytes(canonical_bytes(document))
+                # the stop entry as the earlier build journalled it, its first cause included
+                stop = [
+                    {
+                        "job": "A",
+                        "run_number": 1,
+                        "attempt": engine._live["A"].attempt,
+                        "cause": "update_stop",
+                    }
+                ]
+            request = UpdateRequest(result.token, 1, engine.baseline_id, "seed-recovery")
+            intent = {
+                "event": "intent",
+                "token": result.token,
+                "live_rev": 1,
+                "stop": stop,
+                "filter": ["A"] if old_shape else [],
+                "stop_running": True,
+                "request_id": request.request_id,
+                "fingerprint": request.fingerprint,
+            }
+            engine.journal.append(Record(clock.now(), "config", None, request.request_id, intent))
+            return result
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    return root, asyncio.run(seed())
+
+
+def _resume_until_applied(root: Path) -> None:
+    """Restart `root` from its stored sources and run until rev 2 applies, then stop."""
+    stored = active_configuration(root)
+
+    async def restart():
+        engine = await resume_run(
+            stored.catalog,
+            root,
+            clock=RealClock(),
+            adapters={"CMD": FakeAdapter()},
+            declared=stored.profile,
+            stored_sources=True,
+            hold_open=True,
+        )
+        loop = asyncio.create_task(engine.run_until_quiescent(datetime.max))
+        try:
+            async with asyncio.timeout(10):
+                while not engine.started.is_set() or engine.config_rev != 2:
+                    if loop.done():
+                        await loop
+                    await asyncio.sleep(0.01)
+        finally:
+            loop.cancel()
+            await asyncio.gather(loop, return_exceptions=True)
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(restart())
+
+
+def test_a_restart_of_an_updated_root_counts_a_status_line_as_a_change(short_root):
+    """DL-533, DL-424: a restart runs exactly the stored estate. A launched estate that differs
+    from the applied one only in a `status:` line is refused, as any changed definition is; the
+    seed-only rule does not apply to this comparison."""
+    root, _ = _seed_only_root(short_root, old_shape=False)
+    _resume_until_applied(root)
+    stored = active_configuration(root)
+    assert stored.catalog.jobs["A"].sem.initial_status == "ON_HOLD"
+    (short_root / "a.jil").write_text(JOB)
+    launched = main.prepare(estate_file(short_root)).catalog
+    assert launched.jobs["A"].sem.initial_status is None
+
+    async def restart(catalog):
+        engine = await resume_run(
+            catalog,
+            root,
+            clock=RealClock(),
+            adapters={"CMD": FakeAdapter()},
+            declared=stored.profile,
+        )
+        await engine.shutdown()
+        engine.journal.close()
+
+    with pytest.raises(EngineError, match="catalog hash mismatch"):
+        asyncio.run(restart(launched))
+    asyncio.run(restart(stored.catalog))
+
+
+def test_a_plan_stored_without_seed_only_reopens_under_the_old_rule_and_resumes(short_root):
+    """DL-533: a plan with no `seed_only` key was classified by the old rule, so recovery
+    recomputes the difference by that rule: the job it lists as changed matches, and the update
+    an older build admitted resumes. The journalled attempt ends with cause `update_stop`, its
+    plan is `rerun`, and a replacement attempt of the same run is dispatched after it."""
+    from dsl41.runner_update import reopen_plan
+
+    root, plan = _seed_only_root(short_root, old_shape=True)
+    stored = active_configuration(root)
+    opened = reopen_plan(root, plan.token, configuration=stored)
+    assert "seed_only" not in opened.plan and opened.plan["stop"] == ["A"]
+
+    async def restart():
+        engine = await resume_run(
+            stored.catalog,
+            root,
+            clock=RealClock(),
+            adapters={"CMD": FakeAdapter()},
+            declared=stored.profile,
+            stored_sources=True,
+            hold_open=True,
+        )
+        loop = asyncio.create_task(engine.run_until_quiescent(datetime.max))
+        try:
+            async with asyncio.timeout(10):
+                while not engine.started.is_set() or engine.config_rev != 2:
+                    if loop.done():
+                        await loop
+                    await asyncio.sleep(0.01)
+            assert engine.oracle.catalog.jobs["A"].sem.initial_status == "ON_HOLD"
+            assert not engine.oracle.store.job["A"].on_hold
+        finally:
+            loop.cancel()
+            await asyncio.gather(loop, return_exceptions=True)
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(restart())
+    (applied,) = [
+        body
+        for _, kind, body in rows(root)
+        if kind == "config" and body.get("event") == "applied" and body.get("token") == plan.token
+    ]
+    assert applied["changed"] == ["A"] and applied["seed_only"] == []
+    assert applied["stopped"] == [["A", "rerun"]]
+    records = rows(root)
+    (intent,) = [body for _, kind, body in records if body.get("event") == "intent"]
+    (stop,) = intent["stop"]
+    attempt = stop["attempt"]
+    assert (stop["job"], stop["cause"]) == ("A", "update_stop")
+    (ended,) = [
+        body for _, kind, body in records if kind == "outcome" and body["attempt"] == attempt
+    ]
+    assert (ended["job"], ended["run_number"], ended["cause"]) == ("A", 1, "update_stop")
+    (plan_record,) = [
+        body
+        for _, kind, body in records
+        if kind == "follow_up" and body["attempt"] == attempt and body["event"] == "plan"
+    ]
+    assert plan_record["plan"] == "rerun"
+    replacements = [
+        body
+        for _, kind, body in records
+        if kind == "dispatch" and body["job"] == "A" and body["attempt"] != attempt
+    ]
+    assert [(body["run_number"], body["after"]) for body in replacements] == [(1, "update_stop")]
+
+
+def test_a_seed_only_entry_whose_hash_moved_is_refused_on_reopen(short_root):
+    """DL-533: recovery checks a seed-only entry by name and both hashes, as it checks a
+    changed one. The test forges the entry's `new_hash` in `plan.json`; the hash recomputed
+    from the captured candidate no longer matches it, and reopening refuses."""
+    from dsl41.canon import canonical_bytes
+    from dsl41.runner_update import reopen_plan
+
+    root, plan = _seed_only_root(short_root, old_shape=False)
+    stored = active_configuration(root)
+    assert reopen_plan(root, plan.token, configuration=stored).plan["seed_only"]
+    document = json.loads(plan.plan_json.read_bytes())
+    document["seed_only"][0]["new_hash"] = "sha256:" + "0" * 64
+    plan.plan_json.write_bytes(canonical_bytes(document))
+    with pytest.raises(EngineError, match="recovery refused"):
+        reopen_plan(root, plan.token, configuration=stored)

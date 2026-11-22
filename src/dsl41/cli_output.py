@@ -251,6 +251,32 @@ def change_text(group: Mapping[str, Any]) -> str:
     return f"{one_line(group['field'])}: {values}"
 
 
+#: What a kept job's `status:` edit does by itself: it sets no flag; it seeds only a row that is
+#: made (SEM-24, DL-533). The update may still act on the job for another reason.
+SEED_NOTE = (
+    "the status: edit itself sets no flag on a job that stays (DL-533);"
+    " hold or release it with sendevent"
+)
+
+
+def seed_text(before: str | None, after: str | None) -> str:
+    """The one row text of a seed-only job (DL-533)."""
+    shown = [one_line("(unset)" if value is None else value) for value in (before, after)]
+    return f"initial_status: {shown[0]} -> {shown[1]}; {SEED_NOTE}"
+
+
+def seed_count(count: int) -> str:
+    """The summary's own count of seed-only jobs; none adds nothing (DL-533)."""
+    return f", status line only {count}" if count else ""
+
+
+def seed_counted(view: Mapping[str, Any]) -> int:
+    """Seed-only jobs not already counted as changed: a box whose own edit is its `status:`
+    line and whose members change counts once, as changed, so the counts add up (DL-533)."""
+    changed = {item["name"] for item in view["changed"]}
+    return sum(item["name"] not in changed for item in view.get("seed_only", []))
+
+
 @dataclass(frozen=True)
 class ReloadView:
     header: str
@@ -267,11 +293,16 @@ def prepare_reread(answer: Mapping[str, Any], apply_command: str) -> ReloadView:
     changed = view["changed"]
     details = view.get("definition_changes")
     count = len(changed)
+    seeds = view.get("seed_only", [])
+    seeded = {item["name"] for item in seeds}
     groups = []
     rows: dict[str, list[str]] = defaultdict(list)
     for group in (details or {}).get("groups", []):
         text = change_text(group)
-        names = tuple(group["jobs"])
+        # a seed-only job's one difference is shown once, with its note (DL-533)
+        names = tuple(name for name in group["jobs"] if name not in seeded)
+        if group["jobs"] and not names:
+            continue
         groups.append((text, names))
         for name in names:
             rows[name].append(text)
@@ -296,6 +327,12 @@ def prepare_reread(answer: Mapping[str, Any], apply_command: str) -> ReloadView:
             rows[item["name"]].append(text)
             fallback[text].append(item["name"])
     groups += [(text, tuple(names)) for text, names in fallback.items()]
+    seed_groups: dict[str, list[str]] = defaultdict(list)
+    for item in seeds:
+        text = seed_text(item["before"], item["after"])
+        rows[item["name"]].append(text)
+        seed_groups[text].append(item["name"])
+    groups += [(text, tuple(names)) for text, names in seed_groups.items()]
     for kind in ("added", "removed"):
         if view[kind]:
             groups.append((kind, tuple(view[kind])))
@@ -314,7 +351,7 @@ def prepare_reread(answer: Mapping[str, Any], apply_command: str) -> ReloadView:
         rows[item["name"]].append(text)
         groups.append((text, (item["name"],)))
     footer = []
-    jobs_changed = bool(count or view["added"] or view["removed"])
+    jobs_changed = bool(count or seeds or view["added"] or view["removed"])
     settings_changed = (details or {}).get(
         "settings_changed",
         any(group.get("scope") == "settings" for group in (details or {}).get("groups", [])),
@@ -398,7 +435,8 @@ def prepare_reread(answer: Mapping[str, Any], apply_command: str) -> ReloadView:
         )
     return ReloadView(
         header,
-        f"changed {counted(count)}, added {len(view['added'])}, removed {len(view['removed'])}, unchanged {view['unchanged']}",
+        f"changed {counted(count)}, added {len(view['added'])}, removed {len(view['removed'])}"
+        f"{seed_count(seed_counted(view))}, unchanged {view['unchanged']}",
         tuple(groups),
         tuple(
             f"{one_line(name)}   {'; '.join(changes)}"
@@ -419,7 +457,12 @@ def reread_lines(answer: Mapping[str, Any], style: OutputStyle, apply_command: s
         lines += ["  " + row for row in view.rows]
     else:
         preview = answer["preview"]
-        total = len(preview["changed"]) + len(preview["added"]) + preview["unchanged"]
+        total = (
+            len(preview["changed"])
+            + seed_counted(preview)
+            + len(preview["added"])
+            + preview["unchanged"]
+        )
         for text, names in view.groups:
             all_changed = (
                 total
@@ -459,17 +502,23 @@ def application_lines(application: Any, style: OutputStyle) -> list[str]:
             rows[name].append("definition updated" if kind == "changed" else kind)
     for name, flags in application.restored:
         rows[name].append("re-added with its earlier flags: " + ", ".join(flags))
+    seeds = application.seed_only
+    for name, before, after in seeds:
+        rows[name].append(seed_text(before, after))
     for name, choice in application.stopped:
         rows[name].append(outcomes[choice])
     lines = [
         f"applied: catalog revision {application.rev} ({application.digest})",
-        f"  changed {counted(len(application.changed))}, added {len(application.added)}, removed {len(application.removed)}",
+        f"  changed {counted(len(application.changed))}, added {len(application.added)}, removed {len(application.removed)}"
+        + seed_count(len(seeds)),
     ]
     groups: dict[str, list[str]] = defaultdict(list)
     for name, choice in application.stopped:
         groups[outcomes[choice]].append(name)
     for name, flags in application.restored:
         groups["re-added with its earlier flags: " + ", ".join(flags)].append(name)
+    for name, before, after in seeds:
+        groups[seed_text(before, after)].append(name)
     if style is OutputStyle.neutral:
         lines += [
             f"  {one_line(name)}   {'; '.join(texts)}" for name, texts in sorted(rows.items())

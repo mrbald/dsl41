@@ -890,6 +890,15 @@ or remove. A running box does not refuse a preview. Broken input explains why
 no diff is available. Exit 0 means no running stop, 1 means running stops,
 and 2 means no diff or failure to reach the engine.
 
+A kept job whose only edit is its `status:` line is counted apart, as
+`status line only N`, in both commands. A box whose own edit is its `status:`
+line and whose members change is counted as changed (membership) by `reread`
+and under `status line only` by `update`; each command's counts add up. Its row shows the line's old and new value and says the
+edit itself sets no flag. Update stops nothing and changes no flag for that
+edit; use `sendevent` to hold or release the job. A job inside a box that the
+update restarts is still stopped with the box, and held if it is marked
+(DL-463, DL-533).
+
 Status in the CLI and TUI annotates changed/removed jobs and unchanged members
 of boxes update would restart with this forecast.
 It describes reread time. Another reread replaces it when the revision it read
@@ -971,6 +980,8 @@ Only select a release documented as compatible with the existing store and
 state-machine version. The stored active estate must match what that release
 can interpret. Compatibility is allocated per release; arbitrary upgrades
 and rollbacks are not supported.
+Finish an open update (`status.update` absent) before going back to an older
+build: an older build can refuse to resume an update a newer one admitted (DL-533).
 
 A root created through legacy files or a manifest has no main-config capture.
 It cannot resume through `--config`. Keep its legacy invocation or select a

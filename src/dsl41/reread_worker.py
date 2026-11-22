@@ -143,6 +143,18 @@ def definition_changes(
     return budget.result
 
 
+def _seed_values(live: CatalogIR, candidate: CatalogIR, name: str) -> dict[str, str]:
+    """The display strings of a seed-only job's two `status:` values (DL-482, DL-533)."""
+    view = difference_view(
+        FieldDifference(
+            ("job", "sem", "initial_status"),
+            live.jobs[name].sem.initial_status,
+            candidate.jobs[name].sem.initial_status,
+        )
+    )
+    return {"before": view["before"], "after": view["after"]}
+
+
 def preview(
     candidate: Any,
     live: Live,
@@ -241,15 +253,27 @@ def preview(
                 *plan.added,
                 *plan.removed,
                 *[item["name"] for item in changed],
+                *[item.name for item in plan.seed_only],
                 *[name for name in plan.unchanged if old.get(name) != origins.get(name)],
             ]
         )
+    ]
+    # A seed-only job is counted on its own, not as changed or unchanged; its forecast is an
+    # unchanged job's (DL-533).
+    seeds = [
+        {"name": item.name, **_seed_values(live.catalog, candidate.catalog, item.name)}
+        for item in plan.seed_only
     ]
     result = {
         "added": list(plan.added),
         "removed": list(plan.removed),
         "changed": changed,
-        "unchanged": len(set(plan.unchanged) - {item["name"] for item in changed}),
+        "seed_only": seeds,
+        "unchanged": len(
+            set(plan.unchanged)
+            - {item["name"] for item in changed}
+            - {item["name"] for item in seeds}
+        ),
         "stop": stops,
         "effects": effects,
         "marks": marks,

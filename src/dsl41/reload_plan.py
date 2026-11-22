@@ -203,6 +203,12 @@ def _plan_document(
             for change in plan.changed
         ],
         "unchanged": list(plan.unchanged),
+        # always present; a plan without the key was classified without the seed-only rule
+        # (DL-533)
+        "seed_only": [
+            {"name": change.name, "old_hash": change.old_hash, "new_hash": change.new_hash}
+            for change in plan.seed_only
+        ],
         "stop": list(stop),
         "preflight_warnings": [
             {"code": item.code, "job": item.job, "message": item.message} for item in warnings
@@ -318,9 +324,9 @@ def stop_set(
     scope: BoxScope | None = None,
 ) -> tuple[str, ...]:
     """Changed or removed jobs and members of the box scope whose row is STARTING or RUNNING,
-    sorted; never a box (spec-reload step 5). `reread` previews with it. The update's admission
-    starts from it and adds every named job with a process the engine owns, whatever its row
-    says (DL-525)."""
+    sorted; never a box (spec-reload step 5). A seed-only job adds nothing (DL-533). `reread`
+    previews with it. The update's admission starts from it and adds every named job with a
+    process the engine owns, whatever its row says (DL-525)."""
     names = {change.name for change in plan.changed} | set(plan.removed)
     if scope is None and candidate is not None:
         scope = box_scope(plan, live, candidate)

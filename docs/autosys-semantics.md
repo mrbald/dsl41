@@ -738,8 +738,8 @@ jobs complete and utilize this job as a dependency."
   state, not a transition).
 - Update: the line seeds a row only when the row is made, on a root's first start and for a
   job an update adds. An update never applies it to a job it keeps, so a hold an operator
-  released stays released (DL-531). An edit of only this line on a kept job still counts as
-  a change of the definition, so an update stops the job if it runs (BUG-104).
+  released stays released (DL-531). An edit of only this line on a kept job is seed-only:
+  the update names and stops nothing for it, and `reread` and `update` show it apart (DL-533).
 
 ---
 ## 4. Date/time scheduling

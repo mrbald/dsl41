@@ -179,7 +179,9 @@ in an owned worker; it admits no engine mutation and publishes no retained plan.
 Runtime state never refuses a diff. Broken input returns `invalid_argument`
 with the reason no diff is available; worker failures return `engine_error`.
 Success adds `live_rev`, `source: {kind, path}` and `preview` to the read header.
-Preview has added/changed/removed names, unchanged count, stops, restored flags,
+Preview has added/changed/removed names, the seed-only jobs (`seed_only`: each
+`{name, before, after}`, a kept job whose `status:` line alone changed; DL-533),
+the unchanged count without them, stops, restored flags,
 the stops marked non-idempotent with their reasons (`non_idempotent`; DL-463, DL-482),
 source changes, diagnostics, lint findings and per-job effects (`rerun`, `hold`,
 `remove`, `restart_box` or `restart`). Effects use the first matching rule:
@@ -242,7 +244,8 @@ Request-ID reuse and retention follow §3. The CLI prints the ID before writing.
 Admission returns `decision: admitted`, `request_id`, `stop` and `application`.
 With wait, the `update_window_s` of §4's `status` applies after preparation; timeout
 returns `pending: true`. Application has rev, catalog_hash, added, changed,
-removed, restored and stopped choices. Public replies contain no artifact key.
+removed, restored, stopped choices and `seed_only` (`[job, before, after]`;
+empty for a record without it, DL-533). Public replies contain no artifact key.
 Refusals carry `names`. Their codes include `stale_plan`, `update_in_progress`
 and `engine_draining`.
 

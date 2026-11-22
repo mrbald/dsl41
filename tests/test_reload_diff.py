@@ -5,11 +5,13 @@ Catalogs come from small JIL strings through `lower_source`, the loader the comp
 
 from __future__ import annotations
 
+import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from dsl41.ir import CatalogIR, lower_source
 from dsl41.reload_diff import (
+    Change,
     Plan,
     definition_hash,
     diff,
@@ -359,3 +361,83 @@ def test_kill_signals_does_not_change_job_definitions() -> None:
     edited = _cat(_job("a", command="other"), _job("b"))
     [change] = _diff(catalog, edited, {"kill_signals": (2, 9)}, {"kill_signals": (9,)}).changed
     assert change.name == "a" and change.reason is None
+
+
+# ---- a `status:` line alone is seed-only (DL-533)
+
+_SEEDS = [None, "ON_HOLD", "ON_ICE", "ON_NOEXEC"]
+
+
+def _seeded(name: str, status: str | None, extra: str = "", command: str = "run") -> str:
+    return _job(name, (f"status: {status}\n" if status else "") + extra, command)
+
+
+@pytest.mark.parametrize(
+    "before,after",
+    [(None, seed) for seed in _SEEDS[1:]]
+    + [(seed, None) for seed in _SEEDS[1:]]
+    + [("ON_HOLD", "ON_ICE"), ("ON_NOEXEC", "INACTIVE")],
+)
+def test_a_status_only_edit_is_unchanged_and_seed_only_with_both_hashes(
+    before: str | None, after: str | None
+) -> None:
+    live = _cat(_seeded("j", before), _job("other"))
+    candidate = _cat(_seeded("j", after), _job("other"))
+    plan = _diff(live, candidate)
+    assert plan.changed == ()
+    assert plan.unchanged == ("j", "other")
+    old_hash = definition_hash(live.jobs["j"], live, {})
+    new_hash = definition_hash(candidate.jobs["j"], candidate, {})
+    assert old_hash != new_hash
+    assert plan.seed_only == (Change("j", old_hash, new_hash),)
+    assert plan.prior_boxes == ()
+    # the hashes are the ones the old rule records for the same job as changed
+    (earlier,) = diff(live, candidate, {}, {}, seed_rule=False).changed
+    assert (earlier.name, earlier.old_hash, earlier.new_hash) == ("j", old_hash, new_hash)
+
+
+def test_the_old_rule_lists_a_status_only_edit_as_changed() -> None:
+    live, candidate = _cat(_seeded("j", None)), _cat(_seeded("j", "ON_HOLD"))
+    plan = diff(live, candidate, {}, {}, seed_rule=False)
+    assert [change.name for change in plan.changed] == ["j"]
+    assert plan.unchanged == () and plan.seed_only == ()
+    assert plan.prior_boxes == (("j", None),)
+
+
+def test_a_status_edit_with_a_command_edit_is_changed_not_seed_only() -> None:
+    live = _cat(_seeded("j", None, command="a"))
+    candidate = _cat(_seeded("j", "ON_ICE", command="b"))
+    plan = _diff(live, candidate)
+    assert [change.name for change in plan.changed] == ["j"]
+    assert plan.changed[0].reason is None
+    assert plan.seed_only == () and plan.unchanged == ()
+
+
+def test_a_status_edit_with_an_estate_setting_change_is_changed() -> None:
+    live, candidate = _cat(_seeded("j", None)), _cat(_seeded("j", "ON_HOLD"))
+    plan = _diff(live, candidate, {"timezone": "UTC"}, {"timezone": "Europe/Zurich"})
+    assert [change.name for change in plan.changed] == ["j"]
+    assert plan.seed_only == () and plan.unchanged == ()
+
+
+def test_a_status_edit_with_a_changed_calendar_is_changed() -> None:
+    calendar = 'date_conditions: 1\nrun_calendar: hols\nstart_times: "01:00"\n'
+    live = _cat(_cal("hols", "01/01/2026 00:00"), _seeded("j", None, calendar))
+    candidate = _cat(_cal("hols", "01/02/2026 00:00"), _seeded("j", "ON_HOLD", calendar))
+    plan = _diff(live, candidate)
+    assert [change.name for change in plan.changed] == ["j"]
+    assert plan.seed_only == ()
+
+
+def test_a_retyped_job_with_a_new_status_is_removed_and_added_not_seed_only() -> None:
+    live = _cat(_seeded("j", None))
+    candidate = _cat(_box("j", "status: ON_HOLD\n"))
+    plan = _diff(live, candidate)
+    assert (plan.added, plan.removed) == (("j",), ("j",))
+    assert plan.changed == () and plan.seed_only == () and plan.unchanged == ()
+
+
+def test_a_re_added_name_with_a_status_is_added_not_seed_only() -> None:
+    plan = _diff(_cat(_job("other")), _cat(_job("other"), _seeded("j", "ON_HOLD")))
+    assert plan.added == ("j",)
+    assert plan.seed_only == ()

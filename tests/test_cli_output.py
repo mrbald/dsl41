@@ -925,3 +925,482 @@ def test_r3_update_reply_keeps_admission_application_and_refusal_distinct(kind):
         assert isinstance(reply.decision, Admitted)
         assert reply.pending == (kind == "pending")
         assert (reply.unchanged is not None) == (kind == "unchanged")
+
+
+# ---- a `status:` line alone (DL-533)
+
+SEED_ROW = (
+    "initial_status: (unset) -> ON_HOLD; the status: edit itself sets no flag on a job that"
+    " stays (DL-533); hold or release it with sendevent"
+)
+_SEED_JOBS = "".join(
+    f"insert_job: {name}\njob_type: c\ncommand: true\nmachine: localhost\n\n"
+    for name in ("edited", "other", "seeded", "twin")
+)
+
+
+def _seed_line(text: str, job: str, status: str = "ON_HOLD") -> str:
+    old = f"insert_job: {job}\njob_type: c\n"
+    assert old in text
+    return text.replace(old, f"{old}status: {status}\n")
+
+
+def _seed_forms(tmp_path, *, mixed: bool, status: str = "ON_HOLD", lint: str = "", extra=""):
+    """The passive `reread` answer and the stored plan's application for an edit of the
+    `status:` lines of `seeded` (running) and `twin`; `mixed` also edits the commands of
+    `edited` and `twin`."""
+    from dsl41.oracle import Oracle
+    from dsl41.reload_plan import read_plan, reread
+    from dsl41.reload_update import plan_application
+    from test_main_config import config_file, live_of
+
+    path = config_file(tmp_path, lint=lint)
+    jil = tmp_path / "a.jil"
+    jil.write_text(_SEED_JOBS + extra)
+    before = main_config.prepare(path)
+    text = _seed_line(_seed_line(_SEED_JOBS + extra, "seeded", status), "twin", status)
+    if mixed:
+        for job in ("edited", "twin"):
+            start = text.index(f"insert_job: {job}\n")
+            end = text.index("\n\n", start)
+            text = text[:start] + text[start:end].replace("true", "false") + text[end:]
+    jil.write_text(text)
+    candidate = main_config.prepare(path)
+    live = live_of(before, {"seeded": "RUNNING"})
+    answer = {
+        "ok": True,
+        "live_rev": 1,
+        "source": {"path": str(path)},
+        "preview": preview(candidate, live),
+    }
+    if lint:
+        return answer, None
+    result = reread(live, tmp_path / "plans", candidate=candidate)
+    document = read_plan(tmp_path / "plans", result.token)
+    assert document is not None
+    return answer, plan_application(Oracle(before.catalog), candidate.catalog, document)
+
+
+def test_a_seed_only_reread_and_update_name_the_seed_once_in_each_layout(tmp_path, style):
+    from dsl41.cli_output import application_lines, reread_lines
+
+    answer, application = _seed_forms(tmp_path, mixed=False)
+    assert answer["preview"]["seed_only"] == [
+        {"name": "seeded", "before": "(unset)", "after": "ON_HOLD"},
+        {"name": "twin", "before": "(unset)", "after": "ON_HOLD"},
+    ]
+    assert answer["preview"]["changed"] == [] and answer["preview"]["stop"] == []
+    assert answer["preview"]["marks"] == {}
+    rows = (
+        [f"  {SEED_ROW}   2 jobs: seeded, twin"]
+        if style is OutputStyle.focused
+        else [f"  seeded   {SEED_ROW}", f"  twin   {SEED_ROW}"]
+    )
+    assert reread_lines(answer, style, "dsl41 update") == [
+        "estate on disk differs from the running estate (revision 1)",
+        "",
+        "changed 0 jobs, added 0, removed 0, status line only 2, unchanged 2",
+        *rows,
+        "",
+        "if applied now: no running job is stopped",
+        f"read from: {tmp_path / 'a.jil'}",
+        "apply with: dsl41 update",
+        "forecast at reread time; update rereads before applying",
+    ]
+    assert application is not None and application.changed == ()
+    assert application.seed_only == (("seeded", None, "ON_HOLD"), ("twin", None, "ON_HOLD"))
+    assert application_lines(application, style) == [
+        f"applied: catalog revision 2 ({application.digest})",
+        "  changed 0 jobs, added 0, removed 0, status line only 2",
+        *rows,
+    ]
+
+
+def test_a_mixed_reread_and_update_count_the_seed_on_its_own(tmp_path, style):
+    from dsl41.cli_output import application_lines, reread_lines
+
+    answer, application = _seed_forms(tmp_path, mixed=True)
+    assert [item["name"] for item in answer["preview"]["changed"]] == ["edited", "twin"]
+    assert [item["name"] for item in answer["preview"]["seed_only"]] == ["seeded"]
+    if style is OutputStyle.focused:
+        rows = [
+            "  command: true -> false   2 jobs: edited, twin",
+            "  initial_status: (unset) -> ON_HOLD   1 job: twin",
+            f"  {SEED_ROW}   1 job: seeded",
+        ]
+        applied = [f"  seeded   {SEED_ROW}"]
+    else:
+        rows = [
+            "  edited   command: true -> false",
+            f"  seeded   {SEED_ROW}",
+            "  twin   command: true -> false; initial_status: (unset) -> ON_HOLD",
+        ]
+        applied = [
+            "  edited   definition updated",
+            f"  seeded   {SEED_ROW}",
+            "  twin   definition updated",
+        ]
+    assert reread_lines(answer, style, "dsl41 update") == [
+        "estate on disk differs from the running estate (revision 1)",
+        "",
+        "changed 2 jobs, added 0, removed 0, status line only 1, unchanged 1",
+        *rows,
+        "",
+        "if applied now: no running job is stopped",
+        f"read from: {tmp_path / 'a.jil'}",
+        "apply with: dsl41 update",
+        "forecast at reread time; update rereads before applying",
+    ]
+    assert application is not None
+    assert application_lines(application, style) == [
+        f"applied: catalog revision 2 ({application.digest})",
+        "  changed 2 jobs, added 0, removed 0, status line only 1",
+        *applied,
+    ]
+
+
+def test_a_seed_that_raises_a_refused_finding_offers_no_update(tmp_path, style):
+    """DL-533: the seed-only rows say nothing of admission. An ON_ICE seed on a producer raises
+    L020 where ON_HOLD does not; under `refuse = "warn"` the footer says update would refuse."""
+    from dsl41.cli_output import reread_lines
+
+    lint = 'refuse = "warn"\nignore = ["L011", "L021"]\n'
+    consumer = (
+        "insert_job: consumer\njob_type: c\ncommand: true\nmachine: localhost\n"
+        "condition: s(seeded) & s(twin)\n"
+    )
+    hold, _ = _seed_forms(tmp_path / "hold", mixed=False, lint=lint, extra=consumer)
+    assert "apply with: dsl41 update" in reread_lines(hold, style, "dsl41 update")
+    ice, _ = _seed_forms(tmp_path / "ice", mixed=False, status="ON_ICE", lint=lint, extra=consumer)
+    assert any("L020" in message for message in ice["preview"]["lint_messages"])
+    assert not any("L020" in message for message in hold["preview"]["lint_messages"])
+    text = reread_lines(ice, style, "dsl41 update")
+    assert any(line.startswith("update would refuse") for line in text)
+    assert "apply with: dsl41 update" not in text
+    assert any(
+        "initial_status: (unset) -> ON_ICE; the status: edit itself" in line for line in text
+    )
+
+
+def test_an_older_engines_answer_without_seed_only_still_renders(tmp_path, style):
+    from dsl41.cli_output import application_lines, reread_lines
+
+    answer, application = _seed_forms(tmp_path, mixed=True)
+    older = copy.deepcopy(answer)
+    del older["preview"]["seed_only"]
+    assert "status line only" not in "\n".join(reread_lines(older, style, "dsl41 update"))
+    body = {
+        "rev": 2,
+        "catalog_hash": "h",
+        "added": [],
+        "changed": ["edited"],
+        "removed": [],
+        "restored": [],
+        "stopped": [],
+    }
+    reply = cli_reload.update_reply_of({"ok": True, "token": "t", "application": body})
+    assert reply.application is not None and reply.application.seed_only == ()
+    assert application_lines(reply.application, style)[1] == "  changed 1 job, added 0, removed 0"
+
+
+def test_a_status_only_update_applies_live_with_no_stop_and_restart_keeps_the_rows(
+    tmp_path, monkeypatch
+):
+    """DL-533 end to end: a running job and an idle one whose `status:` lines alone change. The
+    update applies at once with no stop, `update --wait` exits 0 and does not say nothing
+    changed, the attempt runs on, the rows keep their flags, and a restart does not re-seed
+    them (SEM-24)."""
+    import asyncio
+    from datetime import datetime
+    from dsl41.cli_output import reread_lines
+    from dsl41.oracle_state import Event
+    from dsl41.runner_adapters import FakeAdapter
+    from dsl41.runner_clock import VirtualClock
+    from dsl41.runner_control import ControlServer
+    from dsl41.runner_startup import active_configuration, resume_run, start_run
+
+    config, jil = tmp_path / "dsl41.toml", tmp_path / "jobs.jil"
+    config.write_text(
+        f'format_version = 1\n[engine]\nrun_root = "{tmp_path}/run"\n[estate]\ninclude = ["jobs.jil"]\n'
+    )
+    jobs = "".join(
+        f"insert_job: {name}\njob_type: c\ncommand: true\nmachine: localhost\n\n"
+        for name in ("idle", "sample")
+    )
+    jil.write_text(jobs)
+    initial = main_config.prepare(config)
+    at = datetime(2026, 7, 1)
+    seen: dict[str, object] = {}
+
+    async def scenario():
+        engine = start_run(
+            initial.catalog,
+            tmp_path / "run",
+            clock=VirtualClock(start=at),
+            adapters={"CMD": FakeAdapter(park={"sample"})},
+            launched=main_config.profile_of(initial),
+            source_capture=main_config.encoded_parts(initial),
+        )
+        engine.launch_settings = initial.metadata["launch"]
+        engine.reread_source = str(config)
+        server = ControlServer(
+            engine,
+            tmp_path / "run" / "control.sock",
+            estate_fingerprint=main_config.fingerprint(initial),
+        )
+
+        async def drive():
+            while True:
+                await engine._activity.wait()
+                engine._activity.clear()
+                await engine.run_until_quiescent(at)
+
+        pump = asyncio.create_task(drive())
+        request = {"v": 5, "cmd": "update", "baseline_id": engine.baseline_id, "wait": True}
+        try:
+            engine.inject(Event(at=at, kind="FORCE_STARTJOB", payload={"job": "sample"}))
+            await engine.run_until_quiescent(at)
+            async with asyncio.timeout(10):
+                while "sample" not in engine._live:
+                    await asyncio.sleep(0.01)
+            attempt = engine._live["sample"].attempt
+            rows = {name: engine.oracle.store.job[name] for name in ("idle", "sample")}
+            assert rows["sample"].status == "RUNNING"
+            jil.write_text(
+                _seed_line(_seed_line(jobs, "idle", "ON_ICE"), "sample", "ON_HOLD"),
+            )
+            forecast = await server._reread({"v": 5, "cmd": "reread"})
+            assert forecast["ok"], forecast
+            seen["reread"] = reread_lines(forecast, OutputStyle.neutral, "dsl41 update")
+            answer = await asyncio.wait_for(server._update({**request, "request_id": "seed"}), 30)
+            assert answer["stop"] == [] and "unchanged" not in answer, answer
+            assert answer["application"]["seed_only"] == [
+                ["idle", None, "ON_ICE"],
+                ["sample", None, "ON_HOLD"],
+            ]
+            assert answer["application"]["changed"] == [] and answer["application"]["rev"] == 2
+            seen["answer"] = answer
+            assert engine.config_rev == 2
+            assert engine._live["sample"].attempt == attempt
+            assert {name: engine.oracle.store.job[name] for name in rows} == rows
+            catalog = engine.oracle.catalog.jobs
+            assert (catalog["idle"].sem.initial_status, catalog["sample"].sem.initial_status) == (
+                "ON_ICE",
+                "ON_HOLD",
+            )
+            retry = await asyncio.wait_for(server._update({**request, "request_id": "seed"}), 30)
+            assert retry["application"]["seed_only"] == answer["application"]["seed_only"]
+        finally:
+            pump.cancel()
+            await asyncio.gather(pump, return_exceptions=True)
+            await server.close()
+            await engine.shutdown()
+            engine.journal.close()
+        stored = active_configuration(tmp_path / "run")
+        assert stored.catalog.jobs["idle"].sem.initial_status == "ON_ICE"
+        again = await resume_run(
+            stored.catalog,
+            tmp_path / "run",
+            clock=VirtualClock(start=at),
+            adapters={"CMD": FakeAdapter(park={"sample"})},
+            declared=stored.profile,
+            stored_sources=True,
+        )
+        try:
+            assert again.config_rev == 2
+            idle = again.oracle.store.job["idle"]
+            assert (idle.status, idle.on_hold, idle.on_ice, idle.on_noexec) == (
+                "INACTIVE",
+                False,
+                False,
+                False,
+            )
+            sample = again.oracle.store.job["sample"]
+            assert (sample.on_hold, sample.on_ice, sample.on_noexec) == (False, False, False)
+        finally:
+            await again.shutdown()
+            again.journal.close()
+
+    asyncio.run(scenario())
+    assert seen["reread"][:4] == [
+        "estate on disk differs from the running estate (revision 1)",
+        "",
+        "changed 0 jobs, added 0, removed 0, status line only 2, unchanged 0",
+        "  idle   " + SEED_ROW.replace("ON_HOLD", "ON_ICE"),
+    ]
+    reply = cli_reload.update_reply_of(seen["answer"])
+    monkeypatch.setattr(cli_reload, "socket_send", lambda *a, **kw: lambda *a: reply)
+    result = invoke(["update"], OutputStyle.neutral, "--wait")
+    assert result.exit_code == 0, result.output
+    assert "nothing changed" not in result.stdout
+    assert "stop requested" not in result.stdout
+    assert result.stdout.splitlines()[1:] == [
+        "  changed 0 jobs, added 0, removed 0, status line only 2",
+        "  idle   " + SEED_ROW.replace("ON_HOLD", "ON_ICE"),
+        f"  sample   {SEED_ROW}",
+    ]
+
+
+def _box_member(name: str) -> str:
+    return f"insert_job: {name}\njob_type: c\nbox_name: B\ncommand: true\nmachine: localhost\n\n"
+
+
+_BOXED = (
+    "insert_job: B\njob_type: b\n\n"
+    + _box_member("m1")
+    + "insert_job: o\njob_type: c\ncommand: true\nmachine: localhost\n\n"
+)
+
+
+def _boxed_answer(tmp_path, text: str, status: dict[str, str], marked: str = ""):
+    """The passive `reread` answer for box B (member m1) and job o, edited to `text`; m2 is
+    added to B either way."""
+    from test_main_config import config_file, live_of
+
+    path = config_file(tmp_path)
+    (tmp_path / "a.jil").write_text(_BOXED)
+    if marked:
+        (tmp_path / "non-idempotent.toml").write_text(f'[jobs]\n{marked} = "synthetic mark"\n')
+    before = main_config.prepare(path)
+    (tmp_path / "a.jil").write_text(text + _box_member("m2"))
+    candidate = main_config.prepare(path)
+    return {
+        "ok": True,
+        "live_rev": 1,
+        "source": {"path": str(path)},
+        "preview": preview(candidate, live_of(before, status)),
+    }
+
+
+def test_a_box_with_a_seed_and_a_membership_change_is_counted_once_as_changed(tmp_path, style):
+    """DL-533: B's own record differs only in `status:`, and it gains member m2. The JSON keeps
+    both lists; the summary counts B once, as changed, and its row keeps both explanations."""
+    from dsl41.cli_output import reread_lines
+
+    text = _BOXED.replace(
+        "insert_job: B\njob_type: b\n", "insert_job: B\njob_type: b\nstatus: ON_HOLD\n"
+    )
+    answer = _boxed_answer(tmp_path, text, {})
+    view = answer["preview"]
+    assert view["changed"] == [{"name": "B", "reason": "membership"}]
+    assert view["seed_only"] == [{"name": "B", "before": "(unset)", "after": "ON_HOLD"}]
+    assert (view["added"], view["removed"], view["unchanged"]) == (["m2"], [], 2)
+    source = f"source: - -> {tmp_path / 'a.jil'}"
+    if style is OutputStyle.focused:
+        rows = [
+            "  membership   1 job: B",
+            f"  {SEED_ROW}   1 job: B",
+            "  added   1 job: m2",
+            f"  {source}   1 job: m2",
+        ]
+    else:
+        rows = [f"  B   membership; {SEED_ROW}", f"  m2   added; {source}"]
+    assert reread_lines(answer, style, "dsl41 update") == [
+        "estate on disk differs from the running estate (revision 1)",
+        "",
+        "changed 1 job, added 1, removed 0, unchanged 2",
+        *rows,
+        "",
+        "if applied now: no running job is stopped",
+        f"read from: {tmp_path / 'a.jil'}",
+        "apply with: dsl41 update",
+        "forecast at reread time; update rereads before applying",
+    ]
+
+
+def test_a_marked_seed_only_member_of_a_restarted_box_shows_its_seed_and_its_hold(tmp_path, style):
+    """DL-533 with DL-463: running m1 is marked non-idempotent, its `status:` line alone
+    changes, and B gains m2. The seed row says what the edit does; the effects line says the
+    restart holds m1. The update's row carries both."""
+    from dsl41.cli_output import application_lines, reread_lines
+
+    text = _BOXED.replace(
+        "box_name: B\ncommand: true", "box_name: B\nstatus: ON_HOLD\ncommand: true"
+    )
+    answer = _boxed_answer(tmp_path, text, {"B": "RUNNING", "m1": "RUNNING"}, marked="m1")
+    view = answer["preview"]
+    assert view["effects"] == [
+        {"job": "B", "action": "restart_box"},
+        {"job": "m1", "action": "hold"},
+    ]
+    assert view["marks"]["m1"] == {"change": "unchanged", "action": "hold"}
+    source = f"source: - -> {tmp_path / 'a.jil'}"
+    if style is OutputStyle.focused:
+        rows = [
+            "  membership   1 job: B",
+            f"  {SEED_ROW}   1 job: m1",
+            "  added   1 job: m2",
+            f"  {source}   1 job: m2",
+        ]
+    else:
+        rows = ["  B   membership", f"  m1   {SEED_ROW}", f"  m2   added; {source}"]
+    assert reread_lines(answer, style, "dsl41 update") == [
+        "estate on disk differs from the running estate (revision 1)",
+        "",
+        "changed 1 job, added 1, removed 0, status line only 1, unchanged 1",
+        *rows,
+        "",
+        "if applied now: stopping 2 running jobs: B, m1",
+        "  B   would restart as a new box run",
+        "  m1   would be ON_HOLD (marked as not safe to rerun)",
+        "marked non-idempotent: m1 (synthetic mark)",
+        f"read from: {tmp_path / 'a.jil'}",
+        "apply with: dsl41 update",
+        "forecast at reread time; update rereads before applying",
+    ]
+    application = Application(
+        "",
+        2,
+        "h",
+        "",
+        CatalogIR(),
+        ("m2",),
+        (),
+        (),
+        (),
+        (("m1", "none"),),
+        seed_only=(("m1", None, "ON_HOLD"),),
+    )
+    outcome = (
+        "stopped, no follow-up of its own (in a restarted box, a marked member kept without"
+        " retyping is ON_HOLD; other members follow the box if allowed to run)"
+    )
+    rows = (
+        [f"  m1   {outcome}", f"  m1   {SEED_ROW}"]
+        if style is OutputStyle.focused
+        else [f"  m1   {SEED_ROW}; {outcome}", "  m2   added"]
+    )
+    assert application_lines(application, style) == [
+        "applied: catalog revision 2 (h)",
+        "  changed 0 jobs, added 1, removed 0, status line only 1",
+        *rows,
+    ]
+
+
+def test_identical_seeds_on_a_box_that_lost_its_member_and_on_a_job_group_as_all(tmp_path):
+    """DL-533: box B loses its only member, and B and o get the same `status:` line. B counts
+    once, as changed (membership), so the seed group names every job and reads `(all)`; a
+    second count of B would make the total three and drop the label."""
+    from dsl41.cli_output import reread_lines
+    from test_main_config import config_file, live_of
+
+    path = config_file(tmp_path)
+    (tmp_path / "a.jil").write_text(_BOXED)
+    before = main_config.prepare(path)
+    (tmp_path / "a.jil").write_text(
+        "insert_job: B\njob_type: b\nstatus: ON_HOLD\n\n"
+        "insert_job: o\njob_type: c\nstatus: ON_HOLD\ncommand: true\nmachine: localhost\n"
+    )
+    answer = {
+        "ok": True,
+        "live_rev": 1,
+        "source": {"path": str(path)},
+        "preview": preview(main_config.prepare(path), live_of(before)),
+    }
+    view = answer["preview"]
+    assert view["changed"] == [{"name": "B", "reason": "membership"}]
+    assert [item["name"] for item in view["seed_only"]] == ["B", "o"]
+    assert (view["removed"], view["unchanged"]) == (["m1"], 0)
+    lines = reread_lines(answer, OutputStyle.focused, "dsl41 update")
+    assert "changed 1 job, added 0, removed 1, status line only 1, unchanged 0" in lines
+    assert f"  {SEED_ROW}   2 jobs (all)" in lines
