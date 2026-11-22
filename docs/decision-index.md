@@ -112,7 +112,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-99 | how S6 is built, and where the leader record lives | [docs/blocks/policies.md](blocks/policies.md), [docs/citation-index.md](citation-index.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md) |
 | DL-100 | election: the lock, the epoch, and the act that used to happen before both | [docs/blocks/scheduler.md](blocks/scheduler.md), [docs/control-protocol.md](control-protocol.md) |
 | DL-101 | the fence: every append re-proves leadership | [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/policies.md](blocks/policies.md) |
-| DL-102 | the takeover barrier, and the start that gets re-driven rather than failed | [docs/blocks/admission.md](blocks/admission.md), [docs/runner-design.md](runner-design.md) |
+| DL-102 | the takeover barrier, and the start that gets re-driven rather than failed | [docs/blocks/admission.md](blocks/admission.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md) |
 | DL-103 | S6 closes, and the relay's trigger did not fire |  |
 | DL-104 | architecture review after S6 |  |
 | DL-105 | branch coverage over the concurrency tier, and what asking for it found |  |
@@ -535,3 +535,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-531 | A hold release and a `status:` line, stated and pinned | [docs/autosys-semantics.md](autosys-semantics.md), [docs/operations.md](operations.md) |
 | DL-532 | The terminal UI's selection is a job, not a row | [docs/cli-tui-qualification.md](cli-tui-qualification.md) |
 | DL-533 | An edit of only a `status:` line is not a reason to stop a job | [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/update.md](blocks/update.md), [docs/control-protocol.md](control-protocol.md), [docs/deploy.md](deploy.md), [docs/operations.md](operations.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |
+| DL-534 | `explain` answers why a job has not started | [docs/control-protocol.md](control-protocol.md), [docs/protocol-evolution.md](protocol-evolution.md) |

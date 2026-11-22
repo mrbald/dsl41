@@ -27525,3 +27525,37 @@ relitigate an entry; append a new one.
   UNCHANGED. Definition hashes, catalog hashes, history fingerprints and the state-machine
   version. An edit of the line together with any other difference in the job's hashed
   definition record is a change as before.
+- DL-534 `explain` answers why a job has not started
+  (2026-11-22; owner's second priority among the operator-surface findings;
+  src/dsl41/oracle_explain.py, src/dsl41/job_chart.py, src/dsl41/capacity.py,
+  src/dsl41/oracle_facts.py, src/dsl41/runner.py, src/dsl41/runner_control.py,
+  src/dsl41/runner_scheduler.py, src/dsl41/runner_update.py, docs/control-protocol.md,
+  docs/protocol-evolution.md, pyproject.toml, tests/test_explain_causes.py; additive in
+  dialect 5, DL-217; no state-machine version change)
+  THE RULE. The `explain` reply keeps its fields and answers three questions apart. `wake`
+  says what would make a start attempt: a tick the scheduler holds, an update of a job or
+  global the condition reads, the box starting, a deferred window opening, or an operator
+  only. `disposition` says what the oracle would do now with a start attempt of one named
+  kind, the kind a condition wake or a hold release makes; `gates` lists the chart's gates
+  in the chart's order, one of them `deciding`, the others `open` or, below the deciding
+  one, `context`. `dispatch` is present only when a start or a replacement the oracle has
+  decided is not dispatched, and names the wait: a drain, an update, an earlier attempt's
+  cleanup. A job that is QUE_WAIT is told whether it would fit alone, never that it is
+  admitted, with the waiters ahead of it in the scan's order. `capacity` names each bucket
+  that is short, the jobs that hold its units and the waiters that block; a shortage with
+  no holder is legal. While recovery has not finished the reply says so and gives no
+  dispatch evidence. `as_of` is the instant the answer is for; it lags the wall clock on a
+  quiet engine, and a client shows it. Each atom carries the job it names and whether it is
+  a guard, a self reference, undefined or external; `deps` carries the same list.
+  HOW. One read builds the answer from the gate predicates the chart itself uses;
+  `start_verdict` and `readmit_verdict` are called unchanged. The read feeds nothing, pops
+  no scheduler entry, creates no row and calls no engine method that changes state; it may
+  fill the oracle's timezone and calendar caches. Before the first input it answers on a
+  fork.
+  THE DEFECT. `explain` read the condition only. A held member of a box that was not
+  running was shown as waiting on one condition atom, with nothing about the hold, the
+  box, the date arm, the run window, capacity or the engine's own waits, and no read named
+  the resource a queued job waits for or who holds it.
+  UNCHANGED. Every oracle decision; the legacy reply fields; `trace`, `status` and `spec`.
+  NOT BUILT. The terminal UI still renders the legacy fields; the pane and the hop to a
+  cause are the next slice.

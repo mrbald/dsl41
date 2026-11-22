@@ -335,6 +335,12 @@ def test_explain_refuses_a_job_the_catalog_does_not_hold(short_root: Path) -> No
     asyncio.run(scenario())
 
 
+def _legacy_atoms(answer: dict) -> list[dict]:
+    """Each atom's fields from before DL-534, which adds identity fields beside them."""
+    keys = ("atom", "true", "actual")
+    return [{k: atom[k] for k in keys if k in atom} for atom in answer["atoms"]]
+
+
 def test_explain_serves_a_globals_actual_value_beside_the_atoms_truth(
     short_root: Path,
 ) -> None:
@@ -351,7 +357,7 @@ def test_explain_serves_a_globals_actual_value_beside_the_atoms_truth(
         engine, server, loop_task = await _serve(short_root / "run", text)
         try:
             before = await _control_call(server.path, {"cmd": "explain", "job": "s6b_dn"})
-            assert before["atoms"] == [
+            assert _legacy_atoms(before) == [
                 {"atom": "s(s6b_up)", "true": False},
                 {"atom": "v(S6B_FLAG) = go", "true": False, "actual": None},
             ]
@@ -365,7 +371,11 @@ def test_explain_serves_a_globals_actual_value_beside_the_atoms_truth(
 
             await _wait_for_async(seen)
             after = await _control_call(server.path, {"cmd": "explain", "job": "s6b_dn"})
-            assert after["atoms"][1] == {"atom": "v(S6B_FLAG) = go", "true": True, "actual": "go"}
+            assert _legacy_atoms(after)[1] == {
+                "atom": "v(S6B_FLAG) = go",
+                "true": True,
+                "actual": "go",
+            }
             assert "actual" not in after["atoms"][0]
         finally:
             await _teardown(engine, server, loop_task)

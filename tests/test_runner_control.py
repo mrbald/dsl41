@@ -833,6 +833,15 @@ def test_trace_answer_includes_refusal_facts_only_when_set(short_root: Path) -> 
     asyncio.run(scenario())
 
 
+#: The `explain` answer's fields before DL-534, and an atom's.
+_EXPLAIN_LEGACY = ("ok", "job", "condition", "satisfied", "atoms")
+_ATOM_LEGACY = ("atom", "true", "actual")
+
+
+def _legacy_atoms(answer: dict) -> list[dict]:
+    return [{k: atom[k] for k in _ATOM_LEGACY if k in atom} for atom in answer["atoms"]]
+
+
 def test_explain_null_condition_and_status_atom_truth_before_and_after(short_root: Path) -> None:
     text = (
         "insert_job: ex_a\njob_type: c\ncommand: x\nmachine: m1\n\n"
@@ -842,20 +851,24 @@ def test_explain_null_condition_and_status_atom_truth_before_and_after(short_roo
     async def scenario() -> None:
         engine, server, loop_task = await _serve(short_root / "run", text)
         try:
-            none_resp = await _control_call(server.path, {"cmd": "explain", "job": "ex_a"})
-            assert _body(none_resp, engine) == {
+            none_resp = _body(
+                await _control_call(server.path, {"cmd": "explain", "job": "ex_a"}), engine
+            )
+            # the legacy fields stay as they were; DL-534's are additive
+            assert {key: none_resp.pop(key) for key in _EXPLAIN_LEGACY} == {
                 "ok": True,
                 "job": "ex_a",
                 "condition": None,
                 "satisfied": True,
                 "atoms": [],
             }
+            assert sorted(none_resp) == ["as_of", "attempt", "disposition", "gates", "wake"]
 
             before = await _control_call(server.path, {"cmd": "explain", "job": "ex_b"})
             assert before["ok"] is True
             assert before["condition"] == "s(ex_a)"
             assert before["satisfied"] is False
-            assert before["atoms"] == [{"atom": "s(ex_a)", "true": False}]
+            assert _legacy_atoms(before) == [{"atom": "s(ex_a)", "true": False}]
 
             resp = await _sendevent(server.path, "CHANGE_STATUS", job="ex_a", status="SUCCESS")
             assert resp["ok"] is True
@@ -867,7 +880,7 @@ def test_explain_null_condition_and_status_atom_truth_before_and_after(short_roo
             await _wait_for_async(satisfied)
             after = await _control_call(server.path, {"cmd": "explain", "job": "ex_b"})
             assert after["satisfied"] is True
-            assert after["atoms"] == [{"atom": "s(ex_a)", "true": True}]
+            assert _legacy_atoms(after) == [{"atom": "s(ex_a)", "true": True}]
         finally:
             await _teardown(engine, server, loop_task)
 
@@ -2050,6 +2063,28 @@ def test_deps_chain_globals_downstream_and_unknown_job_refused(short_root: Path)
                 "ok": True,
                 "job": "dp_b",
                 "upstream": ["dp_a"],
+                "upstream_atoms": [
+                    {
+                        "atom": "s(dp_a)",
+                        "job": "dp_a",
+                        "kind": "status",
+                        "lookback": None,
+                        "guard": False,
+                        "self": False,
+                        "undefined": False,
+                        "external": False,
+                    },
+                    {
+                        "atom": "v(GFLAG) = go",
+                        "job": None,
+                        "kind": "global",
+                        "lookback": None,
+                        "guard": False,
+                        "self": False,
+                        "undefined": False,
+                        "external": False,
+                    },
+                ],
                 "globals": ["GFLAG"],
                 "downstream": ["dp_c"],
                 "box_name": None,
@@ -2061,6 +2096,7 @@ def test_deps_chain_globals_downstream_and_unknown_job_refused(short_root: Path)
                 "ok": True,
                 "job": "dp_a",
                 "upstream": [],
+                "upstream_atoms": [],
                 "globals": [],
                 "downstream": ["dp_b"],
                 "box_name": None,
@@ -2072,6 +2108,18 @@ def test_deps_chain_globals_downstream_and_unknown_job_refused(short_root: Path)
                 "ok": True,
                 "job": "dp_c",
                 "upstream": ["dp_b"],
+                "upstream_atoms": [
+                    {
+                        "atom": "s(dp_b)",
+                        "job": "dp_b",
+                        "kind": "status",
+                        "lookback": None,
+                        "guard": False,
+                        "self": False,
+                        "undefined": False,
+                        "external": False,
+                    }
+                ],
                 "globals": [],
                 "downstream": [],
                 "box_name": None,
@@ -2083,6 +2131,7 @@ def test_deps_chain_globals_downstream_and_unknown_job_refused(short_root: Path)
                 "ok": True,
                 "job": "dp_d",
                 "upstream": [],
+                "upstream_atoms": [],
                 "globals": [],
                 "downstream": [],
                 "box_name": None,

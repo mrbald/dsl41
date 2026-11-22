@@ -787,13 +787,101 @@ entries after it run under.
 ### `explain <job>`
 
 `{"ok": true, "job", "condition": <source>|null, "satisfied": bool,
-"atoms": [{atom, true, actual?}]}`. `actual` appears for global atoms and
+"atoms": [{atom, true, actual?, …}], "as_of", "wake", "attempt",
+"disposition", "gates", "capacity"?, "dispatch"?, "recovering"?,
+"watching"?}`.
+`actual` appears for global atoms and
 carries the effective value (null = never set), because atom truth alone
 hides why (DL-66). A job with no condition answers `condition: null`,
 `satisfied: true`, `atoms: []`.
 
 Truth comes from the oracle itself (ice bypass, lookback, instances),
 never from a second evaluator.
+
+Each atom also carries its identity (DL-534): `job`, the key it names
+(null for a global); `kind` (`status`, `exitcode`, `global`);
+`lookback`, its token or null; `guard`, true only for a local,
+unqualified `n()`; `self`; `undefined`, a local name the catalog does not
+define; `external`, another instance's job. An undefined or external
+name is no catalog target. `satisfied` stays the condition's own truth,
+so a false atom inside a satisfied OR is no blocker.
+
+The answer then says why the job has not started, as three separate
+answers (DL-534). These fields are additive in dialect 5 (DL-217).
+
+- `as_of`: the instant the answer is computed for, in the `status_at`
+  format. It is the oracle's last input's instant, so on a quiet engine
+  it lags the wall clock. A client must show `as_of` with the answer.
+  Before the first input it is the engine's present instant, read on a
+  copy, so the oracle does not advance.
+- `wake`: a list of `{kind, text, job, at}`, what makes a start attempt.
+  `tick` is the next tick the scheduler holds for the job, named even
+  when the applied definition no longer has a schedule, since an owed
+  tick still fires; `at: null` ("none scheduled") marks a dated job with
+  no tick, such as one whose only time attribute is a run window.
+  `deferred` is a pending run_window-deferred start. `condition`: a job
+  or global the condition names is updated while the condition is true;
+  a repeated update to the same value counts. `box` names the box whose
+  start makes one. A waiter has `scan` alone. `operator` appears when
+  nothing else would make an attempt.
+- `attempt` and `disposition`: what the oracle would do now with one
+  named attempt. `attempt: "start"` is the attempt a condition wake or a
+  hold release makes, never a tick. Its disposition is `admit`, `queue`,
+  `bypass` (noexec: it completes without running), `defer` (the gate's
+  `at` is the next opening), `skip`, or `ignored`. The unarmed date gate
+  stops this attempt; a STARTJOB, a scheduled tick's or an operator's,
+  passes it.
+- A QUE_WAIT job has `attempt: "readmit"`: a full queue scan's
+  readmission of this waiter tried alone now. Its disposition is `fits`
+  (it fits and passes its recheck), `short` (it does not fit), `held`,
+  `cancel` (its box stopped) or `leave` (it fits and its queued recheck
+  fails). A scan decides, and it tries the waiters ahead first, so a
+  waiter that `fits` alone can stay queued behind them; `capacity.ahead`
+  names them.
+- A STARTING or RUNNING job has `attempt: null` and
+  `disposition: "running"`; a running file watch adds `watching`, as
+  `status` serves it.
+- `gates`: the chart's tests in the chart's order, each
+  `{kind, state, text, job, at}`. For a start the kinds are `ice`,
+  `hold`, `date`, `box`, `condition`, `window`, `noexec` and `capacity`;
+  for a readmission `box`, `hold`, `capacity` and `recheck`. `state` is
+  `deciding` for the gate that decides, `open` for each gate before it
+  that applies to the job, and `context` for each later gate that would
+  also stop the attempt. The decision never reaches a context gate. A
+  `box` gate names the box as `job`; so does a `noexec` gate whose
+  ON_NOEXEC is a box's.
+- `capacity`, the pool's test of the job alone now, part by part. It is
+  absent for a STARTING or RUNNING job. A waiter always has it; a job
+  with a start attempt has it when the job has a demand or the pool
+  would refuse it. `{admissible, blockers, short}`: `blockers` holds
+  each higher-priority waiter that blocks the job, `{job, kind}` with
+  `kind` `resource` or `load`. `short` holds each tested bucket with no
+  room: `{bucket, capacity, demand, used, short, spent, holders}`, where
+  `holders` is each job holding units of it, `{job, units}`. A short
+  bucket may have no holder: its units are spent, or its threshold is
+  below the demand. Units a terminal job kept are held by it. A waiter's
+  answer adds `ahead`, the waiters the scan tries before it (priority,
+  then enqueue order, then name) that request a bucket it needs, each
+  `{job, buckets}`, and `text`, which says a scan decides and earlier
+  waiters go first.
+- `dispatch`, present only while a start the oracle decided for the
+  job's current run waits for the engine: `{run_number, kind, wait,
+  attempt, token, removes}`. `kind` is `start` or `replacement`. `wait`
+  is `drain`, `cleanup` (an attempt has not settled: an earlier one, or
+  the replaced attempt whose stop ladder still runs, named as
+  `attempt`) or `update` (its filter holds the job; `token` names it,
+  and `removes` says whether its plan removes the job). A job's own
+  running attempt is no such wait.
+- `recovering`, present only while a restart's recovery has not ended:
+  a sentence saying so. A start can then be owed with no record of it
+  yet (DL-102), so the answer makes no dispatch claim and has no
+  `dispatch`.
+
+The read is synchronous, between feeds. It feeds nothing, pops no
+scheduler tick, polls no file and creates no row, and no decided state
+changes. It may fill the oracle's timezone and calendar caches, memos of
+name resolution. Separate requests can see different instants; the
+read header identifies each.
 
 ### `spec <job>`
 
@@ -805,8 +893,9 @@ the captured JIL (DL-468). The latter does not stop the stored estate.
 
 ### `deps <job>`
 
-`{"ok": true, "job", "upstream": [...], "globals": [...], "downstream":
-[...], "box_name", "members": [...]}` (DL-65, the blast-radius view).
+`{"ok": true, "job", "upstream": [...], "upstream_atoms": [...],
+"globals": [...], "downstream": [...], "box_name", "members": [...]}`
+(DL-65, the blast-radius view).
 `upstream`/`globals` are split by **atom type**, never by sniffing key
 strings, because a job legally named `g:x` (DL-39 escapes) would
 otherwise collide with global `x`. `downstream` comes from the oracle's
@@ -814,6 +903,10 @@ edge-trigger index, which is keyed by those strings. It therefore does
 inherit the collision for such a name; this is a limit, not a guard.
 Condition edges are not the whole blast radius of a box, so containment
 is served alongside: `box_name` upward, `members` downward.
+
+`upstream_atoms` lists the condition's atoms in source order with the
+identity fields `explain` gives them, without their truth (DL-534). It
+is additive in dialect 5; the other lists are unchanged.
 
 ### `timers`
 

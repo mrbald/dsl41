@@ -93,6 +93,12 @@ Control `status` may carry `clock_hold: {"wall", "until"}` while real wall
 time is below engine time (DL-493). Clients may ignore this additive field
 in dialect 5. It changes no record or state version.
 
+Control `explain` adds `as_of`, `wake`, `attempt`, `disposition`,
+`gates` and, when they apply, `capacity`, `dispatch`, `recovering` and
+`watching`, plus seven identity fields per atom; `deps` adds
+`upstream_atoms` (DL-534). The fields each had keep their values. These are additive fields in dialect 5.
+They change no record or state version.
+
 `root_id` is mandatory store identity, not a format version (DL-433).
 Startup refuses a store without it. Clock domain is also checked separately.
 A new binary version alone does not change the catalog or runtime hashes.

@@ -451,6 +451,11 @@ class Scheduler:
         DL-65)."""
         return sorted((tick, job) for job, tick in self._next.items())
 
+    def next_tick(self, job: str) -> datetime | None:
+        """`job`'s next tick, as `upcoming` lists it; None for a job with nothing that ticks
+        or an exhausted calendar (`explain`'s wake, DL-534)."""
+        return self._next.get(job)
+
     def pop_due(self, upto: datetime) -> list[Event]:
         """Consume every tick due at or before `upto`; return its STARTJOB event, stamped at
         the tick and ordered by (tick, job).

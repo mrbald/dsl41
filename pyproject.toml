@@ -206,6 +206,8 @@ include = [
     "src/dsl41/oracle.py",
     "src/dsl41/oracle_cascade.py",
     "src/dsl41/oracle_facts.py",
+    # the explanation of the oracle's decisions (DL-534)
+    "src/dsl41/oracle_explain.py",
     "src/dsl41/oracle_intents.py",
     "src/dsl41/oracle_reads.py",
     "src/dsl41/oracle_schedule.py",

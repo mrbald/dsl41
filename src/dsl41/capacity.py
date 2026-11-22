@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Literal
 from dsl41.oracle_state import CapacityReservation, ReleasePolicy
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 
     from dsl41.ir import CatalogIR, JobIR, ResourceIR, ResourceRef
     from dsl41.oracle_state import JobRuntime
@@ -177,10 +177,43 @@ class CapacityPool:
         """True iff every bucket has room for its demand; gate and acquire share the test.
 
         `own` credits that job's held units to it (`used`, DL-256)."""
+        return not self.shortages(vector, rows, consumed, own=own)
+
+    def shortages(
+        self,
+        vector: list[DemandEntry],
+        rows: Mapping[str, JobRuntime],
+        consumed: Mapping[str, int],
+        *,
+        own: str | None = None,
+    ) -> list[tuple[str, int, int, int]]:
+        """Each bucket of `vector` with no room for its demand, as (bucket, capacity, demand,
+        used), in the vector's order: `can_admit`'s test, bucket by bucket (DL-534)."""
         if not vector:
-            return True
+            return []
         used = self.used(rows, consumed, own=own)
-        return all(used.get(key, 0) + units <= self._bucket_cap[key] for key, units, _, _ in vector)
+        return [
+            (key, self._bucket_cap[key], units, used.get(key, 0))
+            for key, units, _, _ in vector
+            if used.get(key, 0) + units > self._bucket_cap[key]
+        ]
+
+    @staticmethod
+    def holders(
+        buckets: Collection[str], rows: Mapping[str, JobRuntime], *, own: str | None = None
+    ) -> dict[str, list[tuple[str, int]]]:
+        """The rows that hold units of each of `buckets`, with the units, in row order, in one
+        pass over the rows (DL-534). A row holds what its reservations name, whatever its
+        status, so units a terminal run kept are its own (DL-256). `own` is left out, as
+        `used` leaves it."""
+        found: dict[str, list[tuple[str, int]]] = {bucket: [] for bucket in buckets}
+        for name, row in rows.items():
+            if name == own:
+                continue
+            for reservation in row.reservations:
+                if reservation.bucket in found:
+                    found[reservation.bucket].append((name, reservation.units))
+        return found
 
     def load_blocked(
         self,
@@ -199,7 +232,17 @@ class CapacityPool:
         machine, and its own load does not fit now; one whose load fits waits on a resource
         and does not block on the machine. `counts` says which waiters count as queued: the
         Oracle leaves out a held waiter and one whose box is not running."""
-        return self._load_blocked(job_ir, self.used(rows, consumed), rows, counts)
+        return _any(self.load_blockers(job_ir, rows, consumed, counts))
+
+    def load_blockers(
+        self,
+        job_ir: JobIR,
+        rows: Mapping[str, JobRuntime],
+        consumed: Mapping[str, int],
+        counts: Callable[[str], bool],
+    ) -> Iterator[str]:
+        """The waiters that make `load_blocked` true, in row order (DL-534)."""
+        return self._load_blockers(job_ir, self.used(rows, consumed), rows, counts)
 
     def _load_blocked(
         self,
@@ -209,10 +252,20 @@ class CapacityPool:
         counts: Callable[[str], bool],
     ) -> bool:
         """`load_blocked` over usage the caller has already summed."""
+        return _any(self._load_blockers(job_ir, used, rows, counts))
+
+    def _load_blockers(
+        self,
+        job_ir: JobIR,
+        used: Mapping[str, int],
+        rows: Mapping[str, JobRuntime],
+        counts: Callable[[str], bool],
+    ) -> Iterator[str]:
+        """`load_blockers` over usage the caller has already summed."""
         priority = job_priority(job_ir)
         key = self._machine_key(job_ir)
         if priority <= 0 or key is None:
-            return False
+            return
         load_used = used.get(key, 0)
         for name, row in rows.items():
             other = self.catalog.jobs.get(name)
@@ -226,8 +279,7 @@ class CapacityPool:
             if load_used + other_entry[1] <= self._bucket_cap[key]:
                 continue
             if counts(name):
-                return True
-        return False
+                yield name
 
     def resource_blocked(
         self,
@@ -237,7 +289,20 @@ class CapacityPool:
         counts: Callable[[str], bool],
     ) -> bool:
         """DL-255: True when a queued job of strictly higher priority waits for a named
-        resource this job also names.
+        resource this job also names (`resource_blockers`)."""
+        return _any(self.resource_blockers(job_ir, rows, consumed, counts))
+
+    def resource_blockers(
+        self,
+        job_ir: JobIR,
+        rows: Mapping[str, JobRuntime],
+        consumed: Mapping[str, int],
+        counts: Callable[[str], bool],
+        *,
+        floors: Mapping[str, int] | None = None,
+    ) -> Iterator[str]:
+        """DL-255: the queued jobs of strictly higher priority that wait for a named resource
+        this job also names.
 
         Vendor rule: a job in RESWAIT for one resource name "automatically blocks all the
         lower priority jobs that specify the same resource name"; dsl41 has no RESWAIT, such a
@@ -246,13 +311,17 @@ class CapacityPool:
         any resource it names; it blocks on all of them, not only the short one (AutoSys KB
         240816, 12.0). It must also have passed its load check, since the vendor evaluates
         resources only after load, so its load fits and no higher-priority load waiter blocks
-        it. `counts` is `load_blocked`'s."""
+        it. `counts` is `load_blocked`'s. Answers the blockers in row order (DL-534). With
+        `floors` (`load_floors` over the same state), each blocker's load stage is read off
+        them, and a blocker that holds units gets the one usage total less its own
+        reservations, so one call visits each row a bounded number of times. Without, the
+        oracle's own calls read both as they always have."""
         priority = job_priority(job_ir)
         if priority <= 0:
-            return False
+            return
         named = {entry[0] for entry in self._resource_entries(job_ir)}
         if not named:
-            return False
+            return
         used = self.used(rows, consumed)
         for name, row in rows.items():
             other = self.catalog.jobs.get(name)
@@ -264,16 +333,19 @@ class CapacityPool:
             if not any(entry[0] in named for entry in entries):
                 continue
             # a waiter holding units from an earlier run counts them as its own (DL-256)
-            own_used = self.used(rows, consumed, own=name) if row.reservations else used
+            own_used = used
+            if row.reservations:
+                own_used = (
+                    self.used(rows, consumed, own=name) if floors is None else _less(used, row)
+                )
             if not any(
                 own_used.get(key, 0) + units > self._bucket_cap[key] for key, units, _, _ in entries
             ):
                 continue
-            if not self._passed_load(other, used, rows, counts):
+            if not self._passed_load(other, used, rows, counts, floors):
                 continue
             if counts(name):
-                return True
-        return False
+                yield name
 
     def _resource_entries(self, job_ir: JobIR) -> list[DemandEntry]:
         """The named-resource half of a job's demand vector."""
@@ -285,13 +357,45 @@ class CapacityPool:
         used: Mapping[str, int],
         rows: Mapping[str, JobRuntime],
         counts: Callable[[str], bool],
+        floors: Mapping[str, int] | None = None,
     ) -> bool:
         """DL-255: whether a queued positive-priority job has passed its machine-load stage:
-        its load fits and no higher-priority load waiter blocks it."""
+        its load fits and no higher-priority load waiter blocks it, read off `floors` when
+        given."""
         entry = self._machine_entry(job_ir)
         if entry is not None and used.get(entry[0], 0) + entry[1] > self._bucket_cap[entry[0]]:
             return False
-        return not self._load_blocked(job_ir, used, rows, counts)
+        if floors is None:
+            return not self._load_blocked(job_ir, used, rows, counts)
+        key = self._machine_key(job_ir)
+        priority = job_priority(job_ir)
+        return key is None or priority <= 0 or floors.get(key, priority) >= priority
+
+    def load_floors(
+        self,
+        rows: Mapping[str, JobRuntime],
+        consumed: Mapping[str, int],
+        counts: Callable[[str], bool],
+    ) -> dict[str, int]:
+        """Per machine bucket, the lowest positive priority among the counted waiters whose load
+        does not fit now, in one pass over the rows (DL-534). A job of a higher priority
+        number on that machine is load-blocked: `load_blocked`'s rule, whose strict order also
+        leaves a waiter out of its own block, read once for many jobs."""
+        used = self.used(rows, consumed)
+        floors: dict[str, int] = {}
+        for name, row in rows.items():
+            other = self.catalog.jobs.get(name)
+            if row.waiter_seq is None or other is None:
+                continue
+            entry = self._machine_entry(other)
+            priority = job_priority(other)
+            if entry is None or priority <= 0:
+                continue
+            key, load = entry[0], entry[1]
+            if used.get(key, 0) + load <= self._bucket_cap[key] or not counts(name):
+                continue
+            floors[key] = min(floors.get(key, priority), priority)
+        return floors
 
     def has_priority_waiters(self, rows: Mapping[str, JobRuntime]) -> bool:
         """True when a queued job has a positive priority and a sized machine or named
@@ -318,6 +422,20 @@ class CapacityPool:
 
         waiting = [(job, row.waiter_seq) for job, row in rows.items() if row.waiter_seq is not None]
         return [job for job, _ in sorted(waiting, key=key)]
+
+
+def _less(used: Mapping[str, int], row: JobRuntime) -> dict[str, int]:
+    """`used` less the units `row` reserves: `CapacityPool.used` with that row left out, read
+    off a total already summed (DL-534)."""
+    out = dict(used)
+    for reservation in row.reservations:
+        out[reservation.bucket] -= reservation.units
+    return out
+
+
+def _any(names: Iterator[str]) -> bool:
+    """Whether `names` yields one; the scan stops at the first."""
+    return next(names, None) is not None
 
 
 def without_machine_load(vector: list[DemandEntry]) -> list[DemandEntry]:

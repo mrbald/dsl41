@@ -251,6 +251,11 @@ class Deferred:
     #: the cause of the stop the replacement follows, shown beside its status (DL-426)
     after: str | None = None
 
+    @property
+    def owes(self) -> str:
+        """`start` for a pending start, `replacement` for a plan's (`explain`, DL-534)."""
+        return "start" if self.plan is None else "replacement"
+
 
 @dataclass
 class _Plan:
@@ -1402,6 +1407,61 @@ class Engine:
                 "note": facts.note or (LADDER_RUNNING if running else STOP_IN_PROGRESS),
             }
         return view
+
+    def dispatch_wait(self, job: str) -> dict[str, Any] | None:
+        """What keeps a start the oracle decided for `job`'s current run from its dispatch, or
+        None when nothing is owed (`explain`, DL-534). It answers outside a restart's recovery
+        only: until recovery ends, a start can be owed with no record of it yet (DL-102), so
+        `explain` makes no dispatch claim then.
+
+        The evidence is a pending start or a plan's replacement for that job and run. One a held
+        group or an update's filter keeps back waits for the `drain` while the engine drains
+        (the restart launches it), else for the `update` (its token, and whether its plan
+        removes the job), else for the `cleanup` of the attempt that blocks it: an unsettled
+        attempt of the job, or the replaced attempt whose own stop ladder still runs. A
+        `dispatch_pending` or a plan's dispatch step the store holds open while the engine drains
+        waits for the `drain`. A run the oracle has moved past is discharged with no launch, so
+        it owes none. The job's own running attempt is no evidence."""
+        row = self.oracle.store.job.get(job)
+        if row is None or spawn_superseded(row, row.run_number) is not None:
+            return None
+        run = row.run_number
+        held = [item for item in self._held_starts if (item.job, item.run_number) == (job, run)]
+        plans = [
+            attempt
+            for attempt in sorted(self._waiting_plans)
+            if (self._plans[attempt].job, self._plans[attempt].run_number) == (job, run)
+        ]
+        view: dict[str, Any] = {"run_number": run, "attempt": None, "token": None, "removes": False}
+        if held or plans:
+            view["kind"] = held[0].owes if held else "replacement"
+            if self.draining:
+                return view | {"wait": "drain"}
+            if self.update.holds(job):
+                token, removes = self.update.token, self.update.removes(job)
+                return view | {"wait": "update", "token": token, "removes": removes}
+            # a replacement parked behind its own attempt's ladder waits for that attempt
+            # (`perform_plan`), which `blocked` skips by design
+            blocking = self.blocked(job) if held else self.blocked(job, plans[0]) or plans[0]
+            return view | {"wait": "cleanup", "attempt": blocking}
+        if self.draining and self.journal is not None:
+            carried = {item.pending for item in self._held_starts}
+            table = self.journal.open
+            stored = [
+                "start"
+                for seq, pending in table.pending.items()
+                if (pending.job, pending.run_number) == (job, run) and seq not in carried
+            ]
+            stored += [
+                "replacement"
+                for attempt, plan in table.plans.items()
+                if (plan.job, plan.run_number) == (job, run)
+                and attempt not in self._waiting_plans
+                and any(step["step"] == "dispatch" for step in plan.steps)
+            ]
+            if stored:
+                return view | {"kind": stored[0], "wait": "drain"}
+        return None
 
     def _ended_with_its_ladder_running(self, attempt: str) -> bool:
         tier = self.attempts

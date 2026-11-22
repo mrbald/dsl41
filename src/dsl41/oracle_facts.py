@@ -340,20 +340,27 @@ class ReadmitFacts:
     fact: the scan reads it off the rows (`CapacityPool.sorted_waiters`), and each waiter gets
     its own `readmit`. `admission` is the
     readmission's units and its run's facts, built on its first read and kept, so ADMITTED's
-    entry and its completion read one record (DL-364).
+    entry and its completion read one record (DL-364). `known` seeds facts a reader computed
+    by the same rule, as `StartFacts`' does (`oracle_explain`, DL-534).
     """
 
     __slots__ = ("keep_stopped", "units", "_oracle", "_job", "_job_ir", "_known", "_admission")
 
     def __init__(
-        self, oracle: OracleCascade, job: str, job_ir: JobIR, *, keep_stopped: bool
+        self,
+        oracle: OracleCascade,
+        job: str,
+        job_ir: JobIR,
+        *,
+        keep_stopped: bool,
+        known: dict[str, Any] | None = None,
     ) -> None:
         self.keep_stopped = keep_stopped
         self.units = RowUnits(oracle, job)
         self._oracle = oracle
         self._job = job
         self._job_ir = job_ir
-        self._known: dict[str, Any] = {}
+        self._known: dict[str, Any] = {} if known is None else known
         self._admission: AdmissionFacts | None = None
 
     def __repr__(self) -> str:

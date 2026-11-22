@@ -177,6 +177,16 @@ def test_retry_waits_for_cleanup_then_update_releases_replacement(short_root):
             assert (outcome["outcome"], outcome["ladder"]) == ("natural", "running")
             [plan] = _plans(root)
             assert plan["plan"] == "rerun"
+            # DL-534: the parked replacement waits for its own attempt's ladder, named
+            explained = await client.ask("explain", job="j")
+            assert explained["dispatch"] == {
+                "run_number": 1,
+                "kind": "replacement",
+                "wait": "cleanup",
+                "attempt": outcome["attempt"],
+                "token": None,
+                "removes": False,
+            }
             (short_root / "jobs.jil").write_text(_job("true", "n_retrys: 1\n"))
             await client.update()
             assert len(_records(root, "dispatch")) == 1 and _live(child)

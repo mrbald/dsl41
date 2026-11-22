@@ -305,6 +305,15 @@ class EngineUpdate:
         """Whether the dispatch filter keeps `job` from starting now."""
         return self.tier is not None and job in self.tier.dispatch_filter
 
+    def removes(self, job: str) -> bool:
+        """Whether the update in STOPPING removes `job`: its plan names it removed, so the start
+        its filter keeps back is discharged at the application with no launch (DL-534)."""
+        return (
+            self.stopping
+            and self._opened is not None
+            and job in self._opened.plan.get("removed", ())
+        )
+
     def stops(self, job: str, attempt: str) -> bool:
         """Whether the update in STOPPING stops attempt `attempt` of `job`: its stop list names
         that attempt, as admitted or as `resume` restored it from the intent (DL-526)."""

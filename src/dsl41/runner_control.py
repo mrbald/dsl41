@@ -77,13 +77,14 @@ import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from pathlib import Path
-from typing import Any, get_args
+from typing import Any, Final, get_args
 
 
 from dsl41.canon import is_scalar_json, is_wire_int
 from dsl41.conditions import GlobalAtom, iter_atoms
 from dsl41.ir import FwSpec, JobIR
 from dsl41.runner_config import FW_DEFAULT_INTERVAL_S
+from dsl41.oracle_explain import atom_entries, reading, start_answer, wake
 from dsl41.oracle_state import (
     INJECTABLE_STATUSES,
     Event,
@@ -246,6 +247,13 @@ def _applied(body: Mapping[str, Any]) -> dict[str, Any]:
     }
     answer["seed_only"] = body.get("seed_only") or []
     return answer
+
+
+#: `explain`'s statement while a restart recovers, in place of any dispatch claim (DL-534).
+RECOVERING: Final = (
+    "the engine is recovering from a restart: the starts it owes are not all known until"
+    " recovery ends, so this answer gives no dispatch evidence"
+)
 
 
 def _failure(code: Code, error: str, *, refused: bool = False) -> dict[str, Any]:
@@ -1271,38 +1279,43 @@ class ControlServer:
         }
 
     def _explain(self, request: dict[str, Any]) -> dict[str, Any]:
+        """The condition and its atoms' truth, then why the job has not started (DL-534,
+        `oracle_explain`): `as_of`, `wake`, `attempt`, `disposition` with its `gates`,
+        `capacity` where the job has a demand or the pool would refuse it, `dispatch` while a
+        decided start waits for the engine, and a running watch's `watching`. One synchronous
+        read between feeds: it feeds nothing, pops no tick, polls no file and creates no row."""
         job = request.get("job")
         if (error := self._check_job(job)) is not None:
             return error
         assert isinstance(job, str)
         from dsl41.dsl import cond_to_source  # heavyweight surface: load on demand
 
-        oracle = self.engine.oracle
-        attr = oracle.catalog.jobs[job].sem.condition
+        engine = self.engine
+        oracle = reading(engine.oracle, engine.now_present(remember=False))
+        job_ir = oracle.catalog.jobs[job]
+        attr = job_ir.sem.condition
+        reply: dict[str, Any] = {"ok": True, "job": job}
         if attr is None:
-            return {"ok": True, "job": job, "condition": None, "satisfied": True, "atoms": []}
-        cond = attr.cond
-        # oracle._cond_true is package-private on purpose: explain uses the ORACLE's truth
-        # (ice bypass, lookback, instances), never a copy
-        atoms: list[dict[str, Any]] = []
-        for atom in iter_atoms(cond):
-            entry: dict[str, Any] = {
-                "atom": cond_to_source(atom),
-                "true": oracle._cond_true(atom, job),
+            reply |= {"condition": None, "satisfied": True, "atoms": []}
+        else:
+            # oracle._cond_true is package-private on purpose: explain uses the ORACLE's truth
+            # (ice bypass, lookback, instances), never a copy
+            reply |= {
+                "condition": cond_to_source(attr.cond),
+                "satisfied": oracle._cond_true(attr.cond, job),
+                "atoms": atom_entries(oracle, job, attr.cond, truth=True),
             }
-            if isinstance(atom, GlobalAtom):
-                # DL-66: atom truth alone hides WHY; serve the effective global value (null =
-                # never set) beside it. `global`/`globals` answer a NAMED global (DL-87);
-                # this reads the same value where the condition uses it
-                entry["actual"] = oracle.store.global_value(atom.name)
-            atoms.append(entry)
-        return {
-            "ok": True,
-            "job": job,
-            "condition": cond_to_source(cond),
-            "satisfied": oracle._cond_true(cond, job),
-            "atoms": atoms,
-        }
+        tick = None if engine.scheduler is None else engine.scheduler.next_tick(job)
+        reply |= start_answer(oracle, job)
+        reply["wake"] = wake(oracle, job, tick)
+        if engine.recovery is not None:
+            # DL-534: a start can be owed with no record of it until recovery ends (DL-102)
+            reply["recovering"] = RECOVERING
+        elif (dispatch := engine.dispatch_wait(job)) is not None:
+            reply["dispatch"] = dispatch
+        if reply["disposition"] == "running" and (watching := self._fw_watching(job_ir)):
+            reply["watching"] = watching
+        return reply
 
     def _spec(self, request: dict[str, Any]) -> dict[str, Any]:
         job = request.get("job")
@@ -1326,7 +1339,8 @@ class ControlServer:
         edge-trigger index (package-private like _explain; the index shares that key
         collision for pathological names). Containment is served too, because condition
         edges are not a box's whole blast radius: box_name (upward) and members
-        (downward)."""
+        (downward). `upstream_atoms` gives each atom with the identity `explain` gives it
+        (DL-534)."""
         job = request.get("job")
         if (error := self._check_job(job)) is not None:
             return error
@@ -1335,12 +1349,16 @@ class ControlServer:
         job_ir = oracle.catalog.jobs[job]
         upstream: set[str] = set()
         globals_: set[str] = set()
+        atoms: list[dict[str, Any]] = []
         if job_ir.sem.condition is not None:
             for atom in iter_atoms(job_ir.sem.condition.cond):
                 if isinstance(atom, GlobalAtom):
                     globals_.add(atom.name)
                 else:
                     upstream.add(atom.job.key)
+            # DL-534: the atoms with their identity flags, for a hop that needs to know which
+            # names are local catalog jobs
+            atoms = atom_entries(oracle, job, job_ir.sem.condition.cond, truth=False)
         members = (
             sorted(n for n, j in oracle.catalog.jobs.items() if j.box.box_name == job)
             if job_ir.job_type == "BOX"
@@ -1350,6 +1368,7 @@ class ControlServer:
             "ok": True,
             "job": job,
             "upstream": sorted(upstream),
+            "upstream_atoms": atoms,
             "globals": sorted(globals_),
             "downstream": sorted(oracle._referencers.get(job, [])),
             "box_name": job_ir.box.box_name,

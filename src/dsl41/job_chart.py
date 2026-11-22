@@ -71,6 +71,9 @@ The per-job start bound (DL-304) is the refusal row job.100: an attempt past the
 window that descends from `MAX_NESTED_STARTS` admitted starts of its own job (`start admitted`
 items on its instance, in its ancestry) is refused with a trace line whoever asked.
 
+`START_GATES` and `READMIT_GATES` name the tests of `start_verdict` and `readmit_verdict` in
+their order, each read by the predicate the verdict uses, for `explain` (DL-534).
+
 The cascade between instances is declared too (DL-350): a box's rules on its members, a
 member's moves on its box, the wakes, the queue's scan, sent to the `queue_scan` coordinator
 (`scan_chart`, DL-372), and the start retries. A row's action
@@ -452,6 +455,64 @@ def readmit_leaves_unarmed(ctx: Context) -> bool:
 def readmit_keeps(ctx: Context) -> bool:
     """`readmit_verdict` is `keep`: held, not admissible, or kept by an admit-only scan."""
     return readmit_verdict(ctx) == "keep"
+
+
+# ---- the gates an explanation names (DL-534)
+
+type StartGate = Literal["ice", "hold", "date", "box", "condition", "window", "noexec", "capacity"]
+
+#: DL-534: the tests a plain attempt (no force, no relay, no window decision) meets once its
+#: status admits a start, in `start_verdict`'s order. The first that closes decides the attempt.
+START_GATES: Final[tuple[StartGate, ...]] = (
+    "ice",
+    "hold",
+    "date",
+    "box",
+    "condition",
+    "window",
+    "noexec",
+    "capacity",
+)
+
+
+def start_gate_closes(
+    gate: StartGate, attempt: StartAttempt, active: frozenset[str], box: bool
+) -> bool:
+    """Whether `gate` stops a plain attempt, by the test `start_verdict` makes of it (DL-534):
+    `window` closes outside the window, `noexec` closes where the attempt bypasses, `capacity`
+    where it is not admissible."""
+    if gate == "ice":
+        return _gate_iced(active)
+    if gate == "hold":
+        return _gate_held(active)
+    if gate == "date":
+        return _gate_unarmed_tick(attempt)
+    if gate == "box":
+        return _gate_box_closed(attempt)
+    if gate == "condition":
+        return _gate_condition_false(attempt)
+    if gate == "window":
+        return not _inside_window(attempt)
+    if gate == "noexec":
+        return _bypasses_on_noexec(attempt, active, box)
+    return not attempt.admissible
+
+
+type ReadmitGate = Literal["box", "hold", "capacity", "recheck"]
+
+#: DL-534: the tests a full scan's readmission of a waiter meets, in `readmit_verdict`'s order.
+READMIT_GATES: Final[tuple[ReadmitGate, ...]] = ("box", "hold", "capacity", "recheck")
+
+
+def readmit_gate_closes(gate: ReadmitGate, scan: Readmission, active: frozenset[str]) -> bool:
+    """Whether `gate` stops a readmission, by the test `readmit_verdict` makes of it (DL-534)."""
+    if gate == "box":
+        return scan.box == "idle"
+    if gate == "hold":
+        return "hold_on" in active
+    if gate == "capacity":
+        return not scan.admissible
+    return scan.recheck_fails
 
 
 # ---- the admitted start's extent (DL-349, DL-350)
