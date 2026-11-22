@@ -1299,7 +1299,10 @@ The app is a **client of the control socket only** — never in-process with
 the engine. This split is forced, not stylistic. textual-serve spawns one
 app instance per browser session, so an in-process engine hands every
 viewer a private universe. Views: jobs table (status with a cached reread annotation (DL-463), run_number, pending
-timers/alarms), explain pane ("waiting on: s(A) ∧ ¬f(B)" with live truth),
+timers/alarms), explain pane (why the selected job has not started, from
+`explain`: the instant, the deciding gate, the condition's atoms, capacity, the
+dispatch wait and the wakes, each line naming a job a link that `e`, up, down
+and Enter follow and Backspace retraces — DL-535),
 log tail (the §6 std files), event console (sendevent verbs), job-details
 popup (the `spec` block + `deps` needs/blocks lines + a short log tail),
 and the read-only triggers view on `t` (the `timers` verb live with

@@ -18,6 +18,26 @@ Contract detail for DL-46, within DL-41's frame:
   ice/hold/noexec flags, plus `pending_timers` (the oracle's own liveness filter, so display truth
   is dispatch truth) and per-run `log_out`/`log_err`. Alarm counts tally MUST_START_ALARM and
   MUST_COMPLETE_ALARM trace transitions; the oracle's trace is the only alarm authority.
+- Explain pane (DL-535): for the selected job, one line per item, the instant the answer is for,
+  `recovering`, the disposition with its deciding gate first and then the open gates and the
+  context facts, the condition with its atoms, capacity (short buckets, holders or "nobody holds
+  it", blocking waiters, waiters ahead), the dispatch wait and what would wake the job. A line
+  naming a catalog job is a link, marked `›`; a guard, a self reference, an undefined or an
+  external name is labelled and is no link. Each line is keyed by what it names, so the cursor
+  stays on its line across answers. `e` focuses the pane; up and down move between links, the
+  paging keys move the cursor with the view, Enter goes to the linked job (on a line scrolled
+  out of view it only brings the line back), Backspace goes back, `b` switches to the jobs one
+  hop downstream, Escape returns to the table. A hop is the operator's pick (`_choose`) of a link
+  in the answer the pane shows for the selected job: the target's boxes are unfolded, a filter or
+  a view that hides it gives way with a console line, and the hop lands on a status answer asked
+  after it began, with the target selected and its row on screen. Until then the verb keys, `d`,
+  space and a console verb without a job name are held, each with a console line; a change of
+  the selection the hop did not make ends it with a line, and so does a status pass that
+  fails, is refused or sees a new trace baseline. An answer is shown only for the latest
+  request and while its job is selected. The downstream mode asks each downstream job's atoms
+  once per selected job, configuration rev and baseline, for at most `_DETAIL_CAP` jobs. An
+  engine whose answer has no `gates` gets the condition text and no links. The pane asks on a
+  change of the selected job, a refresh and a change of mode only.
 - The log tail is a byte tail of the current run's resolved runner-design ss6 append target
   (`log_out`/`log_err` from status; `o` toggles the stream), read from the local filesystem. The
   TUI runs on the engine host in both postures (textual-serve serves from the host, E3), so file
@@ -76,7 +96,9 @@ Contract detail for DL-46, within DL-41's frame:
   (DL-187 item 6).
 - Job details popup (`d` or Enter on a row): the ss10 `spec` verb's preserve-rendered JIL block
   (the post-placeholder source this engine loaded), topped with the status facts, the `deps`
-  verb's needs/blocks lines (the blast radius, DL-65) and a short local log tail. The header
+  verb's needs/blocks lines (the blast radius, DL-65; from `upstream_atoms` when served, with a
+  guard and a self reference labelled and never a dependency, DL-535) and a short local log
+  tail. The header
   clock and owned timestamps use the host's local time as YYYY-MM-DDTHH:MM:SS (DL-473).
 - Navigation at estate scale (DL-65): the jobs table renders the box tree (indent from the status
   response's box_name; space folds the selected box, `z` folds or unfolds all; a folded box shows
@@ -129,7 +151,7 @@ import sys
 import time
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -398,7 +420,7 @@ _OPERATOR_BELLS = tuple(
     Binding(key, "app.bell", "", show=False)
     for key in (
         *("s", "f", "k", "i", "I", "h", "H", "n", "N"),
-        *("d", "m", "o", "slash", "v", "space", "z", "colon", "]", "[", "}", "{"),
+        *("d", "m", "o", "slash", "v", "space", "z", "colon", "e", "]", "[", "}", "{"),
         *("plus", "equals_sign", "minus"),
     )
 )
@@ -757,6 +779,9 @@ class _JobsTable(DataTable[Any]):
     on the filter line, or `v`, that leaves one job shown selects that
     job; typing in the filter line selects nothing.
 
+    e moves focus to the explain pane, where up, down and Enter go to
+    the job a line names, and Backspace goes back (DL-535).
+
     Drag a border to resize; + and - resize the focused pane.
 
     F1 in the console line (`:`) lists every verb and every status
@@ -1015,6 +1040,7 @@ class _LogTail(RichLog):
         Binding("H", "app.bell", "", show=False),
         Binding("v", "app.bell", "", show=False),
         Binding("colon", "app.bell", "", show=False),
+        Binding("e", "app.bell", "", show=False),
     ]
 
     def __init__(self, *, id: str | None = None) -> None:  # noqa: A002 -- textual's own name
@@ -1475,16 +1501,534 @@ def echo_label(request: dict[str, Any]) -> str:
     return f"> {verb} {target}".rstrip()
 
 
+@dataclass(frozen=True)
+class PaneLine:
+    """One line of the explain pane (DL-535). `target` is the catalog job the line names, the
+    job a hop goes to; None for a line that is no link. `key` names the line by what it names,
+    never by its position, so the cursor stays on the same line when an answer reorders the
+    lines. A link is bound to the job and the answer the pane shows it for by the pane's own
+    `source` and `gen`: the pane shows one answer's lines whole."""
+
+    text: Text
+    target: str | None = None
+    key: str = ""
+
+
+def _unique_keys(lines: list[PaneLine]) -> list[PaneLine]:
+    """Each line's key, with a count for its second and later occurrence (DL-535)."""
+    seen: dict[str, int] = {}
+    out = []
+    for line in lines:
+        count = seen.get(line.key, 0)
+        seen[line.key] = count + 1
+        out.append(replace(line, key=f"{line.key}#{count}") if count else line)
+    return out
+
+
+def _pane_line(
+    text: str | Text, *, target: str | None = None, key: str = "", style: str = ""
+) -> PaneLine:
+    """A line with its gutter: `›` for a link, blank otherwise (DL-535)."""
+    body = text if isinstance(text, Text) else Text(text, style=style)
+    gutter = Text("› ", style="bold") if target is not None else Text("  ")
+    return PaneLine(gutter + body, target, key or body.plain)
+
+
+#: the disposition in words, by attempt and disposition (DL-534, DL-535)
+_DISPOSITION_WORDS: dict[tuple[str | None, str], str] = {
+    ("start", "admit"): "a start now: would start",
+    ("start", "queue"): "a start now: would queue for capacity",
+    ("start", "bypass"): "a start now: would complete without running",
+    ("start", "defer"): "a start now: would wait for its run_window to open",
+    ("start", "skip"): "a start now: would be skipped",
+    ("start", "ignored"): "a start now: would not start",
+    ("readmit", "fits"): "a queue scan now: fits alone; the waiters ahead go first",
+    ("readmit", "short"): "a queue scan now: does not fit",
+    ("readmit", "held"): "a queue scan now: stays queued on hold",
+    ("readmit", "cancel"): "a queue scan now: cancels it, its box is not running",
+    ("readmit", "leave"): "a queue scan now: takes it out of the queue, its recheck fails",
+    (None, "running"): "running",
+}
+
+
+def _at_suffix(at: Any) -> str:
+    return f" at {format_local_at(at)}" if isinstance(at, str) else ""
+
+
+def _disposition_lines(reply: Mapping[str, Any]) -> list[PaneLine]:
+    """The disposition in words, then the deciding gate, the open gates and the context
+    facts, each marked as such (DL-535). A running file watch says what it watches."""
+    attempt, disposition = reply.get("attempt"), str(reply.get("disposition"))
+    words = _DISPOSITION_WORDS.get((attempt, disposition), f"{attempt}: {disposition}")
+    lines = [_pane_line(words, style="bold")]
+    gates = [gate for gate in reply.get("gates") or [] if isinstance(gate, Mapping)]
+    for state in ("deciding", "open", "context"):
+        for gate in gates:
+            if gate.get("state") != state:
+                continue
+            text = f"  {state}: {gate.get('text', '')}{_at_suffix(gate.get('at'))}"
+            job = gate.get("job")
+            lines.append(
+                _pane_line(
+                    text,
+                    target=job if isinstance(job, str) else None,
+                    key=f"gate:{gate.get('kind')}",
+                    style="bold" if state == "deciding" else ("dim" if state == "open" else ""),
+                )
+            )
+    watching = reply.get("watching")
+    if isinstance(watching, Mapping):
+        text = f"  watching {watching.get('file')} every {watching.get('interval')}s"
+        if watching.get("min_size") is not None:
+            text += f", min_size {watching['min_size']}"
+        lines.append(_pane_line(text))
+    return lines
+
+
+def atom_link(atom: Mapping[str, Any]) -> str | None:
+    """The catalog job an atom's line links to (DL-535): the job it names, unless it is a
+    guard, a self reference, an undefined or an external name, or a global."""
+    job = atom.get("job")
+    if not isinstance(job, str) or any(
+        atom.get(flag) for flag in ("guard", "self", "undefined", "external")
+    ):
+        return None
+    return job
+
+
+def _atom_labels(atom: Mapping[str, Any]) -> str:
+    """What an atom that is no dependency link is, in words."""
+    return ", ".join(
+        word
+        for flag, word in (
+            ("guard", "guard"),
+            ("self", "self"),
+            ("undefined", "undefined"),
+            ("external", "external"),
+        )
+        if atom.get(flag)
+    )
+
+
+def _condition_lines(reply: Mapping[str, Any]) -> list[PaneLine]:
+    condition = reply.get("condition")
+    if condition is None:
+        return [_pane_line("no condition", style="dim")]
+    truth = "true" if reply.get("satisfied") else "false"
+    lines = [_pane_line(f"condition: {condition} ({truth})", style="bold")]
+    for atom in reply.get("atoms") or []:
+        if not isinstance(atom, Mapping):
+            continue
+        true = bool(atom.get("true"))
+        text = Text("  ")
+        text.append("✔ " if true else "✘ ", style="green" if true else "red")
+        text.append(str(atom.get("atom", "")), style="" if true else "bold")
+        if "actual" in atom:  # a global atom carries the effective value (DL-66)
+            actual = atom["actual"]
+            text.append(f"   = {actual!r}" if actual is not None else "   (unset)", style="dim")
+        if labels := _atom_labels(atom):
+            text.append(f"  [{labels}]", style="dim")
+        key = f"atom:{atom.get('kind')}:{atom.get('job')}:{atom.get('atom')}"
+        lines.append(_pane_line(text, target=atom_link(atom), key=key))
+    return lines
+
+
+def _capacity_lines(capacity: Any) -> list[PaneLine]:
+    """The short buckets, each with its holders or "nobody holds it", the waiters that block,
+    the waiters ahead and the scan's sentence, one line each (DL-535)."""
+    if not isinstance(capacity, Mapping):
+        return []
+    short = [entry for entry in capacity.get("short") or [] if isinstance(entry, Mapping)]
+    blockers = [entry for entry in capacity.get("blockers") or [] if isinstance(entry, Mapping)]
+    ahead = [entry for entry in capacity.get("ahead") or [] if isinstance(entry, Mapping)]
+    lines: list[PaneLine] = []
+    if capacity.get("admissible") and not short and not blockers:
+        lines.append(_pane_line("capacity: room for it now"))
+    for entry in short:
+        bucket = entry.get("bucket")
+        text = (
+            f"capacity: {bucket} short by {entry.get('short')}: needs {entry.get('demand')},"
+            f" {entry.get('used')} of {entry.get('capacity')} in use"
+        )
+        if entry.get("spent"):
+            text += f", {entry['spent']} spent"
+        lines.append(_pane_line(text, key=f"short:{bucket}"))
+        holders = [h for h in entry.get("holders") or [] if isinstance(h, Mapping)]
+        for holder in holders:
+            units = holder.get("units")
+            job = holder.get("job")
+            lines.append(
+                _pane_line(
+                    f"  held by {job}: {units} unit{'' if units == 1 else 's'}",
+                    target=job if isinstance(job, str) else None,
+                    key=f"holder:{bucket}:{job}",
+                )
+            )
+        if not holders:
+            lines.append(_pane_line("  nobody holds it", key=f"nobody:{bucket}"))
+    for entry in blockers:
+        job = entry.get("job")
+        lines.append(
+            _pane_line(
+                f"capacity: blocked by waiter {job}, higher priority ({entry.get('kind')})",
+                target=job if isinstance(job, str) else None,
+                key=f"blocker:{job}",
+            )
+        )
+    for entry in ahead:
+        job = entry.get("job")
+        buckets = ", ".join(str(b) for b in entry.get("buckets") or [])
+        lines.append(
+            _pane_line(
+                f"capacity: ahead in the queue: {job} ({buckets})",
+                target=job if isinstance(job, str) else None,
+                key=f"ahead:{job}",
+            )
+        )
+    if capacity.get("text"):
+        lines.append(_pane_line(f"capacity: {capacity['text']}", style="dim"))
+    return lines
+
+
+def _dispatch_lines(dispatch: Any) -> list[PaneLine]:
+    if not isinstance(dispatch, Mapping):
+        return []
+    wait = dispatch.get("wait")
+    if wait == "drain":
+        what = "the engine's drain"
+    elif wait == "cleanup":
+        what = f"attempt {dispatch.get('attempt')} to settle"
+    elif wait == "update":
+        what = f"update {str(dispatch.get('token') or '')[:12]}"
+        if dispatch.get("removes"):
+            what += ", which removes the job"
+    else:
+        what = str(wait)
+    kind, run = dispatch.get("kind"), dispatch.get("run_number")
+    text = f"dispatch: the {kind} of run {run} waits for {what}"
+    return [_pane_line(text, style="yellow")]
+
+
+def _wake_lines(wakes: Any) -> list[PaneLine]:
+    lines: list[PaneLine] = []
+    for entry in wakes if isinstance(wakes, list) else []:
+        if not isinstance(entry, Mapping):
+            continue
+        kind, at, job = entry.get("kind"), entry.get("at"), entry.get("job")
+        text = "no scheduled tick" if kind == "tick" and at is None else str(entry.get("text"))
+        lines.append(
+            _pane_line(
+                f"wake: {text}{_at_suffix(at)}",
+                target=job if isinstance(job, str) else None,
+                key=f"wake:{kind}:{job}",
+            )
+        )
+    return lines
+
+
+def _legacy_lines(reply: Mapping[str, Any], row: Mapping[str, Any]) -> list[PaneLine]:
+    """The pane for an engine whose `explain` has no `gates` (DL-535): the condition and its
+    atoms as before, no links. With no condition, the status row's hold or ice says why it
+    does not start."""
+    condition = reply.get("condition")
+    if condition is None:
+        if row.get("on_hold"):
+            why = "on hold"
+        elif row.get("on_ice"):
+            why = "on ice"
+        else:
+            why = "starts on demand/schedule"
+        return [PaneLine(Text(f"no condition -- {why}", style="dim"))]
+    satisfied = bool(reply.get("satisfied"))
+    lines = [
+        PaneLine(Text("waiting on:" if not satisfied else "satisfied:", style="bold")),
+        PaneLine(Text(f"  {condition}")),
+        PaneLine(Text("")),
+    ]
+    for atom in reply.get("atoms") or []:
+        true = bool(atom.get("true"))
+        text = Text()
+        text.append("  ✔ " if true else "  ✘ ", style="green" if true else "red")
+        text.append(f"{atom.get('atom', '')}", style="" if true else "bold")
+        if "actual" in atom:  # global atoms carry the effective value (DL-66)
+            actual = atom["actual"]
+            text.append(f"   = {actual!r}" if actual is not None else "   (unset)", style="dim")
+        lines.append(PaneLine(text))
+    return lines
+
+
+def explain_lines(reply: Mapping[str, Any], row: Mapping[str, Any]) -> list[PaneLine]:
+    """The explain pane's lines for one `explain` answer (DL-535; DL-534 for the fields), one
+    line per item, in this order: the instant the answer is for; the recovery sentence; the
+    disposition with the deciding gate first, then the open gates and the context facts; the
+    condition and its atoms; capacity; the dispatch wait; what would wake the job. A line that
+    names a catalog job links to it; a guard, a self reference, an undefined or an external
+    name does not. An answer without `gates` is an older engine's: `_legacy_lines`. `row` is
+    the job's status row."""
+    if "gates" not in reply:
+        return _legacy_lines(reply, row)
+    lines = [_pane_line(f"as of {format_local_at(reply.get('as_of'))}", style="dim")]
+    if reply.get("recovering"):
+        lines.append(_pane_line(f"recovering: {reply['recovering']}", style="yellow"))
+    lines += _disposition_lines(reply)
+    lines += _condition_lines(reply)
+    lines += _capacity_lines(reply.get("capacity"))
+    lines += _dispatch_lines(reply.get("dispatch"))
+    lines += _wake_lines(reply.get("wake"))
+    return _unique_keys(lines)
+
+
+def downstream_lines(
+    source: str,
+    deps: Mapping[str, Any],
+    atoms_of: Mapping[str, Any],
+) -> list[PaneLine]:
+    """The pane's second mode (DL-535): the jobs one hop downstream of `source`, from `deps`,
+    each with the atom of its condition that names `source`, read off its own `deps` answer
+    in `atoms_of`. Each is a link but `source` itself, a self reference. A job missing from
+    `atoms_of` is not detailed: its name only, and one line says how many. An engine whose
+    `deps` has no `upstream_atoms` gets the names and no links."""
+    downstream = [job for job in deps.get("downstream") or [] if isinstance(job, str)]
+    if not downstream:
+        return [_pane_line(f"no job's condition names {source}", style="dim")]
+    linkable = isinstance(deps.get("upstream_atoms"), list)
+    lines = [_pane_line(f"jobs whose condition names {source}:", style="bold")]
+    undetailed = 0
+    for job in downstream:
+        if job == source:
+            lines.append(_pane_line(f"  {job}: its own condition names it [self]"))
+            continue
+        if linkable and job not in atoms_of:
+            undetailed += 1
+            lines.append(_pane_line(f"  {job}", target=job, key=f"down:{job}"))
+            continue
+        atoms = atoms_of.get(job)
+        named = [
+            atom
+            for atom in (atoms if isinstance(atoms, list) else [])
+            if isinstance(atom, Mapping) and atom.get("job") == source and not atom.get("external")
+        ]
+        words = ", ".join(
+            str(atom.get("atom")) + (" [guard]" if atom.get("guard") else "") for atom in named
+        )
+        if not linkable:
+            words = ""
+        elif not words:
+            words = "no atom of its condition names it"
+        lines.append(
+            _pane_line(
+                f"  {job}: {words}" if words else f"  {job}",
+                target=job if linkable else None,
+                key=f"down:{job}",
+            )
+        )
+    if undetailed:
+        lines.append(
+            _pane_line(f"  {undetailed} not detailed: their atoms were not read", style="dim")
+        )
+    return _unique_keys(lines)
+
+
+def dependency_names(atoms: Sequence[Mapping[str, Any]]) -> dict[str, list[str]]:
+    """The details popup's dependency words from `deps`' `upstream_atoms` (DL-535): `needs`,
+    the jobs and globals the condition depends on, an undefined or external name labelled;
+    `guard`, each guard, a self one labelled; `self`, each other self reference. Neither a
+    guard nor a self reference is a dependency."""
+    out: dict[str, list[str]] = {"needs": [], "guard": [], "self": []}
+    for atom in atoms:
+        if atom.get("guard"):
+            word = str(atom.get("atom")) + (" (self)" if atom.get("self") else "")
+            section = "guard"
+        elif atom.get("self"):
+            word, section = str(atom.get("atom")), "self"
+        elif atom.get("kind") == "global":
+            name = str(atom.get("atom", "")).partition("(")[2].partition(")")[0]
+            word, section = f"v({name})", "needs"
+        else:
+            labels = _atom_labels(atom)
+            word = str(atom.get("job")) + (f" ({labels})" if labels else "")
+            section = "needs"
+        if word not in out[section]:
+            out[section].append(word)
+    return out
+
+
 class _ExplainPane(VerticalScroll):
-    """The condition and atoms explain view for the selected job, with its HELP (DL-187 item
-    7)."""
+    """Why the selected job has not started, as lines, some of them links to another job
+    (DL-535). It shows what the app gives it (`show`): the lines of one answer for one source
+    job, whole, so every link it shows is bound to that job (`source`) and that answer's
+    generation (`gen`). The cursor moves between the links and stays on the line with the same
+    key across answers; it is drawn only while the pane has focus. An action never applies to
+    a line the operator cannot see: the paging keys move the cursor with the view, and Enter on
+    a cursor line scrolled off screen brings it back and does nothing else. Enter, Backspace
+    and Escape are the app's: a hop is the operator's pick."""
 
     HELP = """
-    Why the selected job is, or is not, runnable right now.
+    Why the selected job has not started (DL-535): the instant the
+    answer is for, what a start would do now and the gate that decides,
+    the condition, capacity, the dispatch wait, and what would wake it.
+    A line marked › names another job.
 
-    Shows the job's condition, each atom's truth, and -- for a global
-    atom -- its current effective value.
+    e from the jobs table moves here. Up and down move between the
+    marked lines, and PageUp, PageDown, Home and End move the view and
+    the cursor with it. Enter selects the job the line names,
+    unfolding, unfiltering or changing the view to show it; on a line
+    scrolled out of view it brings the line back first. Backspace goes
+    back; b switches to the jobs whose condition names this job and
+    back; Escape returns to the jobs table. The verb keys act only from
+    the jobs table.
     """
+    BINDINGS = [
+        Binding("up", "link(-1)", "previous link", show=False),
+        Binding("down", "link(1)", "next link", show=False),
+        Binding("pageup", "page(-1)", "page up", show=False),
+        Binding("pagedown", "page(1)", "page down", show=False),
+        Binding("home", "edge(-1)", "top", show=False),
+        Binding("end", "edge(1)", "end", show=False),
+        Binding("enter", "app.pane_hop", "go to job"),
+        Binding("backspace", "app.pane_back", "back"),
+        Binding("b", "toggle_mode", "causes/downstream"),
+        Binding("escape", "app.pane_leave", "jobs table"),
+    ]
+
+    def __init__(self, *, id: str | None = None) -> None:  # noqa: A002 -- textual's own name
+        super().__init__(id=id)
+        #: the job the lines were computed for, and the generation of the request whose answer
+        #: they are
+        self.source: str | None = None
+        self.gen = 0
+        self.lines: list[PaneLine] = []
+        #: index into `lines` of the line the cursor is on, a link, or None
+        self.cursor: int | None = None
+        #: "causes" or "downstream"
+        self.mode = "causes"
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="explain")
+
+    def show(self, source: str | None, gen: int, lines: list[PaneLine]) -> None:
+        """Show `lines`, the answer of generation `gen` for `source`. The cursor stays on the
+        line with the same key, else it goes to the first link while the pane has focus, else
+        nowhere."""
+        kept = self.current() if source == self.source else None
+        self.source, self.gen, self.lines = source, gen, list(lines)
+        self.cursor = None
+        if kept is not None:
+            self.cursor = next(
+                (i for i, line in enumerate(self.lines) if line.target and line.key == kept.key),
+                None,
+            )
+        moved = self.cursor is None
+        if moved and self.has_focus:
+            self.cursor = self._next_link(-1, 1)
+        self._draw(scroll=moved)
+
+    def current(self) -> PaneLine | None:
+        """The link the cursor is on."""
+        if self.cursor is None or not 0 <= self.cursor < len(self.lines):
+            return None
+        return self.lines[self.cursor]
+
+    def _next_link(self, start: int, step: int) -> int | None:
+        index = start + step
+        while 0 <= index < len(self.lines):
+            if self.lines[index].target is not None:
+                return index
+            index += step
+        return None
+
+    def _spans(self) -> list[tuple[int, int]]:
+        """Each line's first row and its rows, wrapped at the pane's width."""
+        width = max(1, self.scrollable_content_region.width)
+        spans, top = [], 0
+        for line in self.lines:
+            rows = max(1, len(line.text.wrap(self.app.console, width)))
+            spans.append((top, rows))
+            top += rows
+        return spans
+
+    def _on_screen(self, index: int, spans: list[tuple[int, int]]) -> bool:
+        top = int(self.scroll_y)
+        return top <= spans[index][0] < top + self.scrollable_content_region.height
+
+    def cursor_on_screen(self) -> bool:
+        """Whether the cursor's line is in view (DL-535)."""
+        return self.cursor is not None and self._on_screen(self.cursor, self._spans())
+
+    def reveal_cursor(self) -> None:
+        """Scroll the cursor's line into view."""
+        self._draw(scroll=True)
+
+    def action_link(self, step: int) -> None:
+        """Up and down move between the links; with none they scroll."""
+        if not any(line.target is not None for line in self.lines):
+            self.scroll_relative(y=step, animate=False, immediate=True)
+            return
+        start = self.cursor if self.cursor is not None else (-1 if step > 0 else len(self.lines))
+        found = self._next_link(start, step)
+        if found is not None:
+            self.cursor = found
+            self._draw(scroll=True)
+
+    def action_page(self, sign: int) -> None:
+        """PageUp and PageDown: a view up or down, the cursor with it (DL-535)."""
+        y = self.scroll_y + sign * self.scrollable_content_region.height
+        self.scroll_to(y=y, animate=False, immediate=True)
+        self._cursor_with_view(sign)
+
+    def action_edge(self, sign: int) -> None:
+        """Home and End: the first or the last view, the cursor with it (DL-535)."""
+        self.scroll_to(y=0 if sign < 0 else self.max_scroll_y, animate=False, immediate=True)
+        self._cursor_with_view(sign)
+
+    def _cursor_with_view(self, sign: int) -> None:
+        """Keep the cursor on its line if that line is in view, else put it on the first link
+        in view after a move down, the last after a move up, or nowhere."""
+        spans = self._spans()
+        if self.cursor is None or not self._on_screen(self.cursor, spans):
+            shown = [
+                i
+                for i, line in enumerate(self.lines)
+                if line.target is not None and self._on_screen(i, spans)
+            ]
+            self.cursor = (shown[0] if sign > 0 else shown[-1]) if shown else None
+        self._draw()
+
+    def action_toggle_mode(self) -> None:
+        self.mode = "downstream" if self.mode == "causes" else "causes"
+        app = self.app
+        assert isinstance(app, RunnerApp)
+        app.pane_mode_changed()
+
+    def on_focus(self) -> None:
+        if self.cursor is None:
+            self.cursor = self._next_link(-1, 1)
+        self.border_subtitle = Text("↑↓ link · enter go · backspace back · b mode · esc table")
+        self._draw(scroll=True)
+
+    def on_blur(self) -> None:
+        self.border_subtitle = ""
+        self._draw()
+
+    def _draw(self, *, scroll: bool = False) -> None:
+        """Render the lines, the cursor's line in reverse while the pane has focus; with
+        `scroll`, scroll that line into view. A redraw for a new answer with the cursor on the
+        same line leaves the view where the operator put it."""
+        texts = []
+        for index, line in enumerate(self.lines):
+            text = line.text.copy()
+            if index == self.cursor and self.has_focus:
+                text.stylize("reverse")
+            texts.append(text)
+        try:
+            static = self.query_one("#explain", Static)
+        except NoMatches:
+            return  # before compose
+        static.update(Text("\n").join(texts))
+        if scroll and self.cursor is not None and self.has_focus:
+            top, rows = self._spans()[self.cursor]
+            width = max(1, self.scrollable_content_region.width)
+            self.scroll_to_region(Region(0, top, width, rows), animate=False, immediate=True)
 
 
 def config_line(status: Mapping[str, Any]) -> str:
@@ -1500,6 +2044,25 @@ def config_line(status: Mapping[str, Any]) -> str:
         jobs = ", ".join(str(job) for job in update.get("stopping") or ()) or "none"
         line += f"  [update {str(update.get('token', ''))[:12]} stopping: {jobs}]"
     return line
+
+
+@dataclass
+class _Hop:
+    """A hop to `target` until a status answer asked after it began still lists the target and
+    the target's row is selected and on screen (DL-535). `after` is the number of status
+    requests sent before it began; `confirmed` is set by the first answer to a later one;
+    `frames` counts the refreshes it has then waited for the row."""
+
+    target: str
+    after: int
+    confirmed: bool = False
+    frames: int = 0
+
+
+#: refreshes a hop waits for its row to come on screen before it gives up (DL-535)
+_HOP_FRAMES = 10
+#: downstream jobs whose atoms the downstream mode asks for, per selected job and rev (DL-535)
+_DETAIL_CAP = 50
 
 
 @dataclass(frozen=True)
@@ -1649,6 +2212,8 @@ class RunnerApp(App[None]):
         Binding("space", "toggle_box", "fold", show=False),
         Binding("z", "toggle_all", "fold-all", show=False),
         Binding("colon", "focus_console", "console"),
+        # the explain pane takes focus, where up, down and Enter go to a cause (DL-535)
+        Binding("e", "focus_explain", "explain", show=False),
         # pane sizing (DL-520): ]/[ move the log against explain and }/{ the jobs table against
         # the side column by a fifth; +/= and - resize the focused pane by a small step
         Binding("]", "resize('log', 1)", "log taller", show=False),
@@ -1702,6 +2267,22 @@ class RunnerApp(App[None]):
         #: that dialog or popup is open or refused (DL-518); the table's verb keys ring the bell
         #: meanwhile. Quit is never held back. The token tells a hold from a later one.
         self._opening: object | None = None
+        #: the generation of the explain pane's last request: an answer is shown only if it
+        #: answers this one and its job is still the selected job (DL-535)
+        self._explain_gen = 0
+        #: the hop under way: until its job is selected and its row is on screen no key acts
+        #: on a job (DL-535)
+        self._hop: _Hop | None = None
+        #: the jobs each hop left, for Backspace (DL-535)
+        self._back: list[str] = []
+        #: status requests sent; a hop is confirmed only by the answer to one sent after it
+        #: began (DL-535)
+        self._status_asked = 0
+        #: the configuration rev of the last status answer, and the downstream mode's detail:
+        #: ((selected job, rev, baseline), each downstream job's atoms), asked once per job,
+        #: rev and baseline, since a restart on a fresh root can repeat a rev number (DL-535)
+        self._config_rev: Any = None
+        self._details: tuple[tuple[str, Any, str], dict[str, Any]] | None = None
         self._rows: set[str] = set()  # DataTable row keys we created
         self._trace_seq = 0
         self._trace_baseline: str | None = None
@@ -1769,8 +2350,7 @@ class RunnerApp(App[None]):
                 yield Static(id="filtermsg")
                 yield _JobsTable(id="jobs")
             with Vertical(id="side"):
-                with _ExplainPane(id="explain-box"):
-                    yield Static(id="explain")
+                yield _ExplainPane(id="explain-box")
                 with _LogPane(id="logbox"):
                     yield _LogTail(id="logtail")
                     yield _LogSearchInput(id="logsearch")
@@ -1836,11 +2416,14 @@ class RunnerApp(App[None]):
         try:
             while True:
                 self._dirty = False
+                self._status_asked += 1
+                asked = self._status_asked
                 try:
                     status = await self._read_status({"cmd": "status"})
                     trace = await self._client.request({"cmd": "trace", "since": self._trace_seq})
                 except ControlClientError as exc:
                     self._set_connected(False, str(exc))
+                    self._stop_hop("the engine did not answer")
                     return
                 self._set_connected(True)
                 # DL-187 item 6 (P1-1): an ok:false status or trace answer is a query refusal,
@@ -1863,6 +2446,7 @@ class RunnerApp(App[None]):
                     )
                     self._trace_baseline = trace_baseline
                     if baseline_changed or mixed_baselines:
+                        self._stop_hop("the trace baseline changed")
                         self._reset_trace_cursor()
                         self._console_write(
                             Text(
@@ -1884,7 +2468,11 @@ class RunnerApp(App[None]):
                     self._baseline = str(status.get("baseline_id") or "")
                     self._set_drift(bool(status.get("spec_drift")))
                     self._set_config(config_line(status))
+                    self._config_rev = status.get("config_rev")
                     self._update_table(status.get("jobs", {}))
+                    self._confirm_hop(asked)
+                else:
+                    self._stop_hop("the status query was refused")
                 await self._update_explain()
                 if not self._dirty:
                     return
@@ -2153,6 +2741,9 @@ class RunnerApp(App[None]):
         if job == self._selected:
             return
         self._selected = job
+        if self._hop is not None and job != self._hop.target:
+            # DL-535: a change of the selection the hop did not make ends it
+            self._stop_hop(self._hop_lost(self._hop.target))
         if job is not None and job != self._chosen:
             self._console_write(
                 Text(f"{job} is selected; the fold hides {self._chosen}", style="yellow")
@@ -2282,40 +2873,219 @@ class RunnerApp(App[None]):
         ]
 
     async def _update_explain(self) -> None:
-        pane = self.query_one("#explain", Static)
-        box = self.query_one("#explain-box")
+        """Ask for the selected job's pane and show the answer (DL-535). Each request has a
+        generation; an answer is shown only if it answers the latest request and its job is
+        still the selected job, so a late answer for another job never fills the pane. Lines
+        for another job are cleared when the request is sent."""
+        pane = self.query_one("#explain-box", _ExplainPane)
         job = self._selected
+        self._explain_gen += 1
+        gen = self._explain_gen
         if job is None:
-            box.border_title = "explain"
-            pane.update("")
+            pane.border_title = "explain"
+            pane.show(None, gen, [])
             return
-        box.border_title = f"explain: {job}"
+        pane.border_title = f"explain: {job}" if pane.mode == "causes" else f"downstream: {job}"
+        if job != pane.source:
+            pane.show(job, gen, [])
         try:
-            response = await self._client.request({"cmd": "explain", "job": job})
+            lines = await self._pane_lines(job, pane.mode)
         except ControlClientError as exc:
             self._set_connected(False, str(exc))
             return
-        if not response.get("ok"):
-            pane.update(Text(str(response.get("error", "explain failed")), style="red"))
+        if gen != self._explain_gen or self._selected != job:
             return
-        text = Text()
-        condition = response.get("condition")
-        if condition is None:
-            text.append("no condition -- starts on demand/schedule", style="dim")
-            pane.update(text)
+        pane.show(job, gen, lines)
+
+    async def _pane_lines(self, job: str, mode: str) -> list[PaneLine]:
+        """The pane's lines for `job`: its `explain` answer, or in the downstream mode its
+        `deps` answer with each downstream job's atoms. Those are asked once per selected job,
+        configuration rev and baseline, for at most `_DETAIL_CAP` jobs, and kept until one of
+        them changes, so a refresh asks one `deps` (DL-535)."""
+        if mode == "causes":
+            response = await self._client.request({"cmd": "explain", "job": job})
+            if not response.get("ok"):
+                error = str(response.get("error", "explain failed"))
+                return [PaneLine(Text(error, style="red"))]
+            return explain_lines(response, self._jobs_snapshot.get(job, {}))
+        deps = await self._client.request({"cmd": "deps", "job": job})
+        if not deps.get("ok"):
+            return [PaneLine(Text(str(deps.get("error", "deps failed")), style="red"))]
+        if not isinstance(deps.get("upstream_atoms"), list):
+            return downstream_lines(job, deps, {})
+        key = (job, self._config_rev, self._baseline)
+        if self._details is None or self._details[0] != key:
+            others = [name for name in deps.get("downstream") or [] if name != job]
+            atoms_of: dict[str, Any] = {}
+            for other in others[:_DETAIL_CAP]:
+                answer = await self._client.request({"cmd": "deps", "job": other})
+                if answer.get("ok") and isinstance(answer.get("upstream_atoms"), list):
+                    atoms_of[other] = answer["upstream_atoms"]
+            self._details = (key, atoms_of)
+        return downstream_lines(job, deps, self._details[1])
+
+    def pane_mode_changed(self) -> None:
+        """`b` in the pane: ask again in the other mode (DL-535)."""
+        self.run_worker(self._update_explain, group="explain", exclusive=True)  # type: ignore[arg-type]
+
+    # ------------------------------------------------- hop to a cause (DL-535)
+
+    def _held_back(self, what: str) -> bool:
+        """Whether a key that acts on a job is held: a dialog or popup is opening (DL-518), or
+        a hop has not landed (DL-535). A held key rings the bell; one a hop holds also says so
+        in a console line, naming `what` it would have done."""
+        if self._hop is not None:
+            self.bell()
+            self._console_write(
+                Text(f"{what}: held until {self._hop.target} is selected and shown", "yellow")
+            )
+            return True
+        if self._opening:
+            self.bell()
+            return True
+        return False
+
+    def action_focus_explain(self) -> None:
+        """`e`: the explain pane takes focus (DL-535)."""
+        if self.screen.maximized is not None:
+            return  # never focus a pane the maximized view is hiding
+        _focus_now(self.query_one("#explain-box", _ExplainPane))
+
+    def action_pane_leave(self) -> None:
+        """Escape in the pane: focus returns to the jobs table, the selection unchanged."""
+        self.query_one("#jobs", _JobsTable).focus()
+
+    def action_pane_hop(self) -> None:
+        """Enter in the pane: the operator picks the job the cursor's link names (DL-535). The
+        pane must show the selected job's answer, the link's line must be in view, and its job
+        must still be a job. A line scrolled out of view is scrolled back and nothing else
+        happens; otherwise nothing changes and the console says why."""
+        if self._held_back("go to"):
             return
-        satisfied = bool(response.get("satisfied"))
-        text.append("waiting on:\n" if not satisfied else "satisfied:\n", style="bold")
-        text.append(f"  {condition}\n\n")
-        for atom in response.get("atoms", []):
-            true = bool(atom.get("true"))
-            text.append("  ✔ " if true else "  ✘ ", style="green" if true else "red")
-            text.append(f"{atom.get('atom', '')}", style="" if true else "bold")
-            if "actual" in atom:  # global atoms carry the effective value (DL-66)
-                actual = atom["actual"]
-                text.append(f"   = {actual!r}" if actual is not None else "   (unset)", style="dim")
-            text.append("\n")
-        pane.update(text)
+        pane = self.query_one("#explain-box", _ExplainPane)
+        line = pane.current()
+        if line is None or line.target is None:
+            self.bell()
+            return
+        if not pane.cursor_on_screen():
+            pane.reveal_cursor()  # an action never applies to a line the operator cannot see
+            return
+        target, source = line.target, pane.source
+        if source is None or source != self._selected:
+            why = "the pane no longer shows the selected job's answer"
+        elif target not in self._jobs_snapshot:
+            why = f"{target} is no longer a job"
+        else:
+            self._back.append(source)
+            self._go(target)
+            return
+        self._console_write(Text(f"go to {target}: {why}; nothing changed", style="yellow"))
+
+    def action_pane_back(self) -> None:
+        """Backspace in the pane: back to the job the last hop left (DL-535). A job that is no
+        longer a job is dropped with a console line and the one before it is tried."""
+        if self._held_back("back"):
+            return
+        while self._back:
+            job = self._back.pop()
+            if job in self._jobs_snapshot:
+                self._go(job)
+                return
+            self._console_write(Text(f"back: {job} is no longer a job; skipped", style="yellow"))
+        self._console_write(Text("back: no earlier job", style="dim"))
+
+    def _go(self, target: str) -> None:
+        """Reveal `target`, pick it by DL-532's `_choose`, and hold every key that acts on a
+        job until the hop lands (DL-535): a status answer asked from now on still lists the
+        target, and its row is selected and on screen."""
+        self._reveal(target)
+        self._choose(target)
+        self._render_table()
+        self._hop = _Hop(target, after=self._status_asked)
+        self._poll()
+
+    def _confirm_hop(self, asked: int) -> None:
+        """A status answer was applied: one to a request sent after the hop began confirms it,
+        and the row's place on screen is checked after the screen refreshes."""
+        hop = self._hop
+        if hop is not None and not hop.confirmed and asked > hop.after:
+            hop.confirmed = True
+            self.call_after_refresh(self._finish_hop, hop)
+
+    def _hop_lost(self, target: str) -> str:
+        """Why a hop to `target` can no longer land, as the selection now stands."""
+        if target not in self._jobs_snapshot:
+            return "it is no longer a job"
+        if target not in self._table_sync.identity:
+            return "it is hidden"
+        return "another job was selected"
+
+    def _stop_hop(self, why: str) -> None:
+        """End the hop under way, if any, with a console line; the keys act again."""
+        hop, self._hop = self._hop, None
+        if hop is not None:
+            self._console_write(Text(f"go to {hop.target} stopped: {why}", style="yellow"))
+
+    def _reveal(self, job: str) -> None:
+        """Make `job` a row (DL-535): its enclosing boxes are unfolded; a filter that hides it
+        is cleared and a view that hides it gives way to the view of every job, each of those
+        two with a console line. The table is rendered by the caller; focus stays where it
+        is."""
+        jobs = self._jobs_snapshot
+        row = jobs.get(job, {})
+        box, seen = row.get("box_name"), {job}
+        while isinstance(box, str) and box not in seen:
+            self._collapsed.discard(box)
+            seen.add(box)
+            box = jobs.get(box, {}).get("box_name")
+        own_box = row.get("box_name")
+        status = str(row.get("status", ""))
+        if self._job_filter.tests and not self._job_filter.matches(
+            job, status, own_box if isinstance(own_box, str) else None
+        ):
+            self._console_write(
+                Text(f"filter /{self._filter}/ hides {job}; cleared", style="yellow")
+            )
+            self._drop_filter()
+            self.query_one("#filterline", Input).styles.display = "none"
+        mode = self._VIEW_MODES[self._view_mode]
+        if mode != "all" and not self._match(job, row, JobFilter()):
+            self._console_write(Text(f"view {mode} hides {job}; showing all jobs", style="yellow"))
+            self._view_mode = 0
+
+    def _finish_hop(self, hop: _Hop) -> None:
+        """Land a confirmed `hop` once its job's row is the cursor's and on screen; else scroll
+        it there and look again after the next refresh, `_HOP_FRAMES` times at most, then give
+        up with a console line. A change of the selection ends the hop in `_set_selected`."""
+        if self._hop is not hop:
+            return
+        target = hop.target
+        try:
+            table = self.query_one("#jobs", _JobsTable)
+        except NoMatches:
+            return  # teardown
+        identity = self._table_sync.identity
+        if self._selected != target or target not in identity:
+            self._stop_hop(self._hop_lost(target))
+            return
+        row = identity.index(target)
+        if table.cursor_row == row and self._row_on_screen(table, row):
+            self._hop = None
+            return
+        hop.frames += 1
+        if hop.frames > _HOP_FRAMES:
+            self._stop_hop(f"its row did not come on screen after {_HOP_FRAMES} refreshes")
+            return
+        table.move_cursor(row=row, scroll=True)
+        self._cursor_set_at = time.monotonic()
+        self.call_after_refresh(self._finish_hop, hop)
+
+    @staticmethod
+    def _row_on_screen(table: DataTable[Any], row: int) -> bool:
+        """Whether table row `row` lies inside the table's scrolled window; every row is one
+        line high (`add_row`'s default), under a one-line header."""
+        height = table.scrollable_content_region.height - (1 if table.show_header else 0)
+        return height > 0 and table.scroll_y <= row < table.scroll_y + height
 
     # -------------------------------------------------------- change feed
 
@@ -2459,8 +3229,7 @@ class RunnerApp(App[None]):
         if self._selected is None:
             self._console_write(Text("details: no job selected", style="red"))
             return
-        if self._opening:
-            self.bell()
+        if self._held_back("details"):
             return
         # partial, not a bare coroutine: a replaced worker must not leave it unawaited
         work = functools.partial(self._open_details, self._selected, self._hold())
@@ -2529,14 +3298,29 @@ class RunnerApp(App[None]):
                 if row.get(key):
                     body.append(f"{label}: {row[key]}\n", style="dim")
         if deps.get("ok"):
-            needs = [*deps.get("upstream", []), *(f"v({g})" for g in deps.get("globals", []))]
-            if needs:
-                body.append("needs:   ", style="bold")
-                body.append(", ".join(needs) + "\n")
+            atoms = deps.get("upstream_atoms")
+            if isinstance(atoms, list):
+                # DL-535: a guard and a self reference are labelled, never a dependency
+                words = dependency_names([a for a in atoms if isinstance(a, Mapping)])
+            else:
+                globals_ = (f"v({g})" for g in deps.get("globals", []))
+                words = {"needs": [*deps.get("upstream", []), *globals_], "guard": [], "self": []}
+            for label, section in (("needs:   ", "needs"), ("guard:   ", "guard")):
+                if words[section]:
+                    body.append(label, style="bold")
+                    body.append(", ".join(words[section]) + "\n")
+            if words["self"]:
+                body.append("self:    ", style="bold")
+                body.append(", ".join(words["self"]) + "\n")
             if deps.get("box_name"):
                 body.append("box:     ", style="bold")
                 body.append(f"{deps['box_name']}\n")
             downstream = deps.get("downstream", [])
+            if isinstance(atoms, list) and any(
+                isinstance(a, Mapping) and a.get("self") for a in atoms
+            ):
+                # the job's own self reference puts it in its own downstream (DL-535)
+                downstream = [name for name in downstream if name != job]
             if downstream:
                 body.append("blocks:  ", style="bold")
                 body.append(", ".join(downstream) + "\n")
@@ -2776,8 +3560,7 @@ class RunnerApp(App[None]):
     _CONFIRM_VERBS = frozenset({"KILLJOB", "FORCE_STARTJOB"})
 
     def action_send(self, verb: str) -> None:
-        if self._opening:
-            self.bell()
+        if self._held_back(verb):
             return
         request = parse_console_command(verb, self._selected)
         if isinstance(request, str):
@@ -2948,6 +3731,9 @@ class RunnerApp(App[None]):
             table.border_subtitle = Text(hint)
 
     def action_toggle_box(self) -> None:
+        if self._hop is not None:
+            self._held_back("fold")  # no key acts on a job until a hop lands (DL-535)
+            return
         self._toggle_box(self._selected)
 
     @on(_JobsTable.FoldClicked)
@@ -2980,6 +3766,17 @@ class RunnerApp(App[None]):
         if not text:
             return
         request = parse_console_command(text, self._selected)
+        jobless = isinstance(request, dict) and isinstance(parse_console_command(text, None), str)
+        if self._hop is not None and jobless:
+            # DL-535: a verb without a job names no job until a hop lands
+            self._console_write(
+                Text(
+                    f"{text.split()[0].upper()}: held until {self._hop.target} is selected"
+                    " and shown; nothing sent",
+                    style="yellow",
+                )
+            )
+            return
         if isinstance(request, str):
             self._console_write(Text(request, style="red"))
             return

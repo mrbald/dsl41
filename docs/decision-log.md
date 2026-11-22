@@ -27559,3 +27559,28 @@ relitigate an entry; append a new one.
   UNCHANGED. Every oracle decision; the legacy reply fields; `trace`, `status` and `spec`.
   NOT BUILT. The terminal UI still renders the legacy fields; the pane and the hop to a
   cause are the next slice.
+- DL-535 The terminal UI shows why a job has not started and goes to each cause
+  (2026-11-22; owner's second priority among the operator-surface findings;
+  src/dsl41/runner_tui.py, tests/test_tui_explain_pane.py, docs/cli-tui-qualification.md,
+  docs/runner-design.md, README.md; keeps DL-532 and DL-187 as they are)
+  THE RULE. The explain pane lists the selected job's answer from `explain` (DL-534): the
+  instant it is for, the disposition with its deciding gate, the open gates and the context
+  facts, the condition and its atoms, capacity, the dispatch wait and what would wake the
+  job. A line that names a job is a link; a guard, a self reference, an undefined or an
+  external name is not. `e` focuses the pane. In it up and down move between links, Enter
+  goes to the job, Backspace goes back, `b` shows the jobs one hop downstream, Escape
+  returns to the table. While the pane has focus the jobs table's action keys do not fire.
+  Going to a job is the operator's pick of it (DL-532). It lands only on a status answer to
+  a request sent after Enter, when the target is the selected job and its row is on screen;
+  until then the verb keys and a console verb without a job name are held and say so. The
+  target is revealed: its boxes are unfolded, and a filter or a view that hides it is
+  cleared or changed with one console line. A pick, a fold, a filter or a view by the
+  operator, a refused or unanswered status query, a changed baseline or ten refreshes
+  without landing end the attempt with a line. An answer for another job or an older
+  request never fills the pane. Enter acts only on a line that is on screen. The
+  downstream list asks for its detail once per selected job, configuration revision and
+  baseline, for at most fifty jobs. Against an engine without the new fields the pane
+  shows the earlier text and has no links.
+  THE DEFECT. The pane showed the condition only, as one text. To reach a job that blocked
+  another, the operator read its name and typed it into the filter.
+  COST. Going to a job costs one status request. A held key is dropped, not queued.

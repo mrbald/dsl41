@@ -403,8 +403,10 @@ Every command that takes `--socket` uses `DSL41_SOCKET` when the option
 is omitted. An explicit `--socket` wins; one of the two is required.
 
 The TUI is the optional `[ui]` extra. It is a thin client of the control
-socket: a jobs table with pending timers and alarms, an explain pane with
-per-atom condition truth, a log tail, and a sendevent console. Zooming the
+socket: a jobs table with pending timers and alarms, an explain pane that
+says why the selected job has not started, a log tail, and a sendevent
+console. In the explain pane (`e`), Enter goes to the job a line names and
+Backspace goes back (DL-535). Zooming the
 log tail (`m`) turns it into a less-style pager with `/` search, `&` filter,
 `n`/`N`, and `F` follow; the operator verbs are unreachable while paging.
 `t` opens a read-only triggers view of every pending timer, calendar tick,
