@@ -203,8 +203,10 @@ def painted_lines(
 
 
 def selected_filter_ready(rendered: bytes) -> bool:
-    lines = painted_lines(rendered, 150, 44)
-    return " jobs 1/3 /recovery_child/ " in lines[4] and " explain: recovery_child " in lines[1]
+    """The submitted filter and the child it selected (DL-532): with the filter line closed,
+    the jobs title and the explain title share the top border row."""
+    line = painted_lines(rendered, 150, 44)[1]
+    return " jobs 1/3 /recovery_child/ " in line and " explain: recovery_child " in line
 
 
 def table_focus_ready(rendered: bytes, columns: int, rows: int) -> bool:

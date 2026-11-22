@@ -42,7 +42,7 @@ Contract detail for DL-46, within DL-41's frame:
   log pane (tail plus prompt line) so the prompt stays visible. `m`/`o`/`r`, `F1` and the resize
   keys pass through to the app.
 - The event console (`:`) accepts exactly the ss10 sendevent verbs (job verbs; SET_GLOBAL
-  NAME=value; CHANGE_STATUS [job] STATUS [exit_code]); an omitted job means the selected row.
+  NAME=value; CHANGE_STATUS [job] STATUS [exit_code]); an omitted job means the selected job.
   Escape clears the typed line and returns focus to the table. Every request and response is
   echoed; refusals render red and change nothing. The server validates against the catalog and
   the TUI never pre-judges. The echo names the whole request, including a global's value, a
@@ -126,6 +126,7 @@ import os
 import re
 import shlex
 import sys
+import time
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -144,7 +145,6 @@ try:
     from textual.app import App, ComposeResult, RenderResult
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical, VerticalScroll
-    from textual.coordinate import Coordinate
     from textual.css.query import NoMatches
     from textual.events import Click
     from textual.message import Message
@@ -237,7 +237,7 @@ _CONSOLE_VERBS = sorted(JOB_EVENT_VERBS | {"SET_GLOBAL", "CHANGE_STATUS"})
 
 #: the console's opening sentence, in its HELP and on the verbs screen (DL-516)
 _CONSOLE_OPENING = (
-    "Type a verb and Enter; a verb without a job acts on the selected row, and grey text is a"
+    "Type a verb and Enter; a verb without a job acts on the selected job, and grey text is a"
     " suggestion that Right or Tab takes."
 )
 
@@ -325,15 +325,13 @@ class _TableSync:
         columns: Sequence[str],
         rows: Sequence[Sequence[Any]],
         on_rebuild: Callable[[Sequence[Any], Any], Any | None] | None = None,
-        default_to_first_row: bool = False,
         column_widths: Mapping[str, int] | None = None,
     ) -> None:
         """On a membership or order change, `on_rebuild` runs once, after clear() and before any
-        add_row, so a caller can arm its bounce guard first. It gets `(new_identity,
-        old_selected)`: the identity about to be shown and the identity the cursor sat on, read
-        before clear() resets `table.cursor_row` (DL-178v). It returns the identity to restore
-        the cursor to, or None. `default_to_first_row` selects row 0 when nothing survived;
-        otherwise the cursor stays where clear()/add_row left it."""
+        add_row. It gets `(new_identity, old_selected)`: the identity about to be shown and the
+        identity the cursor sat on, read before clear() resets `table.cursor_row` (DL-178v). It
+        returns the identity to restore the cursor to, or None; with None the cursor stays on
+        row 0, where clear() and add_row leave it."""
         resized = False
         for column_info in table.ordered_columns:
             width = (column_widths or {}).get(column_info.key.value or "")
@@ -352,8 +350,6 @@ class _TableSync:
                 table.add_row(*cells, key=key)
             if target is not None and target in self.identity:
                 table.move_cursor(row=self.identity.index(target))
-            elif default_to_first_row and rows:
-                table.move_cursor(row=0)
             return
         for i, (key, cells) in enumerate(zip(keys, rows)):
             sigs = [_cell_sig(c) for c in cells]
@@ -755,6 +751,12 @@ class _JobsTable(DataTable[Any]):
     filter line shows the syntax), v cycles all/problems/active, space
     folds a box, z folds every box. A click on a box's marker folds it.
 
+    The selection is a job, not a row. A fold that hides it selects the
+    box shown in its place. A filter or view that hides it leaves nothing
+    selected: up, down, Enter or a click on any cell selects a row. Enter
+    on the filter line, or `v`, that leaves one job shown selects that
+    job; typing in the filter line selects nothing.
+
     Drag a border to resize; + and - resize the focused pane.
 
     F1 in the console line (`:`) lists every verb and every status
@@ -773,6 +775,28 @@ class _JobsTable(DataTable[Any]):
         Binding("n", "app.send('ON_NOEXEC')", "noexec", show=False),
         Binding("N", "app.send('OFF_NOEXEC')", "off-noexec", show=False),
     ]
+    #: with nothing selected the cursor rests on a row painted as any other row, so the
+    #: highlight is never on a job the keys would not act on (DL-532)
+    DEFAULT_CSS = """
+    _JobsTable.-resting > .datatable--cursor, _JobsTable.-resting:focus > .datatable--cursor {
+        background: transparent;
+        color: $foreground;
+        text-style: none;
+    }
+    """
+
+    def action_cursor_up(self) -> None:
+        if not self._pick_rest():
+            super().action_cursor_up()
+
+    def action_cursor_down(self) -> None:
+        if not self._pick_rest():
+            super().action_cursor_down()
+
+    def _pick_rest(self) -> bool:
+        """With nothing selected, up or down selects the row the cursor rests on (DL-532)."""
+        app = self.app
+        return isinstance(app, RunnerApp) and app.pick_rest()
 
     class FoldClicked(Message):
         """A click on a box's indent or marker (DL-512). It is posted after the cursor move's
@@ -786,9 +810,16 @@ class _JobsTable(DataTable[Any]):
         """A first-button click on a box's indent or marker selects the row and folds the box;
         it opens no details. The hit area is the span `_decorated_cells` marks, so the drawing
         and the hit test cannot disagree (DL-512). Every other click goes on to
-        `DataTable._on_click`."""
+        `DataTable._on_click`, except a first-button click anywhere on the row the cursor rests
+        on while nothing is selected: that click selects the row and does nothing else
+        (DL-532)."""
         meta = event.style.meta
         job = meta.get(_FOLD_META)
+        if job is None and event.button == 1 and meta.get("row") == self.cursor_row:
+            if self._pick_rest():
+                event.prevent_default()
+                event.stop()
+            return
         if job is None or event.button != 1:
             return
         event.prevent_default()
@@ -1374,7 +1405,7 @@ def recovery_command(socket_path: Path, request: Mapping[str, Any]) -> str:
 def parse_console_command(text: str, selected: str | None) -> dict[str, Any] | str:
     """Parse an event-console line into the verb half of a sendevent request, or return an
     error string. Grammar (ss11): `<JOB_VERB> [job]`, `SET_GLOBAL NAME=value`,
-    `CHANGE_STATUS [job] STATUS [exit_code]`; an omitted job targets the selected row.
+    `CHANGE_STATUS [job] STATUS [exit_code]`; an omitted job targets the selected job.
 
     The concurrency-model ss6 envelope is not built here (DL-90): `expect` is the revision of the
     app's last refresh, which a pure parser cannot know."""
@@ -1387,7 +1418,7 @@ def parse_console_command(text: str, selected: str | None) -> dict[str, Any] | s
     def _job(explicit: str | None) -> dict[str, Any] | str:
         job = explicit if explicit is not None else selected
         if job is None:
-            return f"{verb} needs a job (none selected)"
+            return f"{verb}: no job selected"
         return {"cmd": "sendevent", "verb": verb, "payload": {"job": job}}
 
     if verb in JOB_EVENT_VERBS:
@@ -1412,7 +1443,7 @@ def parse_console_command(text: str, selected: str | None) -> dict[str, Any] | s
         if shorthand:
             job, status, rest = selected, args[0].upper(), args[1:]
             if job is None:
-                return "CHANGE_STATUS needs a job (none selected)"
+                return "CHANGE_STATUS: no job selected"
         elif len(args) >= 2:
             job, status, rest = args[0], args[1].upper(), args[2:]
         else:
@@ -1651,7 +1682,22 @@ class RunnerApp(App[None]):
         )
         self.sub_title = self._subtitle_base
         self._client = ControlClient(self.socket_path, person)
+        #: the selection is a job, not a row (DL-532). `_chosen` is the job the operator picked
+        #: last, kept while a fold or a filter hides it. `_selected`, what the keys act on, is
+        #: derived from it on each render: the job when shown, else the folded box that stands
+        #: for it, else nothing. `_picked` is False until the first answer selects its first row.
+        self._chosen: str | None = None
+        self._picked = False
         self._selected: str | None = None
+        #: the row the cursor rests on while nothing is selected
+        self._rest: str | None = None
+        #: (chosen job, box) when the operator's own fold made that box stand for the job; a box
+        #: that stands for it by any other change of the rows is not selected (DL-532)
+        self._stand: tuple[str, str] | None = None
+        #: when the table last rebuilt or moved its cursor itself: a highlight or a row-selected
+        #: event stamped no later is the table's own, not a pick (DL-532). Textual stamps each
+        #: message with time.monotonic off Windows, and the control socket is POSIX-only.
+        self._cursor_set_at = float("-inf")
         #: held from the moment a key whose dialog or popup opens from a worker is handled until
         #: that dialog or popup is open or refused (DL-518); the table's verb keys ring the bell
         #: meanwhile. Quit is never held back. The token tells a hold from a later one.
@@ -1692,10 +1738,6 @@ class RunnerApp(App[None]):
         self._view_mode = 0  # index into _VIEW_MODES
         self._collapsed: set[str] = set()  # box rows folded shut
         self._table_sync = _TableSync()  # DL-178v: shared with TriggersScreen
-        #: set across a table rebuild that restores the selection: the first add_row fires a
-        #: spurious row-0 highlight before move_cursor lands, which would wipe the log tail. The
-        #: highlight handler ignores events until the restore target arrives.
-        self._restore_selected: str | None = None
         self._spec_drift = False
         #: spec-reload: the configuration rev the engine runs and, while an update stops its
         #: jobs, its token and those jobs, as the subtitle shows them
@@ -1736,7 +1778,7 @@ class RunnerApp(App[None]):
             yield RichLog(id="console", markup=False, wrap=True)
             yield _ConsoleInput(
                 placeholder="<VERB> [job] | SET_GLOBAL N=v | CHANGE_STATUS [job] STATUS"
-                " [exit] -- empty job = selected row; F1 lists verbs",
+                " [exit] -- empty job = selected job; F1 lists verbs",
                 id="cmdline",
                 suggester=_ConsoleSuggester(lambda: self._jobs_snapshot),
             )
@@ -1981,6 +2023,8 @@ class RunnerApp(App[None]):
         self._jobs_snapshot = jobs
         for name, row in jobs.items():
             self._log_paths[name] = (row.get("log_out"), row.get("log_err"))
+        if self._chosen not in jobs:
+            self._chosen = None  # a removed job leaves nothing selected (DL-532)
         self._render_table()
 
     def _is_problem(self, name: str, row: dict[str, Any]) -> bool:
@@ -2079,16 +2123,61 @@ class RunnerApp(App[None]):
         cells[0] = text
         return cells
 
-    def _on_table_rebuild(self, order: Sequence[Any], _old_selected: Any) -> str | None:
-        # arm the bounce guard before the add_row loop: the first row fires a spurious row-0
-        # highlight ahead of the cursor restore. The app tracks selection in `_selected`, so the
-        # second argument is unused (DL-178v).
-        self._rows = set(order)
-        self._restore_selected = self._selected if self._selected in self._rows else None
-        if not order:
-            # nothing visible: keyed verbs must not fire at a job the operator cannot see
-            self._selected = None
-        return self._restore_selected
+    def _stand_in(self, order: Sequence[str], flat: bool) -> str | None:
+        """The job the keys act on among the rows `order` (DL-532): the chosen job when it is a
+        row; in the tree, its nearest enclosing box that is a row, the folded box that stands
+        for it; otherwise nothing, for a flat view hides it outright."""
+        job = self._chosen
+        if job is None or job in order:
+            return job
+        if flat:
+            return None
+        rows, seen = set(order), {job}
+        box = self._jobs_snapshot.get(job, {}).get("box_name")
+        while isinstance(box, str) and box not in seen:
+            if box in rows:
+                return box
+            seen.add(box)
+            box = self._jobs_snapshot.get(box, {}).get("box_name")
+        return None
+
+    def _set_selected(self, job: str | None) -> None:
+        """Make `job` what the keys act on: the explain pane, the log tail and the fold hint
+        follow it, and with nothing selected the cursor's row is painted as any other
+        (DL-532)."""
+        try:
+            table = self.query_one("#jobs", _JobsTable)
+        except NoMatches:
+            return  # teardown
+        table.set_class(job is None, "-resting")
+        if job == self._selected:
+            return
+        self._selected = job
+        if job is not None and job != self._chosen:
+            self._console_write(
+                Text(f"{job} is selected; the fold hides {self._chosen}", style="yellow")
+            )
+        self._name_fold_keys(table)
+        # the bound method, not a coroutine: a replaced exclusive worker would leave a
+        # never-awaited coroutine (arg-type: run_worker's ResultType inference rejects the bound
+        # async method that textual accepts)
+        self.run_worker(self._update_explain, group="explain", exclusive=True)  # type: ignore[arg-type]
+        self._tail_step()
+
+    def _choose(self, job: str) -> None:
+        """The operator picked `job` (DL-532)."""
+        self._chosen, self._picked, self._rest, self._stand = job, True, None, None
+        self._set_selected(job)
+
+    def pick_rest(self) -> bool:
+        """Select the row the cursor rests on, if nothing is selected, and scroll it into view
+        first, so the job the keys act on is on screen (DL-532)."""
+        if self._selected is not None or self._rest is None:
+            return False
+        table = self.query_one("#jobs", _JobsTable)
+        table.move_cursor(row=table.cursor_row, scroll=True)
+        self._choose(self._rest)
+        return True
 
     def _visible_in_force(self) -> list[tuple[str, int]]:
         """The rows under the filter in force, matched in one bounded pass (DL-514). A stopped
@@ -2102,9 +2191,11 @@ class RunnerApp(App[None]):
         self._drop_filter()
         return self._visible(self._job_filter)
 
-    def _render_table(self, visible: list[tuple[str, int]] | None = None) -> None:
+    def _render_table(
+        self, visible: list[tuple[str, int]] | None = None, *, fold: bool = False
+    ) -> None:
         """Render `visible`, which a draft's bounded pass computed, or the rows under the
-        filter in force."""
+        filter in force. `fold` is True for the operator's own fold or unfold."""
         try:
             table = self.query_one("#jobs", DataTable)
         except NoMatches:
@@ -2115,14 +2206,31 @@ class RunnerApp(App[None]):
         flat = bool(self._filter or self._view_mode)
         order = [name for name, _ in visible]
         rows = [self._decorated_cells(name, depth, kids, flat=flat) for name, depth in visible]
+        self._rows = set(order)
+        if not self._picked and order:
+            # the first answer with rows selects its first row, as nothing was picked yet
+            self._chosen, self._picked = order[0], True
+        # no other change of the rows selects a row the operator did not choose (DL-532)
+        target = self._stand_in(order, flat)
+        if target is None or target == self._chosen:
+            self._stand = None
+        elif fold:
+            self._stand = (str(self._chosen), target)
+        elif self._stand != (self._chosen, target):
+            target = None  # a box the operator's fold did not put in the job's place
+        rebuilt: list[bool] = []
+
+        def on_rebuild(_order: Sequence[Any], _old_selected: Any) -> str | None:
+            rebuilt.append(True)
+            return target
+
         self._table_sync.refresh(
             table,
             identity=order,
             keys=order,
             columns=_COLUMNS,
             rows=rows,
-            on_rebuild=self._on_table_rebuild,
-            default_to_first_row=True,  # highlight event resyncs _selected
+            on_rebuild=on_rebuild,
             column_widths={
                 "status": 44
                 if any(self._jobs_snapshot[name].get("reread") for name in order)
@@ -2137,8 +2245,13 @@ class RunnerApp(App[None]):
         if mode != "all":
             title.append(f" · {mode}", style="bold")
         table.border_title = title
-        if self._selected is None and table.row_count:
-            self._selected = str(table.coordinate_to_cell_key(Coordinate(0, 0)).row_key.value)
+        if target is not None and table.cursor_row != order.index(target):
+            table.move_cursor(row=order.index(target))
+            rebuilt.append(True)
+        if rebuilt:
+            self._cursor_set_at = time.monotonic()
+        self._rest = order[table.cursor_row] if target is None and order else None
+        self._set_selected(target)
         self._name_fold_keys(table)
 
     def _row_cells(self, name: str, row: dict[str, Any]) -> list[Any]:
@@ -2297,28 +2410,39 @@ class RunnerApp(App[None]):
 
     @on(DataTable.RowHighlighted, "#jobs")
     def _on_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """A cursor move the operator made picks its row (DL-532)."""
+        job = self._current_row(event)
+        if job is not None and job != self._selected and job != self._rest:
+            self._choose(job)
+
+    def _current_row(self, event: DataTable.RowHighlighted | DataTable.RowSelected) -> str | None:
+        """The job of the row `event` names, if the operator's act made it: the event was
+        posted after the table last set its own cursor, and its row is still the cursor's row.
+        A rebuild's own events, such as the first add_row's row-0 highlight, and an event a
+        rebuild overtook are not picks (DL-532)."""
         if event.row_key is None or event.row_key.value is None:
-            return
-        selected = str(event.row_key.value)
-        if self._restore_selected is not None:
-            if selected != self._restore_selected:
-                return  # the rebuild's spurious row-0 bounce, not the operator
-            # the restore landed and equals _selected, so the guard below leaves the tail alone
-            self._restore_selected = None
-        if selected == self._selected:
-            return
-        self._selected = selected
-        self._name_fold_keys(event.data_table)
-        # the bound method, not a coroutine: a replaced exclusive worker would leave a
-        # never-awaited coroutine (arg-type: run_worker's ResultType inference rejects the bound
-        # async method that textual accepts)
-        self.run_worker(self._update_explain, group="explain", exclusive=True)  # type: ignore[arg-type]
-        self._tail_step()
+            return None
+        if event.time <= self._cursor_set_at:
+            return None
+        job = str(event.row_key.value)
+        identity = self._table_sync.identity
+        row = event.data_table.cursor_row
+        if row != event.cursor_row or row >= len(identity) or identity[row] != job:
+            return None
+        return job
 
     @on(DataTable.RowSelected, "#jobs")
     def _on_row_selected(self, event: DataTable.RowSelected) -> None:
-        if event.row_key is not None and event.row_key.value is not None:
-            self._selected = str(event.row_key.value)
+        """Enter or a click on the cursor's row opens the selected job's details; on the row
+        the cursor rests on it picks that row, and opens nothing (DL-532). An event a rebuild
+        overtook does neither."""
+        job = self._current_row(event)
+        if job is None:
+            return
+        if self._selected is None:
+            if job == self._rest:
+                self.pick_rest()
+            return
         self.action_details()
 
     def _hold(self) -> object:
@@ -2333,6 +2457,7 @@ class RunnerApp(App[None]):
 
     def action_details(self) -> None:
         if self._selected is None:
+            self._console_write(Text("details: no job selected", style="red"))
             return
         if self._opening:
             self.bell()
@@ -2780,10 +2905,21 @@ class RunnerApp(App[None]):
             return  # a refused or stopped draft keeps the input and its message (DL-511, DL-514)
         self.query_one("#filterline", Input).styles.display = "none"
         self.query_one("#jobs", DataTable).focus()
+        self._pick_sole_row()
 
     def action_cycle_view(self) -> None:
         self._view_mode = (self._view_mode + 1) % len(self._VIEW_MODES)
         self._render_table()
+        self._pick_sole_row()
+
+    def _pick_sole_row(self) -> None:
+        """Enter on the filter line, or the view key, that leaves one row shown in a filtered
+        view picks that row, as a pick by hand would: it is the one row shown and highlighted
+        (DL-532 rule 6). Only those two call this. A keystroke in the filter line, a status
+        answer or any other change of the rows never does, so it selects nothing."""
+        rows = self._table_sync.identity
+        if (self._filter or self._view_mode) and len(rows) == 1 and rows[0] != self._selected:
+            self._choose(rows[0])
 
     def _foldable(self, name: str | None) -> bool:
         """A box with members in the shown tree: what space and a marker click fold, and the
@@ -2797,7 +2933,7 @@ class RunnerApp(App[None]):
         )
 
     def _name_fold_keys(self, table: DataTable[Any]) -> None:
-        """The jobs table's lower border names the fold keys that act on the selected row
+        """The jobs table's lower border names the fold keys that act on the selected job
         (DL-512): both on a box with members, `z` on another row of a tree with such a box,
         none in a flat view. A Text, since a border string parses as markup."""
         hint = ""
@@ -2816,13 +2952,16 @@ class RunnerApp(App[None]):
 
     @on(_JobsTable.FoldClicked)
     def _on_fold_clicked(self, event: _JobsTable.FoldClicked) -> None:
+        # the click picks its row even where the cursor already rested (DL-512, DL-532)
+        if event.job != self._selected:
+            self._choose(event.job)
         self._toggle_box(event.job)
 
     def _toggle_box(self, name: str | None) -> None:
         if name is None or not self._foldable(name):
             return
         self._collapsed.symmetric_difference_update({name})
-        self._render_table()
+        self._render_table(fold=True)
 
     def action_toggle_all(self) -> None:
         if self._filter or self._view_mode:
@@ -2832,7 +2971,7 @@ class RunnerApp(App[None]):
         else:
             kids = self._children()
             self._collapsed = {name for name in self._jobs_snapshot if kids.get(name)}
-        self._render_table()
+        self._render_table(fold=True)
 
     @on(Input.Submitted, "#cmdline")
     def _on_command(self, event: Input.Submitted) -> None:

@@ -533,3 +533,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-529 | Release 2.0.0: the exports stay and the installed package is checked by hand | [README.md](../README.md), [docs/cli-tui-qualification.md](cli-tui-qualification.md), [docs/integration-testing-inventory.md](integration-testing-inventory.md) |
 | DL-530 | The linter says each thing once | [docs/authoring.md](authoring.md), [docs/autosys-semantics.md](autosys-semantics.md), [docs/ir-design.md](ir-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
 | DL-531 | A hold release and a `status:` line, stated and pinned | [docs/autosys-semantics.md](autosys-semantics.md), [docs/operations.md](operations.md) |
+| DL-532 | The terminal UI's selection is a job, not a row | [docs/cli-tui-qualification.md](cli-tui-qualification.md) |

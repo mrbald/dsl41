@@ -175,7 +175,7 @@ def test_parse_job_verb_without_explicit_job_defaults_to_the_selected_row() -> N
 
 
 def test_parse_job_verb_without_explicit_job_and_no_selection_errors() -> None:
-    assert parse_console_command("STARTJOB", None) == "STARTJOB needs a job (none selected)"
+    assert parse_console_command("STARTJOB", None) == "STARTJOB: no job selected"
 
 
 @pytest.mark.parametrize("verb", sorted(JOB_EVENT_VERBS))
@@ -222,10 +222,7 @@ def test_parse_change_status_status_first_with_selected_job() -> None:
 
 
 def test_parse_change_status_status_first_without_selection_errors() -> None:
-    assert (
-        parse_console_command("CHANGE_STATUS SUCCESS", None)
-        == "CHANGE_STATUS needs a job (none selected)"
-    )
+    assert parse_console_command("CHANGE_STATUS SUCCESS", None) == "CHANGE_STATUS: no job selected"
 
 
 def test_parse_change_status_job_first() -> None:
@@ -1792,6 +1789,684 @@ def test_pilot_dl512_the_lower_border_names_the_fold_keys(short_root: Path) -> N
             await _teardown(engine, server, loop_task)
 
     asyncio.run(no_box())
+
+
+# ------------------------------------------------- DL-532: the selection is a job
+
+_SEL_JIL = (
+    "insert_job: sel_a\njob_type: c\ncommand: x\nmachine: m1\n\n"
+    "insert_job: sel_box\njob_type: b\n\n"
+    "insert_job: sel_inner\njob_type: b\nbox_name: sel_box\n\n"
+    "insert_job: sel_deep\njob_type: c\ncommand: x\nmachine: m1\nbox_name: sel_inner\n\n"
+    "insert_job: sel_m1\njob_type: c\ncommand: x\nmachine: m1\nbox_name: sel_box\n\n"
+    "insert_job: sel_z\njob_type: c\ncommand: x\nmachine: m1\n"
+)
+_SEL_ORDER = ["sel_a", "sel_box", "sel_inner", "sel_deep", "sel_m1", "sel_z"]
+#: `=sel_[az]` shows these two, flat, and hides every other job
+_SEL_FILTER = "=sel_[az]"
+_SEL_FILTERED = ["sel_a", "sel_z"]
+#: the table's verb keys and their verbs, read from its bindings
+_SEND_KEYS = [
+    (b.key, b.action.removeprefix("app.send('").removesuffix("')"))
+    for b in _JobsTable.BINDINGS
+    if isinstance(b, Binding) and b.action.startswith("app.send(")
+]
+
+
+@contextlib.asynccontextmanager
+async def _selection_app(short_root: Path, text: str = _SEL_JIL, order: list[str] = _SEL_ORDER):
+    """The DL-532 estate on the real app with the table focused. Every request goes through
+    the real socket; `seen` lists each one, and the last of `edits`, when set, rewrites the
+    jobs of each status answer, the shape an update that adds or removes a job leaves."""
+    engine, server, loop_task = await _serve(short_root / "run", text)
+    try:
+        app = RunnerApp(server.path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == order)
+            table = app.query_one("#jobs", _JobsTable)
+            table.focus()
+            seen: list[dict] = []
+            edits: list = []
+            inner = app._client.request
+
+            async def capture(request):
+                seen.append(request)
+                response = await inner(request)
+                if request.get("cmd") == "status" and edits and response.get("ok"):
+                    response = {**response, "jobs": edits[-1](dict(response["jobs"]))}
+                return response
+
+            app._client.request = capture
+            yield app, pilot, table, server, seen, edits
+    finally:
+        await _teardown(engine, server, loop_task)
+
+
+def _sent(seen: list[dict]) -> list[dict]:
+    return [r for r in seen if r.get("cmd") == "sendevent"]
+
+
+async def _pick(pilot, app: RunnerApp, table: DataTable, job: str) -> None:
+    """The operator moves the cursor onto `job`'s row."""
+    table.move_cursor(row=app._table_sync.identity.index(job))
+    await _wait_for_ui(pilot, lambda: app._selected == job)
+
+
+async def _held_jobs(server: ControlServer) -> set[str]:
+    """The jobs on hold, read through the control socket."""
+    client = ControlClient(server.path)
+    try:
+        jobs = (await client.request({"cmd": "status"}))["jobs"]
+    finally:
+        await client.close()
+    return {name for name, row in jobs.items() if row.get("on_hold")}
+
+
+def _lines(app: RunnerApp) -> list[str]:
+    return [line.text for line in app.query_one("#console", RichLog).lines]
+
+
+def _row_background(table: DataTable, row: int) -> Any:
+    """The background the table paints on its row `row` (the header is line 0)."""
+    return next(iter(table.render_line(1 + row))).style.bgcolor
+
+
+async def _filter(pilot, app: RunnerApp, text: str, rows: list[str]) -> None:
+    await pilot.press("slash", *text, "enter")
+    await _wait_for_ui(pilot, lambda: app._table_sync.identity == rows)
+
+
+async def _clear_filter(pilot, app: RunnerApp) -> None:
+    await pilot.press("slash")
+    await pilot.pause()
+    await pilot.press("escape")
+    await _wait_for_ui(pilot, lambda: app._table_sync.identity == _SEL_ORDER)
+
+
+def test_pilot_dl532_the_first_answer_selects_the_first_row(short_root: Path) -> None:
+    """DL-532 keeps the first load as it was: with nothing ever selected, the first row of the
+    first answer is selected, and its explain pane and log tail are shown."""
+
+    async def scenario() -> None:
+        async with _selection_app(short_root) as (app, pilot, table, _server, _seen, _edits):
+            assert app._selected == "sel_a" and table.cursor_row == 0
+            assert not table.has_class("-resting")
+            await _wait_for_ui(
+                pilot, lambda: app.query_one("#explain-box").border_title == "explain: sel_a"
+            )
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl532_fold_all_selects_the_enclosing_box_and_h_holds_it(short_root: Path) -> None:
+    """DL-532: `z` hides the selected member, so its box, the row that now stands for it, is
+    selected and the console says so in one line. `h` holds that box, not row 0's job. `z`
+    again shows the member, and it is selected again."""
+
+    async def scenario() -> None:
+        async with _selection_app(short_root) as (app, pilot, table, server, seen, _edits):
+            await _pick(pilot, app, table, "sel_m1")
+            await pilot.press("z")
+            await _wait_for_ui(
+                pilot, lambda: app._table_sync.identity == ["sel_a", "sel_box", "sel_z"]
+            )
+            assert app._selected == "sel_box" and table.cursor_row == 1
+            assert _lines(app).count("sel_box is selected; the fold hides sel_m1") == 1
+            await app._refresh()  # a refresh that leaves the same box in its place keeps it
+            assert app._selected == "sel_box"
+
+            await pilot.press("h")
+            await _wait_for_ui(pilot, lambda: app._jobs_snapshot["sel_box"]["on_hold"])
+            assert [r["payload"] for r in _sent(seen)] == [{"job": "sel_box"}]
+            assert await _held_jobs(server) == {"sel_box"}
+
+            await pilot.press("z")
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == _SEL_ORDER)
+            assert app._selected == "sel_m1" and table.cursor_row == 4
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl532_a_nested_fold_selects_the_outermost_folded_box_shown(
+    short_root: Path,
+) -> None:
+    """DL-532: a member of a box inside a box. `z` folds both, so the outer box stands for it.
+    Space unfolds the outer box and the inner box, still folded, stands for it; space again
+    shows the member, and it is selected again. Each move is said in one console line."""
+
+    async def scenario() -> None:
+        async with _selection_app(short_root) as (app, pilot, table, server, seen, _edits):
+            await _pick(pilot, app, table, "sel_deep")
+            await pilot.press("z")
+            await _wait_for_ui(
+                pilot, lambda: app._table_sync.identity == ["sel_a", "sel_box", "sel_z"]
+            )
+            assert app._selected == "sel_box" and table.cursor_row == 1
+            assert _lines(app).count("sel_box is selected; the fold hides sel_deep") == 1
+
+            await pilot.press("space")
+            await _wait_for_ui(
+                pilot,
+                lambda: (
+                    app._table_sync.identity == ["sel_a", "sel_box", "sel_inner", "sel_m1", "sel_z"]
+                ),
+            )
+            assert app._selected == "sel_inner" and table.cursor_row == 2
+            assert _lines(app).count("sel_inner is selected; the fold hides sel_deep") == 1
+
+            await pilot.press("h")
+            await _wait_for_ui(pilot, lambda: app._jobs_snapshot["sel_inner"]["on_hold"])
+            assert await _held_jobs(server) == {"sel_inner"}
+
+            await pilot.press("space")
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == _SEL_ORDER)
+            assert app._selected == "sel_deep" and table.cursor_row == 3
+            assert [r["payload"] for r in _sent(seen)] == [{"job": "sel_inner"}]
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl532_a_filter_that_hides_the_selection_leaves_nothing_selected(
+    short_root: Path,
+) -> None:
+    """DL-532: a filter hides the selected job, so nothing is selected. The cursor rests on a
+    row painted as any other row. Every verb key on the table, `d`, and a console verb without
+    a job say "no job selected" and send nothing; a console verb that names a job is sent."""
+
+    async def scenario() -> None:
+        async with _selection_app(short_root) as (app, pilot, table, server, seen, _edits):
+            await _pick(pilot, app, table, "sel_m1")
+            await _filter(pilot, app, _SEL_FILTER, _SEL_FILTERED)
+            assert app.focused is table
+            assert app._selected is None and table.has_class("-resting")
+            assert _row_background(table, table.cursor_row) == _row_background(table, 1)
+            await _wait_for_ui(
+                pilot, lambda: app.query_one("#explain-box").border_title == "explain"
+            )
+
+            assert len(_SEND_KEYS) == 9
+            for key, verb in _SEND_KEYS:
+                await pilot.press(key)
+                await pilot.pause()
+                assert _lines(app)[-1] == f"{verb}: no job selected"
+                assert not isinstance(app.screen, ConfirmScreen)
+            await pilot.press("d")
+            await pilot.pause()
+            assert _lines(app)[-1] == "details: no job selected"
+            assert not isinstance(app.screen, SpecScreen)
+
+            await pilot.press("colon", *"ON_HOLD", "enter")
+            await pilot.pause()
+            assert _lines(app)[-1] == "ON_HOLD: no job selected"
+            await pilot.press(*"CHANGE_STATUS SUCCESS", "enter")
+            await pilot.pause()
+            assert _lines(app)[-1] == "CHANGE_STATUS: no job selected"
+            assert _sent(seen) == [] and not [w for w in app.workers if w.group == "send"]
+
+            await pilot.press(*"ON_HOLD sel_z", "enter")
+            await _wait_for_ui(pilot, lambda: app._jobs_snapshot["sel_z"]["on_hold"])
+            assert [r["payload"] for r in _sent(seen)] == [{"job": "sel_z"}]
+            assert await _held_jobs(server) == {"sel_z"}
+            assert app._selected is None
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl532_a_cleared_filter_selects_the_hidden_job_again(short_root: Path) -> None:
+    """DL-532: clearing the filter selects the hidden job again. Under a filter, Enter on the
+    resting row picks it without opening details and down moves on; once the operator picked
+    a job there, clearing the filter keeps that newer selection."""
+
+    async def scenario() -> None:
+        async with _selection_app(short_root) as (app, pilot, table, _server, _seen, _edits):
+            await _pick(pilot, app, table, "sel_m1")
+            await _filter(pilot, app, _SEL_FILTER, _SEL_FILTERED)
+            assert app._selected is None
+            await _clear_filter(pilot, app)
+            assert app._selected == "sel_m1" and table.cursor_row == 4
+            assert not table.has_class("-resting")
+
+            await _filter(pilot, app, _SEL_FILTER, _SEL_FILTERED)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app._selected == "sel_a" and not isinstance(app.screen, SpecScreen)
+            assert not table.has_class("-resting")
+            await pilot.press("down")
+            await _wait_for_ui(pilot, lambda: app._selected == "sel_z")
+            await _clear_filter(pilot, app)
+            assert app._selected == "sel_z" and table.cursor_row == 5
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl532_a_refresh_while_the_selection_is_hidden_changes_nothing(
+    short_root: Path,
+) -> None:
+    """DL-532: status answers while a filter hides the selected job select no row and ask no
+    explain; the job is still selected again when the filter clears."""
+
+    async def scenario() -> None:
+        async with _selection_app(short_root) as (app, pilot, table, _server, seen, _edits):
+            await _pick(pilot, app, table, "sel_m1")
+            await _filter(pilot, app, _SEL_FILTER, _SEL_FILTERED)
+            await pilot.pause()
+            mark = len(seen)
+            for _ in range(3):
+                await app._refresh()
+                await pilot.pause()
+            assert app._selected is None and table.has_class("-resting")
+            assert table.cursor_row == 0
+            assert [r for r in seen[mark:] if r.get("cmd") in ("explain", "sendevent")] == []
+            await _clear_filter(pilot, app)
+            assert app._selected == "sel_m1"
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl532_an_update_moves_no_selection(short_root: Path) -> None:
+    """DL-532: an answer that adds a job sorting first keeps the selection on its job. One
+    that removes the selected job leaves nothing selected, and `h` says so. Up or down on the
+    resting cursor then selects the row it rests on."""
+
+    async def scenario() -> None:
+        async with _selection_app(short_root) as (app, pilot, table, _server, seen, edits):
+            await _pick(pilot, app, table, "sel_z")
+            edits.append(lambda jobs: {**jobs, "sel_0": dict(jobs["sel_a"])})
+            await app._refresh()
+            await pilot.pause()
+            assert app._table_sync.identity == ["sel_0", *_SEL_ORDER]
+            assert app._selected == "sel_z" and table.cursor_row == 6
+
+            edits.append(
+                lambda jobs: {
+                    name: row
+                    for name, row in {**jobs, "sel_0": jobs["sel_a"]}.items()
+                    if name != "sel_z"
+                }
+            )
+            await app._refresh()
+            await pilot.pause()
+            assert app._table_sync.identity == ["sel_0", *_SEL_ORDER[:-1]]
+            assert app._selected is None and table.has_class("-resting")
+            await pilot.press("h")
+            await pilot.pause()
+            assert _lines(app)[-1] == "ON_HOLD: no job selected" and _sent(seen) == []
+
+            await pilot.press("down")
+            await pilot.pause()
+            assert app._selected == "sel_0" and table.cursor_row == 0
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl532_a_rebuild_never_passes_the_selection_through_another_row(
+    short_root: Path,
+) -> None:
+    """The bounce guard under DL-532: rebuilds queued back to back, each firing the table's
+    row-0 highlight before the cursor lands, never select another job, so no other job's
+    explain is asked and the log tail keeps its source."""
+
+    async def scenario() -> None:
+        async with _selection_app(short_root) as (app, pilot, table, _server, seen, _edits):
+            await _pick(pilot, app, table, "sel_z")
+            await pilot.pause()
+            sources: list[Any] = []
+            pager = app.query_one("#logtail", _LogTail)
+            inner = pager.set_source
+
+            def set_source(*args: Any) -> None:
+                sources.append(args)
+                inner(*args)
+
+            pager.set_source = set_source  # type: ignore[method-assign]
+            mark = len(seen)
+            jobs = dict(app._jobs_snapshot)
+            more = {**jobs, "sel_0": dict(jobs["sel_a"])}
+            for snapshot in (more, jobs, more, jobs):
+                app._update_table(snapshot)
+            await pilot.pause()
+            app._tail_step()
+            await app._refresh()
+            await pilot.pause()
+            assert app._selected == "sel_z" and table.cursor_row == 5
+            explained = {r["job"] for r in seen[mark:] if r.get("cmd") == "explain"}
+            assert explained <= {"sel_z"} and sources == []
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl532_a_filter_typed_down_to_one_job_selects_it_for_h(short_root: Path) -> None:
+    """DL-532 rule 6: the operator's filter leaves one job, so it is selected as if picked,
+    though the job selected before was another; `h` holds it."""
+
+    async def scenario() -> None:
+        async with _selection_app(short_root) as (app, pilot, table, server, seen, _edits):
+            await _pick(pilot, app, table, "sel_m1")
+            await _filter(pilot, app, "sel_z", ["sel_z"])
+            assert app._selected == "sel_z" and not table.has_class("-resting")
+            await pilot.press("h")
+            await _wait_for_ui(pilot, lambda: app._jobs_snapshot["sel_z"]["on_hold"])
+            assert [r["payload"] for r in _sent(seen)] == [{"job": "sel_z"}]
+            assert await _held_jobs(server) == {"sel_z"}
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl532_a_refresh_that_leaves_one_other_job_selects_nothing(
+    short_root: Path,
+) -> None:
+    """DL-532: rule 6 is the operator's filter change only. A status filter shows one job,
+    selected by rule 6; a status answer then moves it out and another single job in. Nothing
+    is selected, `h` says so, and the new row rests unpainted."""
+
+    async def scenario() -> None:
+        async with _selection_app(short_root) as (app, pilot, table, _server, seen, _edits):
+            await _set_status(app, pilot, "sel_a", "FAILURE")
+            await _filter(pilot, app, "status=fa", ["sel_a"])
+            assert app._selected == "sel_a"
+            await _set_status(app, pilot, "sel_z", "FAILURE")
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == ["sel_a", "sel_z"])
+            await _set_status(app, pilot, "sel_a", "SUCCESS")
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == ["sel_z"])
+            assert app._selected is None and app._rest == "sel_z"
+            assert table.has_class("-resting")
+            assert _row_background(table, 0) == _row_background(table, 1)
+            mark = len(_sent(seen))
+            await pilot.press("h")
+            await pilot.pause()
+            assert _lines(app)[-1] == "ON_HOLD: no job selected"
+            assert len(_sent(seen)) == mark
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl532_the_sole_job_a_filter_shows_stays_selected_when_cleared(
+    short_root: Path,
+) -> None:
+    """DL-532 rule 6: X was chosen, the filter shows only Y, so Y is chosen; clearing the
+    filter keeps Y selected."""
+
+    async def scenario() -> None:
+        async with _selection_app(short_root) as (app, pilot, table, _server, _seen, _edits):
+            await _pick(pilot, app, table, "sel_m1")
+            await _filter(pilot, app, "sel_z", ["sel_z"])
+            assert app._selected == "sel_z"
+            await _clear_filter(pilot, app)
+            assert app._selected == "sel_z" and table.cursor_row == 5
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl532_typing_to_one_job_without_enter_selects_nothing(short_root: Path) -> None:
+    """DL-532 rule 6 is Enter's: a keystroke that leaves one job shown selects nothing, and the
+    row rests unpainted."""
+
+    async def scenario() -> None:
+        async with _selection_app(short_root) as (app, pilot, table, _server, _seen, _edits):
+            await _pick(pilot, app, table, "sel_m1")
+            await pilot.press("slash", *"sel_z")
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == ["sel_z"])
+            assert app._selected is None and table.has_class("-resting")
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl532_typing_from_one_match_to_none_and_back_then_enter_selects_it(
+    short_root: Path,
+) -> None:
+    """DL-532 rule 6: typing to one match, to none and back to one selects nothing; Enter on
+    the one row shown selects it."""
+
+    async def scenario() -> None:
+        async with _selection_app(short_root) as (app, pilot, table, _server, _seen, _edits):
+            await _pick(pilot, app, table, "sel_m1")
+            await pilot.press("slash", *"sel_d")
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == ["sel_deep"])
+            await pilot.press("x")
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == [])
+            await pilot.press("backspace")
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == ["sel_deep"])
+            assert app._selected is None
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app._selected == "sel_deep" and not table.has_class("-resting")
+
+    asyncio.run(scenario())
+
+
+_LOAD_JIL = "".join(
+    f"insert_job: {name}\njob_type: c\ncommand: x\nmachine: m1\n\n"
+    for name in ("load", "load_eod", "load_eom", "other")
+)
+
+
+@pytest.mark.parametrize("ending", ["=load_*", "=load_"], ids=["several", "none"])
+def test_pilot_dl532_a_prefix_with_one_match_then_escape_keeps_the_earlier_pick(
+    short_root: Path, ending: str
+) -> None:
+    """DL-532: `=load` on the way to `=load_*` shows only `load`. Typing picks nothing, so Esc
+    returns to the job picked before the filter (rule 4)."""
+    order = ["load", "load_eod", "load_eom", "other"]
+
+    async def scenario() -> None:
+        async with _selection_app(short_root, _LOAD_JIL, order) as (
+            app,
+            pilot,
+            table,
+            _server,
+            _seen,
+            _edits,
+        ):
+            await _pick(pilot, app, table, "other")
+            await pilot.press("slash", *"=load")
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == ["load"])
+            assert app._selected is None
+            await pilot.press(*ending.removeprefix("=load"))
+            await _wait_for_ui(pilot, lambda: app._filter == ending)
+            await pilot.press("escape")
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == order)
+            assert app._selected == "other" and table.cursor_row == 3
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl532_enter_selects_the_one_row_a_refresh_left_under_the_filter(
+    short_root: Path,
+) -> None:
+    """DL-532 rule 6 at Enter: while the operator types a status filter, status answers swap
+    the one row shown. Enter selects the row then shown and highlighted, and `h` holds it."""
+
+    async def scenario() -> None:
+        async with _selection_app(short_root) as (app, pilot, table, server, _seen, _edits):
+            await _set_status(app, pilot, "sel_a", "FAILURE")
+            await _pick(pilot, app, table, "sel_m1")
+            await pilot.press("slash", *"status=fa")
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == ["sel_a"])
+            assert app._selected is None
+            await _set_status(app, pilot, "sel_z", "FAILURE")
+            await _set_status(app, pilot, "sel_a", "SUCCESS")
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == ["sel_z"])
+            assert app._selected is None
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app._selected == "sel_z" and table.cursor_row == 0
+            assert app._table_sync.identity == ["sel_z"] and not table.has_class("-resting")
+            await pilot.press("h")
+            await _wait_for_ui(pilot, lambda: app._jobs_snapshot["sel_z"]["on_hold"])
+            assert await _held_jobs(server) == {"sel_z"}
+
+    asyncio.run(scenario())
+
+
+def _with_status(jobs: dict, **statuses: str) -> dict:
+    return {**jobs, **{name: {**jobs[name], "status": s} for name, s in statuses.items()}}
+
+
+def test_pilot_dl532_one_answer_that_swaps_the_single_row_selects_nothing(
+    short_root: Path,
+) -> None:
+    """DL-532: one status answer takes the selected single row out of the filter and puts
+    another single row in. Nothing is selected and the new row rests unpainted."""
+
+    async def scenario() -> None:
+        async with _selection_app(short_root) as (app, pilot, table, _server, _seen, edits):
+            await _set_status(app, pilot, "sel_a", "FAILURE")
+            await _filter(pilot, app, "status=fa", ["sel_a"])
+            assert app._selected == "sel_a"
+            edits.append(lambda jobs: _with_status(jobs, sel_a="SUCCESS", sel_z="FAILURE"))
+            await app._refresh()
+            await pilot.pause()
+            assert app._table_sync.identity == ["sel_z"]
+            assert app._selected is None and table.has_class("-resting")
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl532_a_row_selected_event_a_rebuild_overtook_selects_nothing(
+    short_root: Path,
+) -> None:
+    """DL-532: Enter on Z as a status answer takes Z out of the filter. The table's
+    RowSelected for Z arrives after the rebuild, and so does the rebuild's own row-0
+    highlight. Neither selects: nothing is selected afterwards."""
+
+    async def scenario() -> None:
+        async with _selection_app(short_root) as (app, pilot, table, _server, _seen, edits):
+            await _set_status(app, pilot, "sel_a", "FAILURE")
+            await _set_status(app, pilot, "sel_z", "FAILURE")
+            await _filter(pilot, app, "status=fa", ["sel_a", "sel_z"])
+            await _pick(pilot, app, table, "sel_z")
+            key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            table.post_message(DataTable.RowSelected(table, 1, key))
+            edits.append(lambda jobs: _with_status(jobs, sel_z="SUCCESS"))
+            app._update_table(_with_status(app._jobs_snapshot, sel_z="SUCCESS"))
+            await pilot.pause()
+            assert app._table_sync.identity == ["sel_a"]
+            assert app._selected is None and app._rest == "sel_a"
+            assert table.has_class("-resting") and not isinstance(app.screen, SpecScreen)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl532_a_pick_between_a_rebuild_and_its_events_stands(short_root: Path) -> None:
+    """DL-532: with the cursor resting on row 0, a rebuild is followed by a pick before the
+    rebuild's own row-0 highlight is handled. That highlight does not replace the pick."""
+
+    async def scenario() -> None:
+        async with _selection_app(short_root) as (app, pilot, table, _server, _seen, _edits):
+            await _pick(pilot, app, table, "sel_m1")
+            await _filter(pilot, app, _SEL_FILTER, _SEL_FILTERED)
+            assert app._selected is None and table.cursor_row == 0
+            jobs = dict(app._jobs_snapshot)
+            app._update_table({name: row for name, row in jobs.items() if name != "sel_z"})
+            app._update_table(jobs)
+            assert app._table_sync.identity == _SEL_FILTERED
+            assert table.cursor_row == 0 and app._rest == "sel_a"
+            app._choose("sel_z")  # a pick that lands before the rebuild's events
+            await pilot.pause()
+            assert app._selected == "sel_z"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("x", [3, 30], ids=["job-cell", "other-cell"])
+def test_pilot_dl532_a_click_anywhere_on_the_resting_row_selects_it(
+    short_root: Path, x: int
+) -> None:
+    """DL-532: with nothing selected, a click on the resting row, on its job cell or another
+    cell, selects that row and opens no details."""
+
+    async def scenario() -> None:
+        async with _selection_app(short_root) as (app, pilot, table, _server, _seen, _edits):
+            await _pick(pilot, app, table, "sel_m1")
+            await _filter(pilot, app, _SEL_FILTER, _SEL_FILTERED)
+            assert app._selected is None
+            await pilot.click("#jobs", offset=(x, 2))
+            await pilot.pause()
+            assert app._selected == "sel_a" and not table.has_class("-resting")
+            assert not isinstance(app.screen, SpecScreen)
+
+    asyncio.run(scenario())
+
+
+_MANY = [f"many_{i:02d}" for i in range(60)]
+_MANY_JIL = "".join(
+    f"insert_job: {name}\njob_type: c\ncommand: x\nmachine: m1\n\n" for name in [*_MANY, "x_pick"]
+)
+
+
+def test_pilot_dl532_a_pick_after_a_scroll_shows_the_row_it_selects(short_root: Path) -> None:
+    """DL-532: pick X; a submitted filter hides it and shows more rows than fit; the table is
+    scrolled as the mouse wheel scrolls it; down selects the resting row and scrolls it into
+    view, and `h` holds that visible, highlighted job."""
+
+    async def scenario() -> None:
+        async with _selection_app(short_root, _MANY_JIL, [*_MANY, "x_pick"]) as (
+            app,
+            pilot,
+            table,
+            server,
+            _seen,
+            _edits,
+        ):
+            await _pick(pilot, app, table, "x_pick")
+            await _filter(pilot, app, "many_", _MANY)
+            assert app._selected is None and table.cursor_row == 0
+            table.scroll_to(y=30, animate=False)
+            await _wait_for_ui(pilot, lambda: table.scroll_y == 30)
+            await pilot.press("down")
+            await _wait_for_ui(pilot, lambda: table.scroll_y == 0)
+            assert app._selected == "many_00" and table.cursor_row == 0
+            assert not table.has_class("-resting")
+            await pilot.press("h")
+            await _wait_for_ui(pilot, lambda: app._jobs_snapshot["many_00"]["on_hold"])
+            assert await _held_jobs(server) == {"many_00"}
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl532_an_update_that_puts_the_job_under_a_folded_box_selects_nothing(
+    short_root: Path,
+) -> None:
+    """DL-532: a box stands for the chosen job only through the operator's own fold. The job
+    is shown and selected, the operator folds every box, then an update moves the job into a
+    folded box: nothing is selected, and `h` says so."""
+
+    async def scenario() -> None:
+        async with _selection_app(short_root) as (app, pilot, table, _server, seen, edits):
+            await _pick(pilot, app, table, "sel_z")
+            await pilot.press("z")
+            await _wait_for_ui(
+                pilot, lambda: app._table_sync.identity == ["sel_a", "sel_box", "sel_z"]
+            )
+            assert app._selected == "sel_z"
+            edits.append(lambda jobs: {**jobs, "sel_z": {**jobs["sel_z"], "box_name": "sel_box"}})
+            await app._refresh()
+            await pilot.pause()
+            assert app._table_sync.identity == ["sel_a", "sel_box"]
+            assert app._selected is None and table.has_class("-resting")
+            await pilot.press("h")
+            await pilot.pause()
+            assert _lines(app)[-1] == "ON_HOLD: no job selected" and _sent(seen) == []
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl532_a_view_change_to_one_job_selects_it(short_root: Path) -> None:
+    """DL-532 rule 6 at a view change: the problems view shows the one failed job, so it is
+    selected; the view cycled on to one that shows none selects nothing."""
+
+    async def scenario() -> None:
+        async with _selection_app(short_root) as (app, pilot, table, _server, _seen, _edits):
+            await _set_status(app, pilot, "sel_z", "FAILURE")
+            await _pick(pilot, app, table, "sel_m1")
+            await pilot.press("v")
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == ["sel_z"])
+            assert app._selected == "sel_z"
+            await pilot.press("v")
+            await _wait_for_ui(pilot, lambda: app._table_sync.identity == [])
+            assert app._selected is None
+
+    asyncio.run(scenario())
 
 
 # ------------------------------------------------- DL-520: pane borders and +/-

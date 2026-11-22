@@ -704,7 +704,7 @@ def test_terminal_failure_names_the_last_reset_control_and_offset(tmp_path: Path
     asyncio.run(scenario())
 
 
-_FILTERED_SELECTION = b"\x1b[2;91H explain: recovery_child \x1b[5;1H jobs 1/3 /recovery_child/ "
+_FILTERED_SELECTION = b"\x1b[2;1H jobs 1/3 /recovery_child/ \x1b[2;91H explain: recovery_child "
 
 
 def test_terminal_selection_requires_complete_filter_and_selected_child() -> None:
@@ -721,8 +721,8 @@ def test_terminal_selection_requires_complete_filter_and_selected_child() -> Non
         _FILTERED_SELECTION.replace(b"recovery_child/", b"recovery_c/"),
         _FILTERED_SELECTION.replace(b"recovery_child/", b"recovery_childh/"),
         _FILTERED_SELECTION.replace(b"explain: recovery_child", b"explain: recovery_box"),
-        _FILTERED_SELECTION.replace(b"[5;1H", b"[25;1H"),
-        _FILTERED_SELECTION + b"\x1b[5;1H" + b" " * 30,
+        _FILTERED_SELECTION.replace(b"[2;1H", b"[25;1H"),
+        _FILTERED_SELECTION + b"\x1b[2;1H" + b" " * 30,
         _FILTERED_SELECTION[:-2],
     ],
 )
@@ -820,11 +820,15 @@ async def _filter_and_hold(terminal: Terminal) -> int:
         "filter focus", lambda data: _FILTER_OPEN.encode() in _sgr_free(data), after=mark
     )
     mark = terminal.send(b"recovery_child")
-    await terminal.until("complete filter and selected child", selected_filter_ready, after=mark)
+    await terminal.until(
+        "complete filter", lambda data: b"jobs 1/3 /recovery_child/" in _sgr_free(data), after=mark
+    )
     mark = terminal.send(b"\r")
     await terminal.until(
         "submitted table focus", lambda data: table_focus_ready(data, 150, 44), after=mark
     )
+    # Enter on the filter line selects the one job it shows (DL-532)
+    await terminal.until("complete filter and selected child", selected_filter_ready, after=mark)
     mark = terminal.resize()
     await terminal.until(
         "resized table focus", lambda data: table_focus_ready(data, 110, 36), after=mark

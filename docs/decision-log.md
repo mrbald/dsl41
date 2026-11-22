@@ -27475,3 +27475,24 @@ relitigate an entry; append a new one.
   an update stops the job if it runs. The line itself moves no flag; the stop is then
   settled by the interruption rule, which runs the job again or holds a job marked
   non-idempotent (BUG-104).
+- DL-532 The terminal UI's selection is a job, not a row
+  (2026-11-22; owner's first priority among the operator-surface findings;
+  src/dsl41/runner_tui.py, tests/test_runner_tui.py, tests/test_tui_recovery_drivers.py,
+  tests/tui_terminal.py, docs/cli-tui-qualification.md; DL-187's confirmations unchanged)
+  THE RULE. The keys and the console verbs act on the selected job, which follows the job
+  the operator picked last and never the cursor's row. A fold by the operator that hides
+  the job selects the box shown in its place and says so in one console line. A filter or a
+  view that hides it leaves nothing selected: the keys and a verb typed without a job name
+  answer `<VERB>: no job selected` and send nothing, and the cursor's row is painted as an
+  ordinary row until up, down, Enter or a click selects it, scrolled into view first. The
+  job is selected again when it is shown again and nothing else was picked. Enter on the
+  filter line, or a view change by `v`, that leaves one job shown selects that job; typing
+  in the filter line selects nothing. No change of rows the operator did not make selects a
+  job: a refresh, a status answer, an update that adds, removes or moves jobs. A table event
+  that a rebuild overtook is dropped.
+  THE DEFECT. The cursor's row was the selection. When a fold or a filter hid the selected
+  job the table rebuilt with its cursor on the first row, and that row became the
+  selection, so the next unconfirmed key acted on a job the operator had not picked.
+  COST. A pick that a rebuild overtakes is dropped and must be made again. After a filter
+  or view round trip a box no longer stands in for a member hidden by a fold; nothing is
+  selected until a pick.
