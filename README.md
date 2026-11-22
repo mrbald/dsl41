@@ -722,8 +722,12 @@ Runner:
 - `src/dsl41/runner_store.py`: the engine's only durable record: one SQLite
   file per run root, `engine.db`, holding append-only
   canonical records, an append-only configuration history, snapshots and
-  pruning, under one writer with synchronous commits; `MemoryStore` is its
+  pruning, under one writer with synchronous commits, and the transition
+  rows each record produced with their coverage; `MemoryStore` is its
   in-memory twin for rehearsal and tests.
+- `src/dsl41/runner_transitions.py`: the committed transition rows: the
+  start's settling of the rows with the retained journal, and the
+  `transitions` query's request and answer (DL-536).
 - `src/dsl41/runner_config.py`: what an engine runs under:
   `RuntimeProfile` and `runtime_hash`, the configuration row that holds the
   catalog, the profile and the marked set, and `engine.toml`'s stop grace,

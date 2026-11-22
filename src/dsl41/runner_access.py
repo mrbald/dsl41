@@ -323,6 +323,7 @@ def peer_principal(sock: socket_mod.socket) -> Principal | None:
 REQUIRED_TIER: dict[str, Tier] = {
     "status": Tier.READ,
     "trace": Tier.READ,
+    "transitions": Tier.READ,
     "explain": Tier.READ,
     "spec": Tier.READ,
     "deps": Tier.READ,

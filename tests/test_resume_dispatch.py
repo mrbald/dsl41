@@ -126,10 +126,10 @@ async def _die_before_the_dispatch(engine: Engine, ev: Event) -> int:
     journal = engine.journal
     real = journal.append
 
-    def append(*records: Any) -> int:
+    def append(*records: Any, **rows: Any) -> int:
         if any(record.kind == "dispatch" for record in records):
             raise RuntimeError("the engine died before the dispatch record")
-        return real(*records)
+        return real(*records, **rows)
 
     journal.append = append  # type: ignore[method-assign]
     engine.inject(ev)
@@ -431,9 +431,9 @@ def test_the_dispatch_record_precedes_the_launch(short_root: Path) -> None:
         assert engine.journal is not None
         real_append = engine.journal.append
 
-        def append(*records: Any) -> int:
+        def append(*records: Any, **rows: Any) -> int:
             order.extend(record.kind for record in records)
-            return real_append(*records)
+            return real_append(*records, **rows)
 
         engine.journal.append = append  # type: ignore[method-assign]
         engine.inject(_ev("STARTJOB", 0, job="j"))

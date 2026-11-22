@@ -395,10 +395,10 @@ def test_crash_boundaries_allocate_from_committed_dispatch(
         assert engine.journal is not None
         append = engine.journal.store.append
 
-        def fail_commit(*records):
+        def fail_commit(*records, **rows):
             if any(record.kind == "dispatch" for record in records):
                 raise Crash("before commit")
-            return append(*records)
+            return append(*records, **rows)
 
         def fail_launch(*args, **kwargs):
             raise Crash("after commit")

@@ -114,12 +114,12 @@ def _run_dying_at(run_root: Path, append: int | None) -> int:
     appends = 0
     original = journal.append
 
-    def counted(*records: Any) -> int:
+    def counted(*records: Any, **rows: Any) -> int:
         nonlocal appends
         appends += 1
         if appends == append:
             raise _Killed(f"engine gone before store append {appends}")
-        return original(*records)
+        return original(*records, **rows)
 
     journal.append = counted  # type: ignore[method-assign]
 

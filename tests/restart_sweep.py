@@ -283,13 +283,13 @@ def _install_fault(directory: Path, tag: str, fault: Fault | None) -> None:
         (directory / f"children-{tag}.json").write_text(json.dumps(_children()))
         os.kill(os.getpid(), signal.SIGKILL)
 
-    def append(self: Journal, *records: Any) -> int:
+    def append(self: Journal, *records: Any, **rows: Any) -> int:
         nonlocal calls
         calls += 1
         os.write(log, f"{calls} {' '.join(r.kind for r in records)}\n".encode())
         if fault is not None and fault.position == "before" and calls == fault.n:
             die()
-        last = original(self, *records)
+        last = original(self, *records, **rows)
         if fault is not None and fault.position == "after" and calls == fault.n:
             die()
         return last

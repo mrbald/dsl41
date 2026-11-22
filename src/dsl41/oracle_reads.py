@@ -191,7 +191,16 @@ class OracleReads:
     def mark(self, at: datetime, transition: str, cause: str) -> None:
         """Append an out-of-band trace line that names no job (a restart's `RESTART`): no
         transition, no state moves."""
-        self._trace.append(TraceEntry(at=at, job="", transition=transition, cause=cause))
+        self.add_mark(marker(at, transition, cause))
+
+    def add_mark(self, entry: TraceEntry) -> None:
+        """Append the out-of-band line `entry` (`marker`), once whatever records it is durable:
+        an update's `CONFIG` (DL-536)."""
+        self._trace.append(entry.model_copy())
+
+    def trace_length(self) -> int:
+        """The number of trace entries, read without copying any."""
+        return len(self._trace)
 
     def trace_since(self, since: int) -> tuple[int, list[TraceEntry]]:
         """The trace length and a copy of the entries after the first `since`; only the slice is
@@ -617,6 +626,11 @@ class OracleReads:
                 # terminal member is done, ran or not (DL-360)
                 return False
         return True
+
+
+def marker(at: datetime, transition: str, cause: str) -> TraceEntry:
+    """An out-of-band trace line: it names no job and moves no state."""
+    return TraceEntry(at=at, job="", transition=transition, cause=cause)
 
 
 def _entity_keys(cond: Cond) -> set[str]:

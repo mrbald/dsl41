@@ -48,7 +48,7 @@ import json
 import re
 import sys
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -57,7 +57,7 @@ from typing import TYPE_CHECKING, Any, Final
 from dsl41.canon import CanonError, canonical_bytes, decode, hash_over, is_wire_int, naive_utc
 from dsl41.engine_charts import UPDATE_STOP
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import CarriedRows, Event
+from dsl41.oracle_state import CarriedRows, Event, TraceEntry
 from dsl41.runner_admission import (
     ApplyResult,
     Attempt,
@@ -1196,6 +1196,9 @@ class Journal:
         self.open = open_table if open_table is not None else OpenTable()
         self.position = position if position is not None else Position()
         self.last_seq = store.last_seq()
+        #: why `transitions` declines for this run: the start could not settle its rows
+        #: (`runner_transitions.begin`, DL-536); None when it serves
+        self.transitions_declined: str | None = None
 
     def prove(self) -> None:
         """Re-prove the run root's lock (S6b), when there is one. The engine asks before it
@@ -1203,9 +1206,10 @@ class Journal:
         if self._lock is not None:
             self._lock.check()
 
-    def append(self, *records: Record) -> int:
+    def append(self, *records: Record, transitions: Sequence[TraceEntry] = ()) -> int:
         """Append `records` in one transaction; answer the last seq. A record this binary does
-        not know is refused before anything is written (`check_record`)."""
+        not know is refused before anything is written (`check_record`). `transitions` are the
+        trace entries the first record produced, committed with it (DL-536)."""
         dispatches = dict(self.open.dispatches)
         for seq, record in enumerate(records, start=self.next_seq()):
             check_record(record)
@@ -1215,7 +1219,9 @@ class Journal:
                 )
                 dispatches[record.payload["job"]] = dict(record.payload)
         self.prove()
-        last = self.store.append(*records)
+        last = self.store.append(
+            *records, transitions=[entry.model_dump() for entry in transitions]
+        )
         first = last - len(records) + 1
         self.last_seq = last
         for seq, record in enumerate(records, start=first):
@@ -1233,16 +1239,28 @@ class Journal:
 
     # ---- the records
 
-    def admission(self, attempt: Attempt, result: ApplyResult, *also: Record) -> int:
+    def admission(
+        self,
+        attempt: Attempt,
+        result: ApplyResult,
+        *also: Record,
+        transitions: Sequence[TraceEntry] = (),
+    ) -> int:
         """One admission (concurrency-model ss4 steps 4-7) as one transaction: the attempt, its
-        decision, and the records the caller appends with them (a plan step's done mark). A
-        native rejection names one of the append-only `STORED_CODES` (period-model ss2.3)."""
+        decision, the records the caller appends with them (a plan step's done mark), and the
+        trace entries the apply produced, under the input record's seq (DL-536). A native
+        rejection names one of the append-only `STORED_CODES` (period-model ss2.3)."""
         if result.decision == "rejected" and result.code not in STORED_CODES:
             raise EngineError(
                 f"decision {result.index}: a native rejection names its stored code"
                 f" at birth, and this one names {result.code!r}"
             )
-        return self.append(input_record(attempt), decision_record(attempt, result), *also)
+        return self.append(
+            input_record(attempt),
+            decision_record(attempt, result),
+            *also,
+            transitions=transitions,
+        )
 
     def drop(self, ev: Event, reason: str) -> None:
         """A scheduler tick missed across downtime (E9), recorded once."""

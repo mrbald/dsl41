@@ -25184,6 +25184,7 @@ relitigate an entry; append a new one.
   with a dispatch record and no directory is rerun under the attempt rule, not FAILURE). REJECTED:
   the wire `seq` as the store seq; a dispatch inside the admission's append; a pruned store
   replayed from seq 0. Reviewed by an Opus reviewer (two rounds) and Astra (four, owner-approved).
+  NARROWED BY DL-536: trace entries are also stored, as rows no decision reads.
 - DL-429 The attempt and engine lifecycle tiers run the engine's stops; `engine stop`; the
   interruption hold is one oracle transition (2026-10-30; slice 2b wiring of the v2 train under
   DL-424; DL-426's tiers wired through `runner_stops.py`; one catalog hash,
@@ -27584,3 +27585,41 @@ relitigate an entry; append a new one.
   THE DEFECT. The pane showed the condition only, as one text. To reach a job that blocked
   another, the operator read its name and typed it into the filter.
   COST. Going to a job costs one status request. A held key is dropped, not queued.
+- DL-536 Transitions are committed with the journal record that produced them
+  (2026-11-22; owner chose reader tables over state rows as the authority and over
+  snapshots alone; src/dsl41/runner_transitions.py, src/dsl41/runner_store.py,
+  src/dsl41/runner_journal.py, src/dsl41/runner.py, src/dsl41/runner_update.py,
+  src/dsl41/runner_startup.py, src/dsl41/runner_control.py, src/dsl41/runner_access.py,
+  src/dsl41/runner_codes.py, src/dsl41/cli_control.py, src/dsl41/oracle_reads.py,
+  docs/runner-design.md, docs/control-protocol.md, docs/protocol-evolution.md,
+  docs/access-model.md, docs/gateway.md, tests/test_transitions.py; narrows DL-428;
+  additive in dialect 5, DL-217; store schema version stays 1; no state-machine version
+  change)
+  THE RULE. The store holds a table `transitions`, keyed by the journal sequence of the
+  record committed in the same transaction and an ordinal within it. An admission commits
+  its input, its decision and the trace entries the oracle appended while applying it in
+  one transaction; a CONFIG mark commits with its `config applied` record and reaches the
+  in-memory trace only after that commit. The RESTART mark is not stored. No decision reads
+  the table; duplicate detection, dispatch identity, restart decisions, snapshots and
+  retention floors keep their sources. A coverage table says which journal intervals the
+  rows cover and which are gaps, and advances in every committed transaction. The engine
+  never fills old rows by replay: coverage begins at the first record a build with the
+  table commits, and records an earlier build appended are a recorded gap. Each start
+  records a history, so a client can tell a restored root from the one it read. If a start
+  cannot settle the rows, the engine starts all the same and the read declines for that
+  run with `transitions_unavailable` and its reason, which `status` also shows. Pruning
+  deletes rows below the journal's actual bound. The read verb `transitions` pages by
+  `(seq, n)` in either direction with filters by job and transition, holds the whole
+  answer to one mebibyte, reports the retained floor, an expired cursor, the coverage and
+  raw counts by job, and runs on a read-only connection in a thread that shutdown
+  interrupts and joins within a deadline. An earlier build opens and writes such a root
+  and ignores the tables.
+  THE DEFECT. The transition trace lived only in memory since the engine started,
+  unbounded and with positions that restart at zero. A viewer asked for all of it in one
+  line and could not connect once it passed the line limit.
+  UNCHANGED. The in-memory trace, the `trace` verb, `subscribe`, the snapshot and the
+  offline fold; every oracle decision; the restart path.
+  COST. One more statement in each commit and one per transition. Transition history
+  begins at the upgrade. After going back a build and forward again, the earlier build's
+  interval is a gap.
+  NOT BUILT. The terminal UI still reads `trace`. Past runs are the next slices.

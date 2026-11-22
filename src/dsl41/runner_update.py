@@ -60,6 +60,7 @@ from dsl41.canon import digest
 from dsl41.engine_charts import UPDATE_STOP, AttemptOutcome
 from dsl41.idempotence import Exceptions
 from dsl41.ir import CatalogIR
+from dsl41.oracle_reads import marker
 from dsl41.reload_plan import (
     BoxScope,
     Estate,
@@ -782,9 +783,11 @@ class EngineUpdate:
             "clock_domain": journal.clock_domain,
             **application_body(application),
         }
-        journal.append(Record(at, "config", None, None, body))
-        # the trace says where the rev moved, as a replay of the record does
-        engine.oracle.mark(at, CONFIG_MARKER, config_marker(application.rev))
+        # the trace says where the rev moved, as a replay of the record does; the mark commits
+        # with the record and reaches the trace once the record is durable (DL-536)
+        mark = marker(at, CONFIG_MARKER, config_marker(application.rev))
+        journal.append(Record(at, "config", None, None, body), transitions=[mark])
+        engine.oracle.add_mark(mark)
         self._body = body
         return application
 

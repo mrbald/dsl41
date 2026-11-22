@@ -31,6 +31,8 @@ Code = Literal[
     "invalid_argument",
     "plan_cycle",
     "unknown_job",
+    # `transitions` when the start could not settle the rows (DL-536)
+    "transitions_unavailable",
     # subscribe
     "no_journal",
     "backfill_refused",

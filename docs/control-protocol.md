@@ -108,7 +108,8 @@ CLI's job.
   and configuration updates (DL-424, DL-428). `applied_index` is the
   engine's applied admission index, not a configuration revision or the
   SQLite journal seq. The header is stamped after routing
-  (DL-148). Headerless answers are the pre-routing malformed-line,
+  (DL-148). A `transitions` answer names the `applied_index` its read
+  saw, taken when the read began, and that one stands (DL-536). Headerless answers are the pre-routing malformed-line,
   version, credential, `as` wrapper and access refusals, the internal-error answer of
   a handler that raised, and every line `subscribe` writes (§5).
   DL-117's period identity and PR-03's lineage proof under DL-133 resolve to DL-424.
@@ -355,7 +356,8 @@ The client action says what a client does next:
 | `invalid_argument` | refused, query or stream | a field is absent or has the wrong shape or type, a `kill_signals` list is invalid or attached to another verb, or a `request_id` begins with the reserved prefix `engine:` (§3); `error` names the field | fix the request |
 | `plan_cycle` | query | the AND-success skeleton has a cycle, so `plan` is disabled | operator |
 | `unknown_job` | query, or refused on a mutation | the job is not in the catalog (for `status`: in neither the catalog nor the store) | fix the request |
-| `no_journal` | stream | the run has no store to stream | operator |
+| `transitions_unavailable` | query | the start could not settle the transition rows for this run; `error` gives the reason, and the answer asserts no entries, coverage, continuity or history (DL-536) | operator: fix the cause `error` names; the rows are still committed, and the next start tries again |
+| `no_journal` | stream or query | the run has no store to stream, or to read `transitions` from | operator |
 | `backfill_refused` | stream | the backfill met a store it cannot read as this estate's | operator |
 | `unknown_verb` | refused | `verb` names no `sendevent` verb | fix the request |
 | `unknown_status` | refused | `CHANGE_STATUS` names no status | fix the request |
@@ -596,8 +598,8 @@ No `subscribe` line carries the read header (§2, DL-148). A subscription
 is not a revision-bearing read (§2, DL-148).
 
 Every query is a **pure projection** of (oracle, catalog, scheduler,
-spool paths). None changes protocol-visible engine state, and
-none inserts a store row. `status` does refresh one private cache, the
+spool paths), and `transitions` of the store's transition rows. None
+changes protocol-visible engine state, and none inserts a store row. `status` does refresh one private cache, the
 `spec_drift` re-hash below. Queries are safe to serve from the engine's
 task because `feed()` never yields, so a handler can never observe a
 half-applied event.
@@ -719,6 +721,10 @@ is, attempts still open included. An `interrupted` block carries
 could not be trusted and the pids the restart's first reading found. The other keys and their types are
 unchanged.
 
+While `transitions` declines for the run (§4 `transitions`), the answer
+carries `transitions_unavailable`, the reason text; it is absent otherwise.
+A client may ignore this additive field (DL-536).
+
 In the real domain, while the wall is below engine time, the answer carries
 `clock_hold: {"wall": <instant>, "until": <instant>}` (DL-493). Both instants
 use the `status_at` format. It is absent outside a hold and in the virtual
@@ -783,6 +789,106 @@ answer may hold lines that name no job (`"job": ""`) and move no state.
 covers what follows it). `CONFIG` marks where an update's application stands
 between two inputs; its `cause` is `configuration rev N`, the rev the
 entries after it run under.
+
+### `transitions`
+
+The trace entries the store committed with their records (DL-536,
+runner-design §7), paged by key. It is a `read`-tier query. For a run root,
+the read and the shaping of the whole answer run on a thread and a
+read-only connection of their own, off the engine's loop, in one short read
+transaction, so a read never holds up an admission. Shutdown stops a read
+in flight: the statement it runs, any later statement and the sizing of its
+answer all see the stop. Shutdown waits up to 5 seconds for the read's
+thread, then reports the read it abandons and goes on.
+
+Request fields, each optional:
+
+- `cursor`: `[seq, n]`, a row key, two integers from 0 to 2^63 - 1. A page
+  holds the rows after it (`forward`) or before it (`backward`). Null starts
+  at the oldest row (`forward`) or the newest (`backward`).
+- `direction`: `forward` (the default) or `backward`.
+- `limit`: a non-negative integer, 500 by default, cut to 5000.
+- `job`, `transition`: exact filters, each answered through an index.
+- `counts`: up to 64 transition names to count.
+- `history`: the `history` an earlier answer carried.
+
+A malformed field answers `invalid_argument` naming it. A run with no store
+answers `no_journal`. Counts whose answer alone passes the byte cap answer
+`invalid_argument` naming `counts`; so does counts that leave too little room
+for one entry even with its texts cut, until fewer names are counted. When
+the engine's start could not
+settle the transition rows (runner-design §7), every request of that run
+answers `transitions_unavailable` with the reason, and asserts no entries,
+coverage, continuity or history; `status` carries the same reason, and the
+next start tries again.
+
+```json
+{"ok": true,
+ "entries": [{"seq": 41, "n": 0, "at": "2026-07-01T08:00:00",
+              "job": "j", "transition": "INACTIVE->STARTING",
+              "cause": "STARTJOB event (control)"}],
+ "next": [41, 0], "more": true,
+ "floor": 12, "expired": false, "pruned": [],
+ "covered": [[41, 90]], "gaps": [],
+ "watermark": 90, "history": "5f0c…", "continuous_through": 90,
+ "counts": {"j": {"RUNNING->FAILURE": 2}},
+ "counts_covered": [[12, 30], [36, 90]], "counts_gaps": [[31, 35]],
+ "baseline_id": "…", "applied_index": 17}
+```
+
+Two moments shape the answer. When the request is routed, the engine takes
+`watermark`, the journal seq it has reached, and the header's
+`applied_index`, the index applied then. The read then sees the store at
+its own, later point: the rows, the retained floor (`floor`, the oldest
+journal seq it holds), the coverage and the histories come from that read.
+Every seq the answer names (entries, `next`, the intervals, the counts) is
+at or below the watermark; a row committed after routing waits for the next
+page. A prune between pages, or between routing and the read, can remove
+rows the cursor had not reached. A forward cursor then expires: `expired` is
+true and `pruned` lists, at or below the watermark, the seqs from the cursor
+to the newest removed row. A forward cursor at the last row of `floor - 1`
+had reached every removed row and does not expire. A backward cursor below
+`floor` expires with every seq up to it. A cursor at or above `floor` never
+expires.
+
+`entries` are in key order whatever the direction. Each has the `trace`
+entry's fields, written as `trace` writes them (`at` included), unset
+optional ones omitted, with `seq` the journal seq of its record and `n` its
+ordinal there. `next` is the cursor that continues the page in its
+direction: the key of its last entry in that direction, or the request's
+cursor when the page is empty; it is never above `[watermark, 2^63 - 1]`, so
+a cursor past the watermark goes on from the watermark. `more` says whether
+to ask again that way.
+
+The whole encoded answer, header and counts included, is at most 1 MiB. A
+page may hold fewer entries than the limit and the cap allow; only `more`
+says whether entries remain. An entry too large to fit alone comes alone,
+its longest texts cut to the longest prefixes that fit, with `"cut": true`,
+and `next` passes it.
+
+`covered` and `gaps` are seq intervals, both ends included, over the seqs
+the page spans at or above `floor`: from the cursor to its last entry, or
+to the end of the retained journal when nothing remains that way. A gap
+holds seqs with no complete rows; an absent row there says nothing.
+`counts` answers only a request that names it: the raw number of retained
+rows up to the watermark of each named transition, by job and transition.
+`counts_covered` and `counts_gaps` are the coverage of that whole range,
+`floor` to the watermark, so a client sees what the counts leave out. They
+are row counts, not a viewer's refusal total: that total groups scheduler
+starts by job, run and status class, and is built from the filtered rows.
+
+`history` identifies the store's history since the engine last started.
+A restored copy of a root forgets the histories it never saw. When the
+request names a history, `continuous_through` is the last seq at which that
+history and the store's agree: the watermark for the current one, the seq
+before the next start for an earlier one, and 0 for one the store never
+had. A client keeps the rows it holds up to that seq and reads again past
+it.
+
+`dsl41 query transitions` sends `--job`, `--transition`, `--limit` (50 by
+default), `--cursor SEQ:N` and `--forward`, newest first unless
+`--forward`; it refuses `--since`, `--name` and the other queries' options
+by name, and the other queries refuse its options.
 
 ### `explain <job>`
 

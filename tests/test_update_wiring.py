@@ -1584,11 +1584,11 @@ def test_an_exact_update_retry_after_a_failed_applied_write_has_only_its_admissi
         append = SqliteStore.append
         failed = []
 
-        def fail_applied(store: SqliteStore, *records: Record) -> int:
+        def fail_applied(store: SqliteStore, *records: Record, **rows: Any) -> int:
             if any(r.kind == "config" and r.payload.get("event") == "applied" for r in records):
                 failed.extend(records)
                 raise OSError("synthetic applied write failure")
-            return append(store, *records)
+            return append(store, *records, **rows)
 
         writer = None
         try:
@@ -1608,6 +1608,11 @@ def test_an_exact_update_retry_after_a_failed_applied_write_has_only_its_admissi
             assert answer["ok"] and answer["decision"] == "admitted"
             assert answer["stop"] == [] and answer["application"] is None
             assert [c["event"] for c in _configs(run_root)] == ["applied", "intent"]
+            # the CONFIG mark of a `config applied` that was never recorded is not traced (DL-536)
+            async with asyncio.timeout(TIMEOUT_S):
+                traced = await _control_call(server.path, {"cmd": "trace"})
+            assert traced["ok"]
+            assert [e for e in traced["entries"] if e["transition"] == "CONFIG"] == []
 
             reader, writer = await asyncio.open_unix_connection(str(server.path))
             writer.write(json.dumps({**request, "v": 5, "wait": True}).encode() + b"\n")

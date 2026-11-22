@@ -47,6 +47,7 @@ One route per control `cmd`. The set is the read- and ops-tier `cmd` entries of 
 | `catalog` | `GET /api/v1/catalog` | none |
 | `status` | `GET /api/v1/status` | `job`, optional |
 | `trace` | `GET /api/v1/trace` | `since`, optional integer |
+| `transitions` | `GET /api/v1/transitions` | `cursor` (`seq,n`), `direction`, `limit`, `job`, `transition`, `history`; `counts`, repeated; each optional (DL-536) |
 | `explain`, `spec`, `deps` | `GET /api/v1/explain` (and `/spec`, `/deps`) | `job` |
 | `timers`, `plan` | `GET /api/v1/timers`, `GET /api/v1/plan` | none |
 | `global`, `globals` | `GET /api/v1/global`, `GET /api/v1/globals` | `name`; `names`, repeated |

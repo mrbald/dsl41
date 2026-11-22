@@ -244,6 +244,7 @@ def test_the_query_surface_forwards_exactly_the_read_verbs() -> None:
     assert _QUERY_VERBS == (
         "status",
         "trace",
+        "transitions",
         "explain",
         "spec",
         "deps",

@@ -19,6 +19,7 @@ import getpass
 import socket as socket_mod
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -926,8 +927,8 @@ def test_dl45_a_same_instant_sibling_lost_to_the_crash_is_dropped_not_forgotten(
         assert engine.journal is not None
         append = engine.journal.append
 
-        def after_first_input(*records: Record) -> int:
-            seq = append(*records)
+        def after_first_input(*records: Record, **rows: Any) -> int:
+            seq = append(*records, **rows)
             if regressed and any(
                 r.kind == "input" and (r.payload.get("payload") or {}).get("job") == "sib_a"
                 for r in records

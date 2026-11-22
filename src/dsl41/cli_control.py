@@ -10,7 +10,7 @@ The four mutation exit codes (0/2/3/4) are DL-92's and are read in `cli_common.c
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import typer
 
@@ -582,6 +582,56 @@ def _resume_hint(cursor: int | None) -> str:
     return f"resubscribe with --since {cursor}"
 
 
+#: The entries `query transitions` asks for when it names no `--limit`.
+_PAGE: Final = 50
+
+
+def _check_paging(
+    verb: str,
+    since: bool,
+    name: bool,
+    transition: str | None,
+    limit: int | None,
+    cursor: bool,
+    forward: bool,
+) -> None:
+    """Refuse, by name, a `transitions` option given to another query, and an option of
+    another query given to `transitions`: none is ignored."""
+    given = {
+        "--transition": transition is not None,
+        "--limit": limit is not None,
+        "--cursor": cursor,
+        "--forward": forward,
+    }
+    named = next((option for option, there in given.items() if there), None)
+    if verb != "transitions" and named is not None:
+        raise typer.Exit(refuse(f"{named} applies to transitions only"))
+    if verb == "transitions" and since:
+        raise typer.Exit(
+            refuse("--since applies to trace and subscribe; transitions takes --cursor")
+        )
+    if verb == "transitions" and name:
+        raise typer.Exit(refuse("--name applies to global and globals"))
+
+
+def _transitions_request(
+    transition: str | None, limit: int | None, cursor: str | None, forward: bool
+) -> dict[str, Any]:
+    """The `transitions` fields of `query transitions`: newest first unless `--forward`."""
+    fields: dict[str, Any] = {
+        "direction": "forward" if forward else "backward",
+        "limit": _PAGE if limit is None else limit,
+    }
+    if transition is not None:
+        fields["transition"] = transition
+    if cursor is not None:
+        seq, _, n = cursor.partition(":")
+        if not all(part.isascii() and part.isdigit() for part in (seq, n)):
+            raise typer.Exit(refuse(f"--cursor {cursor!r} is not SEQ:N, two integers"))
+        fields["cursor"] = [int(seq), int(n)]
+    return fields
+
+
 def query(
     ctx: typer.Context,
     what: str = typer.Argument(
@@ -598,7 +648,10 @@ def query(
         None,
         "--job",
         "-J",
-        help="status: only this job. explain, spec, deps, is-success, is-failed: the job to query.",
+        help=(
+            "status: only this job. explain, spec, deps, is-success, is-failed: the job to query."
+            " transitions: only this job's entries."
+        ),
     ),
     name: list[str] = typer.Option(
         None, "--name", "-N", help="global, globals: the global to read. Repeatable."
@@ -613,6 +666,21 @@ def query(
     ),  # DL-66
     json_output: bool = typer.Option(
         False, "--json", help="status: the complete UTC JSON response instead of local-time text."
+    ),
+    transition: str = typer.Option(
+        None, "--transition", help="transitions: only entries of this transition."
+    ),
+    limit: int = typer.Option(
+        None, "--limit", min=0, help=f"transitions: at most this many entries (default {_PAGE})."
+    ),
+    cursor: str = typer.Option(
+        None,
+        "--cursor",
+        metavar="SEQ:N",
+        help="transitions: continue after (with --forward) or before this entry key.",
+    ),
+    forward: bool = typer.Option(
+        False, "--forward", help="transitions: page oldest first instead of newest first."
     ),
 ) -> None:
     """Read status, traces, explanations and more from a running engine.
@@ -658,6 +726,9 @@ def query(
         raise typer.Exit(refuse(f"unknown query {what!r} ({'|'.join([*known, *predicates])})"))
     if json_output and verb != "status":
         raise typer.Exit(refuse("--json applies to status only"))
+    _check_paging(
+        verb, since is not None, bool(name), transition, limit, cursor is not None, forward
+    )
     if json_output and brief:
         raise typer.Exit(refuse("--json and --brief cannot be combined"))
     if verb in predicates:
@@ -678,6 +749,8 @@ def query(
     request: dict[str, Any] = {"cmd": verb}
     if job is not None:
         request["job"] = job
+    if verb == "transitions":
+        request |= _transitions_request(transition, limit, cursor, forward)
     if since is not None:
         request["since"] = since
     if name:

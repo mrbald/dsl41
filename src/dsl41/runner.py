@@ -1939,6 +1939,8 @@ class Engine:
         self._applying = True
         observations: list[StatusObservation] = []
         self.oracle.status_observations = observations if self.status_hooks is not None else None
+        # the entries this input adds, its time half's included, commit with its record (DL-536)
+        traced = self.oracle.trace_length()
         try:
             applied = apply_attempt(self.oracle, attempt, forced=forced)
         finally:
@@ -1953,7 +1955,8 @@ class Engine:
             if pending.step is not None:
                 plan, position = pending.step
                 also.append(follow_up_done(plan, position, self.journal.next_seq(), pending.at))
-            self.journal.admission(attempt, applied.result, *also)
+            entries = self.oracle.trace_since(traced)[1]
+            self.journal.admission(attempt, applied.result, *also, transitions=entries)
         self.frontiers = self.frontiers.record(attempt.index)
         if self.status_hooks is not None:
             try:

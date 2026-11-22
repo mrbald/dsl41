@@ -22,6 +22,7 @@ WIDE: frozenset[str] = frozenset(
         "DL-412",  # DL-412: its superseded-by mark is line 41
         "DL-416",
         "DL-424",
+        "DL-428",  # DL-428: its narrowed-by mark is line 41
         "DL-446",  # DL-446: its narrowed-by mark is line 41
         "DL-463",  # DL-463: its narrowed-by mark is line 41
     }

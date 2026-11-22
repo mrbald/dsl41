@@ -71,6 +71,7 @@ import json
 import os
 import socket as socket_mod
 import termios
+import threading
 import time
 import uuid
 
@@ -121,7 +122,11 @@ from dsl41.reload_update import Admitted, Refused
 from dsl41.runner_config import EngineSettings
 from dsl41.reload_plan import spec_texts
 from dsl41.runner_update import APPLICATION_KEYS, OpenedPlan, UpdateRequest, UpdateAnswer
-from dsl41.runner_store import Store
+from dsl41.runner_store import SqliteStore, Store
+from dsl41.runner_transitions import REPLY_BYTES as TRANSITIONS_REPLY_BYTES
+from dsl41.runner_transitions import AnswerTooLarge
+from dsl41.runner_transitions import answer as transitions_answer
+from dsl41.runner_transitions import parse as transitions_parse
 from dsl41.runner_preflight import and_success_skeleton
 from dsl41.runner_procid import ProcessIdentity, proc_start_token
 from dsl41.state_machine import StatechartError
@@ -256,6 +261,113 @@ RECOVERING: Final = (
 )
 
 
+class _StoreRead:
+    """One read of a run root's store on a thread and a read-only connection of its own, owned
+    until the thread ends (DL-536). `stop` interrupts the read: the statement it runs, the
+    statements after it and the sizing of its answer all see it. A cancelled `run` stops the
+    read before it lets the cancellation through; a read that does not end within
+    `deadline_s` is reported and left, so a stuck read never holds up a shutdown."""
+
+    def __init__(
+        self,
+        path: Path,
+        work: Callable[[SqliteStore, Callable[[], bool]], dict[str, Any]],
+        *,
+        deadline_s: float,
+    ) -> None:
+        self._path = path
+        self._work = work
+        self._deadline_s = deadline_s
+        self._lock = threading.Lock()
+        self._store: SqliteStore | None = None
+        self._stopped = False
+        self._thread: threading.Thread | None = None
+        self._done: asyncio.Future[dict[str, Any]] | None = None
+
+    def _main(self, loop: asyncio.AbstractEventLoop, done: asyncio.Future[Any]) -> None:
+        outcome: tuple[dict[str, Any] | None, BaseException | None]
+        try:
+            store = SqliteStore(self._path, read_only=True)
+            try:
+                with self._lock:
+                    self._store = store
+                    if self._stopped:
+                        store.interrupt()
+                outcome = (self._work(store, self.stopped), None)
+            finally:
+                with self._lock:
+                    self._store = None
+                store.close()
+        except BaseException as exc:  # noqa: BLE001 -- the awaiting task gets it
+            outcome = (None, exc)
+        with contextlib.suppress(RuntimeError):  # a closed loop has nobody waiting
+            loop.call_soon_threadsafe(_settle, done, *outcome)
+
+    def stopped(self) -> bool:
+        with self._lock:
+            return self._stopped
+
+    def interrupt(self) -> None:
+        """Stop the read: its running statement now, every later step before it begins."""
+        with self._lock:
+            self._stopped = True
+            if self._store is not None:
+                self._store.interrupt()
+
+    async def run(self) -> dict[str, Any]:
+        loop = asyncio.get_running_loop()
+        done: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._done = done
+        self._thread = threading.Thread(
+            target=self._main, args=(loop, done), name="dsl41-store-read", daemon=True
+        )
+        self._thread.start()
+        try:
+            await asyncio.wait({done})  # a cancelled wait leaves `done` alone
+        except asyncio.CancelledError:
+            await self.stop()
+            raise
+        self._thread.join()  # it ends right after it settled `done`
+        return done.result()
+
+    async def stop(self) -> None:
+        """Interrupt the read and wait for its thread to end, through any cancellation, for at
+        most `deadline_s`."""
+        self.interrupt()
+        done, thread = self._done, self._thread
+        if done is None or thread is None:
+            return
+        loop = asyncio.get_running_loop()
+        until = loop.time() + self._deadline_s
+        while not done.done():
+            left = until - loop.time()
+            if left <= 0:
+                done.add_done_callback(_retrieved)
+                best_effort_report(
+                    f"dsl41: WARNING: {self._path}: a transitions read did not stop within"
+                    f" {self._deadline_s}s; the shutdown goes on without it (DL-536)"
+                )
+                return
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait({done}, timeout=left)
+        _retrieved(done)
+        thread.join()
+
+
+def _retrieved(done: asyncio.Future[Any]) -> None:
+    """Take a finished read's outcome, so a failed read logs nothing at collection."""
+    done.exception()
+
+
+def _settle(
+    done: asyncio.Future[Any], result: dict[str, Any] | None, error: BaseException | None
+) -> None:
+    if error is None:
+        done.set_result(result)
+    else:
+        done.set_exception(error)
+
+
 def _failure(code: Code, error: str, *, refused: bool = False) -> dict[str, Any]:
     """Every `ok: false` answer this server builds except the rejected decision (ss2's
     code table). `code` names the reason and `error` keeps the prose. `refused` says
@@ -314,7 +426,7 @@ class ControlServer:
     ({"ok": bool, ...}), except `subscribe`, which streams journal records until the
     client hangs up.
 
-    Every request names v5 (DL-498). Queries: status [job], trace [since],
+    Every request names v5 (DL-498). Queries: status [job], trace [since], transitions,
     explain job, spec job, deps job, timers, plan, global name, globals names; and
     subscribe [since]. An answer that passed routing and the lineage proof carries the
     concurrency-model ss6 read header (`baseline_id`, `applied_index`), so a
@@ -387,6 +499,12 @@ class ControlServer:
         self._preparing_update: tuple[str, str, asyncio.Future[UpdateAnswer]] | None = None
         #: each subscription's backlog budget (ss5); tests lower it
         self.subscriber_budget = SUBSCRIBER_BACKLOG_BYTES
+        #: the byte cap of one whole `transitions` answer (ss4); tests lower it
+        self.transitions_bytes = TRANSITIONS_REPLY_BYTES
+        #: the store reads in flight, each stopped and joined before `close` returns (DL-536)
+        self._reads: set[_StoreRead] = set()
+        #: how long `close` waits for a stopped read's thread before it goes on (DL-536)
+        self.read_deadline_s = 5.0
         #: the first `StatechartError` a connection handler met (`stop_on`), and the event
         #: `_serve_run` waits on.
         #: It stops the engine with exit 7 (statechart-engine ss5): an assertion failure,
@@ -465,6 +583,8 @@ class ControlServer:
             task.cancel()
         await asyncio.gather(*self._conn_tasks, return_exceptions=True)
         self._conn_tasks.clear()
+        for read in list(self._reads):  # a read whose caller was not a connection handler
+            await read.stop()
         # one more tick: a handler's abort only SCHEDULES connection_lost, and without
         # it the transport never detaches from the server
         await asyncio.sleep(0)
@@ -672,11 +792,12 @@ class ControlServer:
         response = await self._dispatch(request, authority=authority)
         # concurrency-model ss6: every read publishes where the log has reached and which
         # log it is, so a client can tell a revision it may name from one it may not. One
-        # engine per run root answers, enforced by the `leader.lock` flock (DL-100).
-        return response | {
+        # engine per run root answers, enforced by the `leader.lock` flock (DL-100). A read
+        # served off the loop names the index it saw itself, and that one stands (DL-536).
+        return {
             "baseline_id": self.engine.baseline_id,
             "applied_index": self.engine.frontiers.applied_index,
-        }
+        } | response
 
     async def _dispatch(
         self, request: dict[str, Any], *, authority: Tier = Tier.ADM
@@ -688,6 +809,8 @@ class ControlServer:
             return self._status(request)
         if cmd == "trace":
             return self._trace(request)
+        if cmd == "transitions":
+            return await self._transitions(request)
         if cmd == "explain":
             return self._explain(request)
         if cmd == "spec":
@@ -1227,6 +1350,10 @@ class ControlServer:
             until = self.engine.now_admitted(remember=False, wall=wall)
             if wall < until:
                 answer["clock_hold"] = {"wall": wall.isoformat(), "until": until.isoformat()}
+        journal = self.engine.journal
+        if journal is not None and journal.transitions_declined is not None:
+            # DL-536: where a viewer looks, while `transitions` declines for this run
+            answer["transitions_unavailable"] = journal.transitions_declined
         return answer
 
     def _globals(self, names: list[Any]) -> dict[str, Any]:
@@ -1248,6 +1375,41 @@ class ControlServer:
                 "state_rev": 0 if row is None else row.state_rev,
             }
         return {"ok": True, "globals": answers}
+
+    async def _transitions(self, request: dict[str, Any]) -> dict[str, Any]:
+        """The committed transition rows (DL-536). A run root's store is read and the answer
+        shaped and sized on a thread and a read-only connection of their own, so a read never
+        holds up an admission. The watermark and the header's `applied_index` are this step's;
+        the rows, the retained floor and the coverage are the read's (control-protocol ss4)."""
+        journal = self.engine.journal
+        if journal is None:
+            return _failure("no_journal", "this run has no store to read transitions from")
+        if journal.transitions_declined is not None:
+            return _failure("transitions_unavailable", journal.transitions_declined)
+        header = {
+            "ok": True,
+            "baseline_id": self.engine.baseline_id,
+            "applied_index": self.engine.frontiers.applied_index,
+        }
+        parsed = transitions_parse(request, upto=journal.last_seq)
+        if isinstance(parsed, str):
+            return _failure("invalid_argument", parsed)
+        cap = self.transitions_bytes
+
+        def work(store: Store, stopped: Callable[[], bool]) -> dict[str, Any]:
+            return transitions_answer(store, parsed, header=header, byte_cap=cap, stopped=stopped)
+
+        try:
+            if journal.path is None:  # a rehearsal's store lives in this process
+                return work(journal.store, lambda: False)
+            read = _StoreRead(journal.path, work, deadline_s=self.read_deadline_s)
+            self._reads.add(read)
+            try:
+                return await read.run()
+            finally:
+                self._reads.discard(read)
+        except AnswerTooLarge as exc:
+            return _failure("invalid_argument", str(exc))
 
     def _trace(self, request: dict[str, Any]) -> dict[str, Any]:
         since = request.get("since", 0)

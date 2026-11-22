@@ -262,7 +262,7 @@ def test_failed_commit_dry_apply_and_dedup_never_deliver(tmp_path, monkeypatch):
             assert len(engine.deduped) == 1
             assert engine.oracle.fork().status_observations is None
 
-            def fail(*args):
+            def fail(*args, **kwargs):
                 raise OSError("commit failed")
 
             monkeypatch.setattr(engine.journal, "admission", fail)

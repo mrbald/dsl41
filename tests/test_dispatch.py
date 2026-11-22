@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from model_harness import _lose_the_decision_for
@@ -620,10 +621,10 @@ def test_a_failed_dispatch_still_answers_the_durable_decision(tmp_path: Path) ->
     journal = engine.journal
     original = journal.append
 
-    def full(*records: Record) -> int:
+    def full(*records: Record, **rows: Any) -> int:
         if any(record.kind == "dispatch" for record in records):
             raise OSError(28, "No space left on device")
-        return original(*records)
+        return original(*records, **rows)
 
     journal.append = full  # type: ignore[method-assign]
 

@@ -616,7 +616,8 @@ at reconciliation (§7) and reported truthfully, not guessed.
 ## 7. Journal and recovery (E1: prod grade)
 
 The durable engine record is `<run_root>/engine.db` (DL-424, DL-428).
-`SqliteStore` holds `journal`, `configs`, `snapshots` and `meta` tables.
+`SqliteStore` holds `journal`, `configs`, `snapshots` and `meta` tables,
+and the `transitions` tables below (DL-536).
 It commits each append with SQLite `synchronous=FULL`; macOS also enables
 `fullfsync`. The wrapper spool and FW evidence log remain separate evidence
 (§6, §6a). A root with `journal.jsonl` or `wal/` but no store refuses.
@@ -700,7 +701,46 @@ required by open work. A cursor below the floor receives a gap marker.
 a run that starts before the retained anchor is `partial`. Missing end
 evidence yields the reader marker `UNKNOWN`, never an invented oracle
 status. Each run is read under its opening configuration revision (DL-432).
-Emitted trace events remain derived from inputs and are not stored.
+Emitted events remain derived from inputs and are not stored.
+
+**Transition rows** (DL-536). Each trace entry the oracle appends while an
+admission applies, its time half included, commits with that admission's
+`input` record, in the transaction of the input and its decision. An
+update's `CONFIG` mark commits with its `config applied` record and reaches
+the in-memory trace only once that record is durable. A row's key
+is `(seq, n)`: the record's journal seq and the entry's ordinal in it. The
+row keeps the whole entry as canonical bytes, so it holds every value the
+journal holds, with `job` and `transition` as indexed filter columns. A
+failure on a row rolls back the records with it and ends the engine, as any
+append failure does. The legacy trace's `RESTART` mark has no record and is
+not stored. Nothing the engine decides reads these rows: duplicate
+detection, dispatch identity, restart decisions, snapshots and retention
+keep their sources, and the in-memory trace, `trace` and `subscribe` are
+unchanged.
+
+`transitions_coverage` names the seq intervals whose rows are complete, and
+the gaps the start recorded over records this build did not commit. Every append extends it, rows or none. A
+seq it does not name as covered has no claim. A pruning removes the rows
+below its own deletion bound, time cutoff included, and trims the coverage,
+in its transaction. Nothing replays records to fill rows: a row exists
+because this build committed it. Each engine start, after restart
+validation and never on the validate-only path, runs three steps, each on
+its own (`runner_transitions.begin`). First, an earlier start whose own
+history row could not be written gets one, beginning just after the `engine
+started` record before its own. Then it records the start's history in
+`transitions_history`: a restored copy forgets the histories it never saw,
+so a reader's cursor from the abandoned future reads as stale
+(control-protocol §4 `transitions`). Last, it drops rows and coverage
+outside the retained records and records a gap over every retained
+interval the table does not name: a root older than the table, or records
+an earlier build appended. Coverage therefore starts at the first record
+this build commits. An ordinary restart's tail is covered already, since
+its rows committed with their records. If a step raises, the start goes on
+and reports it in one line, and `transitions` declines for that run with
+the reason, which `status` shows too; rows keep being committed with their
+records, and the next start runs the steps again. The steps write
+nothing but these tables, so what the restart decides, the live oracle and
+the journal are as they would be without them.
 
 **Run history.** `dsl41 runs` is an offline projection, not a new record
 kind (DL-113). The row is `{job, run_number, catalog_hash, job_hash, started_at,
@@ -1602,6 +1642,8 @@ the split cannot decay into a second name for one file.
 - `start_refusals.py`: the scheduler refusal counts that §9 and §11 show.
 - `display_time.py`: the host-local display time of §11 (DL-473).
 - `runner_store.py`: SQLite transactions, configuration rows and snapshots (DL-428).
+- `runner_transitions.py`: the start's settling of the transition rows and the
+  `transitions` query's request and answer (DL-536).
 - `runner_attempts.py` and `runner_stops.py`: interruption plans and process cleanup (DL-429).
 - `engine_charts.py`: attempt and engine lifecycle declarations (DL-426).
 - `reload_update.py` and `runner_update.py`: update declaration and wiring (DL-432).

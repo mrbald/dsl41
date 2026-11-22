@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 from store_surgery import append, rows
+from transitions_check import rows_equal_their_replay  # noqa: F401 -- autouse
 
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
@@ -431,10 +432,10 @@ def test_a_crash_between_an_outcome_and_its_follow_up_is_repaired_once(
             assert engine.journal is not None
             real = engine.journal.append
 
-            def die_at_the_step(*records: Any) -> int:
+            def die_at_the_step(*records: Any, **rows: Any) -> int:
                 if any(r.kind == "follow_up" and r.payload["event"] == "done" for r in records):
                     raise RuntimeError("the engine died before the plan's step")
-                return real(*records)
+                return real(*records, **rows)
 
             engine.journal.append = die_at_the_step  # type: ignore[method-assign]
             engine.inject(_ev("STARTJOB", 0, job="j"))
@@ -452,10 +453,10 @@ def test_a_crash_between_an_outcome_and_its_follow_up_is_repaired_once(
             assert engine.journal is not None
             real = engine.journal.append
 
-            def die_at_the_dispatch(*records: Any) -> int:
+            def die_at_the_dispatch(*records: Any, **rows: Any) -> int:
                 if any(r.kind == "dispatch" for r in records):
                     raise RuntimeError("the engine died before the plan's step")
-                return real(*records)
+                return real(*records, **rows)
 
             engine.journal.append = die_at_the_dispatch  # type: ignore[method-assign]
             with contextlib.suppress(RuntimeError):
@@ -825,11 +826,11 @@ def test_a_hold_plan_cut_before_its_step_finishes_it_once(tmp_path: Path) -> Non
         assert engine.journal is not None
         real = engine.journal.append
 
-        def die_at_the_hold(*records: Any) -> int:
+        def die_at_the_hold(*records: Any, **rows: Any) -> int:
             holds = (r.payload.get("payload", {}).get("hold") for r in records if r.kind == "input")
             if any(holds):
                 raise RuntimeError("the engine died before the hold")
-            return real(*records)
+            return real(*records, **rows)
 
         engine.journal.append = die_at_the_hold  # type: ignore[method-assign]
         with contextlib.suppress(RuntimeError):
@@ -1029,12 +1030,12 @@ def test_owed_starts_stay_pending_until_each_dispatch_commits(tmp_path: Path) ->
         real = engine.journal.append
         dispatches: list[int] = []
 
-        def die_at_the_second(*records: Any) -> int:
+        def die_at_the_second(*records: Any, **rows: Any) -> int:
             if any(r.kind == "dispatch" for r in records):
                 dispatches.append(1)
                 if len(dispatches) == 2:
                     raise RuntimeError("the engine died at the second owed start")
-            return real(*records)
+            return real(*records, **rows)
 
         engine.journal.append = die_at_the_second  # type: ignore[method-assign]
         with pytest.raises(RuntimeError, match="second owed start"):
@@ -1195,10 +1196,10 @@ def test_a_dependent_of_a_recovered_completion_waits_behind_the_recovery_barrier
         assert engine.journal is not None
         real = engine.journal.append
 
-        def die_at_the_feed(*records: Any) -> int:
+        def die_at_the_feed(*records: Any, **rows: Any) -> int:
             if any(r.kind == "follow_up" and r.payload["event"] == "done" for r in records):
                 raise RuntimeError("the engine died before the completion landed")
-            return real(*records)
+            return real(*records, **rows)
 
         engine.journal.append = die_at_the_feed  # type: ignore[method-assign]
         engine.inject(_ev("STARTJOB", 0, job="a"))
@@ -1259,12 +1260,12 @@ def test_a_failed_dispatch_is_not_an_applied_boundary_and_a_restart_recovers_it(
         real = engine.journal.append
         seen: list[int] = []
 
-        def die_at_a_dispatch(*records: Any) -> int:
+        def die_at_a_dispatch(*records: Any, **rows: Any) -> int:
             if any(r.kind == "dispatch" for r in records):
                 seen.append(1)
                 if len(seen) == (1 if fault == "first" else 2):
                     raise RuntimeError("the dispatch failed")
-            return real(*records)
+            return real(*records, **rows)
 
         engine.journal.append = die_at_a_dispatch  # type: ignore[method-assign]
         engine.inject(_ev("STARTJOB", 1, job="b"))

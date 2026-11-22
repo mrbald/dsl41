@@ -959,10 +959,10 @@ def test_older_build_crash_after_config_row_resumes_without_another_row(
                 data = canonical_bytes(payload)
                 assert store.put_config(data, "sha256:" + hashlib.sha256(data).hexdigest()) == rev
 
-            def crash_before_applied(*records):
+            def crash_before_applied(*records, **rows):
                 if any(r.kind == "config" and r.payload.get("event") == "applied" for r in records):
                     raise RuntimeError("crash before config applied")
-                return append(*records)
+                return append(*records, **rows)
 
             with monkeypatch.context() as old:
                 old.setattr(runner_update, "store_config", old_writer)
