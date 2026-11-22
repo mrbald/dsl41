@@ -24,6 +24,11 @@ with the reason (`declined`), which `status` shows too: it asserts no entries, c
 continuity or history. The rows keep being committed with their records; the next start runs
 the steps again.
 
+`settle_history` is step 3 for the history index (DL-539), run after `begin` and on its own:
+it drops the index's rows and coverage outside the retained records and records a gap over
+every retained interval its coverage does not name, so the index too covers only what this
+build committed. Its failure is kept apart (`history_declined`), and `status` shows it.
+
 `answer` reads one page and shapes the verb's answer where the read runs (control-protocol ss4
 `transitions`), so the whole encoded answer is sized there, off the engine's loop.
 """
@@ -102,10 +107,33 @@ def _bound_earlier_starts(store: Store) -> None:
 def _settle_rows(store: Store) -> None:
     """Steps 1 and 2: drop what the journal no longer retains, record a gap over what this
     build did not commit."""
-    store.trim_transitions()
-    unnamed = _unnamed(store.transitions_coverage(), store.first_seq(), store.last_seq())
+    _settle(store, store.trim_transitions, store.transitions_coverage, store.cover_transitions)
+
+
+def settle_history(store: Store, *, where: str) -> str | None:
+    """Step 3 for the history index (module docstring, DL-539). Answers None, or why the index
+    serves no read for this run."""
+    try:
+        _settle(store, store.trim_history, store.history_coverage, store.cover_history)
+    except Exception as exc:  # noqa: BLE001 -- any failure: the start goes on, the read declines
+        reason = f"the start could not settle the history index: {type(exc).__name__}: {exc}"
+        best_effort_report(f"dsl41: WARNING: {where}: {reason}; past runs decline (DL-539)")
+        return reason
+    return None
+
+
+def _settle(
+    store: Store,
+    trim: Callable[[], None],
+    coverage: Callable[[], list[Interval]],
+    cover: Callable[[Sequence[Interval]], None],
+) -> None:
+    """Trim one table set to the retained records, then record a gap over every retained seq
+    its coverage does not name."""
+    trim()
+    unnamed = _unnamed(coverage(), store.first_seq(), store.last_seq())
     if unnamed:
-        store.cover_transitions([Interval(low, high, False) for low, high in unnamed])
+        cover([Interval(low, high, False) for low, high in unnamed])
 
 
 def _unnamed(coverage: list[Interval], first: int, last: int) -> list[tuple[int, int]]:

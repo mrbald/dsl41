@@ -25,6 +25,12 @@ Rules both stores keep:
   own transaction and keyed by its seq and the entry's ordinal in it (DL-536). Coverage names
   the seq intervals whose rows are complete; every append extends it, and a seq no interval
   names has no claim. Nothing the engine decides reads these rows.
+- The history index (DL-539) is two tables committed in the same transaction as the records
+  they name: `job_runs`, keyed as the `transitions` row of each status entry that begins a
+  run, and `job_records`, keyed by the seq of each record that belongs to a job's run.
+  `history_coverage` says which seqs they cover, under the rules of `transitions_coverage`.
+  Neither table has a unique key beyond its own, so an index row never fails a commit the
+  records alone would pass. Nothing the engine decides reads them.
 """
 
 from __future__ import annotations
@@ -98,6 +104,27 @@ class Interval:
 
 
 @dataclass(frozen=True, slots=True)
+class RunOpening:
+    """A `job_runs` row of one append (DL-539): entry `n` of its transitions begins run
+    `run_number` of `job`, under configuration `rev`."""
+
+    n: int
+    job: str
+    run_number: int
+    rev: int
+
+
+@dataclass(frozen=True, slots=True)
+class RecordOwner:
+    """A `job_records` row of one append (DL-539): the record at `offset` from the append's
+    first belongs to `job`'s run `run_number`, or to no named run when it is None."""
+
+    offset: int
+    job: str
+    run_number: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class TransitionQuery:
     """One read of the `transitions` rows (DL-536). `cursor` is a `(seq, n)` key the rows go
     after (or before, `backward`); None starts at the oldest (or the newest). `upto` is the
@@ -131,7 +158,13 @@ class TransitionRead:
 
 
 class Store(Protocol):
-    def append(self, *records: Record, transitions: Sequence[TransitionEntry] = ()) -> int:
+    def append(
+        self,
+        *records: Record,
+        transitions: Sequence[TransitionEntry] = (),
+        openings: Sequence[RunOpening] = (),
+        owners: Sequence[RecordOwner] = (),
+    ) -> int:
         """Write `records` in one transaction and return the last seq. A payload canon refuses
         raises `CanonError`, and so does an empty `kind`, or a `kind`, `actor` or `request_id` that
         is not a string of Unicode scalar values (`actor` and `request_id` may be None). A reused
@@ -139,7 +172,10 @@ class Store(Protocol):
 
         `transitions` are the trace entries the first record produced, stored in the same
         transaction under its seq, and coverage extends over the records (DL-536). An entry canon
-        refuses raises `CanonError`, and rows with no record raise `StoreError`."""
+        refuses raises `CanonError`, and rows with no record raise `StoreError`.
+
+        `openings` and `owners` are the history index's rows, stored in the same transaction, and
+        the history coverage extends over the records (DL-539)."""
         ...
 
     def first_seq(self) -> int:
@@ -148,6 +184,20 @@ class Store(Protocol):
 
     def transitions_coverage(self) -> list[Interval]:
         """The covered intervals and the recorded gaps, in seq order (DL-536)."""
+        ...
+
+    def history_coverage(self) -> list[Interval]:
+        """The history index's covered intervals and recorded gaps, in seq order (DL-539)."""
+        ...
+
+    def cover_history(self, intervals: Sequence[Interval]) -> None:
+        """Record `intervals` in place of what the history coverage said about their seqs
+        (DL-539)."""
+        ...
+
+    def trim_history(self) -> None:
+        """Drop the history index's rows and coverage outside the retained records; with nothing
+        outside them, write nothing (DL-539)."""
         ...
 
     def read_transitions(self, query: TransitionQuery) -> TransitionRead:
@@ -225,8 +275,9 @@ class Store(Protocol):
         """Delete the journal rows below one seq bound, and every snapshot but the latest two.
         The bound is the least of `seq`, the latest snapshot's seq, and the first seq whose row
         is not older than `older_than`; the delete reads seqs only, so the rows it keeps are one
-        unbroken range (spec-wiring 1b). Configs are kept. Returns the number of journal rows
-        deleted."""
+        unbroken range (spec-wiring 1b). Configs are kept. The `transitions` rows and the history
+        index's rows below the bound go in the same transaction (DL-536, DL-539). Returns the
+        number of journal rows deleted."""
         ...
 
     def meta(self) -> dict[str, str]:
@@ -410,12 +461,23 @@ class MemoryStore:
         self._coverage: list[Interval] = []
         self._histories: list[tuple[str, int]] = []
         self._pruned_through: tuple[int, int] | None = None
+        #: the history index (DL-539): `job_runs` as `(seq, n, job, run_number, rev)` in key
+        #: order, `job_records` as `(seq, job, run_number)` in seq order, and their coverage
+        self._job_runs: list[tuple[int, int, str, int, int]] = []
+        self._job_records: list[tuple[int, str, int | None]] = []
+        self._history_coverage: list[Interval] = []
 
-    def append(self, *records: Record, transitions: Sequence[TransitionEntry] = ()) -> int:
+    def append(
+        self,
+        *records: Record,
+        transitions: Sequence[TransitionEntry] = (),
+        openings: Sequence[RunOpening] = (),
+        owners: Sequence[RecordOwner] = (),
+    ) -> int:
         encoded = [_encode(record) for record in records]
         rows = [_encode_transition(entry) for entry in transitions]
-        if rows and not encoded:
-            raise StoreError("transition rows are stored with the record that produced them")
+        if (rows or openings or owners) and not encoded:
+            raise StoreError("rows are stored with the records that produced them")
         seen: set[str] = set()
         for row in encoded:
             if row.request_id is None:
@@ -425,8 +487,12 @@ class MemoryStore:
             seen.add(row.request_id)
         if encoded:
             first = self._next_seq
+            last = first + len(encoded) - 1
             self._transitions.extend((first, n, row) for n, row in enumerate(rows))
-            self._coverage = _advanced(self._coverage, first, first + len(encoded) - 1)
+            self._coverage = _advanced(self._coverage, first, last)
+            self._job_runs.extend((first, o.n, o.job, o.run_number, o.rev) for o in openings)
+            self._job_records.extend((first + o.offset, o.job, o.run_number) for o in owners)
+            self._history_coverage = _advanced(self._history_coverage, first, last)
         for row in encoded:
             entry = _MemRow(self._next_seq, row)
             self._next_seq += 1
@@ -504,6 +570,7 @@ class MemoryStore:
         deleted = len(self._rows) - len(kept)
         self._rows = kept
         self._trim(bound, self.last_seq())
+        self._trim_history(bound, self.last_seq())
         return deleted
 
     def meta(self) -> dict[str, str]:
@@ -594,6 +661,22 @@ class MemoryStore:
         self._transitions = [row for row in self._transitions if first <= row[0] <= last]
         self._coverage = _trimmed(self._coverage, first, last)
 
+    # ---- the history index (DL-539)
+
+    def history_coverage(self) -> list[Interval]:
+        return list(self._history_coverage)
+
+    def cover_history(self, intervals: Sequence[Interval]) -> None:
+        self._history_coverage = _overlaid(self._history_coverage, intervals)
+
+    def trim_history(self) -> None:
+        self._trim_history(self.first_seq(), self.last_seq())
+
+    def _trim_history(self, first: int, last: int) -> None:
+        self._job_runs = [row for row in self._job_runs if first <= row[0] <= last]
+        self._job_records = [row for row in self._job_records if first <= row[0] <= last]
+        self._history_coverage = _trimmed(self._history_coverage, first, last)
+
 
 def _key(row: tuple[int, int, object]) -> tuple[int, int]:
     return row[0], row[1]
@@ -654,6 +737,28 @@ _SCHEMA: Final[tuple[str, ...]] = (
         one INTEGER PRIMARY KEY CHECK (one = 1),
         seq INTEGER NOT NULL,
         n INTEGER NOT NULL
+    )""",
+    # DL-539: the history index, created where missing as the tables above are. No unique key
+    # on (job, run_number): a derived row never fails the commit of its records.
+    """CREATE TABLE IF NOT EXISTS job_runs (
+        seq INTEGER NOT NULL,
+        n INTEGER NOT NULL,
+        job TEXT NOT NULL,
+        run_number INTEGER NOT NULL,
+        rev INTEGER NOT NULL,
+        PRIMARY KEY (seq, n)
+    ) WITHOUT ROWID""",
+    "CREATE INDEX IF NOT EXISTS job_runs_job ON job_runs(job, run_number)",
+    """CREATE TABLE IF NOT EXISTS job_records (
+        seq INTEGER PRIMARY KEY,
+        job TEXT NOT NULL,
+        run_number INTEGER
+    )""",
+    "CREATE INDEX IF NOT EXISTS job_records_job ON job_records(job, run_number, seq)",
+    """CREATE TABLE IF NOT EXISTS history_coverage (
+        first_seq INTEGER PRIMARY KEY,
+        last_seq INTEGER NOT NULL,
+        covered INTEGER NOT NULL
     )""",
 )
 
@@ -797,12 +902,18 @@ class SqliteStore:
         row = self._db.execute("SELECT at_utc FROM journal ORDER BY seq DESC LIMIT 1").fetchone()
         return None if row is None else str(row[0])
 
-    def append(self, *records: Record, transitions: Sequence[TransitionEntry] = ()) -> int:
+    def append(
+        self,
+        *records: Record,
+        transitions: Sequence[TransitionEntry] = (),
+        openings: Sequence[RunOpening] = (),
+        owners: Sequence[RecordOwner] = (),
+    ) -> int:
         encoded = [_encode(record) for record in records]
         rows = [_encode_transition(entry) for entry in transitions]
         if not encoded:
-            if rows:
-                raise StoreError("transition rows are stored with the record that produced them")
+            if rows or openings or owners:
+                raise StoreError("rows are stored with the records that produced them")
             return self.last_seq()
         with self._transaction():
             try:
@@ -815,7 +926,9 @@ class SqliteStore:
             except sqlite3.IntegrityError as exc:
                 raise StoreError(f"journal: {exc}") from exc
             last = self.last_seq()
-            self._record_transitions(last - len(encoded) + 1, last, rows)
+            first = last - len(encoded) + 1
+            self._record_transitions(first, last, rows)
+            self._record_history(first, last, openings, owners)
             return last
 
     def _record_transitions(self, first: int, last: int, rows: list[_Transition]) -> None:
@@ -825,13 +938,37 @@ class SqliteStore:
             "INSERT INTO transitions(seq, n, job, transition, entry) VALUES (?, ?, ?, ?, ?)",
             [(first, n, row.job, row.transition, row.entry) for n, row in enumerate(rows)],
         )
+        self._advance("transitions_coverage", first, last)
+
+    def _record_history(
+        self,
+        first: int,
+        last: int,
+        openings: Sequence[RunOpening],
+        owners: Sequence[RecordOwner],
+    ) -> None:
+        """The history index's rows of records `first` to `last` and its coverage over them,
+        inside the append's transaction (DL-539)."""
+        self._db.executemany(
+            "INSERT INTO job_runs(seq, n, job, run_number, rev) VALUES (?, ?, ?, ?, ?)",
+            [(first, o.n, o.job, o.run_number, o.rev) for o in openings],
+        )
+        self._db.executemany(
+            "INSERT INTO job_records(seq, job, run_number) VALUES (?, ?, ?)",
+            [(first + o.offset, o.job, o.run_number) for o in owners],
+        )
+        self._advance("history_coverage", first, last)
+
+    def _advance(self, table: str, first: int, last: int) -> None:
+        """Coverage table `table` once records `first` to `last` were appended with their rows:
+        the covered interval that ends at `first - 1` grows, or a new one starts (DL-536)."""
         grown = self._db.execute(
-            "UPDATE transitions_coverage SET last_seq = ? WHERE covered = 1 AND last_seq = ?",
+            f"UPDATE {table} SET last_seq = ? WHERE covered = 1 AND last_seq = ?",
             (last, first - 1),
         )
         if grown.rowcount == 0:
             self._db.execute(
-                "INSERT INTO transitions_coverage(first_seq, last_seq, covered) VALUES (?, ?, 1)",
+                f"INSERT INTO {table}(first_seq, last_seq, covered) VALUES (?, ?, 1)",
                 (first, last),
             )
 
@@ -887,6 +1024,7 @@ class SqliteStore:
             cursor = self._db.execute("DELETE FROM journal WHERE seq < ?", (bound,))
             deleted = cursor.rowcount
             self._trim(bound, self.last_seq())
+            self._trim_history(bound, self.last_seq())
             return deleted
 
     # ---- reads
@@ -961,10 +1099,13 @@ class SqliteStore:
         return self.last_seq() + 1 if found is None else int(found)
 
     def transitions_coverage(self) -> list[Interval]:
+        return self._coverage("transitions_coverage")
+
+    def _coverage(self, table: str) -> list[Interval]:
         return [
             Interval(int(first), int(last), bool(covered))
             for first, last, covered in self._db.execute(
-                "SELECT first_seq, last_seq, covered FROM transitions_coverage ORDER BY first_seq"
+                f"SELECT first_seq, last_seq, covered FROM {table} ORDER BY first_seq"
             )
         ]
 
@@ -1045,20 +1186,30 @@ class SqliteStore:
 
     def cover_transitions(self, intervals: Sequence[Interval]) -> None:
         with self._transaction():
-            self._set_coverage(_overlaid(self.transitions_coverage(), intervals))
+            self._set_coverage(
+                "transitions_coverage", _overlaid(self.transitions_coverage(), intervals)
+            )
 
     def trim_transitions(self) -> None:
-        first, last = self.first_seq(), self.last_seq()
-        coverage = self.transitions_coverage()
-        outside = self._db.execute(
-            "SELECT 1 FROM transitions WHERE seq < ? UNION ALL"
-            " SELECT 1 FROM transitions WHERE seq > ? LIMIT 1",
-            (first, last),
-        ).fetchone()
-        if outside is None and _trimmed(coverage, first, last) == coverage:
+        if self._settled(("transitions",), "transitions_coverage"):
             return  # a start with nothing to trim commits nothing for it
         with self._transaction():
-            self._trim(first, last)
+            self._trim(self.first_seq(), self.last_seq())
+
+    def _settled(self, tables: tuple[str, ...], coverage: str) -> bool:
+        """Whether no row of `tables` and no interval of `coverage` lies outside the retained
+        records (DL-536)."""
+        first, last = self.first_seq(), self.last_seq()
+        held = self._coverage(coverage)
+        for table in tables:
+            outside = self._db.execute(
+                f"SELECT 1 FROM {table} WHERE seq < ? UNION ALL"
+                f" SELECT 1 FROM {table} WHERE seq > ? LIMIT 1",
+                (first, last),
+            ).fetchone()
+            if outside is not None:
+                return False
+        return _trimmed(held, first, last) == held
 
     def begin_history(self, history: str, first_seq: int | None = None) -> None:
         with self._transaction():
@@ -1102,14 +1253,39 @@ class SqliteStore:
         # two key ranges, so each delete searches the key and scans no kept row
         self._db.execute("DELETE FROM transitions WHERE seq < ?", (first,))
         self._db.execute("DELETE FROM transitions WHERE seq > ?", (last,))
-        self._set_coverage(_trimmed(self.transitions_coverage(), first, last))
+        self._set_coverage(
+            "transitions_coverage", _trimmed(self.transitions_coverage(), first, last)
+        )
 
-    def _set_coverage(self, coverage: list[Interval]) -> None:
-        self._db.execute("DELETE FROM transitions_coverage")
+    def _set_coverage(self, table: str, coverage: list[Interval]) -> None:
+        self._db.execute(f"DELETE FROM {table}")
         self._db.executemany(
-            "INSERT INTO transitions_coverage(first_seq, last_seq, covered) VALUES (?, ?, ?)",
+            f"INSERT INTO {table}(first_seq, last_seq, covered) VALUES (?, ?, ?)",
             [(item.first, item.last, int(item.covered)) for item in coverage],
         )
+
+    # ---- the history index (DL-539)
+
+    def history_coverage(self) -> list[Interval]:
+        return self._coverage("history_coverage")
+
+    def cover_history(self, intervals: Sequence[Interval]) -> None:
+        with self._transaction():
+            self._set_coverage("history_coverage", _overlaid(self.history_coverage(), intervals))
+
+    def trim_history(self) -> None:
+        if self._settled(("job_runs", "job_records"), "history_coverage"):
+            return  # a start with nothing to trim commits nothing for it
+        with self._transaction():
+            self._trim_history(self.first_seq(), self.last_seq())
+
+    def _trim_history(self, first: int, last: int) -> None:
+        """Inside the caller's transaction: the index's rows and coverage outside `first` to
+        `last` go, two key ranges per table so no kept row is scanned."""
+        for table in ("job_runs", "job_records"):
+            self._db.execute(f"DELETE FROM {table} WHERE seq < ?", (first,))
+            self._db.execute(f"DELETE FROM {table} WHERE seq > ?", (last,))
+        self._set_coverage("history_coverage", _trimmed(self.history_coverage(), first, last))
 
 
 class _Transaction:

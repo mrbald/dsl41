@@ -14,6 +14,18 @@ once per store, when the module's tests are done, so no test pays for a replay o
 The same replay checks how runs are numbered (DL-537): for every row and tombstone the replay
 leaves, the status entries that carry a run number are exactly the runs from the one after the
 snapshot row's (or 1) to the row's run number (`runs_open_in_order`).
+
+It checks the history index too (DL-539), over the seqs `history_coverage` covers. The
+`job_runs` rows after the replay's anchor are the replayed status entries that carry a run
+number, with the keys of their rows, each under the rev the replay opened with as moved by the
+CONFIG marks before it. The `job_records` rows are what a scan of the retained journal names,
+written apart from the engine's code: a dispatch's job and run; a STATUS input's job and run,
+or none; a decision paired with its input by admission index; an outcome paired with its
+dispatch by attempt id. A STATUS input with no string job names no job, so neither it nor its
+decision has a row. A decision or an outcome whose input or dispatch the journal no longer
+retains cannot be decided from the retained records, so its stored row is not compared.
+
+`check_roots` answers the count of `transitions` rows it matched; `compared` counts each table.
 """
 
 from __future__ import annotations
@@ -32,21 +44,22 @@ from dsl41 import runner_journal
 from dsl41.canon import canonical_bytes, decode
 from dsl41.oracle_reads import OracleReads
 from dsl41.runner_clock import EngineError
-from dsl41.runner_journal import CONFIG_MARKER, STORE_NAME, StoreReplay, replay_store
+from dsl41.runner_journal import CONFIG_MARKER, STORE_NAME, StoreReplay, first_rev, replay_store
 from dsl41.runner_store import SqliteStore
 
 #: tests left out because they edited a store by hand
 edited: list[str] = []
 
-#: how many stores and rows the check compared in this session
-compared: dict[str, int] = {"stores": 0, "rows": 0}
+#: how many stores and rows the check compared in this session: `rows` of `transitions`, and
+#: the history index's rows by table
+compared: dict[str, int] = {"stores": 0, "rows": 0, "job_runs": 0, "job_records": 0}
 
 type Row = tuple[int, int, Any]
 
 
-def rows_and_replay(path: Path) -> tuple[list[Row], list[Row]] | None:
-    """The stored rows over the covered seqs after the replay's anchor, and the replayed rows
-    there, both keyed `(seq, n)`; None for a store the offline replay refuses."""
+def rows_and_replay(path: Path) -> dict[str, tuple[list[Any], list[Any]]] | None:
+    """For each table, the stored rows over its covered seqs and the rows the replay or the
+    scan gives there (module docstring); None for a store the offline replay refuses."""
     with closing(SqliteStore(path, read_only=True)) as store:
         tables = {
             str(name)
@@ -100,7 +113,82 @@ def rows_and_replay(path: Path) -> tuple[list[Row], list[Row]] | None:
             )
             if counted(int(seq))
         ]
-    return stored, [row for row in replayed if counted(row[0])]
+        tables_compared = {"transitions": (stored, [row for row in replayed if counted(row[0])])}
+        if "job_runs" in tables:
+            start = found.anchor.config_rev if found.anchor is not None else first_rev(store)
+            tables_compared |= _history(store, replayed, after, start)
+    return tables_compared
+
+
+def _run(payload: dict[str, Any]) -> int | None:
+    """A STATUS payload's run number as the run-history fold reads it (an `int` instance, a
+    bool as its value), within the store's signed 64-bit integers; else no run."""
+    run = payload.get("run_number")
+    if isinstance(run, int) and -(2**63) <= run < 2**63:
+        return int(run)
+    return None
+
+
+def _history(
+    store: SqliteStore, replayed: list[Row], after: int, rev: int
+) -> dict[str, tuple[list[Any], list[Any]]]:
+    """The history index's stored rows and the rows the replay and the scan give, over the seqs
+    `history_coverage` covers (module docstring)."""
+    covered = [(i.first, i.last) for i in store.history_coverage() if i.covered]
+
+    def counted(seq: int) -> bool:
+        return any(low <= seq <= high for low, high in covered)
+
+    openings: list[Any] = []
+    for seq, n, entry in replayed:
+        if entry["transition"] == CONFIG_MARKER:
+            rev = int(entry["cause"].rsplit(" ", 1)[1])
+        elif "->" in entry["transition"] and entry.get("run_number") is not None:
+            openings.append((seq, n, entry["job"], entry["run_number"], rev))
+    stored_openings = [
+        tuple(row)
+        for row in store._db.execute(
+            "SELECT seq, n, job, run_number, rev FROM job_runs ORDER BY seq, n"
+        )
+        if row[0] > after and counted(row[0])
+    ]
+    named: dict[int, tuple[str, int | None]] = {}
+    unpaired: set[int] = set()
+    by_attempt: dict[str, tuple[str, int | None]] = {}
+    by_index: dict[int, tuple[str, int | None]] = {}
+    inputs: set[int] = set()
+    for seq, record in store.read_from(0):
+        body = record.payload
+        if record.kind == "dispatch":
+            named[seq] = by_attempt[body["attempt"]] = (body["job"], body["run_number"])
+        elif record.kind == "input":
+            inputs.add(body["index"])
+            payload = body.get("payload") or {}
+            if body.get("kind") == "STATUS" and isinstance(payload.get("job"), str):
+                named[seq] = by_index[body["index"]] = (payload["job"], _run(payload))
+        elif record.kind == "decision":
+            if body["index"] in by_index:
+                named[seq] = by_index[body["index"]]
+            elif body["index"] not in inputs:
+                unpaired.add(seq)  # its input was pruned: the journal cannot say whose it is
+        elif record.kind == "outcome":
+            if body["attempt"] in by_attempt:
+                named[seq] = by_attempt[body["attempt"]]
+            else:
+                unpaired.add(seq)  # its dispatch was pruned
+    owners = [(seq, *owner) for seq, owner in sorted(named.items()) if counted(seq)]
+    stored_owners = [
+        tuple(row)
+        for row in store._db.execute("SELECT seq, job, run_number FROM job_records ORDER BY seq")
+        if counted(row[0]) and row[0] not in unpaired
+    ]
+    return {
+        "job_runs": (
+            stored_openings,
+            [row for row in openings if row[0] > after and counted(row[0])],
+        ),
+        "job_records": (stored_owners, owners),
+    }
 
 
 def runs_open_in_order(found: StoreReplay) -> None:
@@ -146,7 +234,8 @@ def _writes_into(touched: list[str]) -> Any:
 
 
 def check_roots(directory: Path) -> int:
-    """Assert the equality for every store under `directory`; answer how many rows matched."""
+    """Assert the equality for every store under `directory`; answer how many `transitions`
+    rows matched."""
     matched = 0
     for path in sorted(directory.rglob(STORE_NAME)):
         if not path.is_file():
@@ -154,11 +243,12 @@ def check_roots(directory: Path) -> int:
         found = rows_and_replay(path)
         if found is None:
             continue
-        stored, replayed = found
-        assert stored == replayed, path
-        matched += len(stored)
+        for table, (stored, expected) in found.items():
+            assert stored == expected, (path, table)
+            if table == "transitions":
+                matched += len(stored)
+            compared["rows" if table == "transitions" else table] += len(stored)
         compared["stores"] += 1
-        compared["rows"] += len(stored)
     return matched
 
 

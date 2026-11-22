@@ -1956,7 +1956,10 @@ class Engine:
                 plan, position = pending.step
                 also.append(follow_up_done(plan, position, self.journal.next_seq(), pending.at))
             entries = self.oracle.trace_since(traced)[1]
-            self.journal.admission(attempt, applied.result, *also, transitions=entries)
+            # a run opened here is indexed under the rev the engine runs (DL-539)
+            self.journal.admission(
+                attempt, applied.result, *also, transitions=entries, rev=self.config_rev
+            )
         self.frontiers = self.frontiers.record(attempt.index)
         if self.status_hooks is not None:
             try:

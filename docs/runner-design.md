@@ -617,7 +617,7 @@ at reconciliation (§7) and reported truthfully, not guessed.
 
 The durable engine record is `<run_root>/engine.db` (DL-424, DL-428).
 `SqliteStore` holds `journal`, `configs`, `snapshots` and `meta` tables,
-and the `transitions` tables below (DL-536).
+and the `transitions` tables and the history index below (DL-536, DL-539).
 It commits each append with SQLite `synchronous=FULL`; macOS also enables
 `fullfsync`. The wrapper spool and FW evidence log remain separate evidence
 (§6, §6a). A root with `journal.jsonl` or `wal/` but no store refuses.
@@ -741,6 +741,35 @@ the reason, which `status` shows too; rows keep being committed with their
 records, and the next start runs the steps again. The steps write
 nothing but these tables, so what the restart decides, the live oracle and
 the journal are as they would be without them.
+
+**History index** (DL-539). Two tables say where each run opened and which
+records belong to which run, so a read of a job's past runs can fold one
+page of runs. `job_runs` has one row for each status entry, a transition
+`old->new`, that carries a run number, keyed `(seq, n)` as its
+`transitions` row and committed with it, with the job, the run number and
+the configuration rev the engine ran at that commit. START_REFUSED carries
+the current run's number and opens no row. `job_records` has one row,
+keyed by seq, for each `dispatch`, `outcome`, STATUS `input` and that
+input's `decision`, with the job and the run number the record names; an
+outcome names the run of the attempt it ends. A run number counts as the
+run-history fold reads it, an integer, a boolean as its value, and only
+within SQLite's signed 64-bit integers. A STATUS input with no run number,
+an operator's `CHANGE_STATUS`, or with any other value, has none. A STATUS
+input with no string job, and its decision, belong to no job's history and
+have no row. No other record is indexed. Neither table has a
+unique key on the job and run number, so an index row never fails a commit
+the records alone would pass. `history_coverage` follows the rules of
+`transitions_coverage`: every append extends it, a covered seq claims the
+rows of every record there that names a job, a seq it does not name as
+covered has no claim, pruning trims both tables and the coverage in its
+transaction, and nothing fills rows for records an earlier build wrote. A
+build that commits `transitions` rows but no index leaves its appends a
+gap here. Each start settles the index after the steps above, on its own
+(`runner_transitions.settle_history`): it drops rows and coverage outside
+the retained records and records a gap over every retained interval the
+coverage does not name. If that raises, the start goes on and says so in
+one line, and `status` carries `history_unavailable` with the reason.
+Nothing the engine decides reads these tables.
 
 **Run history.** `dsl41 runs` is an offline projection, not a new record
 kind (DL-113). The row is `{job, run_number, catalog_hash, job_hash, started_at,

@@ -113,6 +113,7 @@ from dsl41.runner_scheduler import Scheduler
 from dsl41.runner_stops import AttemptFacts
 from dsl41.runner_store import Record, SqliteStore, Store, StoreError
 from dsl41.runner_transitions import begin as begin_transitions
+from dsl41.runner_transitions import settle_history
 from dsl41.semantics import ADAPTER_SWITCHES, SCHEDULER_SWITCHES, check_overrides
 from dsl41.state_machine import Executor
 
@@ -468,10 +469,10 @@ def _genesis(
     journal = Journal(store, lock=lock, path=path)
     instance = uuid.uuid4().hex  # this engine start's token, recorded in `engine started`
     try:
-        # the first history (DL-536)
-        journal.transitions_declined = begin_transitions(
-            store, where=str(path or "the rehearsal store")
-        )
+        # the first history (DL-536) and the history index's coverage (DL-539)
+        where = str(path or "the rehearsal store")
+        journal.transitions_declined = begin_transitions(store, where=where)
+        journal.history_declined = settle_history(store, where=where)
         rev = store.put_config(configuration.to_bytes(), configuration.digest())
         journal.append(_config_applied(rev, configuration, journal, at))
         journal.engine("started", at, config_rev=rev, instance=instance)
@@ -818,6 +819,8 @@ async def _resume_under_lock(
     # the transition rows claim only what this build committed, under a new history; the steps
     # write only those tables and a failure there leaves the start alone (DL-536)
     journal.transitions_declined = begin_transitions(journal.store, where=str(path))
+    # the history index the same, after the history begun above (DL-539)
+    journal.history_declined = settle_history(journal.store, where=str(path))
     lock.note(at=clock.now())
     for job, rt in engine.oracle.store.job.items():
         if rt.run_number:

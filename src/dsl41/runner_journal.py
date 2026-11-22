@@ -72,7 +72,7 @@ from dsl41.runner_clock import EngineError
 from dsl41.runner_codes import STORED_CODES
 from dsl41.runner_config import Configuration, oracle_reading
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, Proof
-from dsl41.runner_store import Record, SqliteStore, Store, StoreError
+from dsl41.runner_store import Record, RecordOwner, RunOpening, SqliteStore, Store, StoreError
 from dsl41.state_machine import (
     Context,
     Effects,
@@ -1199,6 +1199,9 @@ class Journal:
         #: why `transitions` declines for this run: the start could not settle its rows
         #: (`runner_transitions.begin`, DL-536); None when it serves
         self.transitions_declined: str | None = None
+        #: why the history index serves no read for this run: the start could not settle its
+        #: rows (`runner_transitions.settle_history`, DL-539); None when it serves
+        self.history_declined: str | None = None
 
     def prove(self) -> None:
         """Re-prove the run root's lock (S6b), when there is one. The engine asks before it
@@ -1206,10 +1209,14 @@ class Journal:
         if self._lock is not None:
             self._lock.check()
 
-    def append(self, *records: Record, transitions: Sequence[TraceEntry] = ()) -> int:
+    def append(
+        self, *records: Record, transitions: Sequence[TraceEntry] = (), rev: int | None = None
+    ) -> int:
         """Append `records` in one transaction; answer the last seq. A record this binary does
         not know is refused before anything is written (`check_record`). `transitions` are the
-        trace entries the first record produced, committed with it (DL-536)."""
+        trace entries the first record produced, committed with it (DL-536). The history index's
+        rows commit with them too, a run's opening under `rev`, the configuration rev in force
+        (`index_rows`, DL-539)."""
         dispatches = dict(self.open.dispatches)
         for seq, record in enumerate(records, start=self.next_seq()):
             check_record(record)
@@ -1218,9 +1225,13 @@ class Journal:
                     record.payload, seq, dispatches.get(record.payload["job"]), history=False
                 )
                 dispatches[record.payload["job"]] = dict(record.payload)
+        openings, owners = index_rows(records, transitions, rev)
         self.prove()
         last = self.store.append(
-            *records, transitions=[entry.model_dump() for entry in transitions]
+            *records,
+            transitions=[entry.model_dump() for entry in transitions],
+            openings=openings,
+            owners=owners,
         )
         first = last - len(records) + 1
         self.last_seq = last
@@ -1245,11 +1256,13 @@ class Journal:
         result: ApplyResult,
         *also: Record,
         transitions: Sequence[TraceEntry] = (),
+        rev: int | None = None,
     ) -> int:
         """One admission (concurrency-model ss4 steps 4-7) as one transaction: the attempt, its
         decision, the records the caller appends with them (a plan step's done mark), and the
-        trace entries the apply produced, under the input record's seq (DL-536). A native
-        rejection names one of the append-only `STORED_CODES` (period-model ss2.3)."""
+        trace entries the apply produced, under the input record's seq (DL-536), with the
+        history index's rows under `rev` (DL-539). A native rejection names one of the
+        append-only `STORED_CODES` (period-model ss2.3)."""
         if result.decision == "rejected" and result.code not in STORED_CODES:
             raise EngineError(
                 f"decision {result.index}: a native rejection names its stored code"
@@ -1260,6 +1273,7 @@ class Journal:
             decision_record(attempt, result),
             *also,
             transitions=transitions,
+            rev=rev,
         )
 
     def drop(self, ev: Event, reason: str) -> None:
@@ -1450,6 +1464,69 @@ def follow_up_done(attempt: str, step: int, seq: int | None, at: datetime) -> Re
     return Record(
         at, "follow_up", None, None, {"event": "done", "attempt": attempt, "step": step, "seq": seq}
     )
+
+
+def index_rows(
+    records: Sequence[Record], transitions: Sequence[TraceEntry], rev: int | None
+) -> tuple[list[RunOpening], list[RecordOwner]]:
+    """The history index's rows of one append (DL-539), from its records alone.
+
+    Each status entry (a transition `old->new`) that carries a run number opens that run under
+    `rev`, keyed as its `transitions` row; START_REFUSED carries the current run's number and
+    opens none. A `dispatch` and an `outcome` belong to the run they name: the writer of
+    an outcome copies the job and run number of the attempt it ends, as its dispatch holds them.
+    A STATUS `input` belongs to its payload's job and run number, or to no named run when it
+    names none (an operator's CHANGE_STATUS), and its `decision`, which names only the admission
+    index, to the same; one with no string job, and its decision, belong to no job and have no
+    row. No other record is indexed. A numbered entry with no `rev` is refused,
+    before anything is written."""
+    openings: list[RunOpening] = []
+    for n, entry in enumerate(transitions):
+        if entry.run_number is None or "->" not in entry.transition:
+            continue
+        if rev is None:
+            raise EngineError(
+                f"{entry.job}.{entry.run_number}: a run's opening commits with the"
+                " configuration rev in force (DL-539)"
+            )
+        openings.append(RunOpening(n, entry.job, entry.run_number, rev))
+    owners: list[RecordOwner] = []
+    status: dict[Any, tuple[str, int | None]] = {}
+    for offset, record in enumerate(records):
+        body = record.payload
+        if record.kind in ("dispatch", "outcome"):
+            owner = _job_run(body.get("job"), body.get("run_number"))
+        elif record.kind == "input" and body.get("kind") == "STATUS":
+            payload = body.get("payload") or {}
+            owner = _job_run(payload.get("job"), payload.get("run_number"))
+            if owner is not None:
+                status[body.get("index")] = owner
+        elif record.kind == "decision":
+            owner = status.get(body.get("index"))
+        else:
+            continue
+        if owner is not None:
+            owners.append(RecordOwner(offset, *owner))
+    return openings, owners
+
+
+#: The run numbers the index holds: the store's signed 64-bit integers, so an index row never
+#: fails a commit its records would pass (DL-539).
+_RUN_MIN: Final = -(2**63)
+_RUN_END: Final = 2**63
+
+
+def _job_run(job: object, run_number: object) -> tuple[str, int | None] | None:
+    """A record's job and run number as the index holds them (DL-539). A record with no string
+    job belongs to no job's history: None. A run number names a run as the run-history fold
+    reads it (`runner_history`: an `int` instance, so a bool is its integer value), and only
+    from `_RUN_MIN` up to `_RUN_END`; any other value names no run. The number is made a plain
+    `int` before it is compared, so a subclass (an `IntEnum`) compares as its value."""
+    if not isinstance(job, str):
+        return None
+    if isinstance(run_number, int) and _RUN_MIN <= (value := int(run_number)) < _RUN_END:
+        return job, value
+    return job, None
 
 
 # ---------------------------------------------------------------- readers

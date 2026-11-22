@@ -27681,3 +27681,36 @@ relitigate an entry; append a new one.
   sandbox and adds its tool definitions to every turn. An editor's own server: it answers
   only while the editor is open.
   COST. One dev dependency at a 0.0.x release, locked under the project's `exclude-newer`.
+- DL-539 The engine commits an index of run openings and of records by job
+  (2026-11-22; the write half of the read of a job's past runs;
+  src/dsl41/runner_store.py, src/dsl41/runner_journal.py, src/dsl41/runner_transitions.py,
+  src/dsl41/runner_startup.py, src/dsl41/runner.py, src/dsl41/runner_control.py,
+  docs/runner-design.md, docs/control-protocol.md, docs/protocol-evolution.md,
+  tests/test_history_index.py, tests/transitions_check.py; builds on DL-536 and DL-537;
+  additive in dialect 5, DL-217; no state-machine version change; schema version stays 1)
+  THE RULE. With each journal record the engine commits, in the same transaction, the rows
+  that say which run the record belongs to. `job_runs` has one row for each status entry
+  that begins a run (DL-537), under the key of its `transitions` row, with the job, the run
+  number and the configuration rev in force at that commit. `job_records` has one row for
+  each `dispatch`, each `outcome`, each STATUS `input` and that input's `decision`, with the
+  job and the run number the record names. A run number counts as the run-history fold
+  reads it, and only within 64 bits; a STATUS input with no such number has none, and one
+  with no job has no row. No other record is indexed. `history_coverage` names the seq
+  intervals whose rows are complete, under the rules of `transitions_coverage`: every append
+  of this build extends it, and a seq it does not name has no claim. Each start drops the
+  rows outside the retained records and records a gap over what this build did not commit.
+  Pruning removes the rows below its bound in its own transaction.
+  WHY. A read of a job's past runs must fold one page of runs, not the job's whole history.
+  The fold stays the one definition of a run (DL-113); the index only finds a page's
+  openings and records, and the fold reads each record itself.
+  UNCHANGED. Nothing the engine decides reads these tables. The records, the trace, the
+  snapshot and the store's layout version are as they were. The build before this one opens
+  and appends to a root this build wrote, and what it appends is a gap here.
+  COST. A few small rows per commit, inside the commit's one sync. No index row may fail a
+  commit the records alone would pass: neither table has a unique key on the job and run
+  number, and a run number the store cannot hold is stored as none. Nothing fills rows for
+  records an earlier build wrote, so a root's full history starts at the first record this
+  build commits. If a start cannot settle the index, the engine starts all the same and
+  `status` carries `history_unavailable` with the reason.
+  NOT BUILT. No verb reads the index yet; the read (`history`) is the next change. A STATUS
+  event's `run_number` is still not checked to be a plain integer (BUG-109).

@@ -133,6 +133,15 @@ build settles them with the journal (runner-design §7): it drops the rows
 an older prune left and records the older build's appends as a gap. The `transitions`
 query is additive within dialect 5; `trace` and `subscribe` are unchanged.
 
+**History index (DL-539).** The store adds `job_runs`, `job_records` and
+`history_coverage` where they are missing, at its first writable open;
+`meta.schema_version` stays 1 and the state version is unchanged. An older
+build of schema 1, with or without the transition rows, opens such a store,
+ignores the three tables and appends and prunes as before. The next start
+of this build settles them with the journal (runner-design §7): it drops
+the rows an older prune left and records the older build's appends as a
+gap. The `status` field `history_unavailable` is additive within dialect 5.
+
 **Store and wire are different formats (DL-428).** Store kinds are
 `input`, `decision`, `dispatch`, `dispatch_pending`, `outcome`, `follow_up`,
 `drop`, `preflight`, `config` and `engine`. The stream projects `segment`

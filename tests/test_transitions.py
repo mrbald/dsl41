@@ -514,7 +514,7 @@ class _PreviousBuild:
     def __init__(self, store: Any) -> None:
         self._store = store
 
-    def append(self, *records: Record, transitions: Any = ()) -> int:
+    def append(self, *records: Record, **rows: Any) -> int:
         return int(self._store.append(*records))
 
     def __getattr__(self, name: str) -> Any:
@@ -535,6 +535,7 @@ def _as_previous_build(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     with monkeypatch.context() as patched:
         patched.setattr(runner_startup, "SqliteStore", opened)
         patched.setattr(runner_startup, "begin_transitions", lambda store, *, where: None)
+        patched.setattr(runner_startup, "settle_history", lambda store, *, where: None)
         yield
 
 

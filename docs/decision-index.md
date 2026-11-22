@@ -540,3 +540,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-536 | Transitions are committed with the journal record that produced them | [README.md](../README.md), [docs/access-model.md](access-model.md), [docs/control-protocol.md](control-protocol.md), [docs/gateway.md](gateway.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |
 | DL-537 | A run opens where the oracle starts it | [docs/control-protocol.md](control-protocol.md), [docs/ir-design.md](ir-design.md), [docs/runner-design.md](runner-design.md) |
 | DL-538 | `scripts/refs.py` answers where a name is defined, referenced or called | [docs/agent-workflow.md](agent-workflow.md) |
+| DL-539 | The engine commits an index of run openings and of records by job | [docs/control-protocol.md](control-protocol.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |

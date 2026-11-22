@@ -725,6 +725,11 @@ While `transitions` declines for the run (§4 `transitions`), the answer
 carries `transitions_unavailable`, the reason text; it is absent otherwise.
 A client may ignore this additive field (DL-536).
 
+While the start could not settle the history index for the run
+([runner-design §7](runner-design.md#7-journal-and-recovery-e1-prod-grade)), the answer
+carries `history_unavailable`, the reason text; it is absent otherwise.
+A client may ignore this additive field (DL-539).
+
 In the real domain, while the wall is below engine time, the answer carries
 `clock_hold: {"wall": <instant>, "until": <instant>}` (DL-493). Both instants
 use the `status_at` format. It is absent outside a hold and in the virtual

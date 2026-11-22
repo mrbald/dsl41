@@ -1354,6 +1354,9 @@ class ControlServer:
         if journal is not None and journal.transitions_declined is not None:
             # DL-536: where a viewer looks, while `transitions` declines for this run
             answer["transitions_unavailable"] = journal.transitions_declined
+        if journal is not None and journal.history_declined is not None:
+            # DL-539: the same, while the history index serves no read for this run
+            answer["history_unavailable"] = journal.history_declined
         return answer
 
     def _globals(self, names: list[Any]) -> dict[str, Any]:
