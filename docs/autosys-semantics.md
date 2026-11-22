@@ -587,6 +587,11 @@ nothing else.
   start time". SEM-33's verified closer-edge rule governs that case instead. The two sources
   are not fully reconciled; the difference is noted and not modeled.
 - In a box: a held member prevents box completion; it holds the whole stream.
+- A job with no date conditions and no condition has no gate to wait for, so OFF_HOLD starts
+  it at once. No vendor sentence covers a job with nothing to satisfy; this is the project's
+  reading of "already satisfied" and carries no vendor tier (DL-531). A box released this
+  way starts its members as any box start does (SEM-10), and the released start still meets
+  resource admission (DL-50).
 - ON_HOLD sent to a STARTING or RUNNING job, box or not, is ignored (DL-254). **[V]** Source:
   "sendevent Command -- Change the Executable Status of a Job" (AutoSys 24.2), JOB_ON_HOLD:
   "The event has no effect on jobs with a status of STARTING or RUNNING." The oracle sets no
@@ -731,6 +736,10 @@ jobs complete and utilize this job as a dependency."
 - Lowering: `Semantics.initial_status` (DL-18).
 - Oracle: seeds the SEM-20/21/22 flags before the first event. No trace entry (definition
   state, not a transition).
+- Update: the line seeds a row only when the row is made, on a root's first start and for a
+  job an update adds. An update never applies it to a job it keeps, so a hold an operator
+  released stays released (DL-531). An edit of only this line on a kept job still counts as
+  a change of the definition, so an update stops the job if it runs (BUG-104).
 
 ---
 ## 4. Date/time scheduling

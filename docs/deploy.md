@@ -852,6 +852,9 @@ same path. Restore any unit drop-ins. If you restore unit files, run
 
 ## Reload a changed estate
 
+To decide who may apply a change, when and how to go back, see
+[Operate an estate](operations.md).
+
 Use the engine's socket. Every engine command takes `-S`/`--socket`, with
 `DSL41_SOCKET` as its default (DL-459, DL-463).
 

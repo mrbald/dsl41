@@ -27455,3 +27455,23 @@ relitigate an entry; append a new one.
   backend, and L014 and L020 rest on it (BUG-103).
   COST. A site with `lint.refuse = "warn"` that was refused only for lone `timezone` lines
   is now admitted.
+- DL-531 A hold release and a `status:` line, stated and pinned
+  (2026-11-22; owner: an operations text leaves no unknown; docs/autosys-semantics.md,
+  docs/operations.md, docs/deploy.md, README.md, tests/test_oracle.py,
+  tests/test_reload_update.py, TODO.md; states what the code did and changes no behaviour)
+  THE RULE. OFF_HOLD on a job with no date conditions and no condition starts it at once: a
+  job with nothing to satisfy is satisfied. This holds for a box, whose start then starts
+  its members. A held member stays held and keeps the box RUNNING. A released box whose
+  resource is taken waits in QUE_WAIT (SEM-21, SEM-10, DL-50). A `status:` line seeds hold,
+  ice or noexec when the job's row is made: on a root's first start and on a job an update
+  adds. An update never applies it to a job it keeps (SEM-24).
+  THE DEFECT. No contract said either, and no test pinned the release of a job without
+  gates or the kept job. An operator who releases holds could not read what a release
+  starts.
+  UNCHANGED. Every behaviour. `docs/operations.md` is a new page of the operator track, for
+  the person who owns an estate's go-live and daily running; the install page and the
+  incident page serve other readers (DL-472).
+  NOT BUILT. An edit of only the `status:` line of a kept job still counts as a change, so
+  an update stops the job if it runs. The line itself moves no flag; the stop is then
+  settled by the interruption rule, which runs the job again or holds a job marked
+  non-idempotent (BUG-104).

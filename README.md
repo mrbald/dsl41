@@ -30,11 +30,12 @@ implementation. A site may adapt and repackage them for its Python runtime requi
 **Operator**: start, watch and recover the engine; incidents.
 
 1. [docs/deploy.md](docs/deploy.md) - install the main config, application inputs and unit; start, drain, update, recover and drill one Linux engine
-2. [docs/incident-triage.md](docs/incident-triage.md) - diagnose jobs and attempts, send a checked intervention, and collect evidence with the engine up or down
-3. [examples/nightbank/README.md](examples/nightbank/README.md) - prepare a synthetic training night, rehearse it, and run its incident workers
-4. [examples/file_processing/README.md](examples/file_processing/README.md) - inspect storage, repair it, recover interrupted work and follow the stop/resume exercise
-5. [docs/nav.md](docs/nav.md) - inspect dependencies and box membership from estate files; use triage for the active engine catalog
-6. [examples/snapshots/README.md](examples/snapshots/README.md) - inspect offline observations on the Nightbank and fulfilment graphs; convert a bounded AutoSys summary table
+2. [docs/operations.md](docs/operations.md) - write the site's operating procedure for changes and for a go-live that releases holds by hand
+3. [docs/incident-triage.md](docs/incident-triage.md) - diagnose jobs and attempts, send a checked intervention, and collect evidence with the engine up or down
+4. [examples/nightbank/README.md](examples/nightbank/README.md) - prepare a synthetic training night, rehearse it, and run its incident workers
+5. [examples/file_processing/README.md](examples/file_processing/README.md) - inspect storage, repair it, recover interrupted work and follow the stop/resume exercise
+6. [docs/nav.md](docs/nav.md) - inspect dependencies and box membership from estate files; use triage for the active engine catalog
+7. [examples/snapshots/README.md](examples/snapshots/README.md) - inspect offline observations on the Nightbank and fulfilment graphs; convert a bounded AutoSys summary table
 
 **Job author**: write an estate in JIL or the Python DSL, or bring an existing one in, and get it accepted.
 

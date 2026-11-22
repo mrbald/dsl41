@@ -676,6 +676,39 @@ def test_a_held_member_edited_then_released_runs_and_globals_survive(tmp_path: P
     assert "--sleep 3" in _command(world, "SOD_APPROVE_C")
 
 
+def _alert_on_hold(estate: Path) -> None:
+    """OPS_FAIL_ALERT_C's definition says `status: ON_HOLD`."""
+    path = estate / "global.jil"
+    last = "std_err_file: ~{$NB_LOGS}~/OPS_FAIL_ALERT_C.err\n"
+    text = path.read_text()
+    assert last in text
+    path.write_text(text.replace(last, last + "status: ON_HOLD\n", 1))
+
+
+def test_a_released_hold_of_a_kept_job_whose_jil_says_on_hold_stays_released(
+    tmp_path: Path,
+) -> None:
+    """spec-reload, SEM-24: `status:` seeds a row only when the row is made. A kept job's row is
+    untouched by an update that changes another job (`Oracle.replace_catalog`), so the hold an
+    operator released stays released, through the update and the next input."""
+    world = _world(tmp_path, _alert_on_hold)
+    assert world.row("OPS_FAIL_ALERT_C").on_hold
+    world.feed("OFF_HOLD", job="OPS_FAIL_ALERT_C")
+    released = world.row("OPS_FAIL_ALERT_C")
+    assert (released.status, released.on_hold) == ("INACTIVE", False)
+    _command_change(world, "OPS_SPOOL_C")
+    result, document, candidate = world.reread()
+    assert [change.name for change in result.plan.changed] == ["OPS_SPOOL_C"]
+    assert "OPS_FAIL_ALERT_C" in result.plan.unchanged
+    tier, _ = world.update(document, candidate)
+    assert tier.state == "APPLIED"
+    assert tier.application is not None and tier.application.changed == ("OPS_SPOOL_C",)
+    assert world.oracle.catalog.jobs["OPS_FAIL_ALERT_C"].sem.initial_status == "ON_HOLD"
+    assert world.row("OPS_FAIL_ALERT_C") == released
+    world.feed("SET_GLOBAL", name="RECON_APAC", value="CLEAN")
+    assert not world.row("OPS_FAIL_ALERT_C").on_hold
+
+
 def test_a_removed_jobs_tombstone_keeps_its_hold_and_shows_on_re_add(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

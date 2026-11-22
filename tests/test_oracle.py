@@ -3562,6 +3562,76 @@ def test_sem21_events_on_a_queued_job_keep_their_handling(kind: EventKind) -> No
     assert row.status == ("INACTIVE" if kind == "ON_ICE" else "QUE_WAIT")
 
 
+def test_sem21_off_hold_starts_a_job_with_no_condition_and_no_date_at_once() -> None:
+    """SEM-21, SEM-24 (job.205): OFF_HOLD attempts the start. A top-level command job with no
+    date conditions and no condition passes every gate, so it starts on the release."""
+    o = oracle("insert_job: solo21\njob_type: c\ncommand: x\nmachine: m1\nstatus: ON_HOLD\n")
+    assert o.store.job["solo21"].on_hold
+    o.feed(ev("OFF_HOLD", 0, job="solo21"))
+    assert transitions(o, "solo21") == ["OFF_HOLD", "INACTIVE->STARTING", "STARTING->RUNNING"]
+    assert not o.store.job["solo21"].on_hold
+
+
+#: a held top-level box with no date conditions and no condition, and three members: one free,
+#: one conditioned on the first, one held
+_HELD_BOX_21 = (
+    "insert_job: hbox21\njob_type: b\nstatus: ON_HOLD\n{extra}\n"
+    "insert_job: hbox21_a\njob_type: c\ncommand: x\nmachine: m1\nbox_name: hbox21\n\n"
+    "insert_job: hbox21_b\njob_type: c\ncommand: y\nmachine: m1\nbox_name: hbox21\n"
+    "condition: s(hbox21_a)\n\n"
+    "insert_job: hbox21_h\njob_type: c\ncommand: z\nmachine: m1\nbox_name: hbox21\n"
+    "status: ON_HOLD\n"
+)
+
+_STARTED = ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+
+def test_sem21_off_hold_on_a_box_runs_its_members_and_a_held_member_keeps_it_running() -> None:
+    """SEM-21, SEM-24 (job.205), SEM-10: OFF_HOLD on a held top-level box with no date
+    conditions and no condition starts the box at once. The box's start starts its free
+    member; the conditioned member starts when the first succeeds. The held member stays
+    held and INACTIVE, and the box does not complete while it is held."""
+    o = oracle(_HELD_BOX_21.format(extra=""))
+    o.feed(ev("OFF_HOLD", 0, job="hbox21"))
+    assert transitions(o, "hbox21") == ["OFF_HOLD", *_STARTED]
+    assert transitions(o, "hbox21_a") == _STARTED
+    assert transitions(o, "hbox21_b") == []
+    o.feed(ev("STATUS", 1, job="hbox21_a", status="SUCCESS"))
+    assert transitions(o, "hbox21_b") == _STARTED
+    o.feed(ev("STATUS", 2, job="hbox21_b", status="SUCCESS"))
+    held = o.store.job["hbox21_h"]
+    assert (held.status, held.on_hold) == ("INACTIVE", True)
+    assert transitions(o, "hbox21_h") == []
+    assert o.store.job["hbox21"].status == "RUNNING"
+    assert transitions(o, "hbox21") == ["OFF_HOLD", *_STARTED]
+
+
+def test_sem21_off_hold_on_a_box_whose_resource_is_taken_queues_it() -> None:
+    """SEM-21 (job.205), DL-50: OFF_HOLD's start attempt meets the box's admission like any
+    start. With its resource taken, the released box waits in QUE_WAIT and starts no member;
+    when the holder ends, the box starts and starts its free member. A job with no date
+    conditions has no run window to meet: `_window_side` reads no schedule as inside."""
+    text = (
+        "insert_resource: LOCK21\nres_type: R\namount: 1\n\n"
+        "insert_job: own21\njob_type: c\ncommand: w\nmachine: m1\n"
+        "resources: (LOCK21, QUANTITY=1)\n\n"
+    ) + _HELD_BOX_21.format(extra="resources: (LOCK21, QUANTITY=1)\n")
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="own21"))
+    o.feed(ev("OFF_HOLD", 1, job="hbox21"))
+    assert transitions(o, "hbox21") == ["OFF_HOLD", "INACTIVE->QUE_WAIT"]
+    assert not o.store.job["hbox21"].on_hold
+    assert transitions(o, "hbox21_a") == []
+    o.feed(ev("STATUS", 2, job="own21", status="SUCCESS"))
+    assert transitions(o, "hbox21") == [
+        "OFF_HOLD",
+        "INACTIVE->QUE_WAIT",
+        "QUE_WAIT->STARTING",
+        "STARTING->RUNNING",
+    ]
+    assert transitions(o, "hbox21_a") == _STARTED
+
+
 # -------------------------------------------- 14b. SEM-24 status: at definition time
 
 
