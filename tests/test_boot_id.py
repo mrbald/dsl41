@@ -243,7 +243,8 @@ def test_restart_with_records_from_two_boots(
             ("b", "unobservable", "engine_death"),
         ]
         replacements = [b for _, k, b in rows(run_root) if k == "dispatch" and b["ordinal"] == 2]
-        assert [(b["job"], b["run_number"]) for b in replacements] == [("a", 1), ("b", 1)]
+        # each replacement follows its own attempt's ladder end, so jobs are in no fixed order (DL-426)
+        assert sorted((b["job"], b["run_number"]) for b in replacements) == [("a", 1), ("b", 1)]
     finally:
         for child in children:
             if child.poll() is None:
