@@ -347,7 +347,13 @@ def diff(
         if old_hash == new_hash:
             unchanged.append(name)
             continue
-        if seed_rule and digest(_without_seed(old_record)) == digest(_without_seed(new_record)):
+        # only jobs whose seeds differ can be seed-only; any other differing job is changed
+        # without a second comparison (DL-533)
+        if (
+            seed_rule
+            and old.sem.initial_status != new.sem.initial_status
+            and digest(_without_seed(old_record)) == digest(_without_seed(new_record))
+        ):
             unchanged.append(name)
             seed_only.append(Change(name, old_hash, new_hash))
             continue

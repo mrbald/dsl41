@@ -441,3 +441,50 @@ def test_a_re_added_name_with_a_status_is_added_not_seed_only() -> None:
     plan = _diff(_cat(_job("other")), _cat(_job("other"), _seeded("j", "ON_HOLD")))
     assert plan.added == ("j",)
     assert plan.seed_only == ()
+
+
+def _counted_diff(
+    monkeypatch: pytest.MonkeyPatch,
+    live: CatalogIR,
+    candidate: CatalogIR,
+    live_settings: dict[str, object],
+    candidate_settings: dict[str, object],
+) -> tuple[Plan, int]:
+    from dsl41 import reload_diff
+
+    calls = 0
+    real = reload_diff.digest
+
+    def counting(value: object) -> str:
+        nonlocal calls
+        calls += 1
+        return real(value)
+
+    monkeypatch.setattr(reload_diff, "digest", counting)
+    plan = diff(live, candidate, live_settings, candidate_settings)
+    monkeypatch.setattr(reload_diff, "digest", real)
+    return plan, calls
+
+
+def test_the_seed_comparison_costs_digests_only_for_jobs_whose_seeds_differ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DL-533: a kept job costs two digests, its two hashes. A second comparison, two more,
+    runs only when the two seeds differ, so a setting that changes every job costs what it
+    cost before the seed-only rule."""
+    count = 25
+    names = [f"j{index:02}" for index in range(count)]
+    held = _cat(*(_seeded(name, "ON_HOLD") for name in names))
+    plan, calls = _counted_diff(monkeypatch, held, held, {"timezone": "UTC"}, {"timezone": "X"})
+    assert len(plan.changed) == count and plan.seed_only == ()
+    assert calls == 2 * count
+    live = _cat(*(_job(name) for name in names))
+    plan, calls = _counted_diff(monkeypatch, live, held, {}, {})
+    assert len(plan.seed_only) == count and plan.changed == ()
+    assert calls == 2 * count + 2 * count
+    edited = _cat(*(_seeded(name, "ON_HOLD", command="other") for name in names))
+    plan, calls = _counted_diff(monkeypatch, live, edited, {}, {})
+    assert len(plan.changed) == count and plan.seed_only == ()
+    assert calls == 2 * count + 2 * count
+    plan, calls = _counted_diff(monkeypatch, live, live, {}, {})
+    assert plan.unchanged == tuple(names) and calls == 2 * count
