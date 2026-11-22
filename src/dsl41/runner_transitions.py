@@ -340,7 +340,7 @@ def _page(
         "history": read.histories[-1][0] if read.histories else None,
     }
     if request.history is not None:
-        shaped["continuous_through"] = _agrees_through(read.histories, request.history, upto)
+        shaped["continuous_through"] = agrees_through(read.histories, request.history, upto)
     if read.counts is not None:
         counted, missed = _spans(read.coverage, floor, upto)
         shaped |= {"counts": read.counts, "counts_covered": counted, "counts_gaps": missed}
@@ -373,7 +373,7 @@ def _spans(
     return covered, gaps
 
 
-def _agrees_through(histories: Sequence[tuple[str, int]], named: str, upto: int) -> int:
+def agrees_through(histories: Sequence[tuple[str, int]], named: str, upto: int) -> int:
     """The last seq at which history `named` and this store's agree: everything for the current
     history, up to where the next one began for an earlier one, nothing for one it never had."""
     for position, (history, _) in enumerate(histories):

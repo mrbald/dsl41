@@ -324,6 +324,8 @@ REQUIRED_TIER: dict[str, Tier] = {
     "status": Tier.READ,
     "trace": Tier.READ,
     "transitions": Tier.READ,
+    # a job's past runs, read as `transitions` is (DL-540)
+    "history": Tier.READ,
     "explain": Tier.READ,
     "spec": Tier.READ,
     "deps": Tier.READ,

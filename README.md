@@ -728,6 +728,8 @@ Runner:
 - `src/dsl41/runner_transitions.py`: the committed transition rows: the
   start's settling of the rows with the retained journal, and the
   `transitions` query's request and answer (DL-536).
+- `src/dsl41/runner_runs.py`: the `history` query: a job's past runs, one page
+  folded from the history index (DL-540).
 - `src/dsl41/runner_config.py`: what an engine runs under:
   `RuntimeProfile` and `runtime_hash`, the configuration row that holds the
   catalog, the profile and the marked set, and `engine.toml`'s stop grace,

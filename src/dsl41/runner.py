@@ -560,6 +560,10 @@ class Engine:
         #: the run history the snapshot this engine restarted from carried; each snapshot
         #: continues it with the trace since (`runner_history.run_history`)
         self.restored_runs: dict[str, list[dict[str, Any]]] = {}
+        #: the journal seq of that snapshot, None on an engine that restarted from none: a fact
+        #: for the `history` read; nothing the engine decides reads it, and it is not stored
+        #: (DL-540)
+        self.restored_seq: int | None = None
         #: the job rows that snapshot restored: they number a job's next run when retention
         #: emptied its history
         self.restored_rows: dict[str, JobRuntime] = {}

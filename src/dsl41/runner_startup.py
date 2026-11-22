@@ -1131,6 +1131,7 @@ def _replay_into_engine(
         engine.oracle = Oracle(start.catalog, **oracle_reading(start.profile))
     if snapshot is not None:
         engine.restored_runs = snapshot.runs
+        engine.restored_seq = snapshot.seq
         engine.restored_rows = dict(snapshot.rows.jobs)
         # the trace a restart serves starts at its snapshot, and its first line says so
         since = snapshot.position.last_at

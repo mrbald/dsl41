@@ -142,6 +142,11 @@ of this build settles them with the journal (runner-design §7): it drops
 the rows an older prune left and records the older build's appends as a
 gap. The `status` field `history_unavailable` is additive within dialect 5.
 
+**Past runs (DL-540).** The `history` query is additive within dialect 5. It reads
+the history index and writes nothing. Its one new code, `history_unavailable`, is
+additive within dialect 5 too. The
+store, the records, the snapshot and the state version are unchanged.
+
 **Store and wire are different formats (DL-428).** Store kinds are
 `input`, `decision`, `dispatch`, `dispatch_pending`, `outcome`, `follow_up`,
 `drop`, `preflight`, `config` and `engine`. The stream projects `segment`

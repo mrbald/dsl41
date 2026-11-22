@@ -769,7 +769,8 @@ gap here. Each start settles the index after the steps above, on its own
 the retained records and records a gap over every retained interval the
 coverage does not name. If that raises, the start goes on and says so in
 one line, and `status` carries `history_unavailable` with the reason.
-Nothing the engine decides reads these tables.
+Nothing the engine decides reads these tables. The `history` query reads
+them (control-protocol §4 `history`, DL-540).
 
 **Run history.** `dsl41 runs` is an offline projection, not a new record
 kind (DL-113). The row is `{job, run_number, catalog_hash, job_hash, started_at,
@@ -1676,6 +1677,8 @@ the split cannot decay into a second name for one file.
 - `runner_store.py`: SQLite transactions, configuration rows and snapshots (DL-428).
 - `runner_transitions.py`: the start's settling of the transition rows and the
   `transitions` query's request and answer (DL-536).
+- `runner_runs.py`: the `history` query: a job's past runs, one page folded from the
+  history index (DL-540).
 - `runner_attempts.py` and `runner_stops.py`: interruption plans and process cleanup (DL-429).
 - `engine_charts.py`: attempt and engine lifecycle declarations (DL-426).
 - `reload_update.py` and `runner_update.py`: update declaration and wiring (DL-432).

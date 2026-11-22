@@ -357,6 +357,7 @@ The client action says what a client does next:
 | `plan_cycle` | query | the AND-success skeleton has a cycle, so `plan` is disabled | operator |
 | `unknown_job` | query, or refused on a mutation | the job is not in the catalog (for `status`: in neither the catalog nor the store) | fix the request |
 | `transitions_unavailable` | query | the start could not settle the transition rows for this run; `error` gives the reason, and the answer asserts no entries, coverage, continuity or history (DL-536) | operator: fix the cause `error` names; the rows are still committed, and the next start tries again |
+| `history_unavailable` | query | `history` cannot serve the page: the start could not settle the history index for this run, the page shows one run number twice, or a run on it, or the opening above it, opened under a configuration rev the store holds no row for; `error` gives the reason (DL-540) | operator: for an unsettled index, fix the cause `error` names, and the next start settles it again; a run number shown twice or a missing configuration row stays until retention drops those openings |
 | `no_journal` | stream or query | the run has no store to stream, or to read `transitions` from | operator |
 | `backfill_refused` | stream | the backfill met a store it cannot read as this estate's | operator |
 | `unknown_verb` | refused | `verb` names no `sendevent` verb | fix the request |
@@ -598,7 +599,7 @@ No `subscribe` line carries the read header (§2, DL-148). A subscription
 is not a revision-bearing read (§2, DL-148).
 
 Every query is a **pure projection** of (oracle, catalog, scheduler,
-spool paths), and `transitions` of the store's transition rows. None
+spool paths), and `transitions` and `history` of the store's rows. None
 changes protocol-visible engine state, and none inserts a store row. `status` does refresh one private cache, the
 `spec_drift` re-hash below. Queries are safe to serve from the engine's
 task because `feed()` never yields, so a handler can never observe a
@@ -901,6 +902,121 @@ it.
 default), `--cursor SEQ:N` and `--forward`, newest first unless
 `--forward`; it refuses `--since`, `--name` and the other queries' options
 by name, and the other queries refuse its options.
+
+### `history`
+
+A job's past runs, one page at a time (DL-540, runner-design §7). It is a
+`read`-tier query, read as `transitions` is: on a thread and a read-only
+connection of their own for a run root, in one read transaction, bounded by
+the watermark taken when the request is routed, and stopped by shutdown in
+the same way. Nothing it answers is read by any decision, and it writes
+nothing.
+
+Request fields:
+
+- `job`: the job, a string. Required. A job the store holds no run of,
+  one absent from the current catalog included, answers `ok: true` with an
+  empty page: a removed job can still have past runs.
+- `cursor`: null or a run number from 0 to 2^63 - 1. A page holds the runs
+  below it, newest first. Null starts at the newest.
+- `limit`: a positive integer, 20 by default, cut to 200. It counts run
+  openings.
+- `history`: the `history` an earlier answer carried.
+
+A malformed field answers `invalid_argument` naming it. A run with no store
+answers `no_journal`. While `transitions` declines for the run, `history`
+answers `transitions_unavailable` with the same reason. While the start
+could not settle the history index (`status` shows `history_unavailable`),
+it answers `history_unavailable` with that reason. So does a page that shows one run
+number twice, naming the number, and a page whose run, or the opening
+above it, opened under a configuration rev the store holds no row for,
+naming the rev; no other configuration stands in for it. An answer that cannot hold one run or window
+within the byte cap, such as one for a job whose name alone passes it,
+answers `invalid_argument`.
+
+```json
+{"ok": true, "job": "j",
+ "runs": [{"row": {"job": "j", "run_number": 3, "status": "SUCCESS", "…": "…"},
+           "attempts": [{"ordinal": 1, "attempt": "…", "dispatched_at": "…",
+                         "rev": 2, "after": null, "spool": "…",
+                         "log_out": "…", "log_err": "…",
+                         "outcome": {"kind": "natural", "exit_code": 0,
+                                     "ended_at": "…", "ladder": null}}],
+           "attempts_cut": false}],
+ "incomplete": [], "next": 3, "more": true,
+ "full_from": {"seq": 41, "at": "2026-07-01T08:00:00"},
+ "watermark": 90, "as_of": "2026-07-01T09:12:00",
+ "history": "5f0c…", "continuous_through": 90,
+ "earlier": null,
+ "baseline_id": "…", "applied_index": 17}
+```
+
+`row` is the run row of `dsl41 runs` (runner-design §7 **Run history**) with
+no spool, so its `clock_source` is `journal`. `attempts` are the run's
+dispatches in order, each with its own rev and the outcome its `outcome`
+record holds, or null for none recorded; no environment is shown. A run
+shows at most its 50 newest attempts, and `attempts_cut` says some were left
+out.
+
+**Where full rows start.** `full_from` is the first seq, and its record's
+time, of the interval the history index covers up to the watermark. Only
+runs that opened there or later have rows. Nothing is joined across a gap:
+after a stretch an earlier build wrote, full rows start where this build
+took over again. `full_from` is null when no covered interval reaches the
+watermark.
+
+**Paging.** `next` is the cursor that goes on: the lowest run number the
+page holds, or the request's cursor when it holds none. `more` says whether
+to ask again. A run that opened and was never dispatched, such as a leaf an
+ON_NOEXEC bypass ended, has no row, but the cursor passes it. A page holds
+whole admissions: a STATUS input with no run number belongs to it when its
+seq is above the oldest opening's and at or below the seq of the opening
+above the page, and its decision, the next record of its transaction, comes
+with it. So the page reads the job's records with no run up to one seq past
+that opening. Each request reads at most 20000 rows of evidence (trace
+entries and records), each row it reads counted, so a page may hold fewer
+runs than `limit`, with `more` true. A run whose evidence
+alone passes that bound is listed in `incomplete`, with no row, and the
+cursor passes it. The whole encoded answer is at most 1 MiB: past that, the
+oldest runs and windows are left out first, with `more` true, and a single
+run or window that passes it alone is listed in `incomplete`. An answer
+with `more` true always holds a run, a window or an `incomplete` number
+below the request's cursor, so `next` moves.
+
+**Earlier.** `earlier` is null while full rows remain below the page. Once
+they are all read, it holds `snapshot_seq`, the seq of the snapshot the
+engine restarted from (null when it restarted from none), `windows`, the run
+windows that snapshot recorded for the job with a run number below the job's
+first full row, as recorded and newest first, and `missing`. Windows are not
+rows: they carry no exit code and no attempts, and an open one is not
+continued. Runs that opened after that snapshot and before `full_from` are
+in neither list; `missing` names those seqs, `[low, high]`, or is null when
+there are none. A record the history index does not hold, one an earlier
+build appended in a gap, is not read, even when it names a run that opened
+after the gap; a record the index holds is read wherever it sits, as the
+offline fold reads it. Windows share `limit`, `next` and `more` with the rows.
+
+**What a row promises.** A run that opened at or after `full_from` has the
+row the offline fold gives over the whole journal with its replayed trace
+and no spool, with one exception: a STATUS with no run number, admitted
+after the next run opened (a greater seq) at a time no later than that
+opening and before that run's dispatch, when the two runs are on different
+pages. The whole fold gives it to the earlier run by time, and the earlier
+run's page does not hold it. When both runs are on one page, the query reads
+it as the whole fold does. A page's trace runs through the entry of the
+opening above it, so the fold sees when the next run began, and a STATUS
+admitted in the transaction that opened it reads alike in both. On a pruned
+store, the offline fold calls a run that began before its snapshot `partial`
+where this query calls it `full`, and it can read a run that opened after
+that snapshot under an older rev (BUG-110), where this query uses the rev
+stored with the opening.
+
+`watermark` and `as_of`, the time the records reached then, come from the
+moment the request is routed; the rows come from the read. `history` and
+`continuous_through` are as in `transitions`.
+
+`dsl41 query history --job J` sends `--limit` and `--cursor RUN`, a run
+number; it refuses `--since`, `--name`, `--transition` and `--forward` by name.
 
 ### `explain <job>`
 

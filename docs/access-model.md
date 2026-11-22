@@ -616,7 +616,7 @@ for the tier it falls under. It is not a second classification axis.
 
 | cmd | verb | tier |
 | --- | --- | --- |
-| `status`, `trace`, `transitions` (DL-536), `explain`, `spec`, `deps`, `timers`, `plan`, `global`, `globals`, `subscribe` | — | read |
+| `status`, `trace`, `transitions` (DL-536), `history` (DL-540), `explain`, `spec`, `deps`, `timers`, `plan`, `global`, `globals`, `subscribe` | — | read |
 | `sendevent` | the externally injectable verbs (control-protocol §3): `STARTJOB`, `FORCE_STARTJOB`, `KILLJOB`, `ON_ICE`/`OFF_ICE`, `ON_HOLD`/`OFF_HOLD`, `ON_NOEXEC`/`OFF_NOEXEC`, `DISARM` (DL-158), `RELEASE_RESOURCE` (DL-256), `SET_GLOBAL`, `CHANGE_STATUS`. The internal EventKinds (`STATUS`, `TIMER`, the alarms) have no wire door: the dispatcher refuses them like any unknown verb | ops |
 | `engine_stop` (`dsl41 engine stop`: drains the engine and ends its process) | — | adm |
 | `catalog` (the running catalog, settings, rev, statuses and host settings; DL-437) | — | read |

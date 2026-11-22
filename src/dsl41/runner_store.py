@@ -30,16 +30,18 @@ Rules both stores keep:
   run, and `job_records`, keyed by the seq of each record that belongs to a job's run.
   `history_coverage` says which seqs they cover, under the rules of `transitions_coverage`.
   Neither table has a unique key beyond its own, so an index row never fails a commit the
-  records alone would pass. Nothing the engine decides reads them.
+  records alone would pass. Nothing the engine decides reads them; `read_history` finds one
+  page of a job's runs and their records through them, in one read transaction (DL-540).
 """
 
 from __future__ import annotations
 
 import bisect
+import dataclasses
 import sqlite3
 import sys
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, Protocol
@@ -157,6 +159,66 @@ class TransitionRead:
     pruned_through: tuple[int, int] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class HistoryQuery:
+    """One read of a job's past runs (DL-540): the openings of `job` below run `cursor` (None
+    for the newest), at most `limit` of them, with the evidence of each, newest first, until
+    `budget` rows of evidence (trace entries and records) are taken. `upto` is the highest seq
+    the read may see."""
+
+    job: str
+    cursor: int | None
+    limit: int
+    upto: int
+    budget: int
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryRun:
+    """One `job_runs` row on a read page (DL-540): entry `n` of seq `seq` opened `run_number`
+    under `rev`. `until` is the key of the job's next opening and `until_rev` its rev, both
+    None when the watermark ends the run's range."""
+
+    seq: int
+    n: int
+    run_number: int
+    rev: int
+    until: tuple[int, int] | None
+    until_rev: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryRead:
+    """What one history read transaction saw (DL-540). `boundary` is the first seq of the
+    covered interval of the index that reaches the watermark, None when none does; full rows
+    come only from at or above it, and `boundary_at` is that record's stamp. `first_full` is the
+    run number of the job's oldest opening there. `duplicate` is a run number the page showed
+    twice; the read then gathers nothing. `runs` are the openings whose evidence fits the
+    budget, newest first; `incomplete` is one too large for the budget alone; `more` says
+    openings remain below the last of them. `entries` are the job's trace entries and the
+    CONFIG marks over the runs' ranges, in key order, each range through the entry of the
+    opening above it. `owned` are the records the index names for the job and a run of `runs`;
+    `loose` those it names for the job and no run, from above the oldest opening's seq to one
+    seq past the seq of the opening above the page, or to the watermark. `configs` holds the
+    stored
+    configuration of each rev of `runs` and of the opening above them, None for a rev the store
+    holds no row for."""
+
+    histories: list[tuple[str, int]]
+    first_seq: int
+    boundary: int | None = None
+    boundary_at: datetime | None = None
+    first_full: int | None = None
+    duplicate: int | None = None
+    runs: list[HistoryRun] = field(default_factory=list)
+    incomplete: HistoryRun | None = None
+    more: bool = False
+    entries: list[tuple[int, int, dict[str, Any]]] = field(default_factory=list)
+    owned: list[tuple[int, Record]] = field(default_factory=list)
+    loose: list[tuple[int, Record]] = field(default_factory=list)
+    configs: dict[int, bytes | None] = field(default_factory=dict)
+
+
 class Store(Protocol):
     def append(
         self,
@@ -202,6 +264,11 @@ class Store(Protocol):
 
     def read_transitions(self, query: TransitionQuery) -> TransitionRead:
         """One read of the `transitions` rows in a single read transaction (DL-536)."""
+        ...
+
+    def read_history(self, query: HistoryQuery) -> HistoryRead:
+        """One page of a job's past runs and their evidence, in a single read transaction
+        (DL-540)."""
         ...
 
     def cover_transitions(self, intervals: Sequence[Interval]) -> None:
@@ -432,6 +499,154 @@ def _merged(coverage: list[Interval]) -> list[Interval]:
         else:
             joined.append(interval)
     return joined
+
+
+# ------------------------------------------------------------------ the history read (DL-540)
+
+#: The trace marker an update's application leaves, a row with no job (`runner_journal`): the
+#: entries after it run under the rev it names, so a page's fold reads every mark in its range.
+_CONFIG_MARK: Final[str] = "CONFIG"
+
+
+class _HistoryRows(Protocol):
+    """The statements one history read is made of, each inside the read's one transaction."""
+
+    def first_seq(self) -> int: ...
+
+    def history_coverage(self) -> list[Interval]: ...
+
+    def histories(self) -> list[tuple[str, int]]: ...
+
+    def get_config(self, rev: int) -> bytes: ...
+
+    def _go_on(self) -> None: ...
+
+    def _stamp_of(self, seq: int) -> datetime | None:
+        """The stamp of the record at `seq`, None when none is retained."""
+        ...
+
+    def _openings(
+        self, job: str, floor: int, upto: int, below: int | None, count: int
+    ) -> list[tuple[int, int, int, int]]:
+        """At most `count` openings `(seq, n, run_number, rev)` of `job` from seq `floor` to
+        `upto`, below run `below`, by run number newest first, then by key."""
+        ...
+
+    def _lowest_run(self, job: str, floor: int, upto: int) -> int | None:
+        """The lowest run number among the openings of `job` from seq `floor` to `upto`."""
+        ...
+
+    def _next_opening(self, job: str, run: int, upto: int) -> tuple[int, int, int] | None:
+        """The key and rev `(seq, n, rev)` of the opening of `job` with the next run number
+        above `run`, at or below `upto`."""
+        ...
+
+    def _entries(
+        self, job: str, low: tuple[int, int], high: tuple[int, int], cap: int
+    ) -> list[tuple[int, int, bytes]]:
+        """At most `cap` rows of `job` and CONFIG marks from key `low` up to `high`, excluded,
+        in key order."""
+        ...
+
+    def _owned(self, job: str, run: int, upto: int, cap: int) -> list[int]:
+        """The seqs of at most `cap` records the index names for `job`'s run `run`."""
+        ...
+
+    def _loose(self, job: str, low: int, high: int, cap: int) -> list[int]:
+        """The seqs of at most `cap` records the index names for `job` and no run, above `low`
+        and at or below `high`."""
+        ...
+
+    def _records(self, seqs: Sequence[int]) -> list[tuple[int, Record]]:
+        """The records at `seqs`, in seq order."""
+        ...
+
+
+def _read_history(rows: _HistoryRows, query: HistoryQuery) -> HistoryRead:
+    """One history page (`HistoryRead`), run by run, newest first. A page holds whole
+    admissions. A run's range runs from its opening's key through the entry of the next
+    opening, or past the watermark for the newest, so the fold sees when the next run began as
+    the whole fold does. Its evidence is the job's entries and the CONFIG marks in that range,
+    the records the index names for its run wherever they sit, and the records it names for the
+    job and no run above the opening's seq and up to one seq past the next opening's: entries
+    are keyed under their input's seq, so the input at an opening's own seq was admitted before
+    it opened, and its decision is the next record of its transaction (`Journal.admission`).
+    Every row read counts in the budget; one read for two runs counts for each."""
+    job, upto = query.job, query.upto
+    rows._go_on()
+    seen = HistoryRead(histories=rows.histories(), first_seq=rows.first_seq())
+    reach = next(
+        (i for i in rows.history_coverage() if i.covered and i.first <= upto <= i.last), None
+    )
+    if reach is None:
+        return seen
+    floor = reach.first
+    rows._go_on()
+    found = rows._openings(job, floor, upto, query.cursor, query.limit + 1)
+    base = HistoryRead(
+        histories=seen.histories,
+        first_seq=seen.first_seq,
+        boundary=floor,
+        boundary_at=rows._stamp_of(floor),
+        first_full=rows._lowest_run(job, floor, upto),
+    )
+    for newer, older in zip(found, found[1:], strict=False):
+        if newer[2] == older[2]:  # ordered by number: a number shown twice is adjacent
+            return dataclasses.replace(base, duplicate=newer[2])
+    page = found[: query.limit]
+    taken: list[HistoryRun] = []
+    entries: dict[tuple[int, int], bytes] = {}
+    owned: list[int] = []
+    loose: set[int] = set()
+    left = query.budget
+    incomplete: HistoryRun | None = None
+    rest: list[tuple[int, int, int, int]] = []
+    for at, (seq, n, number, rev) in enumerate(page):
+        rows._go_on()
+        above = rows._next_opening(job, number, upto)
+        high = (upto + 1, 0) if above is None else (above[0], above[1] + 1)
+        last = upto if above is None else min(above[0] + 1, upto)
+        run_entries = rows._entries(job, (seq, n), high, left + 1)
+        run_owned = rows._owned(job, number, upto, max(left + 1 - len(run_entries), 0))
+        run_loose = rows._loose(
+            job, seq, last, max(left + 1 - len(run_entries) - len(run_owned), 0)
+        )
+        used = len(run_entries) + len(run_owned) + len(run_loose)
+        until = None if above is None else (above[0], above[1])
+        run = HistoryRun(seq, n, number, rev, until, None if above is None else above[2])
+        if used > left:
+            if not taken:
+                incomplete, rest = run, page[at + 1 :]
+            else:
+                rest = page[at:]
+            break
+        left -= used
+        taken.append(run)
+        entries.update({(e_seq, e_n): entry for e_seq, e_n, entry in run_entries})
+        owned.extend(run_owned)
+        loose.update(run_loose)
+    rows._go_on()
+    configs: dict[int, bytes | None] = {}
+    revs = [run.rev for run in taken]
+    if taken and taken[0].until_rev is not None:
+        revs.append(taken[0].until_rev)
+    for wanted in revs:
+        if wanted not in configs:
+            try:
+                configs[wanted] = rows.get_config(wanted)
+            except KeyError:
+                configs[wanted] = None
+    rows._go_on()
+    return dataclasses.replace(
+        base,
+        runs=taken,
+        incomplete=incomplete,
+        more=bool(rest) or len(found) > query.limit,
+        entries=[(key[0], key[1], dict(_decode_payload(entries[key]))) for key in sorted(entries)],
+        owned=rows._records(sorted(owned)),
+        loose=rows._records(sorted(loose)),
+        configs=configs,
+    )
 
 
 # ------------------------------------------------------------------ memory
@@ -676,6 +891,70 @@ class MemoryStore:
         self._job_runs = [row for row in self._job_runs if first <= row[0] <= last]
         self._job_records = [row for row in self._job_records if first <= row[0] <= last]
         self._history_coverage = _trimmed(self._history_coverage, first, last)
+
+    # ---- the history read (DL-540)
+
+    def read_history(self, query: HistoryQuery) -> HistoryRead:
+        return _read_history(self, query)
+
+    def _go_on(self) -> None:
+        return None  # the read runs on the loop, with nothing to stop it between steps
+
+    def _stamp_of(self, seq: int) -> datetime | None:
+        found = self._records([seq])
+        return found[0][1].at_utc if found else None
+
+    def _openings(
+        self, job: str, floor: int, upto: int, below: int | None, count: int
+    ) -> list[tuple[int, int, int, int]]:
+        found = [
+            (seq, n, run, rev)
+            for seq, n, owner, run, rev in self._job_runs
+            if owner == job and floor <= seq <= upto and (below is None or run < below)
+        ]
+        return sorted(found, key=lambda row: (-row[2], -row[0], -row[1]))[:count]
+
+    def _lowest_run(self, job: str, floor: int, upto: int) -> int | None:
+        found = self._openings(job, floor, upto, None, len(self._job_runs))
+        return found[-1][2] if found else None
+
+    def _next_opening(self, job: str, run: int, upto: int) -> tuple[int, int, int] | None:
+        above = [
+            (number, seq, n, rev)
+            for seq, n, owner, number, rev in self._job_runs
+            if owner == job and number > run and seq <= upto
+        ]
+        return min(above)[1:] if above else None
+
+    def _entries(
+        self, job: str, low: tuple[int, int], high: tuple[int, int], cap: int
+    ) -> list[tuple[int, int, bytes]]:
+        start = bisect.bisect_left(self._transitions, low, key=_key)
+        found: list[tuple[int, int, bytes]] = []
+        for seq, n, row in self._transitions[start:]:
+            if (seq, n) >= high or len(found) >= cap:
+                break
+            if row.job == job or (row.job == "" and row.transition == _CONFIG_MARK):
+                found.append((seq, n, row.entry))
+        return found
+
+    def _owned(self, job: str, run: int, upto: int, cap: int) -> list[int]:
+        return [
+            seq
+            for seq, owner, number in self._job_records
+            if owner == job and number == run and seq <= upto
+        ][:cap]
+
+    def _loose(self, job: str, low: int, high: int, cap: int) -> list[int]:
+        return [
+            seq
+            for seq, owner, number in self._job_records
+            if owner == job and number is None and low < seq <= high
+        ][:cap]
+
+    def _records(self, seqs: Sequence[int]) -> list[tuple[int, Record]]:
+        wanted = set(seqs)
+        return [(entry.seq, _record(entry.row)) for entry in self._rows if entry.seq in wanted]
 
 
 def _key(row: tuple[int, int, object]) -> tuple[int, int]:
@@ -1286,6 +1565,111 @@ class SqliteStore:
             self._db.execute(f"DELETE FROM {table} WHERE seq < ?", (first,))
             self._db.execute(f"DELETE FROM {table} WHERE seq > ?", (last,))
         self._set_coverage("history_coverage", _trimmed(self.history_coverage(), first, last))
+
+    # ---- the history read (DL-540)
+
+    def read_history(self, query: HistoryQuery) -> HistoryRead:
+        """One read transaction, as `read_transitions`: it holds no lock a writer waits on
+        (WAL), every part is read at the same point, and an interrupt stops it at its next
+        step. Each statement searches one index from one end of its key range."""
+        self._db.execute("BEGIN")
+        try:
+            return _read_history(self, query)
+        finally:
+            self._db.execute("COMMIT")
+
+    def _stamp_of(self, seq: int) -> datetime | None:
+        row = self._db.execute("SELECT at_utc FROM journal WHERE seq = ?", (seq,)).fetchone()
+        return None if row is None else _unstamp(row[0])
+
+    def _openings(
+        self, job: str, floor: int, upto: int, below: int | None, count: int
+    ) -> list[tuple[int, int, int, int]]:
+        under = "" if below is None else " AND run_number < ?"
+        return [
+            (int(seq), int(n), int(run), int(rev))
+            for seq, n, run, rev in self._db.execute(
+                "SELECT seq, n, run_number, rev FROM job_runs INDEXED BY job_runs_job"
+                f" WHERE job = ?{under} AND seq >= ? AND seq <= ?"
+                " ORDER BY run_number DESC, seq DESC, n DESC LIMIT ?",
+                (job, *(() if below is None else (below,)), floor, upto, count),
+            )
+        ]
+
+    def _lowest_run(self, job: str, floor: int, upto: int) -> int | None:
+        row = self._db.execute(
+            "SELECT run_number FROM job_runs INDEXED BY job_runs_job"
+            " WHERE job = ? AND seq >= ? AND seq <= ? ORDER BY run_number LIMIT 1",
+            (job, floor, upto),
+        ).fetchone()
+        return None if row is None else int(row[0])
+
+    def _next_opening(self, job: str, run: int, upto: int) -> tuple[int, int, int] | None:
+        row = self._db.execute(
+            "SELECT seq, n, rev FROM job_runs INDEXED BY job_runs_job"
+            " WHERE job = ? AND run_number > ? AND seq <= ? ORDER BY run_number, seq, n LIMIT 1",
+            (job, run, upto),
+        ).fetchone()
+        return None if row is None else (int(row[0]), int(row[1]), int(row[2]))
+
+    def _entries(
+        self, job: str, low: tuple[int, int], high: tuple[int, int], cap: int
+    ) -> list[tuple[int, int, bytes]]:
+        found = [
+            (int(seq), int(n), bytes(entry))
+            for statement, params in (
+                (
+                    "SELECT seq, n, entry FROM transitions INDEXED BY transitions_job"
+                    " WHERE job = ? AND (seq, n) >= (?, ?) AND (seq, n) < (?, ?)",
+                    (job,),
+                ),
+                (
+                    "SELECT seq, n, entry FROM transitions INDEXED BY transitions_job_transition"
+                    " WHERE job = '' AND transition = ? AND (seq, n) >= (?, ?) AND (seq, n) < (?, ?)",
+                    (_CONFIG_MARK,),
+                ),
+            )
+            for seq, n, entry in self._db.execute(
+                f"{statement} ORDER BY seq, n LIMIT ?", (*params, *low, *high, cap)
+            )
+        ]
+        return sorted(found)[:cap]
+
+    def _owned(self, job: str, run: int, upto: int, cap: int) -> list[int]:
+        return [
+            int(seq)
+            for (seq,) in self._db.execute(
+                "SELECT seq FROM job_records INDEXED BY job_records_job"
+                " WHERE job = ? AND run_number = ? AND seq <= ? ORDER BY seq LIMIT ?",
+                (job, run, upto, cap),
+            )
+        ]
+
+    def _loose(self, job: str, low: int, high: int, cap: int) -> list[int]:
+        return [
+            int(seq)
+            for (seq,) in self._db.execute(
+                "SELECT seq FROM job_records INDEXED BY job_records_job"
+                " WHERE job = ? AND run_number IS NULL AND seq > ? AND seq <= ?"
+                " ORDER BY seq LIMIT ?",
+                (job, low, high, cap),
+            )
+        ]
+
+    def _records(self, seqs: Sequence[int]) -> list[tuple[int, Record]]:
+        found: list[tuple[int, Record]] = []
+        for start in range(0, len(seqs), _CHUNK):
+            chunk = list(seqs[start : start + _CHUNK])
+            self._go_on()
+            marks = ", ".join("?" * len(chunk))
+            for seq, at, kind, actor, request_id, payload in self._db.execute(
+                "SELECT seq, at_utc, kind, actor, request_id, payload FROM journal"
+                f" WHERE seq IN ({marks}) ORDER BY seq",
+                chunk,
+            ):
+                record = Record(_unstamp(at), kind, actor, request_id, _decode_payload(payload))
+                found.append((int(seq), record))
+        return found
 
 
 class _Transaction:

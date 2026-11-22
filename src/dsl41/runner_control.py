@@ -116,13 +116,19 @@ from dsl41.runner_admission import (
 )
 from dsl41.runner_clock import EngineError
 from dsl41.runner_codes import UNKNOWN_OUTCOME_CODES, Code
-from dsl41.runner_journal import best_effort_report, read_backfill
+from dsl41.runner_journal import Journal, best_effort_report, read_backfill
 from dsl41.reload_diff import catalog_hash_v2, catalog_payload
 from dsl41.reload_update import Admitted, Refused
 from dsl41.runner_config import EngineSettings
 from dsl41.reload_plan import spec_texts
 from dsl41.runner_update import APPLICATION_KEYS, OpenedPlan, UpdateRequest, UpdateAnswer
 from dsl41.runner_store import SqliteStore, Store
+from dsl41.runner_runs import BUDGET as HISTORY_BUDGET
+from dsl41.runner_runs import REPLY_BYTES as HISTORY_REPLY_BYTES
+from dsl41.runner_runs import Declined as HistoryDeclined
+from dsl41.runner_runs import Restored
+from dsl41.runner_runs import answer as history_answer
+from dsl41.runner_runs import parse as history_parse
 from dsl41.runner_transitions import REPLY_BYTES as TRANSITIONS_REPLY_BYTES
 from dsl41.runner_transitions import AnswerTooLarge
 from dsl41.runner_transitions import answer as transitions_answer
@@ -344,7 +350,7 @@ class _StoreRead:
             if left <= 0:
                 done.add_done_callback(_retrieved)
                 best_effort_report(
-                    f"dsl41: WARNING: {self._path}: a transitions read did not stop within"
+                    f"dsl41: WARNING: {self._path}: a store read did not stop within"
                     f" {self._deadline_s}s; the shutdown goes on without it (DL-536)"
                 )
                 return
@@ -427,7 +433,7 @@ class ControlServer:
     client hangs up.
 
     Every request names v5 (DL-498). Queries: status [job], trace [since], transitions,
-    explain job, spec job, deps job, timers, plan, global name, globals names; and
+    history job, explain job, spec job, deps job, timers, plan, global name, globals names; and
     subscribe [since]. An answer that passed routing and the lineage proof carries the
     concurrency-model ss6 read header (`baseline_id`, `applied_index`), so a
     client can tell which log a revision was read from. Everything sent BEFORE routing is
@@ -501,6 +507,10 @@ class ControlServer:
         self.subscriber_budget = SUBSCRIBER_BACKLOG_BYTES
         #: the byte cap of one whole `transitions` answer (ss4); tests lower it
         self.transitions_bytes = TRANSITIONS_REPLY_BYTES
+        #: the byte cap of one whole `history` answer and the evidence rows one read may take
+        #: (ss4, DL-540); tests lower them
+        self.history_bytes = HISTORY_REPLY_BYTES
+        self.history_budget = HISTORY_BUDGET
         #: the store reads in flight, each stopped and joined before `close` returns (DL-536)
         self._reads: set[_StoreRead] = set()
         #: how long `close` waits for a stopped read's thread before it goes on (DL-536)
@@ -811,6 +821,8 @@ class ControlServer:
             return self._trace(request)
         if cmd == "transitions":
             return await self._transitions(request)
+        if cmd == "history":
+            return await self._history(request)
         if cmd == "explain":
             return self._explain(request)
         if cmd == "spec":
@@ -1403,14 +1415,68 @@ class ControlServer:
             return transitions_answer(store, parsed, header=header, byte_cap=cap, stopped=stopped)
 
         try:
-            if journal.path is None:  # a rehearsal's store lives in this process
-                return work(journal.store, lambda: False)
-            read = _StoreRead(journal.path, work, deadline_s=self.read_deadline_s)
-            self._reads.add(read)
-            try:
-                return await read.run()
-            finally:
-                self._reads.discard(read)
+            return await self._read_store(journal, work)
+        except AnswerTooLarge as exc:
+            return _failure("invalid_argument", str(exc))
+
+    async def _read_store(
+        self, journal: Journal, work: Callable[[Store, Callable[[], bool]], dict[str, Any]]
+    ) -> dict[str, Any]:
+        """`work` over the run root's store on a thread and a read-only connection of its own
+        (`_StoreRead`), or in process over a rehearsal's (DL-536)."""
+        if journal.path is None:  # a rehearsal's store lives in this process
+            return work(journal.store, lambda: False)
+        read = _StoreRead(journal.path, work, deadline_s=self.read_deadline_s)
+        self._reads.add(read)
+        try:
+            return await read.run()
+        finally:
+            self._reads.discard(read)
+
+    async def _history(self, request: dict[str, Any]) -> dict[str, Any]:
+        """A job's past runs, one page (DL-540), read as `transitions` is: off the loop, in one
+        read transaction, bounded by the watermark this step takes. The loop hands over the
+        job's restored windows and the seq of the snapshot they came from (control-protocol
+        ss4 `history`)."""
+        journal = self.engine.journal
+        if journal is None:
+            return _failure("no_journal", "this run has no store to read past runs from")
+        if journal.transitions_declined is not None:
+            return _failure("transitions_unavailable", journal.transitions_declined)
+        if journal.history_declined is not None:
+            return _failure("history_unavailable", journal.history_declined)
+        parsed = history_parse(request)
+        if isinstance(parsed, str):
+            return _failure("invalid_argument", parsed)
+        upto = journal.last_seq
+        last_at = journal.position.last_at
+        header = {
+            "ok": True,
+            "baseline_id": self.engine.baseline_id,
+            "applied_index": self.engine.frontiers.applied_index,
+            "watermark": upto,
+            "as_of": None if last_at is None else last_at.isoformat(),
+        }
+        # the engine's own list, handed over as it is: nothing changes it in place (DL-540)
+        restored = Restored(self.engine.restored_seq, self.engine.restored_runs.get(parsed.job, []))
+        cap, budget = self.history_bytes, self.history_budget
+
+        def work(store: Store, stopped: Callable[[], bool]) -> dict[str, Any]:
+            return history_answer(
+                store,
+                parsed,
+                upto=upto,
+                header=header,
+                restored=restored,
+                budget=budget,
+                byte_cap=cap,
+                stopped=stopped,
+            )
+
+        try:
+            return await self._read_store(journal, work)
+        except HistoryDeclined as exc:
+            return _failure("history_unavailable", str(exc))
         except AnswerTooLarge as exc:
             return _failure("invalid_argument", str(exc))
 

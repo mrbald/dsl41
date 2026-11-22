@@ -1876,10 +1876,10 @@ def test_query_transitions_pages_newest_first_with_its_own_options(
         (("transitions", "--cursor", "41"), "--cursor '41' is not SEQ:N"),
         (("transitions", "--cursor", "4²:1"), "is not SEQ:N"),
         (("transitions", "j"), "JOB applies to status only"),
-        (("trace", "--limit", "3"), "--limit applies to transitions only"),
+        (("trace", "--limit", "3"), "--limit applies to transitions and history"),
         (("trace", "--forward"), "--forward applies to transitions only"),
         (("status", "--transition", "X"), "--transition applies to transitions only"),
-        (("trace", "--cursor", "1:0"), "--cursor applies to transitions only"),
+        (("trace", "--cursor", "1:0"), "--cursor applies to transitions and history"),
     ],
 )
 def test_query_refuses_by_name_every_option_a_query_does_not_take(

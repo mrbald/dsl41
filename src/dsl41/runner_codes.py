@@ -33,6 +33,9 @@ Code = Literal[
     "unknown_job",
     # `transitions` when the start could not settle the rows (DL-536)
     "transitions_unavailable",
+    # `history` when the start could not settle the history index, or a page shows a run
+    # number twice or names a rev the store holds no configuration for (DL-540)
+    "history_unavailable",
     # subscribe
     "no_journal",
     "backfill_refused",

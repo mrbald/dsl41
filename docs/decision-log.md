@@ -27714,3 +27714,42 @@ relitigate an entry; append a new one.
   `status` carries `history_unavailable` with the reason.
   NOT BUILT. No verb reads the index yet; the read (`history`) is the next change. A STATUS
   event's `run_number` is still not checked to be a plain integer (BUG-109).
+- DL-540 The `history` query answers a job's past runs in bounded pages
+  (2026-11-22; the read half of a job's past runs;
+  src/dsl41/runner_runs.py, src/dsl41/runner_store.py, src/dsl41/runner_control.py,
+  src/dsl41/runner_access.py, src/dsl41/runner_codes.py, src/dsl41/cli_control.py,
+  docs/control-protocol.md, docs/protocol-evolution.md, docs/access-model.md,
+  docs/runner-design.md, tests/test_history_verb.py; builds on DL-113, DL-536, DL-537 and
+  DL-539; additive in dialect 5, DL-217; no state-machine version change; no store write)
+  THE RULE. `history {job, limit, cursor}` is a read-tier query, read as `transitions` is:
+  off the engine's loop, on a read-only connection, in one read transaction, bounded by a
+  watermark. A page is the job's newest run openings below the cursor. The history index
+  (DL-539) finds the page's evidence: the job's stored trace entries and the CONFIG marks
+  from the page's oldest opening through the entry of the opening above it, the records the
+  index names for each run wherever they sit, and the configuration of each opening's rev.
+  A page holds whole admissions: a STATUS input that names no run belongs to it when the
+  oldest opening's seq < its seq <= the next opening's seq, and its decision goes with it.
+  The run-history fold (DL-113), unchanged, makes the rows. Each run also shows its
+  attempts: each `dispatch` with its `outcome`, or none recorded.
+  THE PROMISE. Full rows come only from the interval the index covers up to the watermark;
+  `full_from` names its start and nothing is joined across a gap. A run opened there has
+  the row the offline fold gives over the whole journal with no spool. One exception: a
+  STATUS with no run number, admitted after the next run opened, at a time no later than
+  that opening and before that run's dispatch, when the two runs are on different pages.
+  The fold attributes such a STATUS by trace time, so a page's trace reaches the next
+  opening: the fold must see that a later run began, and when.
+  EARLIER. Once the full rows are read, the answer holds the run windows the snapshot of the
+  last restart recorded for the job, as recorded, and the seqs between that snapshot and
+  `full_from`, where a run may have opened that neither list holds.
+  BOUNDS. 20 openings by default, 200 at most; 20000 rows of evidence per request; 50
+  attempts per run; one mebibyte per answer. A run too large alone is named as incomplete
+  and the cursor passes it. Every answer with more to read moves the cursor.
+  REFUSALS. `history_unavailable`, with the reason: the start could not settle the index; a
+  page shows one run number twice; a run opened under a rev the store holds no configuration
+  for. No other configuration stands in.
+  COST. One fact kept by the engine for readers, the seq of the snapshot it restarted from,
+  and up to 16 decoded configurations kept by content for the next requests. No decision
+  reads either. A record an earlier build appended in a gap of the index is not read, even
+  when it names a run that opened after the gap.
+  NOT BUILT. The terminal UI's pane of past runs. On a pruned root the offline fold can read
+  a run under an older rev than this query does (BUG-110).

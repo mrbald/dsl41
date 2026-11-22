@@ -585,6 +585,9 @@ def _resume_hint(cursor: int | None) -> str:
 #: The entries `query transitions` asks for when it names no `--limit`.
 _PAGE: Final = 50
 
+#: The queries that page with `--limit` and `--cursor`.
+_PAGED: Final = ("transitions", "history")
+
 
 def _check_paging(
     verb: str,
@@ -595,22 +598,22 @@ def _check_paging(
     cursor: bool,
     forward: bool,
 ) -> None:
-    """Refuse, by name, a `transitions` option given to another query, and an option of
-    another query given to `transitions`: none is ignored."""
+    """Refuse, by name, a paging option given to a query that does not page, and an option of
+    another query given to `transitions` or `history`: none is ignored."""
     given = {
         "--transition": transition is not None,
         "--limit": limit is not None,
         "--cursor": cursor,
         "--forward": forward,
     }
-    named = next((option for option, there in given.items() if there), None)
-    if verb != "transitions" and named is not None:
-        raise typer.Exit(refuse(f"{named} applies to transitions only"))
-    if verb == "transitions" and since:
-        raise typer.Exit(
-            refuse("--since applies to trace and subscribe; transitions takes --cursor")
-        )
-    if verb == "transitions" and name:
+    for option, there in given.items():
+        if there and option in ("--transition", "--forward") and verb != "transitions":
+            raise typer.Exit(refuse(f"{option} applies to transitions only"))
+        if there and verb not in _PAGED:
+            raise typer.Exit(refuse(f"{option} applies to transitions and history"))
+    if verb in _PAGED and since:
+        raise typer.Exit(refuse(f"--since applies to trace and subscribe; {verb} takes --cursor"))
+    if verb in _PAGED and name:
         raise typer.Exit(refuse("--name applies to global and globals"))
 
 
@@ -632,6 +635,24 @@ def _transitions_request(
     return fields
 
 
+def _history_request(job: str | None, limit: int | None, cursor: str | None) -> dict[str, Any]:
+    """The `history` fields of `query history`: the server's page size unless `--limit`
+    (DL-540)."""
+    if job is None:
+        raise typer.Exit(refuse("history requires --job"))
+    fields: dict[str, Any] = {}
+    if limit is not None:
+        fields["limit"] = limit
+    if cursor is not None:
+        try:
+            if not (cursor.isascii() and cursor.isdigit()):
+                raise ValueError(cursor)
+            fields["cursor"] = int(cursor)
+        except ValueError:  # a number past the interpreter's digit limit too
+            raise typer.Exit(refuse(f"--cursor {cursor[:40]!r} is not a run number")) from None
+    return fields
+
+
 def query(
     ctx: typer.Context,
     what: str = typer.Argument(
@@ -650,7 +671,7 @@ def query(
         "-J",
         help=(
             "status: only this job. explain, spec, deps, is-success, is-failed: the job to query."
-            " transitions: only this job's entries."
+            " transitions: only this job's entries. history: the job whose past runs to read."
         ),
     ),
     name: list[str] = typer.Option(
@@ -671,13 +692,22 @@ def query(
         None, "--transition", help="transitions: only entries of this transition."
     ),
     limit: int = typer.Option(
-        None, "--limit", min=0, help=f"transitions: at most this many entries (default {_PAGE})."
+        None,
+        "--limit",
+        min=0,
+        help=(
+            f"transitions: at most this many entries (default {_PAGE})."
+            " history: at most this many runs (default 20)."
+        ),
     ),
     cursor: str = typer.Option(
         None,
         "--cursor",
-        metavar="SEQ:N",
-        help="transitions: continue after (with --forward) or before this entry key.",
+        metavar="SEQ:N|RUN",
+        help=(
+            "transitions: continue after (with --forward) or before this entry key SEQ:N."
+            " history: continue below this run number."
+        ),
     ),
     forward: bool = typer.Option(
         False, "--forward", help="transitions: page oldest first instead of newest first."
@@ -751,6 +781,8 @@ def query(
         request["job"] = job
     if verb == "transitions":
         request |= _transitions_request(transition, limit, cursor, forward)
+    if verb == "history":
+        request |= _history_request(job, limit, cursor)
     if since is not None:
         request["since"] = since
     if name:
