@@ -27782,3 +27782,32 @@ relitigate an entry; append a new one.
   stays: an engine child between fork and exec holds the lifeline's write end for a moment.
   REJECTED. Keeping the order and reading the lifeline a second time after an exit: the same
   outcomes with one more read, and "the lifeline is read first" true only in letter.
+- DL-543 Pruning takes one bounded step at a time; snapshot cleanup commits on its own
+  (2026-11-23; first step of the archive database, FEAT-50;
+  src/dsl41/runner_store.py, src/dsl41/runner.py, docs/runner-design.md,
+  tests/test_prune_steps.py, tests/retention.py; narrows spec-wiring 1b's single prune
+  transaction; no state-machine version change; schema version stays 1)
+  THE RULE. Three store operations replace the one prune. `prune_snapshots` deletes every
+  snapshot but the latest two, in its own transaction. `prune_bound` reads the seq
+  retention may prune below: the least of the floor of open work, the latest snapshot's seq
+  and the first seq inside the retention window. `prune_step` deletes at most `PRUNE_STEP`
+  (2000) of the oldest journal rows below that bound, with their derived rows and coverage,
+  in one transaction, and says the highest decision index it deleted. After each snapshot
+  the engine cleans up, reads the bound and takes one step. While rows below the bound
+  remain, pruning is owed: the loop takes one more step only when nothing is due, and
+  yields to every other task before and after it, so no ready task waits behind two steps.
+  Each step proves the run root's lock first. A step with nothing below its bound writes
+  nothing. The decision cache is evicted below the index the step names.
+  WHY. One transaction on the engine's loop removed everything prunable. After downtime, a
+  lowered retention or a stopped archive that is a large delete in front of every admission
+  and every client. The archive will delete only what it has verified, a batch at a time,
+  and needs the three operations apart.
+  UNCHANGED. What is prunable, `retention_days`, the snapshot, the store's layout and every
+  engine decision. The kept rows are one unbroken range after every step. In steady state a
+  round still deletes the few minutes of rows that crossed the retention line, in one step.
+  The build before this one opens and prunes a root this build wrote.
+  COST. `PRUNE_STEP` counts journal rows; their derived rows go with them and are not
+  counted. An owed bound is the one read at the last snapshot: the floor and the latest
+  snapshot only move up, so an older bound is the more careful one. A restart forgets what
+  is owed and its next snapshot reads a new bound. The stop drain takes no owed step.
+  NOT BUILT. The archive database and its worker (FEAT-50).

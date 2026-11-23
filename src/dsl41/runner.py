@@ -200,7 +200,7 @@ from dsl41.runner_journal import (
 from dsl41.runner_history import run_history
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, Proof
 from dsl41.runner_procid import COOKIE_ENV, cookie, current_boot_id, invocation_tag
-from dsl41.runner_store import Record, Store
+from dsl41.runner_store import Record
 from dsl41.runner_scheduler import Scheduler
 from dsl41.runner_update import EngineUpdate, UpdateAnswer, UpdateRequest, now_of
 from dsl41.runner_stops import (
@@ -220,6 +220,11 @@ from dsl41.timezones import alias_table
 #: frontier-rule docstring): `max(INSTANT_BUDGET_FLOOR, 100 * len(catalog.jobs))`. A module
 #: constant so tests can lower it without a new `rehearse_check` parameter (DL-211).
 INSTANT_BUDGET_FLOOR: Final = 10_000
+
+#: the most journal rows one prune step deletes; their derived rows go with them and are not
+#: counted. The loop takes a backlog's steps one at a time when nothing is due, so no ready task
+#: waits behind two (DL-543). A module constant so tests can lower it.
+PRUNE_STEP: Final = 2000
 
 
 @dataclass
@@ -557,6 +562,10 @@ class Engine:
         #: the clock instant and journal seq of the last snapshot this engine took
         self._snapshot_at: datetime | None = None
         self._snapshot_seq = 0
+        #: the prune bound of the last snapshot while journal rows below it remain: the loop
+        #: takes one more step against it each time nothing is due (DL-543). Not stored: a
+        #: restart's next snapshot reads a bound of its own
+        self._prune_owed: int | None = None
         #: the run history the snapshot this engine restarted from carried; each snapshot
         #: continues it with the trace since (`runner_history.run_history`)
         self.restored_runs: dict[str, list[dict[str, Any]]] = {}
@@ -1765,6 +1774,18 @@ class Engine:
                 # loses one
                 self._finish_recovery()
                 continue  # dispatch is not same-instant work: skip the budget
+            if self._owed_step() is not None and work.do in (_Do.QUIESCE, _Do.WAIT):
+                # nothing is due, so no admission is in progress: one owed step, with a turn for
+                # every other task before and after it, so no ready task waits behind two steps
+                # and an idle engine drains its backlog without spinning. An input that becomes
+                # due during the first turn is applied after this one step (DL-543)
+                await asyncio.sleep(0)
+                # a report in that turn may have begun a stop drain or deferred a start
+                owed = self._owed_step()
+                if owed is not None:
+                    self._prune_step(owed)
+                    await asyncio.sleep(0)
+                continue  # a prune step is not same-instant work: skip the budget
             if work.do is _Do.EVENT:
                 _, _, pending = heapq.heappop(self._queue)
                 if pending.control is not None:
@@ -2567,10 +2588,19 @@ class Engine:
         if now - self._snapshot_at >= interval and self.journal.last_seq > self._snapshot_seq:
             self.take_snapshot()
 
+    def _owed_step(self) -> int | None:
+        """The bound of the prune step the loop owes and may take now: at an applied boundary,
+        not recovering and not in the stop drain (DL-543)."""
+        if self._prune_owed is None or not self.at_applied_boundary or self.draining:
+            return None
+        return self._prune_owed
+
     def take_snapshot(self) -> int:
         """Snapshot the engine at the journal's last seq, then prune behind it (spec-wiring 1b):
+        every snapshot but the latest two goes, then one step of at most `PRUNE_STEP` rows
         below `min(snapshot seq, the oldest seq the open table refers to)` and older than
-        `retention_days`. Answers the snapshot's seq."""
+        `retention_days`; a longer backlog is owed to the loop, which takes it a step at a time
+        when nothing else is due (DL-543). Answers the snapshot's seq."""
         assert self.journal is not None
         journal = self.journal
         journal.prove()  # an engine that lost the root writes no snapshot (S6b)
@@ -2600,29 +2630,36 @@ class Engine:
         self._snapshot_at = wall
         self._snapshot_seq = seq
         if self.settings is not None:
+            # the cleanup commits on its own, so a step that raises leaves it done (DL-543)
+            journal.store.prune_snapshots()
             floor = min(seq, journal.open.floor() or seq)
             cutoff = now - timedelta(days=self.settings.retention_days)
-            if journal.store.prune_before(floor, cutoff):
-                # a pruned request id is free again: retention is the one authority for retry
-                # and reuse, before and after a restart (spec-journal)
-                retained = _first_decision_index(journal.store, self.frontiers.committed_index + 1)
-                self.decisions.evict_below(retained)
+            bound = journal.store.prune_bound(floor, cutoff)
+            assert bound is not None  # the snapshot above is stored
+            self._prune_step(bound)
         return seq
+
+    def _prune_step(self, bound: int) -> None:
+        """One prune step of at most `PRUNE_STEP` journal rows below `bound`, once the run
+        root's lock is proved (S6b); pruning stays owed while rows below it remain (DL-543)."""
+        assert self.journal is not None
+        self.journal.prove()  # an engine that lost the root deletes nothing (S6b)
+        store = self.journal.store
+        self._prune_owed = None
+        pruned = store.prune_step(bound, PRUNE_STEP)
+        if pruned.decision is not None:
+            # a pruned request id is free again: retention is the one authority for retry and
+            # reuse, before and after a restart (spec-journal). Decisions go in index order, so
+            # every decision up to the step's highest went with it (DL-543)
+            self.decisions.evict_below(pruned.decision + 1)
+        if store.first_seq() < bound:
+            self._prune_owed = bound
 
 
 def _names_tombstone(oracle: Oracle, attempt: Attempt) -> bool:
     """Whether the input names a job an update removed (its tombstone is no row)."""
     named = attempt.payload.get("job")
     return isinstance(named, str) and named in oracle.store.tombstones
-
-
-def _first_decision_index(store: Store, otherwise: int) -> int:
-    """The index of the oldest decision the store retains, or `otherwise` when it retains none:
-    every decision below it was pruned."""
-    for _, record in store.read_from(0):
-        if record.kind == "decision":
-            return int(record.payload["index"])
-    return otherwise
 
 
 def outcome_kind(result: object) -> str:

@@ -24,6 +24,7 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from nightbank_props import compute_properties, write_kv
+from retention import prune
 from sealed_state import SealedState, _canon_ready
 
 from dsl41.ast_jil import parse
@@ -173,7 +174,7 @@ def test_read_from_follows_a_prune_during_the_read(kind: str, tmp_path: Path) ->
         store.put_snapshot(8, 1, b"s")
         reader = store.read_from(0)
         assert next(reader)[0] == 1
-        store.prune_before(8, T0 + timedelta(days=100))  # rows 1..7 go
+        prune(store, 8, T0 + timedelta(days=100))  # rows 1..7 go
         assert [s for s, _ in reader][-3:] == [8, 9, 10]
 
 
@@ -378,21 +379,23 @@ def test_a_snapshot_above_the_journal_is_refused(kind: str, tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize("kind", KINDS)
-def test_prune_before_keeps_the_snapshot_seq_and_what_is_newer(kind: str, tmp_path: Path) -> None:
+def test_a_prune_keeps_the_snapshot_seq_and_what_is_newer(kind: str, tmp_path: Path) -> None:
     with open_store(kind, tmp_path) as store:
         store.append(*(rec(n, request_id=f"r{n}", at=T0 + timedelta(days=n)) for n in range(1, 11)))
         store.put_snapshot(6, 1, b"state")
         store.put_config(b"cfg", "sha256:c")
         cutoff = T0 + timedelta(days=100)  # every row is older than this
         # the caller names a bound beyond the snapshot; the snapshot's seq still stands
-        assert store.prune_before(10, cutoff) == 5
+        assert store.prune_bound(10, cutoff) == 6
+        assert store.prune_step(6, 2000).deleted == 5
         assert [s for s, _ in store.read_from(0)] == [6, 7, 8, 9, 10]
         latest = store.latest_snapshot()
         assert latest is not None and latest.seq == 6
         assert store.find_request("r5") is None  # a pruned row's request id is free again
         assert store.find_request("r6") is not None
         assert store.get_config(1) == b"cfg"
-        assert store.prune_before(10, cutoff) == 0  # idempotent
+        again = store.prune_bound(10, cutoff)
+        assert again == 6 and store.prune_step(again, 2000).deleted == 0  # idempotent
         assert store.append(rec(11, request_id="r5")) == 11  # seqs are not reused
 
 
@@ -401,7 +404,7 @@ def test_a_pruned_seq_is_not_assigned_again(kind: str, tmp_path: Path) -> None:
     with open_store(kind, tmp_path) as store:
         store.append(*(rec(n, at=T0 + timedelta(days=n)) for n in range(1, 11)))
         store.put_snapshot(10, 1, b"s")
-        assert store.prune_before(10, T0 + timedelta(days=100)) == 9  # only row 10 is left
+        assert prune(store, 10, T0 + timedelta(days=100)) == 9  # only row 10 is left
         assert store.append(rec(11)) == 11
         assert [s for s, _ in store.read_from(0)] == [10, 11]
 
@@ -421,37 +424,97 @@ def test_sqlite_assigns_no_seq_twice_even_with_an_empty_journal(tmp_path: Path) 
 
 
 @pytest.mark.parametrize("kind", KINDS)
-def test_prune_before_honours_both_bounds(kind: str, tmp_path: Path) -> None:
+def test_the_prune_bound_takes_the_least_of_its_three_terms(kind: str, tmp_path: Path) -> None:
+    """Each term decides once: the caller's seq, the latest snapshot's seq, the first row inside
+    the window. The bound is a read: nothing is deleted (DL-543)."""
     with open_store(kind, tmp_path) as store:
         store.append(*(rec(n, at=T0 + timedelta(days=n)) for n in range(1, 11)))
         store.put_snapshot(9, 1, b"s")
-        # seq bound 4 wins: rows 1..3 go; age bound T0+days(2) wins over seq 9: only row 1 goes
-        assert store.prune_before(4, T0 + timedelta(days=100)) == 3
-        assert store.prune_before(9, T0 + timedelta(days=5)) == 1  # row 4 only (<5 days)
+        far = T0 + timedelta(days=100)
+        assert store.prune_bound(4, far) == 4  # the caller's seq
+        assert store.prune_bound(10, far) == 9  # the snapshot's seq
+        assert store.prune_bound(9, T0 + timedelta(days=5)) == 5  # row 5 is the first inside
+        assert store.first_seq() == 1 and store.latest_snapshot() is not None
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_prune_steps_honour_both_bounds(kind: str, tmp_path: Path) -> None:
+    with open_store(kind, tmp_path) as store:
+        store.append(*(rec(n, at=T0 + timedelta(days=n)) for n in range(1, 11)))
+        store.put_snapshot(9, 1, b"s")
+        # seq bound 4 wins: rows 1..3 go; age bound T0+days(5) wins over seq 9: row 4 goes
+        assert prune(store, 4, T0 + timedelta(days=100)) == 3
+        assert prune(store, 9, T0 + timedelta(days=5)) == 1  # row 4 only (<5 days)
         assert [s for s, _ in store.read_from(0)][:2] == [5, 6]
 
 
 @pytest.mark.parametrize("kind", KINDS)
-def test_prune_before_with_no_snapshot_deletes_no_journal_row(kind: str, tmp_path: Path) -> None:
+def test_with_no_snapshot_there_is_no_bound_and_no_journal_row_goes(
+    kind: str, tmp_path: Path
+) -> None:
     with open_store(kind, tmp_path) as store:
         store.append(*(rec(n) for n in range(1, 4)))
-        assert store.prune_before(3, T0 + timedelta(days=100)) == 0
-        assert store.last_seq() == 3
+        assert store.prune_bound(3, T0 + timedelta(days=100)) is None
+        assert prune(store, 3, T0 + timedelta(days=100)) == 0
+        assert store.last_seq() == 3 and store.first_seq() == 1
+
+
+def _snapshot_seqs(store: Store) -> list[int]:
+    """The snapshots held, by putting each seq again: a held one is refused."""
+    held = []
+    for seq in range(1, store.last_seq() + 1):
+        try:
+            store.put_snapshot(seq, 1, b"probe")
+        except StoreError:
+            held.append(seq)
+    return held
 
 
 @pytest.mark.parametrize("kind", KINDS)
-def test_prune_before_keeps_the_latest_two_snapshots(kind: str, tmp_path: Path) -> None:
+def test_the_snapshot_cleanup_keeps_the_latest_two(kind: str, tmp_path: Path) -> None:
     with open_store(kind, tmp_path) as store:
         store.append(*(rec(n) for n in range(1, 8)))
         for seq in (1, 2, 3, 5):
             store.put_snapshot(seq, 1, f"s{seq}".encode())
-        store.prune_before(1, T0)
+        store.prune_snapshots()
         # 1 and 2 are gone, so putting them again is allowed; 3 and 5 are kept
         store.put_snapshot(1, 1, b"back")
         store.put_snapshot(2, 1, b"back")
         for kept in (3, 5):
             with pytest.raises(StoreError):
                 store.put_snapshot(kept, 1, b"x")
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("step", ["nothing prunable", "raises"])
+def test_the_cleanup_does_not_depend_on_the_step(kind: str, step: str, tmp_path: Path) -> None:
+    """The cleanup keeps the latest two snapshots whether the step then deletes nothing or
+    raises; a step that raises deletes no row (DL-543)."""
+    with open_store(kind, tmp_path) as store:
+        store.append(*(rec(n) for n in range(1, 8)))
+        for seq in (2, 3, 5):
+            store.put_snapshot(seq, 1, b"s")
+        store.prune_snapshots()
+        bound = store.prune_bound(7, T0)  # every row is inside the window: row 1 binds
+        assert bound == 1
+        if step == "raises":
+            with pytest.raises(StoreError, match="at least 1"):
+                store.prune_step(5, 0)
+        else:
+            assert store.prune_step(bound, 2000).deleted == 0
+        assert store.first_seq() == 1
+        assert _snapshot_seqs(store) == [3, 5]
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_step_limit_below_one_is_refused(kind: str, tmp_path: Path) -> None:
+    with open_store(kind, tmp_path) as store:
+        store.append(*(rec(n) for n in range(1, 4)))
+        store.put_snapshot(3, 1, b"s")
+        for limit in (0, -1):
+            with pytest.raises(StoreError, match="at least 1"):
+                store.prune_step(3, limit)
+        assert store.first_seq() == 1
 
 
 # ------------------------------------------------------------------ sqlite only

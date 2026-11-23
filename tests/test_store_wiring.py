@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from retention import prune
 from store_surgery import append, rows
 from transitions_check import (  # noqa: F401 -- autouse
     rows_equal_their_replay,
@@ -887,7 +888,7 @@ def _prune_head(run_root: Path, below: int) -> None:
     from dsl41.runner_store import SqliteStore
 
     with closing(SqliteStore(run_root / "engine.db")) as store:
-        store.prune_before(below, datetime(2999, 1, 1))
+        prune(store, below, datetime(2999, 1, 1))
 
 
 def test_the_journal_verb_replays_a_pruned_store_from_its_latest_snapshot(tmp_path: Path) -> None:
@@ -977,7 +978,7 @@ def test_a_pruned_store_that_retains_no_input_still_sends_the_gap_marker() -> No
     assert engine.journal is not None
     store = engine.journal.store
     seq = engine.take_snapshot()
-    store.prune_before(seq, datetime(2999, 1, 1))
+    prune(store, seq, datetime(2999, 1, 1))
     assert all(record.kind != "input" for _, record in store.read_from(0))
     last = engine.frontiers.committed_index
     assert read_backfill(store, since=0, upto=store.last_seq()).gap_from == last + 1
@@ -998,7 +999,7 @@ def test_a_prune_reads_seqs_only_and_leaves_no_hole(tmp_path: Path, kind: str) -
     for at in (old, old, new, old, new, old):
         store.append(Record(at, "engine", None, None, {"event": "started", "at": at.isoformat()}))
     store.put_snapshot(6, 1, b"{}")
-    assert store.prune_before(6, T0 + timedelta(days=50)) == 2
+    assert prune(store, 6, T0 + timedelta(days=50)) == 2
     assert [seq for seq, _ in store.read_from(0)] == [3, 4, 5, 6]
     store.close()
 
@@ -1392,26 +1393,25 @@ def test_the_command_is_given_the_invocation_its_dispatch_record_holds(tmp_path:
 def test_a_pruned_store_with_no_usable_snapshot_is_refused_by_its_readers() -> None:
     """A pruned head with no snapshot breaks the pruner's rule, and a snapshot another state
     version wrote cannot anchor a replay: the backfill and a reader's replay refuse both by
-    name. With no decision retained, the pruner's eviction bound is the one past the last
-    admitted index."""
-    from dsl41.runner import _first_decision_index
+    name. A step that deletes no decision says so, so the pruner evicts nothing (DL-543)."""
     from dsl41.runner_clock import EngineError
     from dsl41.runner_journal import BackfillRefused, replay_store
-    from dsl41.runner_store import Record
+    from dsl41.runner_store import Pruned, Record
 
     store = MemoryStore()
     for _ in range(3):
         store.append(Record(T0, "engine", None, None, {"event": "started", "at": T0.isoformat()}))
     store.put_snapshot(2, 999, b"{}")
-    store.prune_before(2, datetime(2999, 1, 1))
-    assert _first_decision_index(store, 7) == 7
+    store.prune_snapshots()
+    bound = store.prune_bound(2, datetime(2999, 1, 1))
+    assert bound == 2 and store.prune_step(bound, 2000) == Pruned(1, None)
     with pytest.raises(EngineError, match="state version 999"):
         replay_store(store, where="here")
     bare = MemoryStore()
     bare.append(Record(T0, "engine", None, None, {"event": "started", "at": T0.isoformat()}))
     bare.append(Record(T0, "engine", None, None, {"event": "started", "at": T0.isoformat()}))
     bare.put_snapshot(2, 1, b"{}")
-    bare.prune_before(2, datetime(2999, 1, 1))
+    prune(bare, 2, datetime(2999, 1, 1))
     bare._snapshots.clear()  # type: ignore[attr-defined]
     with pytest.raises(BackfillRefused, match="holds no snapshot"):
         read_backfill(bare, since=0, upto=bare.last_seq())

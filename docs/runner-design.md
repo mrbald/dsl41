@@ -703,6 +703,28 @@ starts, unfinished plans and retained run history (DL-428). The engine uses
 a configurable snapshot interval (`engine.toml`); shutdown also snapshots. Journal retention is
 90 days by default. Pruning stays behind the latest snapshot and the floor
 required by open work. A cursor below the floor receives a gap marker.
+After each snapshot the engine runs three store operations (DL-543).
+`prune_snapshots` deletes every snapshot but the latest two, in its own
+transaction. `prune_bound` reads the bound: the least of the floor, the
+latest snapshot's seq and the first seq inside the retention window.
+`prune_step` deletes at most `PRUNE_STEP` (2000) of the oldest journal rows
+below it, with their derived rows and coverage, in one transaction.
+`PRUNE_STEP` counts journal rows; their derived rows go with them and are
+not counted. A step with no journal row below its bound writes nothing.
+The kept rows are one unbroken range after every step. Each step first
+proves the run root's lock (S6b). When rows below the bound remain, the
+loop owes more steps against that bound, with no new snapshot. It takes an
+owed step only when nothing is due, at an applied boundary, not recovering
+and not in the stop drain, and it yields to every other task before and
+after the step. So no ready task waits behind two steps, and an idle
+engine drains its backlog without spinning. An input due when the loop
+chooses its work goes before the step; one that becomes due during the
+step's own first yield is applied after that one step. A snapshot
+that falls due meanwhile takes its own step against its own bound.
+Shutdown's snapshot takes one step; a restart forgets the backlog, and its
+next snapshot prunes on. A step answers the highest decision index it
+deleted, and the decision cache is evicted below the next index, without
+reading the retained journal.
 `journal` and `runs` restore the latest snapshot before folding the tail;
 a run that starts before the retained anchor is `partial`. Missing end
 evidence yields the reader marker `UNKNOWN`, never an invented oracle
@@ -726,8 +748,8 @@ unchanged.
 
 `transitions_coverage` names the seq intervals whose rows are complete, and
 the gaps the start recorded over records this build did not commit. Every append extends it, rows or none. A
-seq it does not name as covered has no claim. A pruning removes the rows
-below its own deletion bound, time cutoff included, and trims the coverage,
+seq it does not name as covered has no claim. A prune step removes the rows
+below the journal's new first seq and trims the coverage there,
 in its transaction. Nothing replays records to fill rows: a row exists
 because this build committed it. Each engine start, after restart
 validation and never on the validate-only path, runs three steps, each on
@@ -767,7 +789,7 @@ unique key on the job and run number, so an index row never fails a commit
 the records alone would pass. `history_coverage` follows the rules of
 `transitions_coverage`: every append extends it, a covered seq claims the
 rows of every record there that names a job, a seq it does not name as
-covered has no claim, pruning trims both tables and the coverage in its
+covered has no claim, a prune step trims both tables and the coverage in its
 transaction, and nothing fills rows for records an earlier build wrote. A
 build that commits `transitions` rows but no index leaves its appends a
 gap here. Each start settles the index after the steps above, on its own

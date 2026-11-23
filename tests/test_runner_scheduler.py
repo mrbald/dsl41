@@ -23,6 +23,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
+from retention import prune
 from typer.testing import CliRunner
 
 from dsl41.cli import app
@@ -1404,7 +1405,7 @@ def test_missed_start_from_falls_back_to_snapshot_with_no_tail(
     )
     seq = genesis.take_snapshot()
     assert genesis.journal is not None
-    genesis.journal.store.prune_before(seq, start + timedelta(days=1))
+    prune(genesis.journal.store, seq, start + timedelta(days=1))
     genesis.journal.close()
     # A crash after the snapshot write and before its engine record leaves no tail.
     delete(run_root, lambda seq, kind, body: kind == "engine" and body["event"] == "snapshot")

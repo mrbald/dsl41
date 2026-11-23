@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from retention import prune
 from test_access import _write_map
 from test_runner_control import (
     _body,
@@ -539,7 +540,7 @@ def test_a_cursor_below_the_pruned_head_gets_the_gap_marker_then_the_backfill(
                 if record.kind == "input" and record.payload["index"] == 5
             ][0]
             store.put_snapshot(kept, 1, b"{}")
-            assert store.prune_before(kept, _dt(2999, 1, 1)) > 0
+            assert prune(store, kept, _dt(2999, 1, 1)) > 0
             wal = engine.journal.path
             top = max(r["seq"] for r in read_journal(wal) if "seq" in r)
             assert top >= 6

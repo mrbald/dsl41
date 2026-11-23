@@ -23,6 +23,7 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+from retention import EarlierPrune, prune
 from store_surgery import rows as journal_rows
 from transitions_check import (  # noqa: F401 -- autouse
     rows_equal_their_replay,
@@ -507,7 +508,7 @@ def _previous_store_module() -> ModuleType:
     return sys.modules[name]
 
 
-class _PreviousBuild:
+class _PreviousBuild(EarlierPrune):
     """The previous build's writer over a root: its store code, which knows no transition rows,
     under this build's engine, whose state machine and records the previous build shares."""
 
@@ -784,7 +785,7 @@ def test_a_forward_cursor_at_the_last_pruned_row_is_not_expired(kind: str, tmp_p
         for n in range(8):
             store.append(_record(n), transitions=[_entry(0), _entry(1)])
         store.put_snapshot(5, STATE_MACHINE_VERSION, b"{}")
-        store.prune_before(5, T0 + timedelta(days=1))
+        prune(store, 5, T0 + timedelta(days=1))
         assert store.first_seq() == 5
 
         def page(cursor: tuple[int, int]) -> dict[str, Any]:
@@ -924,14 +925,20 @@ def test_a_restored_copy_tells_a_client_its_cursor_is_stale(tmp_path: Path) -> N
 def test_pruning_deletes_the_rows_below_its_actual_bound_with_the_journal(
     kind: str, tmp_path: Path
 ) -> None:
-    """The bound is the store's own (`prune_before`'s, the time cutoff included): rows below it
-    go in the pruning transaction and coverage is trimmed; rows at and above it stay."""
+    """The bound is the store's own (`prune_bound`'s, the time cutoff included): rows below the
+    new first seq go in each step's transaction and coverage is trimmed there; rows at and
+    above the bound stay (DL-543)."""
     with _store(kind, tmp_path) as store:
         for n in range(6):
             store.append(_record(n), transitions=[_entry(n)])
         store.put_snapshot(5, STATE_MACHINE_VERSION, b"{}")
         # the time cutoff binds first: record 3 is the first inside the window
-        store.prune_before(5, T0 + timedelta(seconds=2))
+        bound = store.prune_bound(5, T0 + timedelta(seconds=2))
+        assert bound == 3
+        assert store.prune_step(bound, 1).deleted == 1
+        assert [seq for seq, _, _ in _everything(store)] == [2, 3, 4, 5, 6]
+        assert store.transitions_coverage() == [Interval(2, 6, True)]
+        assert store.prune_step(bound, 2000).deleted == 1
         assert store.first_seq() == 3
         assert [seq for seq, _, _ in _everything(store)] == [3, 4, 5, 6]
         assert store.transitions_coverage() == [Interval(3, 6, True)]
@@ -1691,7 +1698,7 @@ def test_a_prune_between_pages_is_reported_not_skipped(kind: str, tmp_path: Path
         assert (before["floor"], before["expired"], before["pruned"]) == (1, False, [])
         assert before["counts"] == {"j": {"INACTIVE->STARTING": 8}}
         store.put_snapshot(6, STATE_MACHINE_VERSION, b"{}")
-        store.prune_before(6, T0 + timedelta(days=1))
+        prune(store, 6, T0 + timedelta(days=1))
         after = runner_transitions.answer(store, Request(query, None), header={})
         assert [e["seq"] for e in after["entries"]] == [6, 7]
         assert (after["floor"], after["expired"], after["pruned"]) == (6, True, [[1, 5]])

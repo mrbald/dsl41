@@ -668,7 +668,11 @@ def test_a_step_with_an_awaiting_clock_lets_the_ready_task_run_inside_it(
 STEP_AWAITS = {
     "run_until_quiescent": [
         ("self._settle()", None),  # between steps
+        # the turn before an owed prune step, where nothing is due, like the idle wait (DL-543)
+        ("asyncio.sleep(0)", None),
         ("self._admit_and_apply(pending)", None),  # an input step
+        # the turn after the synchronous prune step, before the loop chooses again (DL-543)
+        ("asyncio.sleep(0)", None),
         ("self._control(pending)", None),  # a control, update or catch-up step
         ("self.clock.wait_until(work.at)", "self.clock.virtual"),  # a tick, before its starts
         ("self._admit_and_apply(_Pending(at=work.at, request_id=None))", None),  # a timer step

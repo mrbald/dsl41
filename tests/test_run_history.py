@@ -29,6 +29,7 @@ from typing import Any
 
 import pytest
 from model_harness import _lose_the_decision_for
+from retention import prune
 from transitions_check import (  # noqa: F401 -- autouse
     rows_equal_their_replay,
     rows_equal_their_replay_once,
@@ -1171,9 +1172,9 @@ def test_a_pruned_store_replays_its_trace_from_the_latest_snapshot(tmp_path: Pat
         engine.inject(Event(at=clock.now(), kind="STARTJOB", payload={"job": "j1"}))
         await engine.run_until_quiescent(datetime.max)
         assert engine.journal is not None
-        engine.journal.store.prune_before(10**6, datetime(2999, 1, 1))  # nothing to keep yet
+        prune(engine.journal.store, 10**6, datetime(2999, 1, 1))  # nothing to keep yet
         engine.take_snapshot()
-        engine.journal.store.prune_before(10**6, datetime(2999, 1, 1))
+        prune(engine.journal.store, 10**6, datetime(2999, 1, 1))
         await engine.shutdown()
         engine.journal.close()
 
@@ -1231,7 +1232,7 @@ def test_runs_that_began_before_the_snapshot_of_a_pruned_store_read_partial(
         if kind == "input" and body.get("kind") == "STARTJOB"
     ]
     with closing(SqliteStore(run_root / "engine.db")) as store:
-        store.prune_before(start, datetime(2999, 1, 1))  # the opening and the global only
+        prune(store, start, datetime(2999, 1, 1))  # the opening and the global only
     by_job = {row.job: row for row in read_run_root(run_root)}
     assert {job: (row.status, row.fidelity) for job, row in by_job.items()} == {
         "x": ("FAILURE", "partial"),

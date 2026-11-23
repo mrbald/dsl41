@@ -16,7 +16,7 @@ Rules both stores keep:
 
 - A seq is never reused: `journal.seq` is `AUTOINCREMENT`, and `put_snapshot` refuses a seq above
   `last_seq()`.
-- `request_id` is unique in the journal. `prune_before` deletes rows, and a deleted row's
+- `request_id` is unique in the journal. `prune_step` deletes rows, and a deleted row's
   `request_id` is free again, so the retry window is the retention window.
 - Configs are an append-only history. Every `put_config` is a new rev, and the same digest may
   stand under several revs; `find_config` returns the latest.
@@ -88,6 +88,15 @@ class Snapshot:
     seq: int
     state_version: int
     data: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class Pruned:
+    """What one prune step deleted: `deleted` journal rows, the highest decision index among
+    them in `decision`, None when it deleted no `decision` record (DL-543)."""
+
+    deleted: int
+    decision: int | None
 
 
 #: A trace entry as the store takes it: a canon-grammar mapping with string `job` and
@@ -338,13 +347,26 @@ class Store(Protocol):
         """The snapshot with the highest seq, or None."""
         ...
 
-    def prune_before(self, seq: int, older_than: datetime) -> int:
-        """Delete the journal rows below one seq bound, and every snapshot but the latest two.
-        The bound is the least of `seq`, the latest snapshot's seq, and the first seq whose row
-        is not older than `older_than`; the delete reads seqs only, so the rows it keeps are one
-        unbroken range (spec-wiring 1b). Configs are kept. The `transitions` rows and the history
-        index's rows below the bound go in the same transaction (DL-536, DL-539). Returns the
-        number of journal rows deleted."""
+    def prune_snapshots(self) -> None:
+        """Delete every snapshot but the latest two, in a transaction of its own (DL-543)."""
+        ...
+
+    def prune_bound(self, seq: int, older_than: datetime) -> int | None:
+        """The seq retention may prune below: the least of `seq`, the latest snapshot's seq,
+        and the first seq whose row is not older than `older_than`. None when no snapshot is
+        stored. A read; it deletes nothing (spec-wiring 1b, DL-543)."""
+        ...
+
+    def prune_step(self, bound: int, limit: int) -> Pruned:
+        """Delete the oldest journal rows below `bound`, at most `limit` of them, in one
+        transaction, and answer how many went and the highest decision index among them. The
+        delete reads seqs only, so the rows kept are one unbroken range after every step
+        (spec-wiring 1b). The `transitions` rows, the history index's rows and both coverages
+        below the new first seq go in the same transaction (DL-536, DL-539); `limit` counts
+        journal rows only. With no journal row below `bound` the step writes nothing: a
+        consistent store holds no derived row below its first seq, and the start's trim owns
+        the other case. Configs and snapshots are kept. `bound` comes from `prune_bound`; a
+        `limit` below 1 raises `StoreError` (DL-543)."""
         ...
 
     def meta(self) -> dict[str, str]:
@@ -386,6 +408,20 @@ def _stamp(at: datetime) -> str:
 
 def _unstamp(text: str) -> datetime:
     return datetime.fromisoformat(text)
+
+
+def _decision_index(data: bytes) -> int:
+    """The `index` of a stored `decision` record: the admission it decided (DL-543)."""
+    return int(_decode_payload(data)["index"])
+
+
+def _step_limit(limit: int) -> int:
+    """A prune step's row limit as a plain int; below 1 raises, since SQLite reads a negative
+    `LIMIT` as none (DL-543)."""
+    count = int(limit)
+    if count < 1:
+        raise StoreError(f"a prune step's limit is at least 1, not {count}")
+    return count
 
 
 @dataclass(frozen=True, slots=True)
@@ -766,27 +802,38 @@ class MemoryStore:
     def latest_snapshot(self) -> Snapshot | None:
         return self._snapshots[max(self._snapshots)] if self._snapshots else None
 
-    def prune_before(self, seq: int, older_than: datetime) -> int:
+    def prune_snapshots(self) -> None:
         for old in sorted(self._snapshots)[:-2]:
             del self._snapshots[old]
+
+    def prune_bound(self, seq: int, older_than: datetime) -> int | None:
         latest = self.latest_snapshot()
         if latest is None:
-            return 0
+            return None
         cutoff = _stamp(older_than)
         recent = next((entry.seq for entry in self._rows if entry.row.at >= cutoff), None)
-        bound = min(seq, latest.seq, recent if recent is not None else seq)
-        kept: list[_MemRow] = []
-        for entry in self._rows:
-            if entry.seq < bound:
-                if entry.row.request_id is not None:
-                    del self._requests[entry.row.request_id]
-            else:
-                kept.append(entry)
-        deleted = len(self._rows) - len(kept)
-        self._rows = kept
-        self._trim(bound, self.last_seq())
-        self._trim_history(bound, self.last_seq())
-        return deleted
+        return min(seq, latest.seq, recent if recent is not None else seq)
+
+    def prune_step(self, bound: int, limit: int) -> Pruned:
+        count = _step_limit(limit)
+        below = bisect.bisect_left(self._rows, bound, key=lambda entry: entry.seq)
+        if below == 0:
+            return Pruned(0, None)  # nothing below the bound: no write (DL-543)
+        cut = min(below, count)
+        # the new first seq when the step stops short of the bound (DL-543)
+        upto = self._rows[cut].seq if cut < below else bound
+        gone = self._rows[:cut]
+        decision = next(
+            (_decision_index(e.row.payload) for e in reversed(gone) if e.row.kind == "decision"),
+            None,
+        )
+        for entry in gone:
+            if entry.row.request_id is not None:
+                del self._requests[entry.row.request_id]
+        self._rows = self._rows[cut:]
+        self._trim(upto, self.last_seq())
+        self._trim_history(upto, self.last_seq())
+        return Pruned(cut, decision)
 
     def meta(self) -> dict[str, str]:
         return dict(self._meta)
@@ -1284,27 +1331,48 @@ class SqliteStore:
             except sqlite3.IntegrityError as exc:
                 raise StoreError(f"snapshots: {exc}") from exc
 
-    def prune_before(self, seq: int, older_than: datetime) -> int:
+    def prune_snapshots(self) -> None:
         with self._transaction():
             self._db.execute(
                 "DELETE FROM snapshots WHERE seq NOT IN"
                 " (SELECT seq FROM snapshots ORDER BY seq DESC LIMIT 2)"
             )
-            latest = self._db.execute("SELECT MAX(seq) FROM snapshots").fetchone()[0]
-            if latest is None:
-                return 0
-            # the first row inside the window, in seq order: the rows already pruned are gone,
-            # so the scan stops near the head
-            recent = self._db.execute(
-                "SELECT seq FROM journal WHERE at_utc >= ? ORDER BY seq LIMIT 1",
-                (_stamp(older_than),),
-            ).fetchone()
-            bound = min(seq, latest, recent[0] if recent is not None else seq)
-            cursor = self._db.execute("DELETE FROM journal WHERE seq < ?", (bound,))
-            deleted = cursor.rowcount
-            self._trim(bound, self.last_seq())
-            self._trim_history(bound, self.last_seq())
-            return deleted
+
+    def prune_bound(self, seq: int, older_than: datetime) -> int | None:
+        latest = self._db.execute("SELECT MAX(seq) FROM snapshots").fetchone()[0]
+        if latest is None:
+            return None
+        # the first row inside the window, in seq order: the rows already pruned are gone, so
+        # the scan stops near the head
+        recent = self._db.execute(
+            "SELECT seq FROM journal WHERE at_utc >= ? ORDER BY seq LIMIT 1",
+            (_stamp(older_than),),
+        ).fetchone()
+        return min(seq, int(latest), int(recent[0]) if recent is not None else seq)
+
+    def prune_step(self, bound: int, limit: int) -> Pruned:
+        count = _step_limit(limit)
+        if self._db.execute("SELECT 1 FROM journal WHERE seq < ? LIMIT 1", (bound,)).fetchone():
+            with self._transaction():
+                # the first row the step keeps when it stops short of the bound (DL-543)
+                beyond = self._db.execute(
+                    "SELECT seq FROM journal WHERE seq < ? ORDER BY seq LIMIT 1 OFFSET ?",
+                    (bound, count),
+                ).fetchone()
+                upto = bound if beyond is None else int(beyond[0])
+                # the rows below `upto` are the step's own: the search stays inside them
+                last = self._db.execute(
+                    "SELECT payload FROM journal WHERE seq < ? AND kind = 'decision'"
+                    " ORDER BY seq DESC LIMIT 1",
+                    (upto,),
+                ).fetchone()
+                deleted = self._db.execute("DELETE FROM journal WHERE seq < ?", (upto,)).rowcount
+                self._trim(upto, self.last_seq())
+                self._trim_history(upto, self.last_seq())
+                return Pruned(
+                    int(deleted), None if last is None else _decision_index(bytes(last[0]))
+                )
+        return Pruned(0, None)  # nothing below the bound: no write (DL-543)
 
     # ---- reads
 

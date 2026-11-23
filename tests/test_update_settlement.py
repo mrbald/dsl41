@@ -22,6 +22,7 @@ from typing import Any
 
 import pytest
 from dispatch_fixtures import dispatch_record
+from retention import prune
 from store_surgery import rows
 from test_engine_stops_cookie import (
     OTHER_ID,
@@ -446,7 +447,7 @@ def test_runs_reads_each_run_under_the_configuration_it_ran_under(tmp_path: Path
         found.append({(row.job, row.run_number): row for row in read_run_root(run_root)})
         engine.take_snapshot()
         assert engine.journal is not None
-        engine.journal.store.prune_before(10**6, T0 + timedelta(days=9999))
+        prune(engine.journal.store, 10**6, T0 + timedelta(days=9999))
         start(engine, "a")
         await engine.run_until_quiescent(engine.clock.now() + timedelta(seconds=1))
         found.append({(row.job, row.run_number): row for row in read_run_root(run_root)})
@@ -721,7 +722,7 @@ def test_a_box_run_keeps_the_rev_it_ran_under_at_an_equal_instant_and_after_a_pr
         found.append({(row.job, row.run_number): row for row in read_run_root(run_root)})
         engine.take_snapshot()
         assert engine.journal is not None
-        engine.journal.store.prune_before(10**6, T0 + timedelta(days=9999))
+        prune(engine.journal.store, 10**6, T0 + timedelta(days=9999))
         found.append({(row.job, row.run_number): row for row in read_run_root(run_root)})
         await engine.shutdown()
         _close(engine)
@@ -1055,17 +1056,17 @@ def test_a_box_run_keeps_its_rev_through_snapshot_prune_resume_update_snapshot_p
     run_root = tmp_path / "run"
     hashes: list[str] = []
 
-    def prune(engine: Engine) -> None:
+    def prune_engine(engine: Engine) -> None:
         engine.take_snapshot()
         assert engine.journal is not None
-        engine.journal.store.prune_before(10**6, T0 + timedelta(days=9999))
+        prune(engine.journal.store, 10**6, T0 + timedelta(days=9999))
 
     async def first() -> None:
         engine = _engine(tmp_path, boxes(r="", q=""), default=(0.0, 0))
         for job in ("r", "q"):
             engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": job}))
         await engine.run_until_quiescent(T0)
-        prune(engine)
+        prune_engine(engine)
         await engine.shutdown()
         _close(engine)
 
@@ -1090,7 +1091,7 @@ def test_a_box_run_keeps_its_rev_through_snapshot_prune_resume_update_snapshot_p
                 load_configuration_hash(engine, 2),
             ]
         )
-        prune(engine)
+        prune_engine(engine)
         await engine.shutdown()
         _close(engine)
 
@@ -1190,7 +1191,7 @@ def test_a_run_keeps_the_rev_it_opened_under_when_its_replacement_runs_under_the
         engine.take_snapshot()
         floor = engine.journal.open.floor()
         assert floor is not None
-        store.prune_before(floor, T0 + timedelta(days=9999))  # past the first dispatch
+        prune(store, floor, T0 + timedelta(days=9999))  # past the first dispatch
         labels.extend(r.catalog_hash for r in read_run_root(run_root) if r.job == "j")
         kept = [b for _, k, b in rows(run_root) if k == "dispatch" and b["job"] == "j"]
         assert [d["ordinal"] for d in kept] == [2]  # the first attempt's dispatches are gone

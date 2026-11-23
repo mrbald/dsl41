@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from retention import prune
 from test_history_index import (
     _as_transitions_build,
     _bypassed,
@@ -501,7 +502,7 @@ def test_a_pruned_store_reads_a_run_under_the_rev_its_opening_stored(tmp_path: P
             for seq, record in store.read_from(0)
             if record.kind == "config" and record.payload.get("rev") == 2
         ]
-        assert store.prune_before(applied, T0 + timedelta(days=365)) > 0
+        assert prune(store, applied, T0 + timedelta(days=365)) > 0
         assert store.first_seq() == applied
     assert _paged(root, "j", 1) == before
 
@@ -877,7 +878,7 @@ def test_pruning_keeps_the_rows_of_the_retained_runs(tmp_path: Path) -> None:
     with closing(SqliteStore(copy / STORE_NAME)) as store:
         snapshot = store.latest_snapshot()
         assert snapshot is not None
-        assert store.prune_before(snapshot.seq, T0 + timedelta(days=365)) > 0
+        assert prune(store, snapshot.seq, T0 + timedelta(days=365)) > 0
         first = store.first_seq()
     after = _paged(copy, "j", 1)
     kept = {o[3] for o in _openings(copy) if o[0] >= first}

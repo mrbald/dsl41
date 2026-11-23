@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib.util
+import sqlite3
 import subprocess
 import sys
 from collections.abc import Callable, Iterator
@@ -23,6 +24,7 @@ from typing import Any
 
 import pytest
 import transitions_check
+from retention import EarlierPrune
 from test_run_openings import _LEAF, _Root, _at, _ev
 from test_runner_journal import _applied, _attempt
 from test_transitions import _start as _start_engine
@@ -32,6 +34,8 @@ from test_transitions import (
     _as_previous_build,
     _ask,
     _commits,
+    _entry,
+    _everything,
     _incarnation,
     _last,
     _latest,
@@ -54,6 +58,7 @@ from dsl41.runner_ledger import STATE_MACHINE_VERSION
 from dsl41.runner_store import (
     Interval,
     MemoryStore,
+    Pruned,
     Record,
     RecordOwner,
     RunOpening,
@@ -358,7 +363,7 @@ def _transitions_store_module() -> ModuleType:
     return sys.modules[name]
 
 
-class _TransitionsBuild:
+class _TransitionsBuild(EarlierPrune):
     """The build before this one over a root: its store code, which commits transitions rows
     and no index rows, under this build's engine."""
 
@@ -710,14 +715,158 @@ def test_pruning_removes_both_tables_rows_below_its_bound_in_its_transaction(
         for n in range(6):
             _indexed(store, n)
         store.put_snapshot(5, STATE_MACHINE_VERSION, b"{}")
-        ended = _commits(store) if isinstance(store, SqliteStore) else []
         # the time cutoff binds first: record 3 is the first inside the window
-        store.prune_before(5, T0 + timedelta(seconds=2))
+        bound = store.prune_bound(5, T0 + timedelta(seconds=2))
+        assert bound == 3
+        ended = _commits(store) if isinstance(store, SqliteStore) else []
+        assert store.prune_step(bound, 1).deleted == 1
+        runs, records = _rows_of(store)
+        assert [row[0] for row in runs] == [row[0] for row in records] == [2, 3, 4, 5, 6]
+        assert store.history_coverage() == [Interval(2, 6, True)]
+        assert len(ended) == (1 if kind == "sqlite" else 0)
+        assert store.prune_step(bound, 2000).deleted == 1
         assert store.first_seq() == 3
         runs, records = _rows_of(store)
         assert [row[0] for row in runs] == [row[0] for row in records] == [3, 4, 5, 6]
         assert store.history_coverage() == [Interval(3, 6, True)]
-        assert len(ended) == (1 if kind == "sqlite" else 0)
+        assert len(ended) == (2 if kind == "sqlite" else 0)
+
+
+def _derived(store: Store, n: int, request_id: str | None = None) -> int:
+    """One record with a transitions row, an opening and an owner, all naming run `n + 1`."""
+    record = Record(T0 + timedelta(seconds=n), "engine", None, request_id, {"event": "x", "n": n})
+    return store.append(
+        record,
+        transitions=[_entry(n)],
+        openings=[RunOpening(0, "j", n + 1, 1)],
+        owners=[RecordOwner(0, "j", n + 1)],
+    )
+
+
+def _held(store: Store) -> dict[str, Any]:
+    """Everything a prune may change: journal seqs, request ids, derived rows, coverage and
+    the snapshots."""
+    if isinstance(store, SqliteStore):
+        snapshots = [int(seq) for (seq,) in store._db.execute("SELECT seq FROM snapshots")]
+    else:
+        assert isinstance(store, MemoryStore)
+        snapshots = sorted(store._snapshots)
+    return {
+        "journal": [(seq, record.request_id) for seq, record in store.read_from(0)],
+        "first": store.first_seq(),
+        "transitions": [(seq, n) for seq, n, _ in _everything(store)],
+        "index": _rows_of(store),
+        "coverage": (store.transitions_coverage(), store.history_coverage()),
+        "snapshots": sorted(snapshots),
+    }
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_one_prune_step_deletes_at_most_its_limit_of_the_oldest_rows_and_their_derived_rows(
+    kind: str, tmp_path: Path
+) -> None:
+    """A step deletes the oldest rows below its bound, at most its limit, with their
+    `transitions`, `job_runs` and `job_records` rows, and trims both coverages to the new
+    first seq; the kept rows are one unbroken range after every step (DL-543)."""
+    with _store(kind, tmp_path) as store:
+        for n in range(8):
+            _derived(store, n)
+        store.put_snapshot(8, STATE_MACHINE_VERSION, b"{}")
+        for went, first in ((3, 4), (2, 6), (0, 6)):  # bound 6: five rows are below it
+            assert store.prune_step(6, 3).deleted == went
+            kept = list(range(first, 9))
+            assert [seq for seq, _ in store.read_from(0)] == kept
+            assert [seq for seq, _, _ in _everything(store)] == kept
+            runs, records = _rows_of(store)
+            assert [row[0] for row in runs] == [row[0] for row in records] == kept
+            assert store.transitions_coverage() == [Interval(first, 8, True)]
+            assert store.history_coverage() == [Interval(first, 8, True)]
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_drain_leaves_what_one_delete_below_its_bound_leaves(kind: str, tmp_path: Path) -> None:
+    """Steps of two with appends between them leave the journal, request ids, derived rows,
+    coverage and snapshots that one delete below the same bound leaves (DL-543)."""
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    with _store(kind, tmp_path / "a") as drained, _store(kind, tmp_path / "b") as whole:
+        for store in (drained, whole):
+            for n in range(10):
+                _derived(store, n, request_id=f"r{n}")
+            for seq in (3, 6, 9):
+                store.put_snapshot(seq, STATE_MACHINE_VERSION, b"{}")
+            store.prune_snapshots()
+        bound = drained.prune_bound(10, T0 + timedelta(days=1))
+        assert bound == whole.prune_bound(10, T0 + timedelta(days=1)) == 9
+        n = 10
+        for _ in range(10):  # bounded: a step that stalls ends the loop and fails below
+            if drained.prune_step(bound, 2).deleted < 2:
+                break
+            for store in (drained, whole):  # an input admitted between two steps
+                _derived(store, n, request_id=f"r{n}")
+            n += 1
+        assert n == 14  # four whole steps, then the step that reached the bound
+        assert whole.prune_step(bound, 10**6).deleted == 8
+        assert _held(drained) == _held(whole)
+        assert _held(drained)["first"] == bound
+        assert drained.find_request("r7") is None and drained.find_request("r8") is not None
+
+
+def test_a_fault_inside_a_step_rolls_back_its_delete_derived_rows_and_coverage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The step is one transaction: a raise after the journal delete and both trims have run
+    inside it leaves the journal, every derived row and both coverages as they were
+    (DL-543)."""
+    with closing(SqliteStore(tmp_path / "s.db")) as store:
+        for n in range(6):
+            _derived(store, n, request_id=f"r{n}")
+        store.put_snapshot(6, STATE_MACHINE_VERSION, b"{}")
+        before = _held(store)
+        trimmed = store._trim_history
+        inside: list[dict[str, Any]] = []
+
+        def broken(first: int, last: int) -> None:
+            trimmed(first, last)
+            inside.append(  # the step's own view, every delete done
+                {
+                    "first": store.first_seq(),
+                    "transitions": store._db.execute("SELECT MIN(seq) FROM transitions").fetchone(),
+                    "index": _rows_of(store),
+                    "coverage": (store.transitions_coverage(), store.history_coverage()),
+                }
+            )
+            raise sqlite3.OperationalError("disk I/O error")
+
+        monkeypatch.setattr(store, "_trim_history", broken)
+        with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
+            store.prune_step(6, 3)
+        [seen] = inside
+        assert seen["first"] == 4 and seen["transitions"] == (4,)
+        assert [row[0] for row in seen["index"][0]] == [4, 5, 6]
+        assert seen["coverage"] == ([Interval(4, 6, True)], [Interval(4, 6, True)])
+        assert _held(store) == before
+        assert store.find_request("r0") is not None
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_step_names_the_highest_decision_it_deleted_and_reads_no_retained_row(
+    kind: str, tmp_path: Path
+) -> None:
+    """Two decisions, then a long run of records that hold none: the first step answers the
+    higher decision's index; the steps over the run answer none, however long it is
+    (DL-543)."""
+    with _store(kind, tmp_path) as store:
+        store.append(*(Record(T0, "decision", None, f"r{i}", {"index": i}) for i in (1, 2)))
+        store.append(*(_record(n) for n in range(100)))
+        store.append(Record(T0, "decision", None, "r3", {"index": 3}))
+        store.put_snapshot(store.last_seq(), STATE_MACHINE_VERSION, b"{}")
+        bound = store.last_seq()
+        assert store.prune_step(bound, 3) == Pruned(3, 2)
+        assert store.prune_step(bound, 50) == Pruned(50, None)
+        assert store.prune_step(bound, 50) == Pruned(49, None)
+        assert store.prune_step(bound, 50) == Pruned(0, None)
+        assert store.first_seq() == bound
 
 
 @pytest.mark.parametrize("kind", KINDS)

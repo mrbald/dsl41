@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+from retention import prune
 
 from dsl41 import main_config, runner
 from dsl41.ir import lower_source
@@ -466,7 +467,7 @@ def test_pruned_snapshot_keeps_completed_paths_and_sequence_high_water(
             engine.take_snapshot()
             snapshot = engine.journal.store.latest_snapshot()
             high_water = engine.journal.store.last_seq()
-            assert engine.journal.store.prune_before(snapshot.seq, datetime.max) > 0
+            assert prune(engine.journal.store, snapshot.seq, datetime.max) > 0
             replay = replay_store(engine.journal.store, where="test")
             assert replay.anchor.open.dispatches["J0"] == original
         finally:
