@@ -123,6 +123,42 @@ _HOLDS: list[_Hold] = []
 _FAULT: list[_Fault] = []
 
 
+class _Applied:
+    """The reports an engine's loop applied, each with the engine's round then, and a wake
+    for a test that waits for one."""
+
+    def __init__(self) -> None:
+        self.reports: list[tuple[int, Report]] = []
+        self.changed = asyncio.Event()
+
+
+#: by engine; `Engine.archive_report` records here once it has applied a report
+_APPLIED: dict[int, _Applied] = {}
+
+
+def _recorded(real: Callable[[Engine, Report], None]) -> Callable[[Engine, Report], None]:
+    def archive_report(engine: Engine, report: Report) -> None:
+        real(engine, report)
+        applied = _APPLIED.setdefault(id(engine), _Applied())
+        applied.reports.append((engine._archive_round, report))
+        applied.changed.set()
+
+    return archive_report
+
+
+async def _applied(engine: Engine, wanted: Callable[[Report], bool]) -> None:
+    """Wait until the engine's loop has applied a report of the round it last asked for that
+    `wanted` accepts. The worker hands a report to the loop with `call_soon_threadsafe`, and
+    nothing orders that hand-over with any other thread's, so only the application tells."""
+    applied = _APPLIED.setdefault(id(engine), _Applied())
+    while not any(
+        asked == engine._archive_round == report.round and wanted(report)
+        for asked, report in applied.reports
+    ):
+        applied.changed.clear()
+        await asyncio.wait_for(applied.changed.wait(), _WAIT_S)
+
+
 def _statement(sql: str) -> str:
     return _FAULT[0].statement(sql) if _FAULT else sql
 
@@ -140,7 +176,9 @@ def _closed_after(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Each engine's worker is stopped and joined and its store closed at teardown, also when
     the test failed first. Batches are `_STEP` rows, as the steps are."""
     monkeypatch.setattr(runner, "PRUNE_STEP", _STEP)
+    monkeypatch.setattr(Engine, "archive_report", _recorded(Engine.archive_report))
     yield
+    _APPLIED.clear()
     _FAULT.clear()
     while _HOLDS:
         _HOLDS.pop().release.set()
@@ -230,11 +268,12 @@ def _store(engine: Engine) -> Store:
 
 
 async def _settled(engine: Engine) -> None:
-    """Wait for the worker to finish what it was asked; its reports were handed to the loop
-    before it went idle, so they have run when this returns."""
+    """Wait for the worker to finish the round last asked for, with the file closed, and for
+    the loop to have applied that round's last report: its stop, or its completion."""
     worker = engine.archive
     assert worker is not None
     assert await asyncio.to_thread(worker.idle.wait, _WAIT_S)
+    await _applied(engine, lambda report: report.stopped is not None or report.completed)
 
 
 async def _round(engine: Engine) -> int:
@@ -1306,6 +1345,7 @@ def test_nothing_is_owed_past_the_first_batch_before_the_second_is_verified(
         store = _store(engine)
         engine.take_snapshot()
         await hold.reached()
+        await _applied(engine, lambda report: report.verified is not None)
         assert engine._prune_owed == _STEP + 1
         await _drain(engine)
         assert store.first_seq() == _STEP + 1
@@ -2709,3 +2749,45 @@ def test_c8_a_seq_with_nothing_stored_reads_not_archived_under_any_history(
         (4, "h1", "not archived"),
         (5, "h1", "on line"),
     ]
+
+
+def test_a_round_is_settled_when_its_report_is_applied_not_when_the_worker_is_idle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The worker stops at the open and goes idle, and its report reaches the loop only when
+    the test lets it: the engine still says `working`, and the round is not settled until the
+    loop has applied the stop."""
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    (run_root / "archive.db").write_bytes(b"not a database, " * 64)
+    os.chmod(run_root / "archive.db", 0o600)
+    handed = threading.Event()
+    real = runner_archive.ArchiveWorker._post
+
+    def held(worker: runner_archive.ArchiveWorker, report: Report) -> None:
+        def hand_over() -> None:
+            assert worker.idle.wait(_WAIT_S) and handed.wait(_WAIT_S)
+            real(worker, report)
+
+        threading.Thread(target=hand_over, daemon=True).start()
+
+    monkeypatch.setattr(runner_archive.ArchiveWorker, "_post", held)
+
+    async def scenario() -> None:
+        engine = await _basic(run_root)
+        worker = engine.archive
+        assert worker is not None
+        settled = asyncio.ensure_future(_round(engine))
+        assert await asyncio.to_thread(worker.idle.wait, _WAIT_S)
+        # where a wait for the worker alone returns: nothing was applied yet
+        assert engine.archive_view()["state"] == "working" and not settled.done()
+        handed.set()
+        await settled
+        assert engine.archive_view()["state"] == "stopped"
+        assert engine.archive_view()["reason"] == "DatabaseError: file is not a database"
+        await _close(engine)
+
+    try:
+        _run(scenario)
+    finally:
+        handed.set()  # a failed test leaves no hand-over waiting
