@@ -27974,3 +27974,23 @@ relitigate an entry; append a new one.
   the goldens. The state-machine version stays 28 (as in DL-550 and DL-315).
   COST. A start's discharge now precedes the record that applies an update, where it
   followed it. Going back a build brings the old behaviour back.
+- DL-552 A job's time limit is about twice its usual time, and the suite prints its slowest
+  tests (2026-11-24; BUG-105; .github/workflows/ci.yml; builds on DL-211 and DL-354; closes
+  BUG-105)
+  THE RULE. The `test` job's limit is 25 minutes (was 15), the `coverage` job's 40 (was 25),
+  the `explore-page` job's 45 (was 30). The suite's command in the `test` job adds
+  `--durations=25 --durations-min=5`, so each run lists its slowest tests. Nothing else
+  changes: four workers, one test file each at a time.
+  WHAT WAS MEASURED, on the hosted runner, 2026-11-23 and 24. The `test` job's suite step:
+  549 to 837 s over six runs of three commits, against a job limit of 900 s. The `coverage`
+  job: 16.5 to 20 minutes against 25. The `explore-page` job: 15.5 to 25.7 minutes
+  against 30. The same commit and the same Python varied by 2.5 to 4 minutes between its
+  pull-request run and its push run, in either direction; nothing in the suite, the
+  configuration or the workflow depends on the event. BUG-105 said the pull-request runs
+  were the slower ones; they are not. The suite grew, and the runner's own variation is
+  about a quarter of the time.
+  WHY. A limit that a green job can reach cancels a run that has passed every test. A hung
+  test is not what the job limit is for: `faulthandler_timeout` ends one after 120 s, with
+  its stack. The limit still turns a hung job into a red mark, later than before.
+  NOT DONE. The suite's time itself. The printed durations are the evidence the next look
+  at it needs: whether a few files hold a worker while the others wait.

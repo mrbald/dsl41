@@ -550,3 +550,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-541 | The terminal UI reads its history from the stored transitions | [README.md](../README.md), [docs/cli-tui-qualification.md](cli-tui-qualification.md), [docs/control-protocol.md](control-protocol.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |
 | DL-545 | An archive database keeps verified copies of what retention prunes | [README.md](../README.md), [docs/control-protocol.md](control-protocol.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |
 | DL-551 | A decided start is wanted until its run ends | [docs/runner-design.md](runner-design.md) |
+| DL-552 | A job's time limit is about twice its usual time, and the suite prints its slowest tests |  |

@@ -161,7 +161,10 @@ jobs:
     needs: classify
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # DL-552: about twice the suite's usual time on this runner (549 to 837 s measured), so
+    # a slow runner cannot cancel a run that passed; a hung test is ended by
+    # faulthandler_timeout, not by this limit
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -197,8 +200,9 @@ jobs:
       # count is pinned, never `auto`, so the runs that accepted it describe
       # the configuration that runs; the plugin's controller merges the
       # workers' transition hits.
+      # DL-552: the slowest tests are listed, so the suite's time can be read from a run.
       - if: needs.classify.outputs.code != 'false'
-        run: uv run pytest -q -n 4 --dist loadfile
+        run: uv run pytest -q -n 4 --dist loadfile --durations=25 --durations-min=5
 
   # DL-351: the oracle the engine builds reproduces its golden digests
   # over the whole harness sample. Its own job, beside the test legs, so their timeout does not carry it; the
@@ -227,9 +231,9 @@ jobs:
     needs: classify
     if: ${{ !cancelled() && needs.classify.outputs.code != 'false' }}
     runs-on: ubuntu-latest
-    # the whole suite under coverage on four workers, subprocesses measured, runs past the
-    # test legs' fifteen minutes; twenty-five leaves room without hiding a hung test
-    timeout-minutes: 25
+    # the whole suite under coverage on four workers, subprocesses measured, takes 16 to 20
+    # minutes here; forty leaves the same room as the test legs have (DL-552)
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
@@ -279,8 +283,9 @@ jobs:
     runs-on: ubuntu-latest
     # Three browser installs take about eight minutes on a slow runner and the
     # 324 browser tests about nine; 15 cancelled two green runs at 66% on
-    # 2026-10-01. 30 still turns a real hang into a fast red X.
-    timeout-minutes: 30
+    # 2026-10-01. The job took 15.5 to 25.7 minutes on 2026-11-24, so 45 (DL-552):
+    # a real hang still ends in a red X.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
