@@ -27753,3 +27753,32 @@ relitigate an entry; append a new one.
   when it names a run that opened after the gap.
   NOT BUILT. The terminal UI's pane of past runs. On a pruned root the offline fold can read
   a run under an older rev than this query does (BUG-110).
+- DL-544 The wrapper observes the command's exit before it reads the lifeline
+  (2026-11-23; BUG-111, found by a full-suite run and reproduced with a wrapper held
+  between its two reads; src/dsl41/runner_wrapper.py, docs/wrapper-protocol.md ss3 and ss4,
+  docs/runner-design.md, docs/blocks/wrapper.md, src/dsl41/engine_charts.py (a docstring),
+  tests/test_wrapper_branches.py, tests/test_live_engine_recovery.py; narrows DL-503; no
+  spool version change; closes BUG-111)
+  THE RULE. On every wakeup the wrapper observes the command's exit, then reads the
+  lifeline. An exit seen with the lifeline still open at that read is the command's own:
+  the engine outlived it. With the lifeline lost at that read the record is `terminated`,
+  cause `parent lost`, and the exit goes inside `observed`. When the look before the read
+  saw no exit and the lifeline is then lost, the wrapper looks once more before the kill
+  ladder, so the group of a leader that exited in between gets no signal.
+  THE DEFECT. DL-503 read the lifeline first and the exit second. When the engine died
+  between the two reads and the unit's TERM ended a command that exits 0 on TERM, the
+  wrapper held a stale "open" and recorded `exited 0`: a success the engine's death caused,
+  the result DL-503 exists to prevent. On macOS the first wakeup comes at once, so a test
+  that stops the wrapper could land in the gap; on Linux the gap needs a wakeup within
+  microseconds of the engine's death.
+  UNCHANGED. The kill ladder, the record's fields, the durable write before the reap, the
+  exit codes, and what the engine does with `parent lost`: `stopped{lifeline}`, and the
+  attempt is run again where the job allows it.
+  COST. The error that is left is one-sided. An own exit that the engine's death follows
+  before the lifeline read is recorded `parent lost`, and the restarted engine runs the
+  attempt again or holds the job, as the interruption rule says. It needs an engine death,
+  unrelated to the exit, between two system calls.
+  The old error was the correlated one: the death is what ended the command. DL-503's limit
+  stays: an engine child between fork and exec holds the lifeline's write end for a moment.
+  REJECTED. Keeping the order and reading the lifeline a second time after an exit: the same
+  outcomes with one more read, and "the lifeline is read first" true only in letter.

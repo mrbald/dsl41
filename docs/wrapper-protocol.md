@@ -181,7 +181,7 @@ Each attempt has at most one `status.json`, and it holds exactly one outcome:
 |---------------|---------------------|--------------------------------------------|
 | `exited`      | `exit_code`         | the command exited on its own while the lifeline was open |
 | `signaled`    | `signal`            | the command was killed by a signal that the wrapper did not send, while the lifeline was open |
-| `terminated`  | `cause`, `observed` | the attempt ended with the lifeline lost (`cause: "parent lost"`) or with a spawn record that could not be built or written. `observed` carries the command's end, its own exit or signal if the wrapper saw it after the lifeline was lost (§4 step 3, DL-503), or the end the wrapper's kill caused |
+| `terminated`  | `cause`, `observed` | the attempt ended with the lifeline lost (`cause: "parent lost"`) or with a spawn record that could not be built or written. `observed` carries the command's end: its own exit or signal if the wrapper saw it at either look around the lifeline read that found the lifeline lost (§4 steps 3 and 5, DL-503, DL-544), or the end the wrapper's kill caused |
 | `spawn_failed`| `error`             | the wrapper could not open the command's stdin, stdout or stderr, could not execute the selected shell, or could not set a child limit (DL-150, DL-492) |
 
 No outcome of a command that ran is written as an absent file. The
@@ -293,21 +293,30 @@ On other platforms, and for an attempt dispatched without the cookie, the
    lifeline}. The self-pipe is also the interpreter's wakeup fd, so the
    signal writes to it at delivery. A command that exits just before the
    select starts still wakes the wrapper. On every wakeup, whichever
-   descriptor woke the select, the wrapper reads the lifeline BEFORE it
-   checks for child exit, without blocking. With the lifeline open, an exit
-   is recorded as it is seen. With the lifeline lost, the record is
-   `terminated / parent lost` and an exit already there goes inside
+   descriptor woke the select, the wrapper checks for child exit and THEN
+   reads the lifeline, both without blocking (DL-544). An exit seen with the
+   lifeline still open at that read is recorded as it is seen: the engine
+   outlived it. With the lifeline lost at that read, the record is
+   `terminated / parent lost` and an exit already seen goes inside
    `observed`, whatever its kind (DL-503). So an exit that follows the
    engine's death, such as one the unit's TERM caused, belongs to the
-   engine's loss. A command that finished by itself in the instant of the
-   engine's death is recorded the same way. A living engine also closes the
+   engine's loss. Two limits remain. A command that finished by itself is
+   recorded the same way when the engine's death follows its exit before the
+   lifeline read (DL-544). The engine reads that attempt as
+   `stopped{lifeline}`, and the interruption rule (§3, DL-424) runs it again
+   or holds its job.
+   An engine child still between fork and exec holds the lifeline's write
+   end for a moment, and a read in that moment finds the lifeline open
+   (DL-503). A living engine also closes the
    lifeline: when a stop lands before `spawn.json` exists and the launch is
    aborted, and when an attempt's task is cancelled at teardown. An exit seen
    after that close is recorded `terminated / parent lost` as well (DL-503).
 4. On exit, the wrapper observes the exit with waitid(WNOWAIT), writes
    status.json, and then reaps. A stopped, continued or trapped report is
    not an exit: the command is still running (DL-300).
-5. On lifeline EOF, the wrapper takes an exit that is already there. Else it
+5. On lifeline EOF, the wrapper takes an exit that is already there. When the
+   check before the lifeline read saw none, it checks once more, so the group
+   of a leader that exited between the two reads gets no signal (DL-544). Else it
    sends SIGTERM to the command's process group and waits the grace period. It
    sends SIGKILL only to a command that is still alive at the end of that
    wait. A command that ends on the SIGTERM is observed, and the wait stops

@@ -38,10 +38,13 @@ flowchart TD
     spawn -->|"stdio open or the /bin/sh spawn fails"| spawnfail(["status spawn_failed"])
     spawn -->|"spawned"| record{"write spawn.json"}
     record -->|"the write fails"| killed(["kill the group, best-effort status, exit 3"])
-    record -->|"durable"| wait{"wait; on each wakeup the lifeline is read first"}
-    wait -->|"lifeline open, exit observed"| exited["write the observed outcome, then reap"]
-    wait -->|"lifeline EOF, no exit observed"| lost["SIGTERM the group, SIGKILL after the grace"]
-    wait -->|"lifeline EOF, exit observed"| seen["take the exit"]
+    record -->|"durable"| wait{"wait; on each wakeup the exit is checked, then the lifeline read"}
+    wait -->|"exit observed, lifeline open"| exited["write the observed outcome, then reap"]
+    wait -->|"no exit observed, lifeline open"| wait
+    wait -->|"no exit observed, lifeline EOF"| again{"check the exit once more"}
+    again -->|"still running"| lost["SIGTERM the group, SIGKILL after the grace"]
+    again -->|"exited"| seen
+    wait -->|"exit observed, lifeline EOF"| seen["take the exit"]
     lost --> term["write terminated, parent lost, with the command's end in observed"]
     seen --> term
     exited --> ok(["exit 0"])
@@ -53,7 +56,7 @@ flowchart TD
 - Stdlib-only, run by file path and parent-agnostic ([runner-design §6a](../runner-design.md#6a-process-lifecycle-tiers-dl-41a); DL-42).
 - The command has its own process group, apart from the wrapper's, so a group kill never kills the recorder (DL-41a item 2; [wrapper-protocol §3, spawn.json](../wrapper-protocol.md#spawnjson--written-by-the-wrapper-immediately-after-spawning)).
 - The lifeline's write end lives in exactly one process, the spawner. EOF means the parent died, `kill -9` included (DL-41a item 3; runner-design §6a, "Lifeline fd hygiene").
-- On every wakeup the lifeline is read before the exit check, whichever descriptor woke the select. An exit seen with the lifeline lost is recorded as `terminated / parent lost` ([wrapper-protocol §4](../wrapper-protocol.md#4-wrapper-behavior-frozen-semantics) step 3; DL-503).
+- On every wakeup the exit is checked and then the lifeline is read, whichever descriptor woke the select. An exit seen with the lifeline open at that read is the command's own. An exit seen with the lifeline lost at that read is recorded as `terminated / parent lost` ([wrapper-protocol §4](../wrapper-protocol.md#4-wrapper-behavior-frozen-semantics) step 3; DL-503, DL-544).
 - Record before reap, with one stated exception: the path where the `spawn.json` write failed ([wrapper-protocol §3, status.json](../wrapper-protocol.md#statusjson--written-by-the-wrapper-before-reaping); DL-229 item 1).
 - Every record uses the durability liturgy on a local filesystem ([wrapper-protocol §3](../wrapper-protocol.md#3-spool-format-frozen); DL-41a item 4).
 - `status.json` is the sole data channel and appears at most once. Its absence gives an `unobservable` attempt outcome; the interruption rule chooses the follow-up (§3, status.json; DL-424, DL-426).
@@ -83,7 +86,7 @@ flowchart TD
 
 - Boundary: `test_wrapper_imports_are_stdlib_only`, `test_wrapper_records_under_pythonsafepath`.
 - Recording: `test_wrapper_records_natural_exit_and_appends_stdout`, `test_wrapper_survives_external_group_kill_and_records_signal`, `test_wrapper_survives_sigusr1_and_sigusr2_and_still_records`, `test_wrapper_refuses_mistyped_spec_field_before_spawning`.
-- Parent loss: `test_wrapper_graceful_sigterm_reaches_command_on_parent_loss`, `test_lifeline_write_end_leaks_nowhere`, `test_sigkill_engine_midrun_then_resume`.
+- Parent loss: `test_wrapper_graceful_sigterm_reaches_command_on_parent_loss`, `test_lifeline_write_end_leaks_nowhere`, `test_sigkill_engine_midrun_then_resume`, `test_wrapper_records_an_exit_it_saw_by_the_lifeline_at_the_next_read`, `test_wrapper_looks_again_before_the_ladder_when_the_lifeline_is_lost`.
 - The restart's reading of the spool: `test_a_record_a_live_wrapper_writes_after_the_observation_is_read_by_nobody`, `test_a_live_wrapper_that_never_records_gets_the_ladder`, `test_the_spool_record_names_how_the_attempt_ended`, `test_a_crash_while_draining_is_reported_at_the_restart`.
 - Identity: `test_a_kill_refuses_a_spawn_record_naming_a_stranger`, `test_a_record_that_names_another_run_tuple_is_read_as_absent`, `test_a_group_recorded_under_another_boot_is_dead`.
 - Write failures: `test_rc3_a_spawn_that_cannot_be_recorded_kills_what_it_started`, `test_rc3_a_status_that_cannot_be_written_never_reports_an_outcome`, `test_rc3_a_full_disk_at_spawn_leaves_no_record_and_exits_three`.

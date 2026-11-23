@@ -569,11 +569,16 @@ Duties:
    delivery. A Python handler runs only between bytecodes, so without it
    an exit just before the `select` call could leave the wrapper asleep
    while the lifeline is open. On every wakeup, whichever descriptor woke
-   the `select`, **read the lifeline before the child-exit check**
-   (DL-503). An exit seen after the lifeline is lost belongs to the
-   engine's loss: under `KillMode=control-group` the unit's TERM may have
-   ended the command before its wrapper acted. It is recorded as "parent
-   lost", with the exit inside `observed`.
+   the `select`, **check for child exit, then read the lifeline**
+   (DL-544). An exit seen with the lifeline still open at that read is the
+   command's own: the engine outlived it. With the lifeline lost at that
+   read, the exit belongs to the engine's loss (DL-503): under
+   `KillMode=control-group` the unit's TERM may have ended the command
+   before its wrapper acted. It is recorded as "parent lost", with the exit
+   inside `observed`. An own exit that the engine's death follows before
+   the lifeline read is recorded the same way. The attempt is then
+   `stopped{lifeline}`, and the interruption rule (§7) runs it again or
+   holds its job.
 5. On child exit with the lifeline open: observe with `waitid(WNOWAIT)` where available, durably
    write `status.json` — the same identity fields, an `outcome`, `ended_at`,
    and whichever of `exit_code` or `signal` applies — *then* reap. This
@@ -583,7 +588,8 @@ Duties:
    file is the **authority**. The live reaping chain is only a
    notification that the file exists.
 6. On lifeline EOF: the parent died, which includes `kill -9`, because
-   the kernel closes fds regardless. Take an exit already there, or
+   the kernel closes fds regardless. Take an exit already there, checking
+   once more when the check before the read saw none (DL-544), or
    SIGTERM the command pgid, grace, SIGKILL. Write `status.json`
    {terminated, cause: parent lost, observed: the command's end}, exit.
    This behavior makes "engine death ⇒ jobs terminate AND are recorded"

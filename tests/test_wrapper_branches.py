@@ -417,11 +417,15 @@ def _spec(run_dir: Path, command: str, lifeline_fd: int) -> bytes:
     ).encode()
 
 
-def _drive(mode: str, events: Path, spec: bytes, lifeline_r: int) -> subprocess.Popen[bytes]:
+def _drive(
+    mode: str, events: Path, spec: bytes, lifeline_r: int, *, pause: str | None = None
+) -> subprocess.Popen[bytes]:
+    env = None if pause is None else {**os.environ, runner_wrapper.PAUSE_ENV: pause}
     proc = subprocess.Popen(
         [sys.executable, str(DRIVER), mode, str(events)],
         stdin=subprocess.PIPE,
         pass_fds=(lifeline_r,),
+        env=env,
     )
     assert proc.stdin is not None
     proc.stdin.write(spec)
@@ -1024,9 +1028,9 @@ def test_wrapper_records_parent_lost_for_an_exit_that_precedes_its_look(
 ) -> None:
     """DL-503: the wrapper is held after its spawn record, the command ends (by
     itself, or by the TERM the unit sends), the lifeline's write end closes, and
-    the wrapper continues. Both are already there when it looks; the lifeline
-    is read first, so the record is `parent lost` and the exit is inside
-    `observed`, whatever its kind."""
+    the wrapper continues. Both descriptors are ready at its first wakeup; it sees
+    the exit and then the lost lifeline (DL-544), so the record is `parent lost`
+    and the exit is inside `observed`, whatever its kind."""
     run_dir = tmp_path / "j1.1"
     run_dir.mkdir()
     proc, lifeline_w = spawn_wrapper(run_dir, command, pause="post_record")
@@ -1050,6 +1054,137 @@ def test_wrapper_records_parent_lost_for_an_exit_that_precedes_its_look(
     status = read_json(run_dir / "status.json")
     assert status["outcome"] == "terminated" and status["cause"] == "parent lost"
     assert status["observed"] == observed
+
+
+def _next_stop(proc: subprocess.Popen[bytes]) -> None:
+    """Wait for the wrapper's next self-stop. Its parent hears each stop once
+    (WUNTRACED), so a pause point that follows another is never taken for the one
+    before it. A wrapper that exits instead fails here."""
+
+    def stopped() -> bool:
+        pid, status = os.waitpid(proc.pid, os.WUNTRACED | os.WNOHANG)
+        if pid == 0:
+            return False
+        assert os.WIFSTOPPED(status), f"the wrapper ended, status {status}"
+        return True
+
+    wait_for(stopped)
+
+
+def _release_held(proc: subprocess.Popen[bytes], run_dir: Path, lifeline_w: int) -> None:
+    """A failed test's teardown: close the lifeline, then end the command's group and
+    the wrapper, whatever pause holds it."""
+    if lifeline_w >= 0:
+        os.close(lifeline_w)
+    if proc.poll() is None:
+        with contextlib.suppress(Exception):
+            os.killpg(read_json(run_dir / "spawn.json")["command_pgid"], signal.SIGKILL)
+        proc.kill()
+        proc.wait()
+
+
+@pytest.mark.parametrize("engine_dies", ["after_the_record", "before_the_lifeline_read"])
+def test_wrapper_records_an_exit_it_saw_by_the_lifeline_at_the_next_read(
+    tmp_path: Path, engine_dies: str
+) -> None:
+    """DL-544: the command exits by itself while the wrapper is held after its spawn
+    record, so the wrapper's first look sees the exit; it is then held between that
+    look and the lifeline read. With the lifeline open at the read, the record is the
+    command's own `exited`, and an engine death after the record leaves it as it is.
+    With the lifeline lost at the read, the record is `parent lost` with the exit
+    inside `observed`: the stated limit, an own exit that the engine's death follows
+    before the read."""
+    run_dir = tmp_path / "j1.1"
+    run_dir.mkdir()
+    proc, lifeline_w = spawn_wrapper(
+        run_dir, "exit 7", pause="post_record,post_observe_pre_lifeline,post_status_pre_reap"
+    )
+    try:
+        _next_stop(proc)  # post_record
+        spawn = read_json(run_dir / "spawn.json")
+        wait_for(lambda: runner_procid.proc_is_zombie(spawn["command_pid"]))
+        os.kill(proc.pid, signal.SIGCONT)
+        _next_stop(proc)  # post_observe_pre_lifeline, the exit seen
+        assert not (run_dir / "status.json").exists()
+        if engine_dies == "before_the_lifeline_read":
+            os.close(lifeline_w)
+            lifeline_w = -1
+        os.kill(proc.pid, signal.SIGCONT)
+        _next_stop(proc)  # post_status_pre_reap
+        written = (run_dir / "status.json").read_bytes()
+        if lifeline_w >= 0:
+            os.close(lifeline_w)
+            lifeline_w = -1
+        assert _continue_and_wait(proc) == 0
+    finally:
+        _release_held(proc, run_dir, lifeline_w)
+    assert (run_dir / "status.json").read_bytes() == written
+    status = json.loads(written)
+    if engine_dies == "after_the_record":
+        assert status["outcome"] == "exited" and status["exit_code"] == 7
+        assert "cause" not in status
+    else:
+        assert status["outcome"] == "terminated" and status["cause"] == "parent lost"
+        assert status["observed"] == {"outcome": "exited", "exit_code": 7}
+
+
+@pytest.mark.parametrize("leader_exits", [True, False], ids=["leader-exits", "leader-lives"])
+def test_wrapper_looks_again_before_the_ladder_when_the_lifeline_is_lost(
+    tmp_path: Path, leader_exits: bool
+) -> None:
+    """DL-544: the wrapper's first look sees no exit and it is held before the
+    lifeline read; the lifeline then closes. If the leader exited during the hold,
+    the second look takes that exit into `parent lost` and the wrapper makes no
+    group-kill call, so the child that outlives the leader is never signalled. If
+    the leader still lives, the ladder runs: its TERM is a group-kill call, reaches
+    the child's trap and ends the leader. The driver counts the wrapper's own calls,
+    so the check does not wait on the child."""
+    run_dir = tmp_path / "j1.1"
+    run_dir.mkdir()
+    events = tmp_path / "events"
+    ready, termed, go = tmp_path / "ready", tmp_path / "termed", tmp_path / "go"
+    command = (
+        f'/bin/sh -c \'trap "touch {termed}; exit 0" TERM; echo $$ > {ready}; '
+        "while :; do sleep 0.05 & wait $!; done' &\n"
+        f"while [ ! -e {go} ]; do sleep 0.05; done\n"
+        "exit 3\n"
+    )
+    lifeline_r, lifeline_w = os.pipe()
+    proc = _drive(
+        "count_group_kills",
+        events,
+        _spec(run_dir, command, lifeline_r),
+        lifeline_r,
+        pause="post_observe_pre_lifeline",
+    )
+    os.close(lifeline_r)
+    child = None
+    try:
+        wait_for(lambda: (run_dir / "spawn.json").exists() and ready.exists())
+        child = int(wait_for(lambda: ready.read_text().strip()))
+        spawn = read_json(run_dir / "spawn.json")
+        os.kill(proc.pid, signal.SIGCHLD)  # a wakeup on every host
+        _next_stop(proc)  # post_observe_pre_lifeline, the leader running
+        if leader_exits:
+            go.write_text("")
+            wait_for(lambda: runner_procid.proc_is_zombie(spawn["command_pid"]))
+        os.close(lifeline_w)
+        lifeline_w = -1
+        assert _continue_and_wait(proc) == 0
+        status = read_json(run_dir / "status.json")
+        assert status["outcome"] == "terminated" and status["cause"] == "parent lost"
+        if leader_exits:
+            assert status["observed"] == {"outcome": "exited", "exit_code": 3}
+            assert _event_count(events) == 0
+        else:
+            assert status["observed"] == {"outcome": "signaled", "signal": signal.SIGTERM}
+            assert _event_count(events) >= 1
+            wait_for(termed.exists)
+    finally:
+        _release_held(proc, run_dir, lifeline_w)
+        if child is not None and not termed.exists():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(child, signal.SIGKILL)  # the child that outlived its leader
 
 
 def test_wrapper_wakes_for_an_exit_whose_python_handler_has_not_run(tmp_path: Path) -> None:

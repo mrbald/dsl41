@@ -944,8 +944,8 @@ def test_records_after_the_record_timeout_are_evidence_only(
     `spawn.json`; a terminal STATUS stops the attempt, whose timeout ends it `unobservable` with plan
     `none`. Continued, the wrapper then writes `spawn.json` and its record (ENDED +
     spawn_recorded, ENDED + exit_recorded): `terminated / parent lost`, since the engine's stop
-    closed the lifeline before `spawn.json` existed and the wrapper reads the lifeline before
-    the command's exit (DL-503). Where the cookie names the command with no `spawn.json`, the
+    closed the lifeline before `spawn.json` existed and the wrapper's first lifeline read finds
+    it lost (DL-503, DL-544). Where the cookie names the command with no `spawn.json`, the
     cleanup's ladder ended it before the wrapper resumed, and `observed` holds that signal;
     killed, it exits with neither (ENDED +
     wrapper_gone); killed once `spawn.json` names the live command, the tier's verdict is a

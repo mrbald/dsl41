@@ -542,3 +542,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-538 | `scripts/refs.py` answers where a name is defined, referenced or called | [docs/agent-workflow.md](agent-workflow.md) |
 | DL-539 | The engine commits an index of run openings and of records by job | [docs/control-protocol.md](control-protocol.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |
 | DL-540 | The `history` query answers a job's past runs in bounded pages | [README.md](../README.md), [docs/access-model.md](access-model.md), [docs/control-protocol.md](control-protocol.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |
+| DL-544 | The wrapper observes the command's exit before it reads the lifeline | [docs/blocks/wrapper.md](blocks/wrapper.md), [docs/runner-design.md](runner-design.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |

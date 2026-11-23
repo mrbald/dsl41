@@ -32,6 +32,7 @@ from dsl41.runner_clock import RealClock
 from dsl41.runner_config import EngineSettings
 from dsl41.runner_startup import resume_run
 from dsl41.runner_update import UpdateRequest
+from dsl41.runner_wrapper import PAUSE_ENV
 
 pytestmark = pytest.mark.usefixtures("cli_env")
 
@@ -318,6 +319,8 @@ def test_an_exact_update_retry_waits_while_the_restarted_engine_still_stops(shor
         _kill(childfile)
 
 
+# the spawn records name each wrapper and command, so a failure leaves no stopped wrapper
+@pytest.mark.usefixtures("owned_processes")
 def test_a_command_the_units_term_ended_first_is_run_again_not_taken_as_success(short_root):
     """DL-503: systemd sends TERM to the whole unit when the engine dies. A command that ends
     with exit 0 on that TERM, before its wrapper acts, is recorded `parent lost` with the exit
@@ -365,6 +368,72 @@ def test_a_command_the_units_term_ended_first_is_run_again_not_taken_as_success(
                 await _until(lambda: len(_records(root, "outcome")) == 2)
                 assert (await client.ask("status"))["jobs"]["j"]["status"] == "SUCCESS"
                 assert len(_records(root, "dispatch")) == 2
+        finally:
+            if wrapper is not None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(wrapper, signal.SIGCONT)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        _kill(childfile)
+
+
+# the spawn records name each wrapper and command, so a failure leaves no stopped wrapper
+@pytest.mark.usefixtures("owned_processes")
+def test_an_exit_between_the_look_and_the_lifeline_read_is_the_engines_loss(
+    short_root, monkeypatch
+):
+    """DL-544: the wrapper observes the command's exit, then reads the lifeline. It is held
+    between the two with its command running; the engine dies, the unit's TERM ends the
+    command with exit 0, and the wrapper is released. The lifeline is lost at the read, so
+    the record is `parent lost` with the exit inside `observed`, and the restarted engine
+    runs the attempt again. A wrapper that read the lifeline first and was held there would
+    take that exit as the command's own `exited 0`. The test's SIGCHLD wakes the wrapper on
+    every host; only the first engine's wrapper holds."""
+    childfile = short_root / "child"
+    release = childfile.with_suffix(".exit")
+    body = (
+        "trap 'exit 0' TERM\n"
+        f"echo $$ >> {childfile}\n"
+        f"while [ ! -e {release} ]; do sleep 0.05 & wait $!; done\n"
+        "exit 0\n"
+    )
+    path = _config(short_root, _job(_script(short_root, "term-exits-0", body)))
+    root = short_root / "run"
+    spawn_path = root / "runs/j.1/1/spawn.json"
+    status_path = root / "runs/j.1/1/status.json"
+
+    async def scenario():
+        wrapper = None
+        try:
+            monkeypatch.setenv(PAUSE_ENV, "post_observe_pre_lifeline")
+            async with _cli(path) as (client, engine):
+                monkeypatch.delenv(PAUSE_ENV)
+                await client.event("STARTJOB")
+                await _written(childfile)  # the TERM trap is installed
+                await _spawned(root, "j")
+                spawn = json.loads(spawn_path.read_text())
+                wrapper = spawn["wrapper_pid"]
+                os.kill(wrapper, signal.SIGCHLD)
+                await _until(lambda: proc_state(wrapper) == "T")
+                await _kill_engine(engine)
+                os.killpg(spawn["command_pgid"], signal.SIGTERM)  # the unit's TERM
+                await _until(lambda: runner_procid.proc_is_zombie(spawn["command_pid"]))
+                os.kill(wrapper, signal.SIGCONT)
+                await _until(status_path.exists)
+            status = json.loads(status_path.read_text())
+            assert status["outcome"] == "terminated" and status["cause"] == "parent lost"
+            assert status["observed"] == {"outcome": "exited", "exit_code": 0}
+            async with _cli(path) as (client, _):
+                await _until(lambda: len(_records(root, "dispatch")) == 2)
+                assert _records(root, "dispatch")[1]["ordinal"] == 2
+                [first] = _records(root, "outcome")
+                assert (first["outcome"], first["cause"]) == ("stopped", "lifeline")
+                await _spawned(root, "j", n=2)
+                release.touch()
+                await _until(lambda: len(_records(root, "outcome")) == 2)
+                assert (await client.ask("status"))["jobs"]["j"]["status"] == "SUCCESS"
         finally:
             if wrapper is not None:
                 with contextlib.suppress(ProcessLookupError):

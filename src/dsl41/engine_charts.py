@@ -147,8 +147,9 @@ class ExitRecord:
     by itself, `lifeline` or `stop` for a kill, `wrapper` when the wrapper aborted its own
     launch. The times are the wrapper's ISO strings. `wrapper_outcome`, `cause` and `error` are
     the record's own fields, which the adapter's oracle mapping reads. `launched` is False only
-    when the wrapper never launched the command; `observed` is the command's end, seen after the
-    lifeline was lost or caused by the wrapper's own kill (docs/wrapper-protocol.md)."""
+    when the wrapper never launched the command; `observed` is the command's end, seen at either
+    look around the lifeline read that found the lifeline lost, or caused by the wrapper's own
+    kill (docs/wrapper-protocol.md ss3, DL-544)."""
 
     exit_code: int | None = None
     signal: int | None = None

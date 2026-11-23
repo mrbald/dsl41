@@ -18,9 +18,9 @@ wrappers act on the lost lifeline and record it before the unit's TERM reaches t
 then every process still in those sessions gets TERM, then CONT, a bounded wait, then KILL. That
 is not the unit's only behaviour. Under `KillMode=control-group` systemd sends TERM to the whole
 group at once after the main process fails, so a command can die of that TERM before its
-wrapper acts: the wrapper reads the lost lifeline first and records `parent lost` with the
-command's end inside `observed`, and the restart runs the attempt again (DL-503). This module
-sweeps `wrappers-first` only.
+wrapper acts: the wrapper sees the exit, finds the lifeline lost, and records `parent lost`
+with the command's end inside `observed`, and the restart runs the attempt again (DL-503).
+This module sweeps `wrappers-first` only.
 
 The death before the first append leaves a store with no journal record. Its successor is
 refused by name, writes nothing and leaves no process (`refused`, DL-504); no script follows.

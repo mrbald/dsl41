@@ -32,21 +32,27 @@ Duties, in order (ss6a Tier 0):
    tick-exact on Linux.
 4. Portable event loop: SIGCHLD self-pipe + select over {self-pipe, lifeline}. The pipe is
    also the interpreter's wakeup fd, so a SIGCHLD delivered just before the select still
-   wakes it. On EVERY wakeup, whichever descriptor woke it, read the lifeline BEFORE the
-   command's exit (DL-503): an exit seen after the lifeline is lost belongs to the
-   engine's loss and is recorded as "parent lost", never as the command's own end.
+   wakes it. On EVERY wakeup, whichever descriptor woke it, observe the command's exit,
+   then read the lifeline (DL-544). An exit seen while the lifeline is still open at that
+   read is the command's own: the engine outlived it. With the lifeline lost, any exit
+   belongs to the engine's loss and is recorded as "parent lost" (DL-503). The limit: an
+   own exit that the engine's death follows before the lifeline read is "parent lost" too,
+   and the engine's interruption rule reruns or holds it (docs/runner-design.md ss7).
 5. On child exit with the lifeline open: observe with waitid(WNOWAIT), which narrows the
    observe-to-record hole to a few syscalls, durably write ``status.json``, then reap.
 6. On lifeline EOF (the parent died, kill -9 included, since the kernel closes fds):
-   take an exit already there, or SIGTERM the command pgid, grace, SIGKILL; write
+   take an exit already there, looking once more if the first look saw none (DL-544),
+   or SIGTERM the command pgid, grace, SIGKILL; write
    ``status.json`` outcome=terminated cause="parent lost" with the command's end in
    ``observed``, exit. Engine death thus terminates AND records the jobs with no polling
    and no Linux-only mechanism.
 
 status.json outcomes (frozen in docs/wrapper-protocol.md):
-  exited(exit_code) | signaled(signal) -- how the command itself ended, lifeline open;
-  terminated(cause="parent lost")      -- the lifeline was lost: the wrapper killed the
-                                          command on EOF, or saw its exit after it (DL-503);
+  exited(exit_code) | signaled(signal) -- how the command itself ended: the lifeline was
+                                          open at the read after the exit was seen (DL-544);
+  terminated(cause="parent lost")      -- the lifeline was lost at that read: the wrapper
+                                          killed the command on EOF, or took its exit into
+                                          `observed` (DL-503, DL-544);
   spawn_failed(error)                  -- the command's stdin, stdout or stderr could
                                           not be opened, the selected shell could not execute,
                                           or a child limit could not be set (DL-150, DL-492).
@@ -62,9 +68,11 @@ run. The DL-41a accepted cases (-9 of the wrapper alone, or of the whole tree at
 are detected at reconciliation.
 
 Test scaffolding: the DSL41_WRAPPER_TEST_PAUSE env var names comma-separated pause points
-({pre_spawn, post_spawn_pre_record, post_record, post_wait_pre_status,
-post_status_pre_reap}); the wrapper SIGSTOPs itself at each so the kill-matrix tests
-(DL-42 item 8) can freeze it at a phase boundary. Absent the variable the hook is inert.
+({pre_spawn, post_spawn_pre_record, post_record, post_observe_pre_lifeline,
+post_wait_pre_status, post_status_pre_reap}); the wrapper SIGSTOPs itself at each so the
+kill-matrix tests (DL-42 item 8) can freeze it at a phase boundary.
+post_observe_pre_lifeline sits between the exit look and the lifeline read and is passed
+on every wakeup (DL-544). Absent the variable the hook is inert.
 The DL-42 "post-fork pre-exec" boundary is not portably hookable from Python;
 post_spawn_pre_record covers it, since both mean "command pid exists, spawn.json does
 not".
@@ -544,14 +552,20 @@ def main() -> int:
         ready, _, _ = select.select([self_pipe_r, lifeline_fd], [], [])
         if self_pipe_r in ready:
             _drain(self_pipe_r)
-        # duty 4 (DL-503): read the lifeline BEFORE the command's exit, on every wakeup,
-        # whichever descriptor woke the select. An exit seen with the lifeline lost
-        # belongs to the engine's loss: the unit's TERM may have ended the command first.
-        lifeline_lost = _lifeline_lost(lifeline_fd)
+        # duty 4 (DL-544): observe the command's exit, then read the lifeline, on every
+        # wakeup, whichever descriptor woke the select. A lifeline still open after the
+        # exit was seen means the engine outlived it: the exit is the command's own. A
+        # lifeline lost at that read makes any exit the engine's loss (DL-503).
         observed = _observe_exit(child)
-        if lifeline_lost:
+        _test_pause("post_observe_pre_lifeline")
+        if _lifeline_lost(lifeline_fd):
             # duty 6: parent died (EOF fires even under kill -9); the command's end, seen
             # already or caused by the ladder, is forensics inside the record
+            if observed is None:
+                # DL-544: an exit this look observes is taken and its group is not
+                # signalled; a leader that exits after this look can still have its group
+                # signalled by the ladder
+                observed = _observe_exit(child)
             if observed is None:
                 observed = _await_exit_after_kill(child, self_pipe_r, grace_s)
             status = {

@@ -11,6 +11,9 @@ event, so a test can wait on the event instead of sleeping:
 - count_observes: nothing is patched but the exit probe, which runs the real
   one and then notes the call, so a test can wait for a look it caused to
   finish.
+- count_group_kills: nothing is patched but the group kill, which notes the
+  call and then runs the real one, so a test reads whether the wrapper itself
+  signalled the group (DL-544). One line per call.
 - completion_beats_parent_loss: the first exit probe blocks until the command
   has exited and reports "still running", so the lifeline EOF is read with the
   exit already there. One line per probe.
@@ -134,6 +137,16 @@ def count_observes(event_path: str) -> None:
     runner_wrapper._observe_exit = observe
 
 
+def count_group_kills(event_path: str) -> None:
+    real_killpg = runner_wrapper.killpg_quiet
+
+    def killpg(pgid: int, sig: int) -> None:
+        _note(event_path)
+        real_killpg(pgid, sig)
+
+    runner_wrapper.killpg_quiet = killpg
+
+
 def exit_lands_in_select(event_path: str) -> None:
     parked = threading.Event()
 
@@ -241,6 +254,7 @@ def group_kill_fails(event_path: str, *, leader_exited: bool, signal_fails: bool
 
 MODES = {
     "count_observes": count_observes,
+    "count_group_kills": count_group_kills,
     "full_self_pipe": full_self_pipe,
     "completion_beats_parent_loss": completion_beats_parent_loss,
     "exit_lands_in_select": exit_lands_in_select,
