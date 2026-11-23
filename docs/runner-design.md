@@ -1546,7 +1546,7 @@ present job names, computed at that moment (DL-519). Tab never leaves the line; 
 completion, or the cursor inside the line, it rings the bell, and Escape leaves.
 A refused query is reported in the console and the subtitle, never shown
 as an empty estate. A detached `dsl41 ui` exits 2 on a status answer with
-`ok: false` and `access_denied`, before asking for trace (DL-499).
+`ok: false` and `access_denied`, before asking for its history (DL-499).
 It prints the engine's text on stderr. `run --ui` keeps the query-fault display.
 The console prints the first scheduler-origin `START_REFUSED` for each job and cause.
 It counts identical repeats silently.
@@ -1557,24 +1557,100 @@ An input's start that a run window postponed and that is refused at the opening
 has no origin. It prints every time and is not counted in details or rehearsal.
 The L010 bounded-loop refusal is an internal wake, not an input's start.
 It carries none of the three refusal facts, prints every time, and is not counted.
-Console repeat counts belong to each UI session and flush and reset with
-the trace cursor and alarm tally (DL-480). Without a later entry or a cursor
-reset, the console shows no repeat summary. Quitting loses pending counts.
-Below the trigger lines, job details show `scheduler refusals: N (run K)`
-when N is non-zero. This count includes the first refusal and uses only the
-entries the trace serves for that job's current run. QUE_WAIT refusals count
+Console repeat counts belong to each UI session. They flush before an engine
+restart's line and when the viewer joins the history again (DL-480). Without a
+later entry, the console shows no repeat summary. Quitting loses pending counts.
+The console reads the stored entries of `transitions`, never `trace` (DL-541).
+The viewer checks each answer against the schema of the fields it reads (present
+where the contract says they always are, and of their types) and trusts the engine
+for the rest; relations between fields are the engine's to keep, and the engine's
+tests hold it to them. One decoder turns an answer into a typed page or refuses it
+whole, with a diagnostic naming the verb, the field's path, what was expected and
+what came; every reader uses the typed page, and a refusal whose `code` or `error`
+is not a string is refused the same way. A line that is no JSON object is the
+transport's failure (`ControlClient`: "response is not a JSON object"): the viewer
+reads it as a lost connection, and a later alarm rescan it broke ends incomplete. A
+malformed answer means, for the join with its alarm scan, a refused query (one line
+with the diagnostic, nothing held, the next pass joins again); for the follow, one
+such line, and the cursor stays; for a later alarm rescan, incomplete alarms; for
+the pager, one line, and it keeps its place; for the details popup, an unknown
+total.
+Each pass draws the jobs table from `status` before it reads the history.
+The first read is 500 entries backward, shown oldest first; its
+`[watermark, 2^63 - 1]` is the join point. A join is whole or not at all: a
+disconnect or a refusal in its page or its alarm scans leaves the viewer not
+joined, and nothing is shown or held until all of it is read. Each wake and poll
+reads forward pages from the cursor with the history token, at most 4 in a pass
+and the rest in a trailing pass, and checks the read header and continuity before
+a page's rows are used. A new history token that continues the held history is an
+engine restart: its console line waits until the first row above the old token's
+`continuous_through` is written, across pages and passes, or until the follow
+reaches the watermark; the console and the alarm times stay. A changed `baseline_id` in a page or in
+`status`, a history that does not continue what is held (a restored root), or no
+stored history any more forgets everything held, alarm times included, and joins
+again, with one console line. An expired cursor and a gap each write one line.
+`no_journal`, `transitions_unavailable` and `unknown_cmd` leave the table live,
+and the console says once why there is no history. The console holds at most
+10 000 lines; `E` opens the earlier stored entries in the log pager, a page per
+press, back to the retained floor. It starts at the oldest keyed line, or just
+above the highest key the bound evicted. Past the pager's 10 000 lines a page
+drops the pager's newest lines, and the title says so. A press while a page is
+read rings the bell. Each page carries the history token and is checked as a
+followed page is; on a mismatch the console says so and the pager shows the log.
+The alarms column counts a job's `MUST_START_ALARM` and `MUST_COMPLETE_ALARM`
+entries whose `at` is at most 24 hours before `status.engine_now`; such a job is a
+problem. Alarm times exist only while `engine_now` is known: a `status` without it
+drops them, and none is collected meanwhile. A scan has an anchor: everything at or
+below it is the scan's, everything above it the follow's. It reads each alarm
+transition backward from the anchor, the anchor's own row included, until an entry
+is older than twice the window, within 2000 rows and 8 requests. A followed alarm above the anchor adds its time. The join's scan is
+anchored at the join point. When `engine_now` becomes known, the first time or
+again after a `status` without it, or steps back by more than the window against
+the latest one seen since the last scan, one scan anchored at the follow cursor
+rebuilds the times, with no second join. A scan cut by its bound, a scan that read a
+gap, or a followed page with a gap marks the alarm part of Problems incomplete until
+the next scan. No gap is dated by entry times: an entry's `at` is the time the engine
+stamped on its event, not the time it was stored. A gap below where every scan
+stopped is never read. What the mark means: a gap holds seqs whose entries are
+unknown, so an alarm may be there. On a root upgraded in place the gap of the
+earlier build's records stays in what a scan reads, and the mark stays on, until an
+alarm of each kind (`MUST_START_ALARM` and `MUST_COMPLETE_ALARM`) older than twice
+the window is stored above the gap, where both scans stop, or retention prunes the
+gap. After a prune an attached viewer keeps the mark until its next scan; a new
+viewer scans at its join. A `status` without `engine_now`
+marks the alarm part unavailable. An alarm is dated by its deadline: after a stall
+or outage longer than the window, an alarm raised late for an old deadline is not
+in Problems, and it can keep a viewer that joins then from seeing a different,
+recent alarm.
+Below the trigger lines, job details show `scheduler refusals: N (run K)`. The
+popup opens first and fills N in when its read ends, on a connection of its own, so a stalled read holds neither the popup nor the keys. It
+reads the job's stored entries, newest first, with no transition filter, within
+2000 rows and 8 requests, until the entry that opens the run: the status entry
+that carries the run's number, which only a run's opening and `START_REFUSED`
+carry (DL-537). An entry of a later run, one that opened after the status answer,
+is passed over. The popup takes its row, the read header and the history token from
+one answer, its own `status` read, whose `history` names the store's history; it
+reads no field of the viewer. It opens at once and says the total is loading. Every
+page carries that token, and the total is exact only when every page (a) comes under
+that header, (b) reports that token as its `history` and (c) reports it continuous
+through the page's own watermark, and holds no entry the server cut to fit. Any
+other page, a refusal of any code, a transport failure, a malformed answer, or a
+`status` with no `history` (an older engine), makes it `unknown`. The total is read
+once, when the popup opens, and `unknown` stays until the popup is opened again;
+the loading line is always replaced, and exact zero reads `0`. A popup opened right after an engine restart
+is exact, since it does not wait for the viewer to follow. A popup that closes, and a pager
+that is released, cancel the read in flight, and the reads connection starts the
+next exchange fresh. It counts the run's scheduler-origin
+`START_REFUSED` entries, the first refusal included. QUE_WAIT refusals count
 separately from refusals of the preceding run; queued details show
-`scheduler refusals: N (queued)`. Completion retains the run's count;
-a new run starts at zero.
-These counts reset with the trace cursor and alarms. A trace opened by
-RESTART labels the details count `since snapshot`. Counts are not stored.
-If a restarted engine's new trace is already longer than the UI's cursor,
-the cursor does not detect the restart. Counts can then include entries twice.
-The stored trace, `query trace` and rehearsal output still list every refusal.
-The trace cursor and alarm tally reset (DL-210) on a changed `baseline_id`
-or disagreement between the status and trace baselines, with one
-console notice and a read from zero on the next poll. A restart retains
-the stored baseline (DL-428); retention can limit the available prefix.
+`scheduler refusals: N (queued)`. Completion retains the run's count; a new run
+starts at zero. The total is the same across an engine restart. It is exact when
+the opening is reached with no gap above it in what was read; a gap below the
+opening is never read. Past a bound, at the retained floor first, or at an earlier
+run's entry first (a start stored with no number), it reads `at least N`. A total
+that is not exact and is zero, or one whose pages span two histories, reads
+`unknown`.
+`query transitions`, `query trace` and rehearsal output list every refusal.
 
 `dsl41 run --ui` starts the engine and attaches the TUI in the terminal, and
 that terminal owns the run. `dsl41 ui --socket <path>` attaches the same app

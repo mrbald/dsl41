@@ -341,7 +341,8 @@ def test_access_as_nested_and_subscription_reload(short_root):
 
 
 def test_access_ui_wraps_every_path_and_echoes_person(short_root):
-    """Real status, trace, explain, console mutation and subscription; OS account has no tier."""
+    """Real status, transitions, explain, console mutation and subscription; OS account has no
+    tier."""
 
     async def scenario():
         root = short_root / "r"
@@ -405,7 +406,7 @@ def test_ui_subtitle_names_person_in_place_of_socket(tmp_path):
         (False, "invalid_argument", False),
     ],
 )
-def test_ui_status_denial_exit_precedes_trace(short_root, owns_run, code, ends, capsys):
+def test_ui_status_denial_exit_precedes_transitions(short_root, owns_run, code, ends, capsys):
     """The socket stands in for an engine's fault response, without changing UI state."""
 
     async def scenario():
@@ -431,10 +432,11 @@ def test_ui_status_denial_exit_precedes_trace(short_root, owns_run, code, ends, 
             async with viewer.run_test(size=(100, 35)) as pilot:
                 await _wait_for_ui(pilot, lambda: "status" in requests)
                 if not ends:
-                    await _wait_for_ui(pilot, lambda: "trace" in requests)
+                    await _wait_for_ui(pilot, lambda: "transitions" in requests)
                 await pilot.pause()
             assert (viewer.return_code == 2) is ends
-            assert ("trace" not in requests) is ends
+            assert ("transitions" not in requests) is ends
+            assert "trace" not in requests  # DL-541: the viewer never asks for the trace
         finally:
             server.close()
             await server.wait_closed()
@@ -478,7 +480,7 @@ def test_ui_status_consumers_stop_only_on_detached_status_denial(
                     request = json.loads(line)
                     cmd = request["cmd"]
                     if active and (
-                        cmd not in {"status", "trace", "explain", "subscribe"}
+                        cmd not in {"status", "transitions", "explain", "subscribe"}
                         or (cmd == "status" and request.get("job") in {"visible", "unseen"})
                     ):
                         requests.append(cmd)
@@ -504,8 +506,8 @@ def test_ui_status_consumers_stop_only_on_detached_status_denial(
                             }
                         elif cmd == "deps":
                             answer.update(box_name="outer", members=["child"])
-                        elif cmd == "trace":
-                            answer.update(entries=[], last_seq=0)
+                        elif cmd == "transitions":
+                            answer.update(entries=[], next=None, more=False, gaps=[], watermark=0)
                         elif cmd == "sendevent":
                             answer.update(decision="applied", kind=request["verb"])
                         elif cmd == "subscribe":

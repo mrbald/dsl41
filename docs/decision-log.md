@@ -27866,3 +27866,43 @@ relitigate an entry; append a new one.
   suppressed.
   NOT BUILT. A start the engine decided that expired or ended before its launch, and is then
   set to STARTING by hand, still launches (BUG-112).
+- DL-541 The terminal UI reads its history from the stored transitions
+  (2026-11-24; owner's choice of a time window for alarms, and the owner's ruling on what a
+  viewer checks; src/dsl41/runner_tui.py, src/dsl41/runner_control.py,
+  src/dsl41/runner_transitions.py, src/dsl41/runner_journal.py, docs/control-protocol.md,
+  docs/protocol-evolution.md, docs/runner-design.md, docs/cli-tui-qualification.md,
+  README.md, tests/test_tui_history.py, tests/test_tui_page_decoder.py,
+  tests/transitions_conformance.py; builds on DL-536; narrows DL-46 item 14 and DL-210,
+  which read the in-memory trace; additive in dialect 5, DL-217; no state version change)
+  THE RULE. The viewer joins with the newest 500 stored entries (`transitions`, backward)
+  and follows forward by key and history token. It sends no `trace`. Its console holds 10000
+  lines; `E` pages the earlier stored entries to the retained floor. A token that continues
+  what the viewer holds is an engine restart: one line, the console stays. A history that
+  does not continue it, or a new baseline, joins again. With no stored history the table
+  stays live and the console says once why.
+  ALARMS. `status` carries `engine_now`. While it is known the viewer keeps the time of each
+  alarm entry per job, from one scan through the `transition` filter and from followed
+  entries. A job is a problem by alarms while one is dated at most 24 hours before
+  `engine_now`. The title says when that part is incomplete (a bounded scan, or any gap in
+  what was read) or unavailable.
+  REFUSAL TOTALS. `status` carries `history`, the store's history token. The details popup
+  takes the row, the read header and that token from its own `status` answer and walks the
+  job's entries back to the one that opens the run. The total is exact on one path only:
+  every page under that header and token, continuous through its watermark, no cut entry,
+  the opening found. Otherwise it reads "at least N" or "unknown".
+  WHAT THE VIEWER CHECKS. An answer's schema: the presence and type of the fields it reads.
+  A malformed answer is refused whole, with a diagnostic naming the field, what was
+  expected and what came. The viewer trusts the engine for the rest and does not validate
+  the engine's contract. The relations the contract states are checked in the engine's
+  tests, by a conformance checker over the answers the engine produces.
+  WHY. The first poll read the engine's whole in-memory trace in one reply and wrote it to
+  an unbounded console. An alarm count since the last restart grows without end.
+  REJECTED. Counts served by the engine over a time cutoff. Dating a gap by the entries
+  around it. Checking the contract's relations in the viewer: a second implementation of
+  the engine's rules in the client, with no end.
+  ALSO. The engine listed a pruned interval that began above the watermark for a forward
+  cursor past it; it lists the interval only when it is not empty. Six sentences of the
+  `transitions` contract state edge cases that were unstated.
+  COST. An alarm is dated by its deadline, so after an outage longer than the window an old
+  alarm is in the console and not in Problems. On a root upgraded in place the alarms read
+  incomplete until an alarm of each kind is stored above the gap or retention prunes it.

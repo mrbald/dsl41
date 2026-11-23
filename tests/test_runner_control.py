@@ -27,7 +27,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import get_args
 
@@ -4142,5 +4142,61 @@ def test_update_decision_timeout_and_preparation_cancellation(short_root: Path, 
             assert bad["code"] == "invalid_argument"
         finally:
             await _teardown(engine, server, loop)
+
+    asyncio.run(scenario())
+
+
+def test_dl541_status_carries_engine_now_under_a_real_and_a_virtual_clock(short_root: Path) -> None:
+    """`engine_now` is the engine's present time, naive UTC, written as an entry's `at` is;
+    a virtual clock at its minimum answers it too."""
+    text = "insert_job: en_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "real", text)
+        try:
+            before = RealClock().now()
+            answer = await _control_call(server.path, {"cmd": "status"})
+            after = RealClock().now()
+        finally:
+            await _teardown(engine, server, loop_task)
+        now = datetime.fromisoformat(answer["engine_now"])
+        assert now.tzinfo is None and before <= now <= after
+        assert answer["engine_now"] == now.isoformat()
+
+        root = short_root / "virtual"
+        engine = start_run(
+            lower_source(text), root, clock=VirtualClock(), adapters={"CMD": FakeAdapter()}
+        )
+        server = ControlServer(engine, root / "control.sock")
+        await server.start()
+        try:
+            answer = await _control_call(server.path, {"cmd": "status"})
+        finally:
+            await server.close()
+            await engine.shutdown()
+            assert engine.journal is not None
+            engine.journal.close()
+        assert answer["ok"] and answer["engine_now"] == datetime.min.isoformat()
+        assert "clock_hold" not in answer
+
+        # an offset-aware virtual clock: naive UTC, as a stored entry's `at` is written
+        root = short_root / "aware"
+        aware = datetime(2026, 7, 1, 10, tzinfo=timezone(timedelta(hours=2)))
+        engine = start_run(
+            lower_source(text),
+            root,
+            clock=VirtualClock(start=aware),
+            adapters={"CMD": FakeAdapter()},
+        )
+        server = ControlServer(engine, root / "control.sock")
+        await server.start()
+        try:
+            answer = await _control_call(server.path, {"cmd": "status"})
+        finally:
+            await server.close()
+            await engine.shutdown()
+            assert engine.journal is not None
+            engine.journal.close()
+        assert answer["engine_now"] == "2026-07-01T08:00:00"
 
     asyncio.run(scenario())

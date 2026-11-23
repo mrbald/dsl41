@@ -1199,6 +1199,9 @@ class Journal:
         #: why `transitions` declines for this run: the start could not settle its rows
         #: (`runner_transitions.begin`, DL-536); None when it serves
         self.transitions_declined: str | None = None
+        #: the history this start began in the transition rows, once every start step
+        #: succeeded; `status` names it (DL-541). None otherwise
+        self.history: str | None = None
         #: why the history index serves no read for this run: the start could not settle its
         #: rows (`runner_transitions.settle_history`, DL-539); None when it serves
         self.history_declined: str | None = None

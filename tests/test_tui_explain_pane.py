@@ -42,7 +42,7 @@ from test_runner_tui import (
     _post_raw,
     _serve,
     _teardown,
-    _trace_poll_app,
+    _history_poll_app,
     _wait_for_ui,
 )
 
@@ -439,7 +439,7 @@ _CHAIN_ORDER = ["ch_a", "ch_b", "ch_c", "ch_d", "ch_g"]
 class _Client:
     """The test's side of the app's control client. `seen` lists every request. The last of
     `edits` rewrites the jobs of each status answer, and `rev`, when set, its configuration
-    rev; `baseline`, when set, is the read header of each status and trace answer. A verb in
+    rev; `baseline`, when set, is the read header of each status and transitions answer. A verb in
     `refused` is answered ok:false, and one in `failing` gets no answer. `crafted` answers a
     job's `explain` with the answer its function gives. `hold(key)` withholds the answers to
     the requests `key` names, a verb or (verb, job), until `release(key)`; `release_one(key)`
@@ -496,7 +496,7 @@ class _Client:
                 response = {**response, "jobs": self.edits[-1](dict(response["jobs"]))}
             if self.rev is not None:
                 response = {**response, "config_rev": self.rev}
-        if cmd in ("status", "trace") and self.baseline is not None and response.get("ok"):
+        if cmd in ("status", "transitions") and self.baseline is not None and response.get("ok"):
             response = {**response, "baseline_id": self.baseline}
         return response
 
@@ -804,14 +804,14 @@ def test_pilot_dl535_a_status_answer_asked_before_enter_does_not_land_the_hop(
     ("fault", "why"),
     [
         ("failing", "the engine did not answer"),
-        ("baseline", "the trace baseline changed"),
+        ("baseline", "the baseline changed"),
         ("refused", "the status query was refused"),
     ],
 )
 def test_pilot_dl535_a_status_pass_that_ends_the_hop_leaves_the_keys_on_the_selection(
     short_root, fault: str, why: str
 ) -> None:
-    """The status pass the hop waits for gets no answer, sees a new trace baseline, or is
+    """The status pass the hop waits for gets no answer, sees a new baseline, or is
     refused. The hop ends with its line, the selection stays as it is, and `h` then holds the
     selected job and nothing else."""
 
@@ -839,6 +839,10 @@ def test_pilot_dl535_a_status_pass_that_ends_the_hop_leaves_the_keys_on_the_sele
             assert _lines(app).count(line) == 1
             client.failing.clear()
             client.refused.clear()
+            if client.baseline is not None:
+                # the table was drawn from the faked header; the engine's own comes back first
+                client.baseline = None
+                await app._refresh()
             table.focus()
             await pilot.press("h")
             await _wait_for_ui(pilot, lambda: bool(_sent(client)))
@@ -1378,11 +1382,10 @@ def test_pilot_dl535_a_new_baseline_asks_the_downstream_detail_again(short_root)
             await app._refresh()
             mark = len(client.seen)
             client.baseline = "fresh-root"
-            await app._refresh()  # the trace baseline changed: read from the start next pass
-            assert client.asked("deps", mark) == []
-            await app._refresh()
-            await app._refresh()
+            await app._refresh()  # the table is drawn from the new header in this pass (DL-541)
             assert app._baseline == "fresh-root" and app._config_rev == 7
+            assert client.asked("deps", mark) == ["rc_src", "rc_d1", "rc_d2", "rc_d3"]
+            await app._refresh()
             assert client.asked("deps", mark) == ["rc_src", "rc_d1", "rc_d2", "rc_d3", "rc_src"]
 
     asyncio.run(scenario())
@@ -1420,7 +1423,7 @@ def test_pilot_dl535_an_old_engine_s_pane_is_today_s_text_with_no_links(short_ro
     a job that is then put on hold."""
 
     async def scenario() -> None:
-        async with _trace_poll_app(short_root) as (app, pilot, replies):
+        async with _history_poll_app(short_root) as (app, pilot, replies):
             pane = _pane(app)
             await _wait_for_ui(pilot, lambda: bool(pane.lines))
             assert _shown(pane.lines) == [("no condition -- starts on demand/schedule", None)]

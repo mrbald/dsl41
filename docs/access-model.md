@@ -696,7 +696,7 @@ Tests are named `test_access_*`. These obligations hold (DL-146):
     An unarmed estate or another uid refuses without a receipt.
     Wrapped streams lose READ on policy reload and close under the person's name.
 14. Person-aware UI paths use `ControlClient` for every request and subscription.
-    A denied detached status read exits 2 before trace; other faults and `run --ui`
+    A denied detached status read exits 2 before the history read; other faults and `run --ui`
     retain DL-187 item 6. Bad principal JSON exits before connection.
 15. The real pinned web application runs on a Unix socket. Refused upgrades start
     no process. Concurrent tabs keep separate persons and shell metacharacters

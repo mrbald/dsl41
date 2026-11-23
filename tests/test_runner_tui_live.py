@@ -278,7 +278,7 @@ def test_pilot_subtitle_names_a_stopping_update_then_the_applied_revision(
                 assert app._rows == {"live_job"}
                 table = app.query_one("#jobs", DataTable)
                 assert [str(key.value) for key in table.rows] == ["live_job"]
-                assert app._alarms == {}
+                assert app._alarm_times == {}
                 assert str(table.get_cell("live_job", "alarms")) == ""
 
     asyncio.run(scenario())
@@ -313,7 +313,7 @@ def test_pilot_access_reload_refuses_queries_and_details_then_recovers(short_roo
                 assert [triggers.get_row(key) for key in triggers.rows] == previous
                 await pilot.press("escape", "r")
                 await _wait_for_ui(
-                    pilot, lambda: set(app._query_faults) == {"status", "trace", "timers"}
+                    pilot, lambda: set(app._query_faults) == {"status", "transitions", "timers"}
                 )
                 assert "(refused)" in app.sub_title
                 assert table.row_count == 1
@@ -334,7 +334,7 @@ def test_pilot_access_reload_refuses_queries_and_details_then_recovers(short_roo
                 await pilot.press("escape", "r")
                 await _wait_for_ui(pilot, lambda: not app._query_faults)
                 assert "(refused)" not in app.sub_title
-                for verb in ("status", "trace", "timers"):
+                for verb in ("status", "transitions", "timers"):
                     assert sum(f"{verb} query refused:" in line.text for line in console.lines) == 1
                     assert any(line.text == f"{verb} query ok again" for line in console.lines)
 
@@ -467,9 +467,7 @@ def test_pilot_scheduler_ticks_flush_a_repeat_summary_on_the_next_job_entry(
                 )
                 for minute in (1, 2, 3):
                     clock.advance(T0 + timedelta(minutes=minute))
-                    await _wait_for_ui(
-                        pilot, lambda: sum(app._scheduler_refusals.values()) == minute
-                    )
+                    await _wait_for_ui(pilot, lambda: _refusals_folded(app, "live_job") == minute)
                 assert _console(app).count("START_REFUSED") == 1
                 console = app.query_one("#console", RichLog)
                 first = next(line for line in console.lines if "START_REFUSED" in line.text)
@@ -512,7 +510,7 @@ def test_pilot_deadline_alarms_increment_the_count_and_render_red(
                 clock.advance(T0)
                 await _wait_for_ui(pilot, lambda: app._jobs_snapshot["live_job"]["armed"])
                 clock.advance(T0 + timedelta(minutes=1))
-                await _wait_for_ui(pilot, lambda: app._alarms.get("live_job") == 1)
+                await _wait_for_ui(pilot, lambda: app._alarm_count("live_job") == 1)
                 alarm = deadline.upper() + "_ALARM"
                 console = app.query_one("#console", RichLog)
                 lines = [line for line in console.lines if alarm in line.text]
@@ -531,9 +529,13 @@ def test_pilot_deadline_alarms_increment_the_count_and_render_red(
 
 
 @pytest.mark.parametrize("restart", ["resume", "new-baseline"])
-def test_pilot_restart_resets_the_cursor_and_flushes_pending_refusals(
+def test_pilot_restart_keeps_the_history_or_joins_again_and_flushes_pending_refusals(
     short_root: Path, restart: str
 ) -> None:
+    """A resumed engine continues the stored history: one line, and the console and the alarm
+    times stay. A fresh root under a new baseline joins again. Either way the folded refusals
+    are flushed first (DL-480, DL-541)."""
+
     async def scenario() -> None:
         root = short_root / "run"
         clock = _Clock()
@@ -553,20 +555,9 @@ def test_pilot_restart_resets_the_cursor_and_flushes_pending_refusals(
                 )
                 for minute in (1, 2, 3):
                     clock.advance(T0 + timedelta(minutes=minute))
-                    await _wait_for_ui(
-                        pilot,
-                        lambda: (
-                            sum(
-                                count
-                                for (job, _, _), count in app._scheduler_refusals.items()
-                                if job == "live_job"
-                            )
-                            == minute
-                        ),
-                    )
-                assert app._alarms == {"alarm_job": 1}
-                previous = app._trace_seq
-                baseline = app._baseline
+                    await _wait_for_ui(pilot, lambda: _refusals_folded(app, "live_job") == minute)
+                await _wait_for_ui(pilot, lambda: app._alarm_count("alarm_job") == 1)
+                baseline, history = app._baseline, app._history
                 assert "repeated2moretimes" not in _console(app)
                 await engines.aclose()
                 if restart == "new-baseline":
@@ -577,18 +568,39 @@ def test_pilot_restart_resets_the_cursor_and_flushes_pending_refusals(
                 await pilot.press("r")
                 await _wait_for_ui(pilot, lambda: "repeated2moretimes" in _console(app))
                 if restart == "resume":
-                    await _wait_for_ui(pilot, lambda: app._trace_from_snapshot)
-                    assert app._trace_seq < previous
-                    assert app._baseline == baseline
-                    assert "RESTART" in _console(app)
+                    restarted = "enginerestarted;thestoredhistorycontinues"
+                    await _wait_for_ui(pilot, lambda: restarted in _console(app))
+                    assert app._history != history and app._baseline == baseline
                     assert _console(app).index("repeated2moretimes") < _console(app).index(
-                        "RESTART"
+                        restarted
                     )
+                    assert _console(app).count(restarted) == 1
+                    assert app._alarm_count("alarm_job") == 1
+                    assert "RESTART" not in _console(app)
+                    # the popup reads the run's total from the engine's store, across the restart
+                    app._choose("live_job")
+                    app.query_one("#jobs", DataTable).focus()
+                    await pilot.press("d")
+                    await _wait_for_ui(pilot, lambda: isinstance(app.screen, SpecScreen))
+                    await _wait_for_ui(
+                        pilot,
+                        lambda: (
+                            "scheduler refusals: 3 (run 1)"
+                            in str(app.screen.query_one("#specbox Static", Static).content)
+                        ),
+                    )
+                    await pilot.press("escape")
                 else:
                     await _wait_for_ui(pilot, lambda: app._baseline != baseline)
-                    assert "tracebaselinechanged;readingfromthestartnextpoll" in _console(app)
-                assert not app._scheduler_refusals
-                assert not app._alarms
+                    assert "baselinechanged;joiningthehistoryagain" in _console(app)
+                    assert app._alarm_count("alarm_job") == 0
                 assert _console(app).count("repeated2moretimes") == 1
 
     asyncio.run(scenario())
+
+
+def _refusals_folded(app: RunnerApp, job: str) -> int:
+    """The scheduler refusals of `job` the console's open fold holds: its first line and its
+    repeats."""
+    run = app._refusal_runs.get(job)
+    return 0 if run is None else run.repeats + 1

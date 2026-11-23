@@ -29,8 +29,8 @@ TUI surface (ss11; DL-46; runner_tui.py's docstring holds the TUI-side detail):
   fire-time staleness rules, so a heap entry a fire would discard is not shown.
   `log_out`/`log_err` are the stored ss6 append targets of the CURRENT run's latest
   dispatched attempt (DL-447). They are CMD-only and null before dispatch.
-- The protocol has no TUI verb: the TUI is `status` + `trace --since` + `explain`
-  + `sendevent` + `subscribe`-as-wake-up, the headless surface (DL-45).
+- The protocol has no TUI verb: the TUI is `status` + `transitions` + `explain`
+  + `sendevent` + `subscribe`-as-wake-up, the headless surface (DL-45, DL-541).
 
 Read model (DL-78): every query handler is a pure projection of (oracle, catalog,
 scheduler, spool paths) and mutates nothing. Because feed() never yields, a handler
@@ -81,7 +81,7 @@ from pathlib import Path
 from typing import Any, Final, get_args
 
 
-from dsl41.canon import is_scalar_json, is_wire_int
+from dsl41.canon import is_scalar_json, is_wire_int, naive_utc
 from dsl41.conditions import GlobalAtom, iter_atoms
 from dsl41.ir import FwSpec, JobIR
 from dsl41.runner_config import FW_DEFAULT_INTERVAL_S
@@ -1357,12 +1357,19 @@ class ControlServer:
         update = self.engine.update.view()
         if update is not None:
             answer["update"] = update
+        wall = self.engine.clock.now()
+        # DL-541: the engine's present time, written as a stored entry's `at` is (naive UTC,
+        # canon.naive_utc), so a viewer can date what it shows; nothing the engine decides reads it
+        present = self.engine.now_present(remember=False, wall=wall)
+        answer["engine_now"] = naive_utc(present).isoformat()
         if not self.engine.clock.virtual:
-            wall = self.engine.clock.now()
             until = self.engine.now_admitted(remember=False, wall=wall)
             if wall < until:
                 answer["clock_hold"] = {"wall": wall.isoformat(), "until": until.isoformat()}
         journal = self.engine.journal
+        # DL-541: the history `transitions` reports for this store, so a viewer can tell the
+        # rows it reads come from the history this answer's rows belong to; null without one
+        answer["history"] = None if journal is None else journal.history
         if journal is not None and journal.transitions_declined is not None:
             # DL-536: where a viewer looks, while `transitions` declines for this run
             answer["transitions_unavailable"] = journal.transitions_declined

@@ -63,6 +63,7 @@ from dsl41.runner_control import (
 )
 from dsl41.console_words import STATUS_ROWS, VERB_ROWS
 from dsl41.runner_startup import start_run
+from dsl41.runner_transitions import agrees_through
 from dsl41.runner_tui import (
     _COLUMNS,
     _CONSOLE_VERBS,
@@ -944,64 +945,192 @@ def test_pilot_f1_reaches_the_maximized_pager_and_the_triggers_screen(short_root
     asyncio.run(scenario())
 
 
-class _TraceReplies:
-    """Controlled query pairs; trace filtering follows the wire's exclusive cursor."""
+_KEY_MAX = 2**63 - 1
+
+
+class _HistoryReplies:
+    """Controlled `status` and `transitions` answers (DL-541). `rows` are the stored entries,
+    each with its key; a page follows control-protocol ss4: entries in key order, `next` the
+    key of its last entry in its direction or the request's cursor, never above
+    `[watermark, 2^63 - 1]`, `gaps` the seqs of `gaps` the page spans, `continuous_through`
+    by `histories`. `refusal` answers every `transitions` request in place of a page."""
 
     def __init__(self) -> None:
-        self.status = {
+        self.status: dict[str, Any] = {
             "ok": True,
             "baseline_id": "period-a",
+            "engine_now": "2026-07-01T08:00:00",
             "jobs": {"trace_job": {"status": "INACTIVE", "job_type": "CMD"}},
         }
-        self.trace = {
-            "ok": True,
-            "baseline_id": "period-a",
-            "last_seq": 2,
-            "entries": self.entries("old", 2),
-        }
+        self.baseline = "period-a"
+        self.rows: list[dict] = self.entries("old", 2)
+        self.histories: list[tuple[str, int]] = [("history-a", 1)]
+        self.floor = 1
+        self.gaps: list[list[int]] = []
+        #: the key of the newest pruned row a forward cursor below it misses
+        self.pruned_through: tuple[int, int] | None = None
+        self.watermark: int | None = None
+        self.refusal: dict | None = None
+        #: the most entries one page holds, as a byte cap would cut it
+        self.page_cap: int | None = None
+        #: (predicate, event): a request the predicate takes waits for the event
+        self.gates: list[tuple[Any, asyncio.Event]] = []
+        #: a request this predicate takes raises ControlClientError
+        self.fail: Any = None
+        #: called with each `transitions` request after its answer is shaped
+        self.after: Any = None
+        #: whether `status` names the store's history (DL-541), as an engine of this build does
+        self.names_history = True
+        #: a `continuous_through` every page reports in place of the computed one
+        self.through: int | None = None
+        #: mangle(request, answer) -> the answer sent, to send one out of the contract's form
+        self.mangle: Any = None
         self.requests: list[dict] = []
         self.disconnected = False
 
     @staticmethod
-    def entries(cause: str, count: int) -> list[dict]:
+    def entries(
+        cause: str,
+        count: int,
+        *,
+        first: int = 1,
+        transition: str = "MUST_START_ALARM",
+        at: str = "2026-07-01T08:00:00",
+        job: str = "trace_job",
+    ) -> list[dict]:
         return [
             {
                 "seq": seq,
-                "at": "2026-07-01T08:00:00",
-                "job": "trace_job",
-                "transition": "MUST_START_ALARM",
+                "n": 0,
+                "at": at,
+                "job": job,
+                "transition": transition,
                 "cause": f"{cause}-{seq}",
             }
-            for seq in range(1, count + 1)
+            for seq in range(first, first + count)
         ]
+
+    def upto(self) -> int:
+        if self.watermark is not None:
+            return self.watermark
+        return max((row["seq"] for row in self.rows), default=self.floor - 1)
+
+    def transitions(self, request: dict) -> dict:
+        upto = self.upto()
+        rows = sorted(
+            (
+                row
+                for row in self.rows
+                if row["seq"] <= upto
+                and request.get("job") in (None, row["job"])
+                and request.get("transition") in (None, row["transition"])
+            ),
+            key=lambda row: (row["seq"], row["n"]),
+        )
+        cursor = tuple(request["cursor"]) if request.get("cursor") is not None else None
+        backward = request.get("direction") == "backward"
+        limit = request.get("limit", 500)
+        if self.page_cap is not None:
+            limit = min(limit, self.page_cap)
+        if backward:
+            after = [r for r in rows if cursor is None or (r["seq"], r["n"]) < cursor]
+            page, more = after[max(0, len(after) - limit) :], len(after) > limit
+            last = (page[0]["seq"], page[0]["n"]) if page else None
+            high = upto if cursor is None else min(cursor[0], upto)
+            low = (high if last is None else last[0]) if more else self.floor
+        else:
+            after = [r for r in rows if cursor is None or (r["seq"], r["n"]) > cursor]
+            page, more = after[:limit], len(after) > limit
+            last = (page[-1]["seq"], page[-1]["n"]) if page else None
+            low = self.floor if cursor is None else cursor[0]
+            high = min((low if last is None else last[0]) if more else upto, upto)
+        following = cursor if last is None else last
+        if following is not None and following > (upto, _KEY_MAX):
+            following = (upto, _KEY_MAX)
+        pruned = []
+        through = self.pruned_through
+        if cursor is not None and not backward and through is not None and cursor < through:
+            first, newest = max(cursor[0], 1), min(through[0], upto)
+            if first <= newest:
+                pruned.append([first, newest])
+        elif cursor is not None and backward and cursor[0] < self.floor:
+            if 1 <= min(cursor[0], upto):
+                pruned.append([1, min(cursor[0], upto)])
+        # covered and gaps account for the span at or above the floor, as the engine's do
+        start = max(low, self.floor)
+        gaps = sorted(
+            [max(a, start), min(b, high)] for a, b in self.gaps if max(a, start) <= min(b, high)
+        )
+        covered, at = [], start
+        for a, b in gaps:
+            if a > at:
+                covered.append([at, a - 1])
+            at = max(at, b + 1)
+        if at <= high:
+            covered.append([at, high])
+        answer = {
+            "ok": True,
+            "baseline_id": self.baseline,
+            "applied_index": 0,
+            "entries": [dict(row) for row in page],
+            "next": None if following is None else list(following),
+            "more": more,
+            "floor": self.floor,
+            "expired": bool(pruned),
+            "pruned": pruned,
+            "covered": covered,
+            "gaps": gaps,
+            "watermark": upto,
+            "history": self.histories[-1][0],
+        }
+        if request.get("history") is not None:
+            answer["continuous_through"] = agrees_through(self.histories, request["history"], upto)
+            if self.through is not None:
+                answer["continuous_through"] = self.through
+        if self.mangle is not None:
+            answer = self.mangle(request, answer)
+        return answer
 
     async def request(self, request):
         self.requests.append(dict(request))
-        if self.disconnected:
+        for taken, gate in list(self.gates):
+            if taken(request):
+                await gate.wait()
+        if self.disconnected or (self.fail is not None and self.fail(request)):
             raise ControlClientError("test disconnect")
         if request["cmd"] == "status":
+            if self.names_history and "history" not in self.status:
+                return {**self.status, "history": self.histories[-1][0]}
             return self.status
-        if request["cmd"] == "trace":
-            if not self.trace["ok"]:
-                return self.trace
-            return {
-                **self.trace,
-                "entries": [
-                    entry for entry in self.trace["entries"] if entry["seq"] > request["since"]
-                ],
-            }
+        if request["cmd"] == "transitions":
+            if self.refusal is not None:
+                return self.refusal
+            answer = self.transitions(request)
+            if self.after is not None:
+                self.after(request)
+            return answer
         if request["cmd"] in ("spec", "deps", "timers"):
             return {"ok": True}
-        assert request["cmd"] == "explain"
+        assert request["cmd"] == "explain", request
         return {"ok": True, "condition": None}
+
+    def follows(self) -> list[dict]:
+        """The forward `transitions` requests sent, without their history token."""
+        return [
+            {k: v for k, v in r.items() if k not in ("cmd", "history")}
+            for r in self.requests
+            if r["cmd"] == "transitions" and r.get("direction") == "forward"
+        ]
 
 
 @contextlib.asynccontextmanager
-async def _trace_poll_app(short_root: Path, *, size: tuple[int, int] = (160, 40)):
-    """Mount the real widgets, with polling driven only by each test's r key."""
-    replies = _TraceReplies()
+async def _history_poll_app(short_root: Path, *, size: tuple[int, int] = (160, 40)):
+    """Mount the real widgets over `_HistoryReplies`, with polling driven only by each test's r
+    key; it yields once the join and its alarm scans are read."""
+    replies = _HistoryReplies()
     app = RunnerApp(short_root / "control.sock")
     app._client.request = replies.request
+    app._reads.request = replies.request
 
     async def no_journal_wakeups():
         return
@@ -1017,7 +1146,7 @@ async def _trace_poll_app(short_root: Path, *, size: tuple[int, int] = (160, 40)
 
     app.set_interval = controlled_interval
     async with app.run_test(size=size) as pilot:
-        await _wait_for_ui(pilot, lambda: app._trace_seq == 2)
+        await _wait_for_ui(pilot, lambda: app._join is not None and "trace_job" in app._rows)
         yield app, pilot, replies
 
 
@@ -1029,7 +1158,7 @@ def test_pilot_spec_drift_advice_clears_and_does_not_repeat_on_reconnect(
     socket_root = Path("run root's $;") if relative else short_root
 
     async def scenario() -> None:
-        async with _trace_poll_app(socket_root, size=(80, 40)) as (app, pilot, replies):
+        async with _history_poll_app(socket_root, size=(80, 40)) as (app, pilot, replies):
             console = app.query_one("#console", RichLog)
             notices: list[str] = []
             write = app._console_write
@@ -1081,7 +1210,7 @@ def test_pilot_spec_drift_advice_clears_and_does_not_repeat_on_reconnect(
             assert notices.count(expected) == 3
             assert {request["cmd"] for request in replies.requests} <= {
                 "status",
-                "trace",
+                "transitions",
                 "explain",
             }
 
@@ -1091,41 +1220,49 @@ def test_pilot_spec_drift_advice_clears_and_does_not_repeat_on_reconnect(
 def test_dl210_u1_u4_trace_baseline_change_restarts_a_longer_trace_next_poll(
     short_root: Path,
 ) -> None:
-    """First sight seeds identity; a longer replacement trace still starts from zero."""
+    """First sight seeds identity. A status answer under a new baseline forgets the held
+    history before the table is drawn, and the same pass joins the new history (DL-541)."""
 
     async def scenario() -> None:
-        async with _trace_poll_app(short_root) as (app, pilot, replies):
+        async with _history_poll_app(short_root) as (app, pilot, replies):
             console = app.query_one("#console", RichLog)
-            table = app.query_one("#jobs", DataTable)
-            # u4: mounting consumed the first trace, without a reset pass or notice.
-            assert [r["since"] for r in replies.requests if r["cmd"] == "trace"] == [0]
-            assert app._alarms == {"trace_job": 2}
-            assert not any("trace baseline" in line.text for line in console.lines)
-            old_row = table.get_row("trace_job")
+            # u4: mounting joined once, without a reset pass or notice.
+            joins = [r for r in replies.requests if r["cmd"] == "transitions" and "cursor" not in r]
+            assert joins == [{"cmd": "transitions", "direction": "backward", "limit": 500}]
+            assert app._alarm_count("trace_job") == 2
+            assert not any("baseline changed" in line.text for line in console.lines)
             before = len(console.lines)
             replies.requests.clear()
             replies.status.update(baseline_id="period-b", jobs={"new_job": {"status": "SUCCESS"}})
-            replies.trace.update(
-                baseline_id="period-b", last_seq=4, entries=replies.entries("new", 4)
-            )
+            replies.baseline = "period-b"
+            replies.histories = [("history-b", 1)]
+            replies.rows = replies.entries("new", 4)
 
             await pilot.press("r")
-            await pilot.pause()
-            assert replies.requests == [{"cmd": "status"}, {"cmd": "trace", "since": 2}]
-            assert app._trace_seq == 0 and app._alarms == {}
-            assert table.get_row("trace_job") == old_row and "new_job" not in app._rows
-            assert app._baseline == "period-a"
-            assert len(console.lines) == before + 1
-            assert "trace baseline changed" in console.lines[-1].text
-            assert not any("[new-" in line.text for line in console.lines)
-
-            await pilot.press("r")
-            await _wait_for_ui(pilot, lambda: app._trace_seq == 4)
-            assert [r["since"] for r in replies.requests if r["cmd"] == "trace"] == [2, 0]
-            assert app._alarms == {"trace_job": 4}
-            assert app._rows == {"new_job"}
-            assert sum("[new-" in line.text for line in console.lines) == 4
-            assert sum("trace baseline changed" in line.text for line in console.lines) == 1
+            await _wait_for_ui(pilot, lambda: app._join == (4, _KEY_MAX))
+            scan = {"direction": "backward", "cursor": [4, _KEY_MAX], "limit": 500}
+            assert replies.requests == [
+                {"cmd": "status"},
+                {"cmd": "transitions", "direction": "backward", "limit": 500},
+                {
+                    "cmd": "transitions",
+                    "transition": "MUST_COMPLETE_ALARM",
+                    **scan,
+                    "history": "history-b",
+                },
+                {
+                    "cmd": "transitions",
+                    "transition": "MUST_START_ALARM",
+                    **scan,
+                    "history": "history-b",
+                },
+            ]
+            assert app._rows == {"new_job"} and app._baseline == "period-b"
+            assert app._alarm_count("trace_job") == 4
+            lines = [line.text for line in console.lines]
+            assert lines[before] == "baseline changed; joining the history again"
+            assert sum("[new-" in text for text in lines) == 4
+            assert sum("baseline changed" in text for text in lines) == 1
 
     asyncio.run(scenario())
 
@@ -1141,7 +1278,8 @@ def _start_refusal(
 ) -> dict:
     return {
         "seq": seq,
-        "at": f"2026-07-01T23:30:{seq:02}",
+        "n": 0,
+        "at": (datetime(2026, 7, 1, 23, 30) + timedelta(seconds=seq)).isoformat(),
         "job": job,
         "transition": "START_REFUSED",
         "cause": cause,
@@ -1153,6 +1291,19 @@ def _start_refusal(
     }
 
 
+def _opening(seq: int, run: int = 1, job: str = "trace_job", n: int = 0) -> dict:
+    """The stored status entry that opens run `run` of `job` (DL-537)."""
+    return {
+        "seq": seq,
+        "n": n,
+        "at": f"2026-07-01T23:29:{seq:02}",
+        "job": job,
+        "transition": "INACTIVE->STARTING",
+        "cause": "STARTJOB event (scheduler)",
+        "run_number": run,
+    }
+
+
 def _console_text(console: RichLog) -> str:
     return re.sub(r"\s+", "", "".join(line.text for line in console.lines))
 
@@ -1161,9 +1312,9 @@ def test_pilot_identical_refusal_after_a_different_entry_prints_a_new_first_line
     short_root: Path, local_timezone
 ) -> None:
     async def scenario() -> None:
-        async with _trace_poll_app(short_root) as (app, pilot, _):
+        async with _history_poll_app(short_root) as (app, pilot, _):
             console = app.query_one("#console", RichLog)
-            app._consume_trace(
+            app._consume_entries(
                 [
                     _start_refusal(3),
                     _start_refusal(4),
@@ -1175,7 +1326,8 @@ def test_pilot_identical_refusal_after_a_different_entry_prints_a_new_first_line
                         "cause": "deadline",
                     },
                     _start_refusal(6),
-                ]
+                ],
+                follow=True,
             )
             await pilot.pause()
             summary = (
@@ -1196,12 +1348,11 @@ def test_pilot_interleaved_jobs_keep_separate_refusal_runs(
     short_root: Path, local_timezone
 ) -> None:
     async def scenario() -> None:
-        async with _trace_poll_app(short_root) as (app, pilot, replies):
+        async with _history_poll_app(short_root) as (app, pilot, replies):
             console = app.query_one("#console", RichLog)
             changed_cause = _SCHEDULER_REFUSAL.replace("RUNNING", "QUE_WAIT")
-            replies.trace.update(
-                last_seq=10,
-                entries=[
+            replies.rows.extend(
+                [
                     _start_refusal(3, "job_a"),
                     _start_refusal(4, "job_b"),
                     _start_refusal(5, "job_a"),
@@ -1213,7 +1364,7 @@ def test_pilot_interleaved_jobs_keep_separate_refusal_runs(
                 ],
             )
             await pilot.press("r")
-            await _wait_for_ui(pilot, lambda: app._trace_seq == 10)
+            await _wait_for_ui(pilot, lambda: app._cursor == (10, _KEY_MAX))
             await pilot.pause()
             rendered = _console_text(console)
             for job, count_text, at, last in (
@@ -1255,11 +1406,11 @@ def test_pilot_operator_and_unknown_refusals_print_every_time(
     short_root: Path, local_timezone, cause: str, source: str | None
 ) -> None:
     async def scenario() -> None:
-        async with _trace_poll_app(short_root) as (app, pilot, replies):
+        async with _history_poll_app(short_root) as (app, pilot, replies):
             console = app.query_one("#console", RichLog)
-            replies.trace.update(
-                last_seq=6,
-                entries=[
+            replies.rows.extend(
+                [
+                    _opening(2, n=1),
                     _start_refusal(3),
                     _start_refusal(4),
                     _start_refusal(5, cause=cause, source=source),
@@ -1267,7 +1418,7 @@ def test_pilot_operator_and_unknown_refusals_print_every_time(
                 ],
             )
             await pilot.press("r")
-            await _wait_for_ui(pilot, lambda: app._trace_seq == 6)
+            await _wait_for_ui(pilot, lambda: app._cursor == (6, _KEY_MAX))
             await pilot.pause()
             rendered = _console_text(console)
             summary = (
@@ -1281,7 +1432,9 @@ def test_pilot_operator_and_unknown_refusals_print_every_time(
             )
             assert rendered.count("repeated1moretime,") == 1
             assert app._refusal_runs == {}
-            assert app._scheduler_refusals == {("trace_job", 1, "RUNNING"): 2}
+            # only an explicit scheduler origin counts towards the run's stored total (DL-541)
+            row = {"status": "RUNNING", "run_number": 1}
+            assert await app._refusal_total("trace_job", row, "period-a", app._history) == (2, True)
 
     asyncio.run(scenario())
 
@@ -1290,31 +1443,29 @@ def test_pilot_reconnect_preserves_refusal_summary_without_recounting(
     short_root: Path, local_timezone
 ) -> None:
     async def scenario() -> None:
-        async with _trace_poll_app(short_root) as (app, pilot, replies):
+        async with _history_poll_app(short_root) as (app, pilot, replies):
             console = app.query_one("#console", RichLog)
-            entries = [_start_refusal(seq) for seq in (3, 4, 5)]
-            replies.trace.update(last_seq=5, entries=entries)
+            replies.rows.append(_opening(2, n=1))
+            replies.rows.extend(_start_refusal(seq) for seq in (3, 4, 5))
             await pilot.press("r")
-            await _wait_for_ui(pilot, lambda: app._trace_seq == 5)
+            await _wait_for_ui(pilot, lambda: app._cursor == (5, _KEY_MAX))
             replies.disconnected = True
             await pilot.press("r")
             await _wait_for_ui(pilot, lambda: app._connected is False)
             replies.disconnected = False
-            # A new cause flushes the run; the already consumed prefix is still present.
-            replies.trace.update(
-                last_seq=6,
-                entries=[*entries, _start_refusal(6, cause="operator", source="control")],
-            )
+            # A new cause flushes the run; the rows already read are not read again.
+            replies.rows.append(_start_refusal(6, cause="operator", source="control"))
             replies.requests.clear()
             await pilot.press("r")
-            await _wait_for_ui(pilot, lambda: app._trace_seq == 6)
+            await _wait_for_ui(pilot, lambda: app._cursor == (6, _KEY_MAX))
             await pilot.press("r")
             await pilot.pause()
-            assert [r["since"] for r in replies.requests if r["cmd"] == "trace"] == [5, 6]
+            assert [r["cursor"] for r in replies.follows()] == [[5, _KEY_MAX], [6, _KEY_MAX]]
             rendered = _console_text(console)
             assert rendered.count("repeated2moretimes") == 1
             assert rendered.count("START_REFUSED") == 3
-            assert app._scheduler_refusals == {("trace_job", 1, "RUNNING"): 3}
+            row = {"status": "RUNNING", "run_number": 1}
+            assert await app._refusal_total("trace_job", row, "period-a", app._history) == (3, True)
 
     asyncio.run(scenario())
 
@@ -1323,8 +1474,11 @@ def test_pilot_reconnect_preserves_refusal_summary_without_recounting(
 def test_pilot_details_count_current_run_and_keep_queued_refusals_apart(
     short_root: Path, job_type: str
 ) -> None:
+    """The popup reads the run's stored refusals when it opens (DL-541): the current run's,
+    the queued start's apart, and the same total after an engine restart."""
+
     async def scenario() -> None:
-        async with _trace_poll_app(short_root) as (app, pilot, replies):
+        async with _history_poll_app(short_root) as (app, pilot, replies):
             row = replies.status["jobs"]["trace_job"]
             row.update(status="RUNNING", run_number=1, job_type=job_type, started_by="schedule")
 
@@ -1332,6 +1486,17 @@ def test_pilot_details_count_current_run_and_keep_queued_refusals_apart(
                 app.query_one("#jobs", DataTable).focus()
                 await pilot.press("d")
                 await _wait_for_ui(pilot, lambda: isinstance(app.screen, SpecScreen))
+                await _wait_for_ui(
+                    pilot,
+                    lambda: (
+                        not [
+                            w
+                            for w in app.workers
+                            if w.group in ("details", "refusals") and not w.is_finished
+                        ]
+                    ),
+                )
+                await pilot.pause()
                 body = str(app.screen.query_one("#specbox Static", Static).content)
                 if expected is None:
                     assert "scheduler refusals:" not in body
@@ -1340,60 +1505,69 @@ def test_pilot_details_count_current_run_and_keep_queued_refusals_apart(
                     assert body.index("started by:") < body.index("scheduler refusals:")
                 await pilot.press("escape")
 
+            replies.rows.append(_opening(2, n=1))
             await pilot.press("r")
-            await details(None)
-            entries = [
-                _start_refusal(3, cause="opaque cause"),
-                {**_start_refusal(4), "refused_status": "STARTING"},
-                {**_start_refusal(5), "refused_status": "QUE_WAIT"},
-                _start_refusal(6, job="another_job"),
-                _start_refusal(7, source="control"),
-            ]
-            replies.trace.update(last_seq=7, entries=entries)
-            await pilot.press("r")
-            await _wait_for_ui(pilot, lambda: app._trace_seq == 7)
+            await details("scheduler refusals: 0 (run 1)\n")  # exact, never a removed line
+            replies.rows.extend(
+                [
+                    _start_refusal(3, cause="opaque cause"),
+                    {**_start_refusal(4), "refused_status": "STARTING"},
+                    {**_start_refusal(5), "refused_status": "QUE_WAIT"},
+                    _start_refusal(6, job="another_job"),
+                    _start_refusal(7, source="control"),
+                ]
+            )
             await details("scheduler refusals: 2 (run 1)")
             row["status"] = "QUE_WAIT"
             await details("scheduler refusals: 1 (queued)")
             row["status"] = "SUCCESS"
             await details("scheduler refusals: 2 (run 1)")
             row.update(status="RUNNING", run_number=2)
-            await details(None)
-            replies.trace.update(
-                last_seq=8, entries=[*entries, {**_start_refusal(8), "run_number": 2}]
-            )
-            await pilot.press("r")
-            await _wait_for_ui(pilot, lambda: app._trace_seq == 8)
+            replies.rows.append(_opening(7, run=2, n=1))
+            await details("scheduler refusals: 0 (run 2)\n")
+            replies.rows.append({**_start_refusal(8), "run_number": 2})
             await details("scheduler refusals: 1 (run 2)")
-            app._trace_from_snapshot = True
-            await details("scheduler refusals: 1 (run 2) since snapshot")
-            app._reset_trace_cursor()
-            assert app._alarms == {} and app._scheduler_refusals == {}
-            assert not app._trace_from_snapshot
-            await details(None)
+            # an engine restart: the popup shows the run's stored total, with no qualifier
+            replies.histories.append(("history-b", 9))
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: app._history == "history-b")
+            await details("scheduler refusals: 1 (run 2)\n")
+            reads = [r for r in replies.requests if r["cmd"] == "transitions" and r.get("job")]
+            # the walk's first page carries the history the viewer holds (DL-541)
+            assert reads[-1] == {
+                "cmd": "transitions",
+                "job": "trace_job",
+                "direction": "backward",
+                "limit": 500,
+                "history": "history-b",
+            }
 
     asyncio.run(scenario())
 
 
-def test_dl210_u3_mixed_read_baselines_return_without_updating_the_table(short_root: Path) -> None:
-    """A status/trace race also resets when the trace identity itself stayed the same."""
+def test_dl210_u3_mixed_read_baselines_forget_the_history_and_draw_the_table(
+    short_root: Path,
+) -> None:
+    """A status answer under another read header than the held history forgets it, alarm
+    times included; the table is drawn from status; a join whose page comes under the old
+    header is not taken (DL-541)."""
 
     async def scenario() -> None:
-        async with _trace_poll_app(short_root) as (app, pilot, replies):
+        async with _history_poll_app(short_root) as (app, pilot, replies):
             console = app.query_one("#console", RichLog)
-            table = app.query_one("#jobs", DataTable)
-            old_row = table.get_row("trace_job")
             before = len(console.lines)
             replies.requests.clear()
             replies.status.update(baseline_id="period-b", jobs={"mixed_job": {"status": "SUCCESS"}})
-            replies.trace.update(last_seq=3, entries=replies.entries("mixed", 3))
+            replies.rows.extend(replies.entries("mixed", 1, first=3))
 
             await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: "mixed_job" in app._rows)
             await pilot.pause()
-            assert replies.requests == [{"cmd": "status"}, {"cmd": "trace", "since": 2}]
-            assert app._trace_seq == 0 and app._alarms == {}
-            assert app._baseline == "period-a"
-            assert table.get_row("trace_job") == old_row and "mixed_job" not in app._rows
+            assert [r for r in replies.requests if r["cmd"] == "transitions"] == [
+                {"cmd": "transitions", "direction": "backward", "limit": 500}
+            ]
+            assert app._join is None and app._alarm_times == {}
+            assert app._baseline == "period-b" and app._rows == {"mixed_job"}
             assert len(console.lines) == before + 1
             assert not any("[mixed-" in line.text for line in console.lines)
 
@@ -1401,41 +1575,40 @@ def test_dl210_u3_mixed_read_baselines_return_without_updating_the_table(short_r
 
 
 def test_dl210_u5_reconnect_same_baseline_keeps_cursor_across_a_resume(short_root: Path) -> None:
-    """Disconnect preserves alarms and cursor; a resumed engine continues a longer prefix."""
+    """Disconnect preserves alarms and cursor; the next pass follows on from the cursor."""
 
     async def scenario() -> None:
-        async with _trace_poll_app(short_root) as (app, pilot, replies):
+        async with _history_poll_app(short_root) as (app, pilot, replies):
             console = app.query_one("#console", RichLog)
             replies.disconnected = True
             await pilot.press("r")
             await pilot.pause()
             assert app._connected is False
-            assert app._trace_seq == 2 and app._alarms == {"trace_job": 2}
+            assert app._cursor == (2, _KEY_MAX) and app._alarm_count("trace_job") == 2
 
             replies.disconnected = False
             replies.requests.clear()
-            replies.trace.update(last_seq=3, entries=replies.entries("old", 3))
+            replies.rows.extend(replies.entries("old", 1, first=3))
             await pilot.press("r")
-            await _wait_for_ui(pilot, lambda: app._trace_seq == 3)
-            assert [r["since"] for r in replies.requests if r["cmd"] == "trace"] == [2]
-            assert app._alarms == {"trace_job": 3}
+            await _wait_for_ui(pilot, lambda: app._cursor == (3, _KEY_MAX))
+            assert [r["cursor"] for r in replies.follows()] == [[2, _KEY_MAX]]
+            assert app._alarm_count("trace_job") == 3
             assert sum("[old-" in line.text for line in console.lines) == 3
-            assert not any("trace baseline" in line.text for line in console.lines)
+            assert not any("baseline changed" in line.text for line in console.lines)
 
     asyncio.run(scenario())
 
 
-def test_dl210_headerless_trace_refusal_preserves_cursor(short_root: Path) -> None:
+def test_dl210_headerless_transitions_refusal_preserves_cursor(short_root: Path) -> None:
     async def scenario() -> None:
-        async with _trace_poll_app(short_root) as (app, pilot, replies):
-            replies.status["baseline_id"] = "period-b"
-            replies.trace = {"ok": False, "error": "lineage proof lost"}
+        async with _history_poll_app(short_root) as (app, pilot, replies):
+            replies.refusal = {"ok": False, "error": "lineage proof lost"}
             await pilot.press("r")
             await pilot.pause()
-            assert app._trace_seq == 2 and app._alarms == {"trace_job": 2}
+            assert app._cursor == (2, _KEY_MAX) and app._alarm_count("trace_job") == 2
             console = app.query_one("#console", RichLog)
-            assert any("trace query refused" in line.text for line in console.lines)
-            assert not any("trace baseline" in line.text for line in console.lines)
+            assert any("transitions query refused" in line.text for line in console.lines)
+            assert not any("baseline changed" in line.text for line in console.lines)
 
     asyncio.run(scenario())
 
@@ -4111,6 +4284,7 @@ def test_pager_bindings_shadow_or_allowlist_every_app_key() -> None:
         "plus",
         "equals_sign",
         "minus",  # the focused pane's size, here the log's (DL-520)
+        "E",  # the page of stored events before the pager's first (DL-541)
     }
 
     def keys(bindings) -> set[str]:
@@ -4773,7 +4947,7 @@ def test_pilot_header_reads_all_19_characters_at_80_columns(
     monkeypatch.setattr(tui, "datetime", FrozenDateTime)
 
     async def scenario() -> None:
-        async with _trace_poll_app(short_root, size=(80, 24)) as (app, pilot, _):
+        async with _history_poll_app(short_root, size=(80, 24)) as (app, pilot, _):
             clock = app.query_one(tui._LocalHeaderClock)
             for width in (80, 120, 80):
                 await pilot.resize_terminal(width, 24)
@@ -4789,19 +4963,24 @@ def test_pilot_local_times_in_table_trace_details_and_triggers(
     short_root: Path, local_timezone
 ) -> None:
     async def scenario() -> None:
-        async with _trace_poll_app(short_root, size=(240, 50)) as (app, pilot, replies):
+        async with _history_poll_app(short_root, size=(240, 50)) as (app, pilot, replies):
             row = {
                 "status": "SUCCESS",
                 "status_at": "2026-07-01T23:30:00",
                 "pending_timers": [{"due": "2026-01-01T23:45:00", "kind": "schedule"}],
             }
             replies.status["jobs"] = {"trace_job": row}
-            cause = "trace since the snapshot at 2026-07-01T23:30:00; `dsl41 runs` has the history"
-            replies.trace.update(
-                last_seq=3,
-                entries=[
-                    {"seq": 3, "at": "2026-07-01T23:30:00", "transition": "RESTART", "cause": cause}
-                ],
+            # a time inside the cause is the engine's text and is shown as it came
+            cause = "configuration rev 2 applied at 2026-07-01T23:30:00"
+            replies.rows.append(
+                {
+                    "seq": 3,
+                    "n": 0,
+                    "at": "2026-07-01T23:30:00",
+                    "job": "",
+                    "transition": "CONFIG",
+                    "cause": cause,
+                }
             )
             request = replies.request
 
@@ -4819,7 +4998,7 @@ def test_pilot_local_times_in_table_trace_details_and_triggers(
 
             app._client.request = answer
             await pilot.press("r")
-            await _wait_for_ui(pilot, lambda: app._trace_seq == 3)
+            await _wait_for_ui(pilot, lambda: app._cursor == (3, _KEY_MAX))
             table = app.query_one("#jobs", DataTable)
             assert table.get_cell("trace_job", "at") == "2026-07-02T01:30:00"
             assert table.columns[next(k for k in table.columns if k.value == "at")].width == 19

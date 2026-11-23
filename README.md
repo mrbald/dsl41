@@ -409,6 +409,22 @@ console. In the explain pane (`e`), Enter goes to the job a line names and
 Backspace goes back (DL-535). Zooming the
 log tail (`m`) turns it into a less-style pager with `/` search, `&` filter,
 `n`/`N`, and `F` follow; the operator verbs are unreachable while paging.
+The console reads the engine's stored history (`transitions`): the last 500
+entries when the viewer joins, then each new entry. It holds 10 000 lines, and
+`E` opens the earlier stored entries in the pager, a page per press, back to the
+oldest entry the engine keeps (DL-541).
+It says in one line when the engine restarted, when entries were pruned before
+it read them, when seqs have no stored entries, and when the engine keeps no
+history it can read. The alarms column, and the problems view of `v`, count a
+job's alarms dated within 24 hours of the engine's present time. An alarm is
+dated by its deadline: after a stall or outage longer than that, an alarm raised
+late for an old deadline is in the console and not in the problems view, and it
+can keep a viewer that joins then from seeing a different, recent alarm. The jobs
+title says when the alarm count is unavailable, or incomplete because a read met
+seqs with no stored entries or a scan reached its bound of 2000 rows or 8
+requests. On a root upgraded in place that mark can stay until an alarm of each
+kind older than two days is stored above the earlier build's seqs, or retention
+drops them; an attached view then keeps it until its next scan.
 `t` opens a read-only triggers view of every pending timer, calendar tick,
 and live filewatch with countdowns. The jobs table marks an armed latch as
 flag `A`. Verb keys act only while the jobs table has focus. Kill and force

@@ -11,13 +11,47 @@ Contract detail for DL-46, within DL-41's frame:
 - Change feed, consumed idempotently (DL-45 item 5): a `subscribe` connection is only a wake-up
   signal. Every record schedules a state refresh and is never rendered, so the at-least-once
   dispatch/drop race costs a redundant refresh, not a duplicated row. The screen comes from
-  idempotent queries: the jobs table from `status`, the commentary from `trace --since`, the
-  explain pane from `explain`. A 2s poll backstops a lost subscription, which reconnects with
-  backoff.
+  idempotent queries: the jobs table from `status`, the commentary from the stored entries of
+  `transitions`, the explain pane from `explain`. A 2s poll backstops a lost subscription, which
+  reconnects with backoff. The viewer never sends `trace`.
+- Stored history (DL-541): each pass draws the jobs table from `status` first, then reads the
+  history. The viewer checks a `transitions` answer against the schema of the fields it reads
+  and trusts the engine for the rest: one decoder takes a page whole or refuses it with a
+  diagnostic naming the field, and every reader uses the typed page. The join is `transitions`
+  backward, 500 entries, shown oldest first; its `[watermark, 2^63 - 1]` is the join point. A
+  join is whole or not at all: a disconnect or a refusal in its page or its alarm scans leaves
+  the viewer not joined. Each wake and poll then
+  reads forward pages from the cursor with the history token, at most 4 per pass, the rest in a
+  trailing pass, continuity and read header checked before a page's rows are used. A new token
+  that continues the history is an engine restart: one console line at the boundary, and the
+  console and the alarm times stay. A history that does not continue what is held, a page or a
+  status answer under another read header, or no stored history any more forgets everything
+  held and joins again. An expired cursor and a gap each write one line. `no_journal`,
+  `transitions_unavailable` and `unknown_cmd` leave the table live and the console says once
+  why there is no history. The console holds at most 10 000 lines; `E` opens the stored entries
+  before the oldest it holds in the pager, a page per press, back to the retained floor; past
+  the pager's 10 000 lines a page drops the newest. The pager's and the details popup's reads
+  carry the history token on a connection of their own.
 - The jobs table is the ss10 status response verbatim: status, status_at, run_number, exit_code,
   ice/hold/noexec flags, plus `pending_timers` (the oracle's own liveness filter, so display truth
-  is dispatch truth) and per-run `log_out`/`log_err`. Alarm counts tally MUST_START_ALARM and
-  MUST_COMPLETE_ALARM trace transitions; the oracle's trace is the only alarm authority.
+  is dispatch truth) and per-run `log_out`/`log_err`. The alarms column counts a job's
+  MUST_START_ALARM and MUST_COMPLETE_ALARM entries dated within 24 hours of `status.engine_now`,
+  and such a job is a problem (DL-541). Alarm times exist only while `engine_now` is known.
+  A scan has an anchor: everything at or below it is the scan's, everything above it the
+  follow's. It reads backward per transition from the anchor, the anchor's own row included,
+  until an entry is older than twice the window, at most 2000 rows and 8 requests each; a
+  followed alarm above the anchor adds its time. The join's scan is anchored
+  at the join point. When `engine_now` becomes known, the first time or after a status without
+  it, or steps back by more than the window, one scan anchored at the follow cursor rebuilds the
+  times. An alarm is dated by its deadline: after a stall or an outage longer than the window,
+  an alarm raised late for an old deadline is not in Problems, and it can keep a viewer that
+  joins then from seeing a different, recent alarm. The table's title marks the alarms
+  incomplete after a scan cut by its bound or one that read a gap, or a followed page with a
+  gap, until the next scan; no gap is dated by entry times. On a root upgraded in place the
+  mark stays until an alarm of each kind older than twice the window is stored above the
+  earlier build's gap, or retention prunes it; after a prune an attached viewer keeps the mark
+  until its next scan, and a new viewer scans at its join. The title marks the alarms
+  unavailable from an engine whose `status` has no `engine_now`.
 - Explain pane (DL-535): for the selected job, one line per item, the instant the answer is for,
   `recovering`, the disposition with its deciding gate first and then the open gates and the
   context facts, the condition with its atoms, capacity (short buckets, holders or "nobody holds
@@ -33,7 +67,7 @@ Contract detail for DL-46, within DL-41's frame:
   after it began, with the target selected and its row on screen. Until then the verb keys, `d`,
   space and a console verb without a job name are held, each with a console line; a change of
   the selection the hop did not make ends it with a line, and so does a status pass that
-  fails, is refused or sees a new trace baseline. An answer is shown only for the latest
+  fails, is refused or sees a new baseline. An answer is shown only for the latest
   request and while its job is selected. The downstream mode asks each downstream job's atoms
   once per selected job, configuration rev and baseline, for at most `_DETAIL_CAP` jobs. An
   engine whose answer has no `gates` gets the condition text and no links. The pane asks on a
@@ -92,13 +126,19 @@ Contract detail for DL-46, within DL-41's frame:
   edge starts them. Due-less rows render generically. It is read-only: every operator verb is
   shadowed to the bell (DL-67) and `t`/`q`/escape close. The jobs table's flags column carries
   `A` for the same latch. An ok:false `timers` answer leaves the rows as they were, names the
-  refusal on the border title and marks the app subtitle as a status or trace refusal does
+  refusal on the border title and marks the app subtitle as a status or transitions refusal does
   (DL-187 item 6).
 - Job details popup (`d` or Enter on a row): the ss10 `spec` verb's preserve-rendered JIL block
   (the post-placeholder source this engine loaded), topped with the status facts, the `deps`
   verb's needs/blocks lines (the blast radius, DL-65; from `upstream_atoms` when served, with a
-  guard and a self reference labelled and never a dependency, DL-535) and a short local log
-  tail. The header
+  guard and a self reference labelled and never a dependency, DL-535), the run's stored
+  scheduler refusal total (DL-541: "loading" when the popup opens, then read once, back to the
+  entry that opens the run, from pages of the history its own `status` answer names. It is
+  exact, "at least N" or unknown: "at least" past a bound, over a gap above that entry or when it
+  is not reached; "unknown" when that is zero, when a page is not of that history or holds an
+  entry the server cut, on any refusal, transport failure or malformed answer, or when the
+  engine names no history. "unknown" stays until the popup is opened again) and a short local
+  log tail. The header
   clock and owned timestamps use the host's local time as YYYY-MM-DDTHH:MM:SS (DL-473).
 - Navigation at estate scale (DL-65): the jobs table renders the box tree (indent from the status
   response's box_name; space folds the selected box, `z` folds or unfolds all; a folded box shows
@@ -146,13 +186,14 @@ import asyncio
 import functools
 import os
 import re
+import reprlib
 import shlex
 import sys
 import time
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -191,7 +232,7 @@ from dsl41.job_filter import JobFilter, read_filter
 from dsl41.match_bound import Stopped, run_bounded
 from dsl41.pane_layout import Sizes, Split, place, set_cells, step
 from dsl41.runner_access import Principal
-from dsl41.start_refusals import RefusalKey, scheduler_refusal_counts
+from dsl41.start_refusals import scheduler_refusal_counts
 from dsl41.runner_admission import addressed_key
 from dsl41.runner_clock import EngineError
 from dsl41.runner_control import (
@@ -217,6 +258,24 @@ from dsl41.runner_control import (
 
 
 _ALARM_TRANSITIONS = frozenset({"MUST_START_ALARM", "MUST_COMPLETE_ALARM"})
+#: DL-541: the console's bound in rendered lines, and the stored entries a join reads
+_CONSOLE_LINES = 10_000
+_JOIN_LIMIT = 500
+#: DL-541: a job is a problem by alarms while the engine's present time is at most this far
+#: past the time an alarm is dated by; alarm times are kept for twice as long
+_ALARM_WINDOW = timedelta(hours=24)
+#: DL-541: the rows and the requests one backward read may spend: an alarm scan per name, or
+#: a refusal total
+_SCAN_ROWS = 2000
+_SCAN_REQUESTS = 8
+#: DL-541: the forward pages one pass follows before it leaves the rest to a trailing pass
+_FOLLOW_PAGES = 4
+#: the largest part of a `transitions` key (control-protocol ss4)
+_KEY_MAX = 2**63 - 1
+#: DL-541: the refusals that mean this engine keeps no history a viewer can read
+_NO_HISTORY_CODES = frozenset({"no_journal", "transitions_unavailable", "unknown_cmd"})
+#: a stored entry's key, `(seq, n)` (control-protocol ss4 `transitions`)
+type _Key = tuple[int, int]
 _STATUS_STYLE = {
     "INACTIVE": "dim",
     "STARTING": "cyan",
@@ -313,6 +372,299 @@ class _RefusalRun:
     cause: str
     last_clock: str
     repeats: int = 0
+
+
+class _HistoryEnds(Exception):
+    """A `transitions` page does not continue the history it was read for (DL-541). `kind` is
+    `refused`, `gone` (no stored history), `moved` (another read header) or `broken` (the
+    stored history does not continue past `through`)."""
+
+    def __init__(self, kind: str, through: int | None = None) -> None:
+        super().__init__(kind)
+        self.kind, self.through = kind, through
+
+
+@dataclass
+class _Scan:
+    """What an alarm scan read (DL-541): the times by job and key, and whether it was cut."""
+
+    times: dict[str, dict[_Key, datetime]]
+    cut: bool
+
+
+# ----------------------------------------------- the `transitions` answer (DL-541)
+#
+# The viewer checks the schema of what it reads and trusts the engine for the rest: each field
+# it reads is present where the contract says it always is and has its type. An answer that
+# is not is refused whole, with a diagnostic naming the verb, the field's path, what was
+# expected and what came. Relations between fields are the engine's to keep; the tests hold
+# the engine to them (`tests/transitions_conformance.py`).
+
+
+class MalformedPage(ValueError):
+    """A `transitions` answer that does not fit the schema of what the viewer reads."""
+
+
+_ABSENT = object()
+
+
+#: the longest diagnostic a malformed answer gives, ellipsis included
+_DIAGNOSTIC_MOST = 200
+
+
+def _schema_error(path: str, expected: str, value: Any) -> MalformedPage:
+    found = "nothing" if value is _ABSENT else f"{type(value).__name__} {reprlib.repr(value)}"
+    text = f"transitions: {path}: expected {expected}, got {found}"
+    if len(text) > _DIAGNOSTIC_MOST:
+        text = text[: _DIAGNOSTIC_MOST - 1] + "…"
+    return MalformedPage(text)
+
+
+def _typed(container: Mapping[str, Any], name: str, path: str, kind: str) -> Any:
+    """The field `name`, present and of `kind`: string, integer (never a boolean), boolean,
+    list, or a key (a pair of integers)."""
+    value = container.get(name, _ABSENT)
+    ok = {
+        "a string": isinstance(value, str),
+        "an integer": type(value) is int,
+        "a boolean": type(value) is bool,
+        "a list": isinstance(value, list),
+        "a key [seq, n]": isinstance(value, list)
+        and len(value) == 2
+        and all(type(part) is int for part in value),
+    }[kind]
+    if not ok:
+        raise _schema_error(f"{path}{name}", kind, value)
+    return value
+
+
+@dataclass(frozen=True)
+class PageEntry:
+    """One entry of a decoded page: the `trace` entry's fields, typed, and its key."""
+
+    seq: int
+    n: int
+    at: datetime
+    at_text: str
+    job: str
+    transition: str
+    cause: str
+    start_source: str | None = None
+    run_number: int | None = None
+    refused_status: str | None = None
+    cut: bool = False
+
+    @property
+    def key(self) -> _Key:
+        return self.seq, self.n
+
+    def fields(self) -> dict[str, Any]:
+        """The entry as the console and the refusal count read it: its decoded fields only."""
+        out: dict[str, Any] = {
+            "seq": self.seq,
+            "n": self.n,
+            "at": self.at_text,
+            "job": self.job,
+            "transition": self.transition,
+            "cause": self.cause,
+        }
+        for name in ("start_source", "run_number", "refused_status"):
+            if getattr(self, name) is not None:
+                out[name] = getattr(self, name)
+        return out
+
+
+type _Interval = tuple[int, int]
+
+
+@dataclass(frozen=True)
+class TransitionPage:
+    """The fields of a `transitions` answer the viewer reads, typed (control-protocol ss4)."""
+
+    baseline_id: str
+    entries: tuple[PageEntry, ...]
+    next: _Key | None
+    more: bool
+    floor: int
+    expired: bool
+    pruned: tuple[_Interval, ...]
+    gaps: tuple[_Interval, ...]
+    watermark: int
+    history: str | None
+    continuous_through: int | None = None
+
+
+def _schema_entry(value: Any, path: str) -> PageEntry:
+    if not isinstance(value, Mapping):
+        raise _schema_error(path, "an object", value)
+    at_text = _typed(value, "at", f"{path}.", "a string")
+    at = _naive_utc(at_text)
+    if at is None or at.isoformat() != at_text:  # a timestamp as `trace` writes it
+        raise _schema_error(f"{path}.at", "a naive UTC timestamp as `trace` writes it", at_text)
+    optional: dict[str, Any] = {}
+    for name in ("start_source", "refused_status"):
+        if name in value:
+            optional[name] = _typed(value, name, f"{path}.", "a string")
+    if "run_number" in value:
+        optional["run_number"] = _typed(value, "run_number", f"{path}.", "an integer")
+    if "cut" in value:
+        optional["cut"] = _typed(value, "cut", f"{path}.", "a boolean")
+    return PageEntry(
+        seq=_typed(value, "seq", f"{path}.", "an integer"),
+        n=_typed(value, "n", f"{path}.", "an integer"),
+        at=at,
+        at_text=at_text,
+        job=_typed(value, "job", f"{path}.", "a string"),
+        transition=_typed(value, "transition", f"{path}.", "a string"),
+        cause=_typed(value, "cause", f"{path}.", "a string"),
+        **optional,
+    )
+
+
+def _schema_intervals(answer: Mapping[str, Any], name: str) -> tuple[_Interval, ...]:
+    out: list[_Interval] = []
+    for index, value in enumerate(_typed(answer, name, "", "a list")):
+        if not (isinstance(value, list) and len(value) == 2 and all(type(v) is int for v in value)):
+            raise _schema_error(f"{name}[{index}]", "a seq interval [low, high]", value)
+        out.append((value[0], value[1]))
+    return tuple(out)
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """An `ok: false` answer's envelope (control-protocol ss2): `code` names the reason and may
+    be missing on a replayed decision; `error` is prose."""
+
+    code: str | None
+    error: str
+
+
+def decode_refusal(answer: Mapping[str, Any]) -> Refusal:
+    """The envelope of an `ok: false` answer (control-protocol ss2): `error` is a string, and
+    so is `code` when present; a replayed decision may omit `code`."""
+    code = answer.get("code")
+    if "code" in answer:
+        code = _typed(answer, "code", "", "a string")
+    error = _typed(answer, "error", "", "a string")
+    return Refusal(code, error.strip())
+
+
+def decode_transitions(answer: Any, request: Mapping[str, Any]) -> TransitionPage:
+    """The fields of `answer` the viewer reads, typed, or `MalformedPage` with a diagnostic
+    (DL-541). A refusal is classified before this. A field the viewer does not read, and any
+    relation between fields, is not checked: the engine is trusted for them."""
+    if not isinstance(answer, Mapping):
+        raise _schema_error("(answer)", "an object", answer)
+    if answer.get("ok") is not True:
+        raise _schema_error("ok", "true", answer.get("ok", _ABSENT))
+    entries = tuple(
+        _schema_entry(value, f"entries[{index}]")
+        for index, value in enumerate(_typed(answer, "entries", "", "a list"))
+    )
+    following = answer.get("next", _ABSENT)
+    if following is not None:
+        following = tuple(_typed(answer, "next", "", "a key [seq, n]"))
+    history = answer.get("history", _ABSENT)
+    if history is not None:
+        history = _typed(answer, "history", "", "a string")
+    through = None
+    if request.get("history") is not None:
+        through = _typed(answer, "continuous_through", "", "an integer")
+    return TransitionPage(
+        baseline_id=_typed(answer, "baseline_id", "", "a string"),
+        entries=entries,
+        next=following,
+        more=_typed(answer, "more", "", "a boolean"),
+        floor=_typed(answer, "floor", "", "an integer"),
+        expired=_typed(answer, "expired", "", "a boolean"),
+        pruned=_schema_intervals(answer, "pruned"),
+        gaps=_schema_intervals(answer, "gaps"),
+        watermark=_typed(answer, "watermark", "", "an integer"),
+        history=history,
+        continuous_through=through,
+    )
+
+
+def _just_above(key: _Key) -> _Key:
+    """The least key above `key`: a backward page from it holds `key` itself."""
+    seq, n = key
+    return (seq, n + 1) if n < _KEY_MAX else (seq + 1, 0)
+
+
+@dataclass
+class _PagerPin:
+    """The pager shows stored entries (DL-541). `before` is the key the next page reads
+    before, None once a page reached the retained floor; `start` is where the first page read
+    from, under `history` and `baseline`; `reading` while a page is asked."""
+
+    before: _Key | None
+    start: _Key
+    history: str | None
+    baseline: str | None
+    reading: bool = False
+
+
+def _wire_key(value: Any) -> _Key | None:
+    """A `[seq, n]`, or None unless it is a pair of integers."""
+    if not isinstance(value, list) or len(value) != 2:
+        return None
+    if not all(type(part) is int for part in value):
+        return None
+    return int(value[0]), int(value[1])
+
+
+def _entry_key(entry: Mapping[str, Any]) -> _Key | None:
+    """A stored entry's `(seq, n)`, or None for an entry without one."""
+    return _wire_key([entry.get("seq"), entry.get("n")])
+
+
+def _naive_utc(value: Any) -> datetime | None:
+    """An `at` or `engine_now` as the engine writes it, naive UTC; None for anything else."""
+    if not isinstance(value, str):
+        return None
+    try:
+        at = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return at if at.tzinfo is None else None
+
+
+def _refusal_line(row: Mapping[str, Any], total: str) -> Text:
+    """The details popup's line for a run's scheduler refusals (DL-541)."""
+    run = "queued" if row.get("status") == "QUE_WAIT" else f"run {row.get('run_number')}"
+    return Text(f"scheduler refusals: {total} ({run})\n")
+
+
+def seq_words(intervals: Any) -> str:
+    """Seq intervals `[[low, high], ...]` as words: `seq 7`, `seqs 31-35, 40`; empty for
+    none."""
+    parts: list[str] = []
+    for interval in intervals if isinstance(intervals, list) else []:
+        bounds = _wire_key(interval)
+        if bounds is not None:
+            low, high = bounds
+            parts.append(str(low) if low == high else f"{low}-{high}")
+    if not parts:
+        return ""
+    return (
+        f"seq {parts[0]}" if len(parts) == 1 and "-" not in parts[0] else f"seqs {', '.join(parts)}"
+    )
+
+
+def entry_line(entry: Mapping[str, Any]) -> Text:
+    """The line the console and the pager show for one entry."""
+    transition = str(entry.get("transition", ""))
+    if transition in _ALARM_TRANSITIONS:
+        style = "bold red"
+    elif transition == "START_REFUSED":
+        # DL-64: a refused operator start answers "why did nothing happen"
+        style = "yellow"
+    else:
+        style = "dim"
+    clock = format_local_at(entry.get("at"))
+    return Text(
+        f"{clock} {entry.get('job', '')} {transition} [{entry.get('cause', '')}]", style=style
+    )
 
 
 def _cell_sig(value: Any) -> tuple[str, str]:
@@ -420,7 +772,7 @@ _OPERATOR_BELLS = tuple(
     Binding(key, "app.bell", "", show=False)
     for key in (
         *("s", "f", "k", "i", "I", "h", "H", "n", "N"),
-        *("d", "m", "o", "slash", "v", "space", "z", "colon", "e", "]", "[", "}", "{"),
+        *("d", "m", "o", "slash", "v", "space", "z", "colon", "e", "E", "]", "[", "}", "{"),
         *("plus", "equals_sign", "minus"),
     )
 )
@@ -434,6 +786,11 @@ class SpecScreen(ModalScreen[None]):
     HELP = """
     The running engine's own facts for one job: status, dependencies,
     the loaded JIL source, and a short log tail.
+
+    The run's scheduler refusals are read once, when the popup opens
+    (DL-541): exact, "at least N", or "unknown" when the stored history
+    cannot prove the count. "unknown" stays until the popup is opened
+    again.
 
     q, escape, enter, or d closes.
     """
@@ -455,11 +812,20 @@ class SpecScreen(ModalScreen[None]):
     def __init__(self, title: str, body: Text) -> None:
         super().__init__()
         self._title = title
-        self._body = body
+        self._static = Static(body)
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="specbox"):
-            yield Static(self._body)
+            yield self._static
+
+    def show(self, body: Text) -> None:
+        """A body read after the popup opened, such as the refusal total (DL-541)."""
+        self._static.update(body)
+
+    def on_unmount(self) -> None:
+        # DL-541: a closed popup's history read in flight is cancelled; the reads connection
+        # drops an exchange that is cancelled, so the next reader starts on a fresh one
+        self.app.workers.cancel_group(self.app, "refusals")
 
     def on_mount(self) -> None:
         box = self.query_one("#specbox")
@@ -726,7 +1092,7 @@ class TriggersScreen(ModalScreen[None]):
             return  # a worker resuming after the await can outlive the screen
         if not response.get("ok"):
             # DL-187 item 6 (P1-1): the last good rows stay; the refusal is named on the border
-            # and, through the app's keyed memo, the subtitle, as for status and trace
+            # and, through the app's keyed memo, the subtitle, as for status and transitions
             error = str(response.get("error", "")).strip()
             # P1-3: a Text title, because border_title strings parse as rich markup and this
             # error is the server's
@@ -781,6 +1147,22 @@ class _JobsTable(DataTable[Any]):
 
     e moves focus to the explain pane, where up, down and Enter go to
     the job a line names, and Backspace goes back (DL-535).
+
+    E opens the stored events before the oldest the console holds in
+    the pager; E there reads the page before (DL-541). The alarms
+    column, and the problems view, count a job's alarms dated within 24
+    hours of the engine's present time. An alarm is dated by its
+    deadline: after a stall or outage longer than that, an alarm
+    raised late for an old deadline is only in the console, and it
+    can keep a viewer that joins then from seeing a different, recent
+    alarm. The title marks the alarms unavailable without the engine's
+    present time, and incomplete when a read met seqs with no stored
+    entries (an alarm may be there) or a scan reached its bound of
+    2000 rows or 8 requests. On a root upgraded in place that mark can
+    stay until an alarm of each kind older than two days is stored
+    above the earlier build's seqs, or retention drops them; after
+    that, this view keeps the mark until its next scan, and a view
+    that joins anew does not show it.
 
     Drag a border to resize; + and - resize the focused pane.
 
@@ -1008,6 +1390,10 @@ class _LogTail(RichLog):
 
     / searches forward, ? backward, n/N repeat the last search, & shows
     only matching lines. q or escape leaves the pager.
+
+    E shows the stored events before the console's oldest instead of
+    the log, a page per press, until the retained floor (DL-541). Past
+    the pager's 10 000 lines a page drops the newest lines.
     """
     BINDINGS = [
         # search (the pager's reason to exist)
@@ -1066,8 +1452,51 @@ class _LogTail(RichLog):
         self._title_cache = ""
         #: what a stop on new lines cleared, shown in the title until the next pattern (DL-514)
         self._notice = ""
+        #: the title while the pager shows stored entries instead of a log, and whether a page
+        #: dropped its newest lines at the bound (DL-541)
+        self._label: str | None = None
+        self._dropped = False
 
     # ------------------------------------------------------------- data plane
+
+    def show_entries(self, label: str) -> None:
+        """Show stored entries, read backward, instead of the log, under `label` (DL-541)."""
+        self.set_source("events", None)
+        self._label = label
+        self._refresh_title()
+
+    def drop_entries(self) -> None:
+        """The log takes the pager back; its next `set_source` shows it."""
+        self._label, self._dropped = None, False
+
+    def prepend(self, lines: list[str]) -> None:
+        """Earlier lines go above the buffer; past its bound the newest lines go, since the
+        pager reads backward, and the title says so (DL-541). The view stays on the line it
+        showed. The filter and the search in force run over the new lines and the lines kept
+        in one bounded pass (DL-514)."""
+        lines = lines[-_PAGER_BUFFER_LINES:]
+        keep = max(0, min(len(self._buffer), _PAGER_BUFFER_LINES - len(lines)))
+        if keep < len(self._buffer):
+            self._dropped = True
+        kept = list(self._buffer)[:keep]
+        top = int(self.scroll_y)
+        line_filter, needle = self._line_filter, self._needle
+        rows = run_bounded(
+            lambda: (
+                _pager_rows(lines, line_filter, needle),
+                _pager_rows(kept, line_filter, needle),
+            ),
+            _PAGER_LIMIT_S,
+        )
+        self._buffer.clear()
+        self._buffer.extend([*lines, *kept])
+        if isinstance(rows, Stopped):
+            self._drop_patterns(False)
+            return
+        added, rest = rows
+        self._redraw([*added, *rest])
+        self.scroll_to(y=top + len(added), animate=False)
+        self._refresh_title()
 
     def set_source(self, stream: str, path: str | None) -> None:
         """New tail target (job switch, o toggle, truncation): drop the buffer, keep the
@@ -1275,7 +1704,12 @@ class _LogTail(RichLog):
         self.set_interval(0.5, self._refresh_title)
 
     def _refresh_title(self) -> None:
-        title = Text(f"log ({self._stream}): {self._path or 'none yet'}")
+        title = Text(self._label or f"log ({self._stream}): {self._path or 'none yet'}")
+        if self._label and self._dropped:
+            title.append(
+                f"  newest lines dropped: the pager holds {_PAGER_BUFFER_LINES}",
+                style="bold yellow",
+            )
         if self._line_filter_text:
             title.append(f"  &{self._line_filter_text}", style="italic")
         if self._needle_text:
@@ -1288,6 +1722,79 @@ class _LogTail(RichLog):
         if title.plain != self._title_cache:
             self._title_cache = title.plain
             self.border_title = title
+
+
+class _Console(RichLog):
+    """The event console, bounded at `_CONSOLE_LINES` rendered lines (DL-541). A line written
+    for a stored entry keeps the entry's key, so the oldest key still on screen is known as
+    lines are evicted, and the pager reads the entries before it.
+
+    DL-541: it reads two private fields of the pinned textual RichLog. `_start_line` counts the
+    rendered lines the bound has evicted since the log began, and `_size_known` is false while
+    writes wait, deferred, for the first size; RichLog replays those writes in order through
+    `write` once it is known. `test_dl541_richlog_keeps_the_private_fields_the_console_reads`
+    fails if the installed textual stops providing either with that meaning."""
+
+    def __init__(self, *, id: str | None = None) -> None:  # noqa: A002 -- textual's own name
+        super().__init__(id=id, markup=False, wrap=True, max_lines=_CONSOLE_LINES)
+        #: (index of the line's first rendered line since the console began, entry key)
+        self._marks: deque[tuple[int, _Key]] = deque()
+        #: the keys of writes that wait for the first size, in the order RichLog replays them
+        self._early: deque[_Key | None] = deque()
+        self._key: _Key | None = None
+        #: the highest key whose line the bound evicted
+        self._evicted: _Key | None = None
+
+    def write_entry(self, text: Text, key: _Key | None) -> None:
+        self._key = key
+        try:
+            self.write(text)
+        finally:
+            self._key = None
+
+    def write(self, content: Any, *args: Any, **kwargs: Any) -> Any:
+        key, self._key = self._key, None
+        if not self._size_known:
+            self._early.append(key)
+            return super().write(content, *args, **kwargs)
+        if self._early:  # RichLog replays the waiting writes before any other write
+            key = self._early.popleft()
+        first = self._start_line + len(self.lines)
+        result = super().write(content, *args, **kwargs)
+        if key is not None:
+            self._marks.append((first, key))
+        while self._marks and self._marks[0][0] < self._start_line:
+            evicted = self._marks.popleft()[1]
+            self._evicted = evicted if self._evicted is None else max(self._evicted, evicted)
+        return result
+
+    def clear(self) -> Any:
+        self._marks.clear()
+        self._early.clear()
+        self._evicted = None
+        return super().clear()
+
+    def oldest_key(self) -> _Key | None:
+        """The key of the oldest entry whose line the console still holds whole."""
+        if self._marks:
+            return self._marks[0][1]
+        keys = [key for key in self._early if key is not None]
+        return keys[0] if keys else None
+
+    def earlier_from(self) -> _Key | None:
+        """Where reading the entries before the console starts (DL-541): its oldest keyed
+        line, or, when the bound evicted every keyed line, just above the highest key it
+        evicted."""
+        oldest = self.oldest_key()
+        if oldest is not None:
+            return oldest
+        return None if self._evicted is None else _just_above(self._evicted)
+
+    def forget_keys(self) -> None:
+        """The lines stay and stand for no key: the next history read keys its own."""
+        self._marks.clear()
+        self._early = deque(None for _ in self._early)
+        self._evicted = None
 
 
 def _focus_now(widget: Widget) -> None:
@@ -2152,6 +2659,8 @@ class _MainScreen(Screen[None]):
         assert isinstance(app, RunnerApp)
         app._release_handle()
         app.call_after_refresh(app._place_panes)
+        if self.maximized is None:
+            app._release_pager()
 
     def on_screen_suspend(self) -> None:
         app = self.app
@@ -2214,6 +2723,8 @@ class RunnerApp(App[None]):
         Binding("colon", "focus_console", "console"),
         # the explain pane takes focus, where up, down and Enter go to a cause (DL-535)
         Binding("e", "focus_explain", "explain", show=False),
+        # the stored events before the console's oldest, in the pager (DL-541)
+        Binding("E", "earlier", "earlier events", show=False),
         # pane sizing (DL-520): ]/[ move the log against explain and }/{ the jobs table against
         # the side column by a fifth; +/= and - resize the focused pane by a small step
         Binding("]", "resize('log', 1)", "log taller", show=False),
@@ -2247,6 +2758,9 @@ class RunnerApp(App[None]):
         )
         self.sub_title = self._subtitle_base
         self._client = ControlClient(self.socket_path, person)
+        #: DL-541: the pager's and the details popup's history reads have a connection of their
+        #: own, so a stalled read never holds the table's refresh or the operator's keys
+        self._reads = ControlClient(self.socket_path, person)
         #: the selection is a job, not a row (DL-532). `_chosen` is the job the operator picked
         #: last, kept while a fold or a filter hides it. `_selected`, what the keys act on, is
         #: derived from it on each render: the job when shown, else the folded box that stands
@@ -2284,11 +2798,40 @@ class RunnerApp(App[None]):
         self._config_rev: Any = None
         self._details: tuple[tuple[str, Any, str], dict[str, Any]] | None = None
         self._rows: set[str] = set()  # DataTable row keys we created
-        self._trace_seq = 0
-        self._trace_baseline: str | None = None
-        self._alarms: dict[str, int] = {}
-        self._scheduler_refusals: dict[RefusalKey, int] = {}
-        self._trace_from_snapshot = False
+        #: DL-541: the stored history this viewer follows. `_join` is `[watermark, 2^63 - 1]` of
+        #: the join's answer, None until a join; `_cursor` is the key the next forward page
+        #: reads after; `_history` the answer's history token; `_history_baseline` the read
+        #: header the rows came under.
+        self._join: _Key | None = None
+        self._cursor: _Key | None = None
+        self._history: str | None = None
+        self._history_baseline: str | None = None
+        #: DL-541: the reason the engine keeps no history this viewer can read, once said
+        self._no_history: str | None = None
+        #: DL-541: the highest seq a console line has named as not stored
+        self._gaps_told = 0
+        #: DL-541: the engine's present time from the last status answer; None from an engine
+        #: that does not send it, and then the alarm part of Problems is unavailable
+        self._engine_now: datetime | None = None
+        #: DL-541: job -> key -> the time each alarm entry is dated by, up to twice
+        #: `_ALARM_WINDOW` old: a scan's, at or below its anchor, and each followed one above.
+        #: `_alarms_cut` is true from a scan cut by its bound or one that read a gap, or a
+        #: followed page with a gap, until the next scan; `_alarms_scanned` once a scan
+        #: was read whole.
+        self._alarm_times: dict[str, dict[_Key, datetime]] = {}
+        self._alarms_cut = False
+        self._alarms_scanned = False
+        #: DL-541: the latest present time seen since the alarm times were last scanned
+        self._now_max: datetime | None = None
+        #: DL-541: a rescan became due and no scan has completed since
+        self._rescan_owed = False
+        #: DL-541: everything at or below this key is the alarm scan's, everything above it
+        #: the follow's
+        self._alarm_anchor: _Key | None = None
+        #: DL-541: an engine restart whose line waits for the first row above this seq
+        self._restart_at: int | None = None
+        #: DL-541: set while the pager shows stored entries
+        self._pager_pin: _PagerPin | None = None
         self._refusal_runs: dict[str, _RefusalRun] = {}
         self._log_paths: dict[str, tuple[str | None, str | None]] = {}
         self._tail_stream: int = 0  # 0 = out, 1 = err
@@ -2326,7 +2869,7 @@ class RunnerApp(App[None]):
         self._connected: bool | None = None  # None = never yet reported
         self._refreshing = False
         self._dirty = False
-        #: DL-187 item 6 (P1-1): verb -> error for each of status, trace and timers answering
+        #: DL-187 item 6 (P1-1): verb -> error for each of status, transitions and timers answering
         #: ok:false; empty while queries are clean. Keyed so one verb's recovery cannot erase
         #: another's live refusal.
         self._query_faults: dict[str, str] = {}
@@ -2355,7 +2898,7 @@ class RunnerApp(App[None]):
                     yield _LogTail(id="logtail")
                     yield _LogSearchInput(id="logsearch")
         with Vertical(id="consolebox"):
-            yield RichLog(id="console", markup=False, wrap=True)
+            yield _Console(id="console")
             yield _ConsoleInput(
                 placeholder="<VERB> [job] | SET_GLOBAL N=v | CHANGE_STATUS [job] STATUS"
                 " [exit] -- empty job = selected job; F1 lists verbs",
@@ -2394,21 +2937,39 @@ class RunnerApp(App[None]):
     def action_refresh(self) -> None:
         self._poll()
 
-    def _reset_trace_cursor(self) -> None:
-        """Read the trace from the start again and forget what the old cursor indexed
-        (DL-46 item 14, DL-210). The alarms go with the cursor: they are keyed by the sequence
-        numbers about to be re-read."""
-        # DL-480: report pending repeats before forgetting the old trace's UI counts.
+    def _reset_history(self) -> None:
+        """Forget everything held of the stored history, alarm times included, so a later pass
+        joins again (DL-541). The console keeps its lines, which then stand for no key. A pager
+        that shows stored entries gives way to the log."""
+        # DL-480: report pending repeats before forgetting the old history.
+        self._flush_refusal_runs()
+        self._join = self._cursor = None
+        self._history = self._history_baseline = None
+        self._gaps_told = 0
+        self._alarm_times.clear()
+        self._alarms_cut = self._alarms_scanned = False
+        self._now_max = self._alarm_anchor = self._restart_at = None
+        # what is held is dropped, an owed rescan and an alarm-scan fault with it
+        self._rescan_owed = False
+        self._set_query_fault("alarm scan", None)
+        try:
+            self.query_one("#console", _Console).forget_keys()
+        except NoMatches:
+            return  # teardown
+        if self._pager_pin is not None:
+            self._console_write(
+                Text("earlier events: the stored history changed; the pager shows the log again")
+            )
+            self._release_pager()
+
+    def _flush_refusal_runs(self) -> None:
         for job, run in list(self._refusal_runs.items()):
             self._flush_refusal_run(job, run.last_clock)
-        self._trace_seq = 0
-        self._alarms.clear()
-        self._scheduler_refusals.clear()
-        self._trace_from_snapshot = False
 
     async def _refresh(self) -> None:
-        """Re-query status, trace and explain. Refreshes triggered while one is in flight fold
-        into a single trailing pass."""
+        """Re-query status, then the stored history, then explain. The table is drawn from the
+        status answer before the history is read (DL-541). Refreshes triggered while one is in
+        flight fold into a single trailing pass."""
         if self._refreshing:
             self._dirty = True
             return
@@ -2420,50 +2981,19 @@ class RunnerApp(App[None]):
                 asked = self._status_asked
                 try:
                     status = await self._read_status({"cmd": "status"})
-                    trace = await self._client.request({"cmd": "trace", "since": self._trace_seq})
                 except ControlClientError as exc:
                     self._set_connected(False, str(exc))
                     self._stop_hop("the engine did not answer")
                     return
                 self._set_connected(True)
-                # DL-187 item 6 (P1-1): an ok:false status or trace answer is a query refusal,
-                # not a dead socket: the last good table stays and the operator is told. Each
-                # verb is set independently.
+                # DL-187 item 6 (P1-1): an ok:false status answer is a query refusal, not a
+                # dead socket: the last good table stays and the operator is told
                 self._set_query_fault(
                     "status", None if status.get("ok") else str(status.get("error", "")).strip()
                 )
-                self._set_query_fault(
-                    "trace", None if trace.get("ok") else str(trace.get("error", "")).strip()
-                )
-                trace_baseline = trace.get("baseline_id")
-                status_baseline = status.get("baseline_id")
-                if isinstance(trace_baseline, str) and trace_baseline:
-                    baseline_changed = (
-                        self._trace_baseline is not None and trace_baseline != self._trace_baseline
-                    )
-                    mixed_baselines = (
-                        status_baseline is not None and status_baseline != trace_baseline
-                    )
-                    self._trace_baseline = trace_baseline
-                    if baseline_changed or mixed_baselines:
-                        self._stop_hop("the trace baseline changed")
-                        self._reset_trace_cursor()
-                        self._console_write(
-                            Text(
-                                "trace baseline changed; reading from the start next poll", "yellow"
-                            )
-                        )
-                        return
-                if trace.get("ok"):
-                    last_seq = trace.get("last_seq")
-                    if isinstance(last_seq, int) and last_seq < self._trace_seq:
-                        # a shorter trace resets the cursor; a baseline change above resets even
-                        # a longer one, and a resume alone does not (it replays the existing
-                        # prefix)
-                        self._reset_trace_cursor()
-                        self._dirty = True
-                    self._consume_trace(trace.get("entries", []))
                 if status.get("ok"):
+                    self._see_engine_now(_naive_utc(status.get("engine_now")))
+                    self._check_status_baseline(status)
                     # concurrency-model ss6 read header: the revisions below belong to THIS log
                     self._baseline = str(status.get("baseline_id") or "")
                     self._set_drift(bool(status.get("spec_drift")))
@@ -2473,6 +3003,14 @@ class RunnerApp(App[None]):
                     self._confirm_hop(asked)
                 else:
                     self._stop_hop("the status query was refused")
+                try:
+                    await self._read_history(status)
+                except ControlClientError as exc:
+                    self._set_connected(False, str(exc))
+                    # a rescan that failed marked the alarms incomplete: the title shows it
+                    self._render_table()
+                    return
+                self._render_table()  # the alarms and their mark as the history left them
                 await self._update_explain()
                 if not self._dirty:
                     return
@@ -2526,7 +3064,7 @@ class RunnerApp(App[None]):
             self._console_write(Text(f"control socket unreachable: {detail}", style="red"))
 
     def _set_query_fault(self, verb: str, error: str | None) -> None:
-        """DL-187 item 6 (P1-1): an ok:false answer from `status`, `trace` or `timers`, distinct
+        """DL-187 item 6 (P1-1): an ok:false answer from `status`, `transitions` or `timers`, distinct
         from a dead socket and from "nothing fires next". It is keyed by verb, so one verb's
         recovery cannot erase another's live refusal; the subtitle reads whether the map holds
         anything.
@@ -2571,18 +3109,330 @@ class RunnerApp(App[None]):
                 )
             )
 
-    def _consume_trace(self, entries: list[dict[str, Any]]) -> None:
-        for entry in entries:
-            seq = entry.get("seq")
-            if isinstance(seq, int):
-                # Consuming an entry never lowers the cursor (DL-501).
-                self._trace_seq = max(self._trace_seq, seq)
-            transition = str(entry.get("transition", ""))
-            if transition == "RESTART":
-                self._trace_from_snapshot = True
-            for key, count in scheduler_refusal_counts([entry]).items():
-                self._scheduler_refusals[key] = self._scheduler_refusals.get(key, 0) + count
+    # ------------------------------------------------ stored history (DL-541)
+
+    def _see_engine_now(self, now: datetime | None) -> None:
+        """Alarm times exist only while the engine's present time is known (DL-541): a status
+        without it drops them, and the next with it rebuilds them by one scan."""
+        self._engine_now = now
+        if now is None:
+            self._alarm_times, self._alarms_scanned, self._now_max = {}, False, None
+            return
+        if not self._alarms_scanned:
+            self._rescan_owed = True  # the clock is known, the first time or again
+        elif self._now_max is not None and self._now_max - now > _ALARM_WINDOW:
+            self._rescan_owed = True  # it stepped back by more than the window
+        if self._alarms_scanned:
+            self._now_max = now if self._now_max is None else max(self._now_max, now)
+
+    def _check_status_baseline(self, status: Mapping[str, Any]) -> None:
+        """A status answer under another read header than the held history forgets all of it,
+        before the table is drawn (DL-541)."""
+        baseline = status.get("baseline_id")
+        held = self._history_baseline
+        if self._join is None or not isinstance(baseline, str) or not baseline or held is None:
+            return
+        if baseline != held:
+            self._stop_hop("the baseline changed")
+            self._reset_history()
+            self._console_write(Text("baseline changed; joining the history again", "yellow"))
+
+    async def _page(
+        self,
+        request: dict[str, Any],
+        *,
+        baseline: str | None,
+        history: str | None,
+        held: int,
+        client: ControlClient | None = None,
+    ) -> TransitionPage:
+        """One `transitions` page of the history read under `baseline` and `history`, decoded
+        whole and checked before its rows are used (DL-541): it comes under that read header,
+        and the stored history continues `history` through seq `held`. A refusal raises
+        `_HistoryEnds`: one that means no stored history is said once on the console, any
+        other is a query refusal (DL-187 item 6). A malformed answer raises
+        `MalformedPage`; each reader says what that means for it."""
+        wire = {"cmd": "transitions", **request}
+        if history is not None:
+            wire["history"] = history
+        answer = await (client or self._client).request(wire)
+        if isinstance(answer, Mapping) and answer.get("ok") is False:  # a refusal comes first
+            refusal = decode_refusal(answer)  # a malformed envelope is MalformedPage
+            raise _HistoryEnds(self._history_refused(refusal, quiet=client is not None))
+        page = decode_transitions(answer, wire)
+        if baseline is not None and page.baseline_id != baseline:
+            raise _HistoryEnds("moved")
+        through = page.continuous_through
+        if history is not None and through is not None and through < held:
+            raise _HistoryEnds("broken", through)
+        return page
+
+    def _history_refused(self, refusal: Refusal, *, quiet: bool) -> str:
+        """The kind of a refused page: `gone` for no stored history, else `refused`."""
+        error, code = refusal.error, refusal.code
+        if code not in _NO_HISTORY_CODES:
+            if not quiet:
+                self._set_query_fault("transitions", error)
+            return "refused"
+        if not quiet:
+            self._set_query_fault("transitions", None)
+            reason = f"{error} ({code})"
+            if reason != self._no_history:
+                self._no_history = reason
+                self._console_write(Text(f"no stored history: {reason}", style="yellow"))
+        return "gone"
+
+    def _history_ended(self, end: _HistoryEnds) -> None:
+        """What a page that does not fit leaves (DL-541). No stored history, another read
+        header or a history that does not continue forgets everything held; a plain refusal
+        keeps it for the next pass."""
+        if end.kind == "refused" or self._join is None:
+            return  # nothing is held: the next pass joins again
+        if end.kind == "moved":
+            self._stop_hop("the baseline changed")
+            self._reset_history()
+            self._console_write(Text("baseline changed; joining the history again", "yellow"))
+        elif end.kind == "broken":
+            self._reset_history()
+            self._console_write(
+                Text(
+                    f"the stored history does not continue past seq {end.through}; joining again",
+                    style="yellow",
+                )
+            )
+            self._dirty = True
+        else:
+            self._reset_history()
+
+    async def _read_history(self, status: Mapping[str, Any]) -> None:
+        """Join the stored history, or follow it, then scan the alarms again when the engine's
+        present time first appears or steps back by more than the window (DL-541)."""
+        baseline = status.get("baseline_id") if status.get("ok") else None
+        try:
+            if self._join is None:
+                await self._join_history(baseline if isinstance(baseline, str) else None)
+            else:
+                await self._follow_history()
+            if self._rescan_due():
+                await self._rescan()
+        except _HistoryEnds as end:
+            self._history_ended(end)
+        except MalformedPage as exc:
+            # DL-541: a join fails whole and joins again next pass; a follow keeps its cursor
+            self._set_query_fault("transitions", f"a malformed answer: {exc}")
+        self._drop_old_alarms()
+
+    def _history_read(self) -> None:
+        """A join or a followed page was read whole: a refusal or a fault of earlier is over,
+        and its recovery line goes before the lines the page writes (DL-541)."""
+        self._set_query_fault("transitions", None)
+        self._no_history = None
+
+    def _tell_gaps(self, page: TransitionPage) -> tuple[_Interval, ...]:
+        """One line for the seqs a page reports with no stored entries, each seq once; the
+        page's gaps."""
+        told = self._gaps_told
+        fresh: list[list[int]] = []
+        for low, high in page.gaps:
+            if high > told:
+                fresh.append([max(low, told + 1), high])
+                self._gaps_told = max(self._gaps_told, high)
+        if fresh:
+            self._console_write(Text(f"no entries stored for {seq_words(fresh)}", style="yellow"))
+        return page.gaps
+
+    async def _join_history(self, baseline: str | None) -> None:
+        """The newest stored entries and, with the engine's present time, one alarm scan
+        anchored at the join point `[watermark, 2^63 - 1]` (DL-541). A join is whole or not at
+        all: nothing is shown or held until every page of it is read."""
+        page = await self._page(
+            {"direction": "backward", "limit": _JOIN_LIMIT}, baseline=baseline, history=None, held=0
+        )
+        join: _Key = (page.watermark, _KEY_MAX)
+        history = page.history
+        if page.baseline_id:
+            baseline = page.baseline_id
+        now = self._engine_now
+        scan = None if now is None else await self._scan(join, now, baseline, history)
+        self._history_read()  # the join was read whole
+        self._join = self._cursor = join
+        self._history, self._history_baseline = history, baseline
+        self._tell_gaps(page)
+        self._consume_entries([entry.fields() for entry in page.entries])
+        if scan is None:
+            self._take_scan(None, join, now)
+        else:
+            self._scan_completed(scan, join, now)
+
+    def _scan_completed(self, scan: _Scan, anchor: _Key, now: datetime | None) -> None:
+        """The one completion of an alarm scan, the join's or a later rescan's, whole or
+        bounded (DL-541): its times are held, no rescan is owed, and an alarm-scan fault is
+        over, with its recovery line if one was said."""
+        self._take_scan(scan, anchor, now)
+        self._rescan_owed = False
+        self._set_query_fault("alarm scan", None)
+
+    def _take_scan(self, scan: _Scan | None, anchor: _Key, now: datetime | None) -> None:
+        """The alarm times are a scan's: everything at or below `anchor` is the scan's,
+        everything above it the follow's (DL-541)."""
+        self._alarm_anchor = anchor
+        if scan is None:
+            self._alarm_times, self._alarms_cut, self._alarms_scanned = {}, False, False
+            return
+        self._alarm_times, self._alarms_cut, self._alarms_scanned = scan.times, scan.cut, True
+        self._now_max = now
+
+    def _rescan_due(self) -> bool:
+        """The alarm times are rebuilt by one scan when the engine's present time becomes known,
+        the first time or again after a status without it, or steps back by more than the window
+        against the latest one seen since the last scan: times dropped past twice the window
+        could then be inside it (DL-541). A rescan that became due stays due until a scan
+        completes; a transport failure or a malformed page leaves it due."""
+        return self._join is not None and self._engine_now is not None and self._rescan_owed
+
+    async def _rescan(self) -> None:
+        """Scan anchored at the follow cursor, so every row the follow read is the scan's and no
+        console line is written twice or skipped; the times read replace the times held only
+        once every page is read (DL-541)."""
+        now, anchor = self._engine_now, self._cursor
+        assert now is not None and anchor is not None
+        try:
+            scan = await self._scan(anchor, now, self._history_baseline, self._history)
+        except ControlClientError:
+            # DL-541: a transport failure changes no scan state, so the next pass asks again;
+            # a scan held meanwhile is marked incomplete. The failure goes on to the
+            # transport's path.
+            if self._alarms_scanned:
+                self._alarms_cut = True
+            raise
+        except MalformedPage as exc:
+            # DL-541: a later rescan that meets a malformed answer ends incomplete; the times
+            # it would replace stay, and the operator gets the diagnostic, once while it stays
+            self._set_query_fault("alarm scan", f"a malformed answer: {exc}")
+            held = self._alarm_times if self._alarms_scanned else {}
+            kept = self._alarm_anchor if self._alarms_scanned else None
+            self._take_scan(_Scan(dict(held), True), kept or anchor, now)
+            return
+        self._scan_completed(scan, anchor, now)
+
+    async def _scan(
+        self, anchor: _Key, now: datetime, baseline: str | None, history: str | None
+    ) -> _Scan:
+        """The times of the alarm entries at or below `anchor`, the anchor's own row included,
+        each transition read backward, each page newest first, until one is dated more than
+        twice the window before `now`, within `_SCAN_ROWS` rows and `_SCAN_REQUESTS` requests
+        per transition (DL-541). A bound hit, or any gap in what the scan read, cuts it: a gap
+        holds seqs whose entries are unknown, and nothing dates them."""
+        times: dict[str, dict[_Key, datetime]] = {}
+        cut = False
+        # a backward page holds the keys below its cursor: from just above a row key, the
+        # anchor's own row is the scan's; the join point is above every row of its seq
+        start = anchor if anchor[1] == _KEY_MAX else _just_above(anchor)
+        for name in sorted(_ALARM_TRANSITIONS):
+            cursor, rows, requests = start, 0, 0
+            while True:
+                if rows >= _SCAN_ROWS or requests >= _SCAN_REQUESTS:
+                    cut = True
+                    break
+                request = {"transition": name, "direction": "backward", "cursor": list(cursor)}
+                page = await self._page(
+                    {**request, "limit": min(_JOIN_LIMIT, _SCAN_ROWS - rows)},
+                    baseline=baseline,
+                    history=history,
+                    held=anchor[0],
+                )
+                requests += 1
+                rows += len(page.entries)
+                stop: int | None = None
+                for entry in reversed(page.entries):  # a page comes in ascending key order
+                    if entry.key > anchor:
+                        continue
+                    if now - entry.at > 2 * _ALARM_WINDOW:
+                        stop = entry.seq
+                        break
+                    times.setdefault(entry.job, {})[entry.key] = entry.at
+                # a gap below the stop is never reached
+                if any(stop is None or high >= stop for _, high in page.gaps):
+                    cut = True
+                if stop is not None or not page.more:
+                    break
+                following = page.next
+                if following is None or following >= cursor:
+                    cut = True
+                    break
+                cursor = following
+        return _Scan(times, cut)
+
+    async def _follow_history(self) -> None:
+        """Forward pages from the cursor until `more` is false, at most `_FOLLOW_PAGES` in one
+        pass; the rest is left to a trailing pass (DL-541). Past the last page the cursor is
+        `[watermark, 2^63 - 1]`, so an expired, empty page is not asked again."""
+        for _ in range(_FOLLOW_PAGES):
+            cursor = self._cursor
+            assert cursor is not None
+            page = await self._page(
+                {"cursor": list(cursor), "direction": "forward"},
+                baseline=self._history_baseline,
+                history=self._history,
+                held=cursor[0],
+            )
+            self._history_read()  # this page was read whole, before its lines
+            if page.expired:
+                pruned = seq_words([list(interval) for interval in page.pruned]) or "some seqs"
+                self._console_write(
+                    Text(f"pruned before this view read them: {pruned}", style="yellow")
+                )
+            if self._tell_gaps(page):
+                # DL-541: an alarm in seqs with no stored entries is unknown until the next scan
+                self._alarms_cut = True
+            self._follow_rows(page)
+            following = page.next
+            if not page.more:
+                self._say_restart()  # the follow reached the watermark (DL-541)
+                self._cursor = max(cursor, following or cursor, (page.watermark, _KEY_MAX))
+                return
+            if following is None or following <= cursor:
+                return  # a page that does not move on ends this pass
+            self._cursor = following
+        self._dirty = True
+
+    def _follow_rows(self, page: TransitionPage) -> None:
+        """A followed page's rows. A new history token that continues the held one is an
+        engine restart: its line waits until the first row above the old token's
+        `continuous_through` is written, across pages and passes, or until the follow reaches
+        the watermark (DL-541)."""
+        entries = [entry.fields() for entry in page.entries]
+        history = page.history
+        if history is not None and history != self._history:
+            through = page.continuous_through
+            if self._history is not None and through is not None and self._restart_at is None:
+                self._restart_at = through
+            self._history = history
+        self._consume_entries(entries, follow=True)
+
+    def _say_restart(self) -> None:
+        if self._restart_at is not None:
+            self._restart_at = None
+            self._flush_refusal_runs()
+            self._console_write(
+                Text("engine restarted; the stored history continues", style="yellow")
+            )
+
+    def _consume_entries(self, entries: Any, *, follow: bool = False) -> None:
+        """One console line per entry, folding repeated scheduler refusals (DL-480), each line
+        keyed by its entry; a followed alarm entry above the alarm anchor adds its time, and a
+        held restart line goes before the first row above the old history (DL-541)."""
+        console = self.query_one("#console", _Console)
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, Mapping):
+                continue
+            key = _entry_key(entry)
+            if follow and self._restart_at is not None and key is not None:
+                if key[0] > self._restart_at:
+                    self._say_restart()
             job = str(entry.get("job", ""))
+            if follow and str(entry.get("transition", "")) in _ALARM_TRANSITIONS:
+                self._keep_alarm(job, key, entry.get("at"))
             clock = format_local_at(entry.get("at"))
             cause = str(entry.get("cause", ""))
             scheduler_refusal = _is_scheduler_refusal(entry)
@@ -2594,16 +3444,54 @@ class RunnerApp(App[None]):
             self._flush_refusal_run(job, clock)
             if scheduler_refusal:
                 self._refusal_runs[job] = _RefusalRun(cause, clock)
-            if transition in _ALARM_TRANSITIONS:
-                self._alarms[job] = self._alarms.get(job, 0) + 1
-            if transition in _ALARM_TRANSITIONS:
-                style = "bold red"
-            elif transition == "START_REFUSED":
-                # DL-64: a refused operator start answers "why did nothing happen"
-                style = "yellow"
+            console.write_entry(entry_line(entry), key)
+
+    def _keep_alarm(self, job: str, key: _Key | None, at: Any) -> None:
+        """A followed alarm's time, keyed so a row read twice is kept once (DL-541). Alarm times
+        exist only while the engine's present time is known and a scan holds; a row at or below
+        the scan's anchor is the scan's."""
+        when = _naive_utc(at)
+        anchor = self._alarm_anchor
+        if key is None or when is None or anchor is None or key <= anchor:
+            return
+        if self._engine_now is not None and self._alarms_scanned:
+            self._alarm_times.setdefault(job, {})[key] = when
+
+    def _drop_old_alarms(self) -> None:
+        """Alarm times more than twice the window old go; none inside it does (DL-541)."""
+        now = self._engine_now
+        if now is None:
+            return
+        for job in list(self._alarm_times):
+            kept = {
+                key: at
+                for key, at in self._alarm_times[job].items()
+                if now - at <= 2 * _ALARM_WINDOW
+            }
+            if kept:
+                self._alarm_times[job] = kept
             else:
-                style = "dim"
-            self._console_write(Text(f"{clock} {job} {transition} [{cause}]", style=style))
+                del self._alarm_times[job]
+
+    def _alarm_count(self, job: str) -> int:
+        """The alarms of `job` in the window: dated at most `_ALARM_WINDOW` before the engine's
+        present time, evaluated at each refresh (DL-541). Only times are subtracted, never the
+        window from the present, so a virtual clock at its minimum cannot overflow."""
+        now = self._engine_now
+        if now is None:
+            return 0
+        return sum(1 for at in self._alarm_times.get(job, {}).values() if now - at <= _ALARM_WINDOW)
+
+    def _alarm_note(self) -> str:
+        """How far the alarm part of Problems can be trusted (DL-541): unavailable without the
+        engine's present time or a stored history, incomplete after a scan cut by its bound or
+        one that read a gap, or a followed page with a gap, until the next scan.
+        The status part does not depend on it."""
+        if self._engine_now is None or self._join is None:
+            return "alarms unavailable"
+        if not self._alarms_scanned or self._alarms_cut:
+            return "alarms incomplete"
+        return ""
 
     _VIEW_MODES = ("all", "problems", "active")
 
@@ -2619,7 +3507,7 @@ class RunnerApp(App[None]):
         """The one definition of 'problem', shared by the `v` problems view and the folded-box
         rollup. QUE_WAIT counts: on a contended estate it can park a region indefinitely."""
         status = str(row.get("status", ""))
-        return status in ("FAILURE", "TERMINATED", "QUE_WAIT") or bool(self._alarms.get(name))
+        return status in ("FAILURE", "TERMINATED", "QUE_WAIT") or self._alarm_count(name) > 0
 
     def _match(self, name: str, row: dict[str, Any], job_filter: JobFilter) -> bool:
         mode = self._VIEW_MODES[self._view_mode]
@@ -2835,6 +3723,10 @@ class RunnerApp(App[None]):
         mode = self._VIEW_MODES[self._view_mode]
         if mode != "all":
             title.append(f" · {mode}", style="bold")
+        note = self._alarm_note()
+        if note:
+            # DL-541: the alarm part of Problems, and the alarms column, is marked
+            title.append(f" · {note}", style="yellow")
         table.border_title = title
         if target is not None and table.cursor_row != order.index(target):
             table.move_cursor(row=order.index(target))
@@ -2858,7 +3750,7 @@ class RunnerApp(App[None]):
             timer_text = f"{first.get('kind', '?')}@{clock}"
             if len(timers) > 1:
                 timer_text += f" +{len(timers) - 1}"
-        alarms = self._alarms.get(name, 0)
+        alarms = self._alarm_count(name)
         exit_code = row.get("exit_code")
         return [
             name,
@@ -3108,6 +4000,8 @@ class RunnerApp(App[None]):
             pager = self.query_one("#logtail", _LogTail)
         except NoMatches:
             return  # a set_interval tick can outlive the unmounting screen
+        if self._pager_pin is not None:
+            return  # the pager shows stored entries until the operator leaves it (DL-541)
         paths = self._log_paths.get(self._selected or "", (None, None))
         path = paths[self._tail_stream]
         stream = ("out", "err")[self._tail_stream]
@@ -3162,6 +4056,98 @@ class RunnerApp(App[None]):
 
     def action_toggle_stream(self) -> None:
         self._tail_stream = 1 - self._tail_stream
+        self._tail_step()
+
+    # ------------------------------------------------- earlier entries (DL-541)
+
+    def action_earlier(self) -> None:
+        """`E`: the stored entries before the oldest the console holds, in the pager, one page
+        per press, back to the retained floor (DL-541). The first press pins the pager to them
+        and zooms it at once, so a key typed next is the pager's (DL-518); leaving the pager
+        gives it back to the log. A press while a page is read, or at the floor, rings the
+        bell and sends nothing."""
+        if self._join is None:
+            self._console_write(Text("earlier events: no stored history to read", style="yellow"))
+            return
+        pager = self.query_one("#logtail", _LogTail)
+        pin = self._pager_pin
+        if pin is None:
+            start = self.query_one("#console", _Console).earlier_from() or self._join
+            pin = self._pager_pin = _PagerPin(start, start, self._history, self._history_baseline)
+            pager.show_entries(f"stored events before seq {start[0]}")
+            pane = self.query_one("#logbox", _LogPane)
+            if self.screen.maximized is not pane:
+                self.screen.maximize(pane)
+            _focus_now(pager)
+        if pin.reading or pin.before is None:
+            self.bell()
+            return
+        pin.reading = True
+        work = functools.partial(self._page_earlier, pin)
+        self.run_worker(work, group="earlier", exclusive=False)  # type: ignore[arg-type]
+
+    async def _page_earlier(self, pin: _PagerPin) -> None:
+        """One page before `pin.before`, read under the history the pin was taken from and
+        checked as the follow checks its pages (DL-541). Past the pager's bound the page drops
+        the pager's newest lines, since it reads backward."""
+        before = pin.before
+        assert before is not None
+        try:
+            page = await self._page(
+                {"direction": "backward", "cursor": list(before), "limit": _JOIN_LIMIT},
+                baseline=pin.baseline,
+                history=pin.history,
+                held=pin.start[0],
+                client=self._reads,
+            )
+        except ControlClientError as exc:
+            self._console_write(Text(f"earlier events: {exc}", style="red"))
+            return
+        except MalformedPage as exc:
+            # DL-541: the page could not be read; the pager keeps its place, and `E` asks again
+            self._console_write(Text(f"earlier events: a malformed answer: {exc}", "red"))
+            return
+        except _HistoryEnds as end:
+            if self._pager_pin is not pin:
+                return
+            if end.kind == "refused" or end.kind == "gone":
+                self._console_write(Text("earlier events: the engine refused the read", "red"))
+                return
+            self._console_write(
+                Text("earlier events: the stored history changed; the pager shows the log again")
+            )
+            self._release_pager()
+            return
+        finally:
+            pin.reading = False
+        if self._pager_pin is not pin:
+            return  # the operator left the pager meanwhile
+        pager = self.query_one("#logtail", _LogTail)
+        lines = [entry_line(entry.fields()).plain for entry in page.entries]
+        gaps = seq_words([list(gap) for gap in page.gaps])
+        if gaps:
+            lines.insert(0, f"-- no entries stored for {gaps} --")
+        following = page.next
+        if page.more and following is not None and following < before:
+            pin.before = following
+        else:
+            pin.before = None
+            lines.insert(0, f"-- the stored history starts here, at seq {page.floor} --")
+        pager.prepend(lines)
+
+    def _release_pager(self) -> None:
+        """The log pane left the screen's zoom: the pager follows the selected job's log again
+        (DL-541)."""
+        if self._pager_pin is None:
+            return
+        self._pager_pin = None
+        # a page read in flight is cancelled, and with it its exchange on the reads connection
+        self.workers.cancel_group(self, "earlier")
+        try:
+            self.query_one("#logtail", _LogTail).drop_entries()
+        except NoMatches:
+            return
+        self._tail_key = None
         self._tail_step()
 
     # ------------------------------------------------------------------ help
@@ -3248,6 +4234,104 @@ class RunnerApp(App[None]):
         """F1 on the console line: the verbs screen in place of the help panel (DL-516)."""
         self.push_screen(ConsoleWordsScreen())
 
+    async def _refusal_total(
+        self, job: str, row: Mapping[str, Any], baseline: str | None, history: str | None
+    ) -> tuple[int, bool]:
+        """The stored scheduler refusals of `row`'s run, or of its queued start, as
+        `(count, exact)` (DL-541). It is unknown, `(0, False)`, unless proved exact: any end of
+        the read other than the one exact path in `_walk_refusals`, a refusal of any code, a
+        transport failure, a malformed answer or an exception included, is unknown or, for a
+        verified identity with incomplete coverage, a lower bound. A cancel, when the popup
+        closes, goes through."""
+        try:
+            return await self._walk_refusals(job, row, baseline, history)
+        except MalformedPage as exc:
+            self._console_write(Text(f"details: a malformed answer: {exc}", style="red"))
+            return 0, False
+        except Exception:  # noqa: BLE001 -- every end but the proved-exact one is not exact
+            return 0, False
+
+    async def _walk_refusals(
+        self, job: str, row: Mapping[str, Any], baseline: str | None, history: str | None
+    ) -> tuple[int, bool]:
+        """`row`, `baseline` and `history` come from one `status` answer, the popup's own: its
+        row, its read header and the history it names; the walk reads and writes no field of
+        the viewer. It reads the job's stored entries backward from the present, each page
+        newest first, on the reads connection, until the entry that opens the run: the status
+        entry carrying its run number, which only a run's opening and START_REFUSED carry
+        (DL-537); an entry of a later run, one that opened after the status answer, is passed
+        over. Every page carries `history` and must (a) come under `baseline`, (b) report
+        `history` as its own and (c) report it continuous through that page's own watermark,
+        and hold whole entries: a page that fails any of these, holds an entry the server cut,
+        or is malformed, or no `history` to carry (an engine that does not name it), makes the
+        total unknown. Past `_SCAN_ROWS` rows or `_SCAN_REQUESTS` requests, over a gap above the
+        opening, at the floor, or at an earlier run's entry first (an opening stored with no
+        number), it is a lower bound. It is exact only on reaching the opening with none of
+        these."""
+        unknown = (0, False)
+        run_number = row.get("run_number")
+        if type(run_number) is not int or baseline is None or history is None:
+            return unknown
+        queued = row.get("status") == "QUE_WAIT"
+        cursor: _Key | None = None
+        total = rows = requests = 0
+        whole = True  # no gap above the opening in what was read
+        while True:
+            if rows >= _SCAN_ROWS or requests >= _SCAN_REQUESTS:
+                return total, False
+            request: dict[str, Any] = {
+                "job": job,
+                "direction": "backward",
+                "limit": min(_JOIN_LIMIT, _SCAN_ROWS - rows),
+            }
+            if cursor is not None:
+                request["cursor"] = list(cursor)
+            # any refusal raises, a malformed answer raises MalformedPage; the checks below
+            # are the walk's own: (a) (b) (c)
+            page = await self._page(
+                request, baseline=None, history=history, held=0, client=self._reads
+            )
+            if (
+                page.baseline_id != baseline  # (a) the row's read header
+                or page.history != history  # (b) the history the row's answer names
+                or page.continuous_through != page.watermark  # (c) it holds through this page
+            ):
+                return unknown
+            if any(entry.cut for entry in page.entries):
+                return unknown  # an entry the server shortened to fit the page
+            requests += 1
+            rows += len(page.entries)
+            stop: int | None = None
+            opened = False
+            for entry in reversed(page.entries):  # a page comes in ascending key order
+                if entry.job != job:
+                    continue  # not an entry of what was asked: neither counted nor an opening
+                run = entry.run_number
+                if run is not None and run > run_number:
+                    continue  # a run that opened after the status answer
+                if run is not None and (run < run_number or "->" in entry.transition):
+                    # the run's opening, or an entry of an earlier run: no entry of this run
+                    # lies below it
+                    stop = entry.seq
+                    opened = run == run_number
+                    break
+                # QUE_WAIT is a class of its own: queue admission has not yet moved the run
+                counts = scheduler_refusal_counts([entry.fields()])
+                for (name, counted, kind), count in counts.items():
+                    if name == job and counted == run_number and (kind == "QUE_WAIT") == queued:
+                        total += count
+            if any(stop is None or high >= stop for _, high in page.gaps):
+                whole = False
+            if stop is not None:
+                if opened and whole:
+                    return total, True  # the one exact path
+                return total, False
+            if not page.more:
+                return total, False  # the floor first: the opening is not stored
+            cursor = page.next
+            if cursor is None:
+                return unknown
+
     async def _show_details(self, job: str, hold: object | None = None) -> None:
         """The spec popup: runtime facts from `status`, dependency lines from `deps` (the blast
         radius, DL-65), source from `spec`, and a short local log tail."""
@@ -3260,8 +4344,8 @@ class RunnerApp(App[None]):
             self._set_connected(False, str(exc))
             return
         self._set_connected(True)
-        body = Text()
         row = status.get("jobs", {}).get(job, {}) if status.get("ok") else {}
+        body = Text()
         if row:
             state = str(row.get("status", ""))
             body.append(state, style=_STATUS_STYLE.get(state, "bold"))
@@ -3282,18 +4366,8 @@ class RunnerApp(App[None]):
                     body.append(line + "\n", style="bold")
                 else:
                     body.append(line + "\n")
-            run_number = row.get("run_number", 0)
-            count = sum(
-                count
-                for (name, run, status_class), count in self._scheduler_refusals.items()
-                if name == job
-                and run == run_number
-                and (status_class == "QUE_WAIT") == (state == "QUE_WAIT")
-            )
-            if count:
-                scope = " since snapshot" if self._trace_from_snapshot else ""
-                run_label = "queued" if state == "QUE_WAIT" else f"run {run_number}"
-                body.append(f"scheduler refusals: {count} ({run_label}){scope}\n")
+        head, body = body, Text()
+        if row:
             for label, key in (("log out", "log_out"), ("log err", "log_err")):
                 if row.get(key):
                     body.append(f"{label}: {row[key]}\n", style="dim")
@@ -3352,8 +4426,39 @@ class RunnerApp(App[None]):
                 body.append("\nlog tail:\n", style="bold")
                 for line in lines:
                     body.append(f"  {line}\n", style="dim")
-        self.push_screen(SpecScreen(job, body))
+        screen = SpecScreen(job, head + body)
+        self.push_screen(screen)
         self._release(hold)
+        if row and type(row.get("run_number")) is int:
+            # DL-541: the popup is open before its history is read, and says the total is
+            # loading. Its row, read header and history all come from its own status answer.
+            header, named = status.get("baseline_id"), status.get("history")
+            baseline = header if isinstance(header, str) and header else None
+            token = named if isinstance(named, str) and named else None
+            screen.show(head + _refusal_line(row, "loading") + body)
+            work = functools.partial(
+                self._fill_refusals, screen, job, row, head, body, baseline, token
+            )
+            self.run_worker(work, group="refusals", exclusive=True)  # type: ignore[arg-type]
+
+    async def _fill_refusals(
+        self,
+        screen: SpecScreen,
+        job: str,
+        row: Mapping[str, Any],
+        head: Text,
+        tail: Text,
+        baseline: str | None,
+        history: str | None,
+    ) -> None:
+        """The run's stored refusal total, read once and placed in the open popup when it
+        arrives (DL-541): exact N, `at least N` for a lower bound, or `unknown`, which stays
+        until the popup is opened again. The loading line is always replaced."""
+        count, exact = await self._refusal_total(job, row, baseline, history)
+        if screen not in self.screen_stack:
+            return
+        total = str(count) if exact else (f"at least {count}" if count else "unknown")
+        screen.show(head + _refusal_line(row, total) + tail)
 
     # ------------------------------------------------------- pane geometry
 
@@ -3854,3 +4959,4 @@ class RunnerApp(App[None]):
 
     async def on_unmount(self) -> None:
         await self._client.close()
+        await self._reads.close()

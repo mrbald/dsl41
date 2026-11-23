@@ -41,7 +41,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Final
+from typing import Any, Final, NamedTuple
 
 from dsl41.canon import is_scalar_string, is_wire_int
 from dsl41.runner_journal import best_effort_report
@@ -69,13 +69,22 @@ _CUTTABLE: Final[tuple[str, ...]] = ("cause", "job", "transition", "start_source
 # ---------------------------------------------------------------- the start's routine
 
 
-def begin(store: Store, *, where: str) -> str | None:
+class Begun(NamedTuple):
+    """What the start's steps leave (DL-536, DL-541): why `transitions` declines for this run,
+    or None; and the history this start began, which `status` names, or None when any step
+    failed, even after the history was written."""
+
+    declined: str | None
+    history: str | None
+
+
+def begin(store: Store, *, where: str) -> Begun:
     """Run the start's steps (module docstring), the history first and each step on its own,
-    so a failed trim or gap step keeps the start's history boundary. Answers None, or why
-    `transitions` declines for this run."""
+    so a failed trim or gap step keeps the start's history boundary."""
+    history = uuid.uuid4().hex
     steps: tuple[tuple[str, Callable[[], None]], ...] = (
         ("bound the earlier starts", lambda: _bound_earlier_starts(store)),
-        ("begin the history", lambda: store.begin_history(uuid.uuid4().hex)),
+        ("begin the history", lambda: store.begin_history(history)),
         ("settle the rows", lambda: _settle_rows(store)),
     )
     reasons: list[str] = []
@@ -85,10 +94,10 @@ def begin(store: Store, *, where: str) -> str | None:
         except Exception as exc:  # noqa: BLE001 -- any failure: the start goes on, the verb declines
             reasons.append(f"{what}: {type(exc).__name__}: {exc}")
     if not reasons:
-        return None
+        return Begun(None, history)
     reason = "the start could not settle the transition rows: " + "; ".join(reasons)
     best_effort_report(f"dsl41: WARNING: {where}: {reason}; `transitions` declines (DL-536)")
-    return reason
+    return Begun(reason, None)
 
 
 def _bound_earlier_starts(store: Store) -> None:
@@ -321,7 +330,11 @@ def _page(
     through = read.pruned_through
     if query.cursor is not None and not query.backward:
         if through is not None and query.cursor < through:
-            pruned.append([max(query.cursor[0], 1), min(through[0], upto)])
+            # DL-541: only the missed seqs at or below the watermark; a cursor past it missed
+            # none this answer may name, and the next page, routed later, reports them
+            first, newest = max(query.cursor[0], 1), min(through[0], upto)
+            if first <= newest:
+                pruned.append([first, newest])
     elif query.cursor is not None and query.cursor[0] < floor:
         if 1 <= min(query.cursor[0], upto):
             pruned.append([1, min(query.cursor[0], upto)])

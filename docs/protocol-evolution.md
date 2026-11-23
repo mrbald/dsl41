@@ -93,6 +93,13 @@ Control `status` may carry `clock_hold: {"wall", "until"}` while real wall
 time is below engine time (DL-493). Clients may ignore this additive field
 in dialect 5. It changes no record or state version.
 
+Control `status` carries `engine_now`, the engine's present time, and
+`history`, the history its start began in the transition rows or null (DL-541).
+Clients may ignore these additive fields in dialect 5. They change no record or
+state version. A terminal UI of this build reads its history from
+`transitions` and sends no `trace`; against an engine without `engine_now` it
+marks the alarm part of Problems unavailable.
+
 Control `explain` adds `as_of`, `wake`, `attempt`, `disposition`,
 `gates` and, when they apply, `capacity`, `dispatch`, `recovering` and
 `watching`, plus seven identity fields per atom; `deps` adds

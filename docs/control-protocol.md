@@ -726,6 +726,16 @@ While `transitions` declines for the run (§4 `transitions`), the answer
 carries `transitions_unavailable`, the reason text; it is absent otherwise.
 A client may ignore this additive field (DL-536).
 
+The answer carries `history`: the history this engine's start began in the
+transition rows, the value a `transitions` read of the same store reports as
+`history`. It is null with no store, and when any step of the start's settling of
+the transition rows failed, even one after the history was written. The engine
+keeps it from its start; the answer reads no store for it. A client may ignore
+this additive field (DL-541). The terminal UI's details popup takes it with the
+row it shows and counts a run's stored refusals only from pages that report it. It
+reads the total once, when it opens. The total is exact, "at least N", or unknown;
+"unknown" stays until the popup is opened again.
+
 While the start could not settle the history index for the run
 ([runner-design §7](runner-design.md#7-journal-and-recovery-e1-prod-grade)), the answer
 carries `history_unavailable`, the reason text; it is absent otherwise.
@@ -738,6 +748,26 @@ domain. The query reads engine time without remembering a stamp.
 `dsl41 query status` prints `wall clock <wall> is behind engine time; ticks
 and timers resume at <until>` beside the update notice, using local display
 time. JSON carries the key unchanged. The terminal UI does not show it.
+
+The answer carries `engine_now`, the engine's present time: the virtual clock
+as it reads, or in the real domain engine time as `clock_hold.until` reads it
+(DL-493). It is naive UTC, written as a stored entry's `at` is, also from an
+offset-aware clock, and read without remembering a stamp. Nothing the engine decides reads it. A client may ignore
+this additive field (DL-541).
+The terminal UI dates alarms against it. A job is a problem by alarms while
+one of its alarm entries has an `at` at most 24 hours before `engine_now`.
+An alarm's `at` is the deadline the engine stamped on it. After a stall or an
+outage longer than that window, an alarm raised late for an old deadline is in
+the console and not in Problems, and it can keep a viewer that joins then from
+seeing a different, recent alarm. The viewer marks the alarm part of Problems
+incomplete when a read meets a gap in the stored entries, since an alarm may be
+there; no gap is dated by entry times. On a root upgraded in place the mark stays
+until an alarm of each kind (`MUST_START_ALARM` and `MUST_COMPLETE_ALARM`) older
+than twice the window is stored above the earlier build's gap, or retention prunes
+the gap. After a prune an attached viewer keeps the mark until its next scan; a new
+viewer scans at its join. The viewer keeps alarm times only while
+`engine_now` is known, and rebuilds them by one scan when it becomes known or
+steps back by more than the window.
 
 ### `catalog`
 
@@ -860,6 +890,9 @@ to the newest removed row. A forward cursor at the last row of `floor - 1`
 had reached every removed row and does not expire. A backward cursor below
 `floor` expires with every seq up to it. A cursor at or above `floor` never
 expires.
+A backward cursor below `floor` at seq 0, or with the watermark at 0, has no seq
+up to it at or below the watermark and does not expire. A forward cursor at seq 0
+lists from seq 1, the first journal seq.
 
 `entries` are in key order whatever the direction. Each has the `trace`
 entry's fields, written as `trace` writes them (`at` included), unset
@@ -881,8 +914,14 @@ and `next` passes it.
 
 `covered` and `gaps` are seq intervals, both ends included, over the seqs
 the page spans at or above `floor`: from the cursor to its last entry, or
-to the end of the retained journal when nothing remains that way. A gap
-holds seqs with no complete rows; an absent row there says nothing.
+to the end of the retained journal when nothing remains that way. For a null
+cursor the span starts at `floor` (`forward`) or ends at the watermark
+(`backward`). A forward cursor past the watermark spans no seq, so `covered` and
+`gaps` are empty; a backward one spans up to the watermark. A page that holds no
+entry and says `more` spans the seq where its span starts (`forward`) or ends
+(`backward`) when that seq is at or above `floor` and at or below the watermark,
+and no seq otherwise. A gap holds seqs with no complete rows; an absent row there says
+nothing.
 `counts` answers only a request that names it: the raw number of retained
 rows up to the watermark of each named transition, by job and transition.
 `counts_covered` and `counts_gaps` are the coverage of that whole range,
@@ -890,13 +929,26 @@ rows up to the watermark of each named transition, by job and transition.
 are row counts, not a viewer's refusal total: that total groups scheduler
 starts by job, run and status class, and is built from the filtered rows.
 
-`history` identifies the store's history since the engine last started.
+`history` identifies the store's history since the engine last started. It is
+null when the store holds no history; an engine serves no such page, since a start
+that cannot begin a history makes the verb decline.
 A restored copy of a root forgets the histories it never saw. When the
 request names a history, `continuous_through` is the last seq at which that
 history and the store's agree: the watermark for the current one, the seq
 before the next start for an earlier one, and 0 for one the store never
 had. A client keeps the rows it holds up to that seq and reads again past
 it.
+
+**What the terminal UI checks.** The terminal UI checks an answer against the
+schema of the fields it reads: each is present where this section says it always
+is and has its type, an entry has its fields with their types, a key is a pair of
+integers, `at` is a naive UTC timestamp, and a refusal's `code` and `error` are
+strings. It refuses a malformed answer whole, with a diagnostic naming the verb,
+the field's path, what was expected and what came, and trusts the engine for the
+rest: relations between fields and against the request are the engine's to keep.
+It ignores fields it does not know (DL-217) and never checks an answer against the
+store (DL-541). `dsl41 query transitions` passes an answer through. A line that is
+no JSON object is a decode failure of the client (§1, `ControlClientError`).
 
 `dsl41 query transitions` sends `--job`, `--transition`, `--limit` (50 by
 default), `--cursor SEQ:N` and `--forward`, newest first unless

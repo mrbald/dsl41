@@ -70,6 +70,71 @@ def _header_timestamp_ready(rendered: bytes, columns: int, rows: int) -> bool:
     return bool(re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", header))
 
 
+#: the display server's stored entries (DL-541): a run's start and two scheduler refusals
+_DISPLAY_ROWS = [
+    {
+        "seq": 1,
+        "n": 0,
+        "at": "2026-07-01T21:10:11",
+        "job": "display_job",
+        "transition": "INACTIVE->STARTING",
+        "cause": "STARTJOB event (scheduler)",
+        "run_number": 1,
+    },
+    *[
+        {
+            "seq": seq,
+            "n": 0,
+            "at": "2026-07-01T21:11:00",
+            "job": "display_job",
+            "transition": "START_REFUSED",
+            "cause": "opaque schedule fire",
+            "start_source": "scheduler",
+            "run_number": 1,
+            "refused_status": status,
+        }
+        for seq, status in ((2, "STARTING"), (3, "RUNNING"))
+    ],
+]
+
+
+def _display_page(request: dict[str, Any]) -> dict[str, Any]:
+    """One `transitions` page over `_DISPLAY_ROWS`, all of it in one page."""
+    cursor = tuple(request["cursor"]) if request.get("cursor") else None
+    backward = request.get("direction") == "backward"
+    rows = [
+        row
+        for row in _DISPLAY_ROWS
+        if request.get("job") in (None, row["job"])
+        and request.get("transition") in (None, row["transition"])
+        and (
+            cursor is None
+            or ((row["seq"], row["n"]) < cursor if backward else (row["seq"], row["n"]) > cursor)
+        )
+    ]
+    last = rows[0 if backward else -1] if rows else None
+    # the whole page is final: its span runs from the cursor to the watermark (forward) or
+    # from the floor to the cursor (backward), at or above the floor (control-protocol ss4)
+    at = min(cursor[0], 3) if cursor else None
+    low, high = (1, 3 if at is None else at) if backward else (1 if at is None else at, 3)
+    if cursor and cursor[0] > 3:
+        low, high = (1, 3) if backward else (4, 3)
+    return {
+        "applied_index": 0,  # a conforming answer's header (control-protocol ss4)
+        "entries": rows,
+        "next": [last["seq"], last["n"]] if last else (list(cursor) if cursor else None),
+        "more": False,
+        "floor": 1,
+        "expired": False,
+        "pruned": [],
+        "covered": [[low, high]] if low <= high else [],
+        "gaps": [],
+        "watermark": 3,
+        "history": "display",
+        "continuous_through": 3,
+    }
+
+
 @contextlib.asynccontextmanager
 async def _display_server(path: Path):
     """Fixed UTC replies for observing every display surface in a real UI process."""
@@ -92,27 +157,10 @@ async def _display_server(path: Path):
                 response: dict[str, Any] = {"ok": True, "baseline_id": "display", "epoch": 1}
                 if verb == "status":
                     response["jobs"] = {"display_job": row}
-                elif verb == "trace":
-                    entries = [
-                        {"seq": 1, "at": "2026-07-01T21:10:11", "transition": "RESTART"},
-                        *[
-                            {
-                                "seq": seq,
-                                "at": "2026-07-01T21:11:00",
-                                "job": "display_job",
-                                "transition": "START_REFUSED",
-                                "cause": "opaque schedule fire",
-                                "start_source": "scheduler",
-                                "run_number": 1,
-                                "refused_status": status,
-                            }
-                            for seq, status in ((2, "STARTING"), (3, "RUNNING"))
-                        ],
-                    ]
-                    response.update(
-                        last_seq=3,
-                        entries=[e for e in entries if e["seq"] > request.get("since", 0)],
-                    )
+                    response["engine_now"] = "2026-07-01T21:30:00"
+                    response["history"] = "display"
+                elif verb == "transitions":
+                    response.update(_display_page(request))
                 elif verb == "timers":
                     response["timers"] = [{"job": "display_job", **row["pending_timers"][0]}]
                 elif verb == "spec":
@@ -266,9 +314,11 @@ def _browser_display_times(engine: str, url: str, diagnostics: Path) -> None:
             mark = len(output)
             page.keyboard.press("d")
             until("at 2026-07-02T01:30:00", mark)
-            until("scheduler refusals: 2 (run 1) since snapshot", mark)
+            until("scheduler refusals: 2 (run 1)", mark)
             until("next: schedule @ 2026-01-02T00:45:00", mark)
             until("  schedule @ 2026-01-02T00:45:00", mark)
+            # DL-541: the stored total has no qualifier
+            assert b"since snapshot" not in _sgr_free(b"".join(output[mark:]))
             mark = len(output)
             page.keyboard.press("q")
             until("jobs 1/1", mark)
@@ -330,9 +380,11 @@ def test_full_local_timestamps_in_real_display_lanes(
                     await until("2026-07-01T23:10:11")
                     mark = terminal.send(b"d")
                     await until("at 2026-07-02T01:30:00", mark)
-                    await until("scheduler refusals: 2 (run 1) since snapshot", mark)
+                    await until("scheduler refusals: 2 (run 1)", mark)
                     await until("next: schedule @ 2026-01-02T00:45:00", mark)
                     await until("  schedule @ 2026-01-02T00:45:00", mark)
+                    # DL-541: the stored total has no qualifier
+                    assert b"since snapshot" not in _sgr_free(bytes(terminal.raw[mark:]))
                     mark = terminal.send(b"q")
                     await until("jobs 1/1", mark)
                     mark = terminal.send(b"t")

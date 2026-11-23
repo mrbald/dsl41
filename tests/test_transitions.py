@@ -52,8 +52,10 @@ from dsl41.runner_store import (
     Store,
     StoreError,
     TransitionQuery,
+    TransitionRead,
 )
-from dsl41.runner_transitions import CURSOR_MAX, Request, begin, fit, parse
+from dsl41.runner_transitions import CURSOR_MAX, Begun, Request, begin, fit, parse
+from transitions_conformance import check_conformance
 
 ROOT = Path(__file__).resolve().parent.parent
 T0 = datetime(2026, 7, 1, 8, 0)
@@ -337,7 +339,7 @@ def test_an_admission_is_one_transaction_and_a_start_with_nothing_to_do_adds_one
 
     with closing(SqliteStore(path)) as store:
         ended = _commits(store)
-        assert begin(store, where="t") is None
+        assert begin(store, where="t").declined is None
         assert len(ended) == 1
         ended.clear()
         store.append(record(0), record(1), transitions=[_entry(0), _entry(1)])
@@ -347,7 +349,7 @@ def test_an_admission_is_one_transaction_and_a_start_with_nothing_to_do_adds_one
         assert len(ended) == 1
     with closing(SqliteStore(path)) as store:  # a restart
         ended = _commits(store)
-        assert begin(store, where="t") is None
+        assert begin(store, where="t").declined is None
         assert len(ended) == 1
         assert store.transitions_coverage() == [Interval(1, 3, True)]
 
@@ -535,7 +537,9 @@ def _as_previous_build(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
     with monkeypatch.context() as patched:
         patched.setattr(runner_startup, "SqliteStore", opened)
-        patched.setattr(runner_startup, "begin_transitions", lambda store, *, where: None)
+        patched.setattr(
+            runner_startup, "begin_transitions", lambda store, *, where: Begun(None, None)
+        )
         patched.setattr(runner_startup, "settle_history", lambda store, *, where: None)
         yield
 
@@ -637,6 +641,9 @@ async def _ask(run_root: Path, request: dict[str, Any], *, status: bool = False)
     await engine.run_until_quiescent(now + timedelta(minutes=1))
     server = _server(engine, run_root)
     answer = await server._respond({"cmd": "transitions", **request})
+    if answer.get("ok"):
+        # the engine's answer holds every property its contract states (DL-541)
+        check_conformance(answer, {"cmd": "transitions", **request})
     status_answer = await server._respond({"cmd": "status"})
     await _close(engine)
     return (answer, engine, status_answer) if status else (answer, engine)
@@ -680,12 +687,15 @@ def test_a_failure_in_any_step_of_the_start_leaves_the_engine_running_and_the_ve
         "applied_index": engine.frontiers.applied_index,
     }
     assert status["transitions_unavailable"] == reason
+    # DL-541: a start whose steps failed names no history, even one it wrote first
+    assert status["history"] is None
     assert [seq for seq, _, _ in _stored(run_root) if seq > before]  # rows still commit
     events = [b.get("event") for _, kind, b in journal_rows(run_root) if kind == "engine"]
     assert "shutdown_during_startup" not in events
     served, _, status = asyncio.run(_ask(run_root, {}, status=True))
     assert served["ok"] is True and served["entries"]
     assert "transitions_unavailable" not in status
+    assert status["history"] is not None and status["history"] == served["history"]
     assert _coverage(run_root)[0] == Interval(1, before, False)
 
 
@@ -721,7 +731,7 @@ def test_a_restored_live_snapshot_whose_first_start_fails_its_trim_keeps_its_bou
         return Record(T0 + timedelta(seconds=n), "engine", None, None, {"event": "x", "n": n})
 
     store = MemoryStore()
-    assert begin(store, where="t") is None
+    assert begin(store, where="t").declined is None
     for n in range(3):
         store.append(record(n), transitions=[_entry(n, cause="original")])
     snapshot = copy.deepcopy(store)
@@ -735,11 +745,11 @@ def test_a_restored_live_snapshot_whose_first_start_fails_its_trim_keeps_its_bou
 
     real = restored.trim_transitions
     restored.trim_transitions = transient  # type: ignore[method-assign]
-    assert "settle the rows: OSError: transient" in str(begin(restored, where="t"))
+    assert "settle the rows: OSError: transient" in str(begin(restored, where="t").declined)
     restored.trim_transitions = real  # type: ignore[method-assign]
     for n in range(3, 6):
         restored.append(record(n), transitions=[_entry(n, cause="restored run")])
-    assert begin(restored, where="t") is None
+    assert begin(restored, where="t").declined is None
     query = TransitionQuery(None, False, 100, upto=restored.last_seq())
     answer = fit(restored.read_transitions(query), Request(query, old), header={})
     assert answer["continuous_through"] == 3
@@ -771,9 +781,9 @@ def test_a_start_whose_history_row_failed_is_bounded_by_the_next_start(
 
 def test_bounding_earlier_starts_writes_nothing_when_every_start_has_its_row() -> None:
     store = MemoryStore()
-    assert begin(store, where="t") is None
+    assert begin(store, where="t").declined is None
     store.append(Record(T0, "engine", None, None, {"event": "started", "at": T0.isoformat()}))
-    assert begin(store, where="t") is None
+    assert begin(store, where="t").declined is None
     assert len(store.histories()) == 2
 
 
@@ -1010,7 +1020,7 @@ def test_paging_both_ways_returns_every_row_once_across_a_restart(tmp_path: Path
         cursor = tuple(page["next"])
         store.close()
         store = SqliteStore(path)  # a restart reopens the store and begins a history
-        assert begin(store, where="test") is None
+        assert begin(store, where="test").declined is None
         for page in _pages(store, backward=backward, start=cursor):
             keys = [(e["seq"], e["n"]) for e in page["entries"]]
             seen.extend(reversed(keys) if backward else keys)
@@ -1409,6 +1419,28 @@ def test_the_verb_without_a_store_is_refused() -> None:
     engine = Engine(lower_source(_JIL), clock=VirtualClock(start=T0), adapters={})
     answer = asyncio.run(_server(engine, Path("/nonexistent"))._respond({"cmd": "transitions"}))
     assert answer["ok"] is False and answer["code"] == "no_journal"
+    status = asyncio.run(_server(engine, Path("/nonexistent"))._respond({"cmd": "status"}))
+    assert status["ok"] is True and status["history"] is None  # DL-541
+
+
+def test_dl541_status_names_the_history_transitions_reports(tmp_path: Path) -> None:
+    """After a fresh start and after a resume, `status.history` is the history a
+    `transitions` read of the same store reports; each start names its own."""
+    run_root = tmp_path / "run"
+    engine = _start(run_root)
+
+    async def ask() -> tuple[dict[str, Any], dict[str, Any]]:
+        server = _server(engine, run_root)
+        status = await server._respond({"cmd": "status"})
+        page = await server._respond({"cmd": "transitions"})
+        await _close(engine)
+        return status, page
+
+    fresh, page = asyncio.run(ask())
+    assert isinstance(fresh["history"], str) and fresh["history"] == page["history"]
+    served, _, resumed = asyncio.run(_ask(run_root, {}, status=True))
+    assert resumed["history"] == served["history"]
+    assert resumed["history"] not in (None, fresh["history"])
 
 
 def test_a_read_in_flight_does_not_hold_up_an_admission(tmp_path: Path) -> None:
@@ -1918,7 +1950,7 @@ def test_a_store_this_build_wrote_opens_and_appends_under_the_previous_build(
         assert previous.prune_before(1, at) == 0
     assert _coverage(run_root) == covered
     with closing(SqliteStore(path)) as store:
-        assert begin(store, where="test") is None
+        assert begin(store, where="test").declined is None
         assert store.transitions_coverage()[-1].last == last
 
 
@@ -1934,3 +1966,19 @@ def test_a_journal_append_carries_its_rows_to_the_store() -> None:
     entry = TraceEntry(at=T0, job="j", transition="A->B", cause="c")
     journal.append(_record(0), transitions=[entry])
     assert [TraceEntry.model_validate(e) for _, _, e in _everything(journal.store)] == [entry]
+
+
+def test_dl541_a_forward_cursor_past_the_watermark_names_no_pruned_seq_above_it() -> None:
+    """Routed at watermark 2 with cursor `[3, 0]`; rows are appended and pruned through seq 10
+    before the read. The missed seqs all lie above the watermark, which no seq the answer
+    names may pass: nothing is pruned at this watermark, and the cursor does not expire."""
+    read = TransitionRead(
+        rows=[], first_seq=11, coverage=[], histories=[("h", 1)], pruned_through=(10, 0)
+    )
+    query = TransitionQuery((3, 0), False, 500, upto=2)
+    header = {"ok": True, "baseline_id": "b", "applied_index": 0}
+    answer = fit(read, Request(query, None), header=header)
+    assert (answer["expired"], answer["pruned"], answer["next"]) == (False, [], [2, 2**63 - 1])
+    check_conformance(answer, {"cmd": "transitions", "cursor": [3, 0]})
+    below = fit(read, Request(TransitionQuery((1, 0), False, 500, upto=2), None), header={})
+    assert (below["expired"], below["pruned"]) == (True, [[1, 2]])

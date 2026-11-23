@@ -221,7 +221,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-207 | `minify` emits a de-identified estate, and an unclassified attribute stops it |  |
 | DL-208 | `minify` takes `--properties` like every other catalog-consuming verb |  |
 | DL-209 | Simulation closure by classification: the coverage register (S1 of five) | [docs/live-instance-runbook.md](live-instance-runbook.md) |
-| DL-210 | Production readiness, first slice: the supervisor survives its clients and its service manager; the TUI survives a period roll | [docs/runner-design.md](runner-design.md) |
+| DL-210 | Production readiness, first slice: the supervisor survives its clients and its service manager; the TUI survives a period roll |  |
 | DL-211 | CI measures coverage once, on the interpreter where measuring is free; the two spin tests stop spinning | [docs/agent-workflow.md](agent-workflow.md), [docs/blocks/engine-loop.md](blocks/engine-loop.md) |
 | DL-212 | Preflight names the day the scheduler names: the base zone is the fallback before UTC | [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
 | DL-213 | Preflight always probes the calendars: the anchor defaults to now | [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
@@ -547,3 +547,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-548 | `nav` answers a name it does not find with the names that contain it | [docs/nav.md](nav.md) |
 | DL-549 | The offline run history reads a run under the rev in force at its opening | [docs/runner-design.md](runner-design.md) |
 | DL-550 | Only the engine's own start entry plans a launch | [docs/glossary.md](glossary.md), [docs/runner-design.md](runner-design.md) |
+| DL-541 | The terminal UI reads its history from the stored transitions | [README.md](../README.md), [docs/cli-tui-qualification.md](cli-tui-qualification.md), [docs/control-protocol.md](control-protocol.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |
