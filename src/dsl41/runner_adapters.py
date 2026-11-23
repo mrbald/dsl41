@@ -285,7 +285,8 @@ def outcome_from_status(status: dict[str, Any]) -> AdapterResult:
         return Failed(f"unrecognized status record outcome {outcome!r}")
     if outcome == "exited":
         exit_code = status.get("exit_code")
-        if isinstance(exit_code, int):
+        # `true` is no exit code: the engine refuses a boolean as one (DL-554)
+        if isinstance(exit_code, int) and is_wire_int(exit_code):
             return exit_code
         return Failed(f"malformed status record: outcome 'exited' with exit_code={exit_code!r}")
     if outcome == "signaled":

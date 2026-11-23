@@ -39,6 +39,7 @@ from dsl41.capacity import CapacityPool
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, EventKind, OracleError, TraceEntry
+from dsl41.runner_admission import AdmissionRefused
 from dsl41.runner_clock import EngineError
 from dsl41.semantics import SemanticSwitches
 from dsl41.semantics import resolve as resolve_switches
@@ -7346,17 +7347,25 @@ def test_error_feed_time_going_backwards_raises() -> None:
         o.feed(ev("STATUS", 0, job="solo", status="SUCCESS"))
 
 
-def test_error_status_without_job_raises() -> None:
+def test_error_status_without_job_raises(sem_path: str) -> None:
+    """The oracle refuses it; the engine refuses it at its door first (DL-554)."""
     text = "insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"
     o = oracle(text)
-    with pytest.raises(OracleError, match="requires payload.job"):
+    door = sem_path == "engine"
+    error: type[Exception] = AdmissionRefused if door else OracleError
+    match = "STATUS payload.job" if door else "requires payload.job"
+    with pytest.raises(error, match=match):
         o.feed(Event(at=T0, kind="STATUS", payload={"status": "SUCCESS"}))
 
 
-def test_error_set_global_without_name_raises() -> None:
+def test_error_set_global_without_name_raises(sem_path: str) -> None:
+    """The oracle refuses it; the engine refuses it at its door first (DL-554)."""
     text = "insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n"
     o = oracle(text)
-    with pytest.raises(OracleError, match="SET_GLOBAL requires payload.name"):
+    door = sem_path == "engine"
+    error: type[Exception] = AdmissionRefused if door else OracleError
+    match = "SET_GLOBAL payload.name" if door else "SET_GLOBAL requires payload.name"
+    with pytest.raises(error, match=match):
         o.feed(Event(at=T0, kind="SET_GLOBAL", payload={"value": "x"}))
 
 

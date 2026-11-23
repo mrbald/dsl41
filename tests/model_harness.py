@@ -43,6 +43,7 @@ from dsl41.ir import CatalogIR, lower_source
 from dsl41.oracle_state import Event
 from dsl41.runner import Engine
 from dsl41.runner_adapters import AdapterContext, FakeAdapter
+from dsl41.runner_admission import fresh_event
 from dsl41.runner_clock import VirtualClock
 from dsl41.runner_scheduler import Scheduler
 from dsl41.runner_startup import resume_run, start_run
@@ -373,8 +374,9 @@ class ModelRun:
         arrive the way a real adapter would deliver it. The SOURCE is what
         makes it a completion (runner_admission.COMPLETION_SOURCES): the
         log carries provenance and nothing else, so replay has to reach the
-        gate's verdict from the same field."""
-        self.live._enqueue(ev, source=source)
+        gate's verdict from the same field. The event is fresh, so it passes the engine's
+        payload schema first (DL-554)."""
+        self.live._enqueue(fresh_event(ev), source=source)
 
     async def crash(self) -> None:
         """Model engine death: in-flight adapter tasks die without

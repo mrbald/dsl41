@@ -59,6 +59,8 @@ from dsl41.engine_charts import UPDATE_STOP
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import CarriedRows, Event, TraceEntry
 from dsl41.runner_admission import (
+    RUN_NUMBER_END,
+    RUN_NUMBER_MIN,
     ApplyResult,
     Attempt,
     DecisionIndex,
@@ -1532,21 +1534,20 @@ def index_rows(
     return openings, owners
 
 
-#: The run numbers the index holds: the store's signed 64-bit integers, so an index row never
-#: fails a commit its records would pass (DL-539).
-_RUN_MIN: Final = -(2**63)
-_RUN_END: Final = 2**63
-
-
 def _job_run(job: object, run_number: object) -> tuple[str, int | None] | None:
     """A record's job and run number as the index holds them (DL-539). A record with no string
     job belongs to no job's history: None. A run number names a run as the run-history fold
     reads it (`runner_history`: an `int` instance, so a bool is its integer value), and only
-    from `_RUN_MIN` up to `_RUN_END`; any other value names no run. The number is made a plain
-    `int` before it is compared, so a subclass (an `IntEnum`) compares as its value."""
+    from `RUN_NUMBER_MIN` up to `RUN_NUMBER_END`, the store's signed 64-bit integers, so an
+    index row never fails a commit its records would pass; any other value names no run. The
+    number is made a plain `int` before it is compared, so a subclass (an `IntEnum`) compares
+    as its value."""
     if not isinstance(job, str):
         return None
-    if isinstance(run_number, int) and _RUN_MIN <= (value := int(run_number)) < _RUN_END:
+    if (
+        isinstance(run_number, int)
+        and RUN_NUMBER_MIN <= (value := int(run_number)) < RUN_NUMBER_END
+    ):
         return job, value
     return job, None
 

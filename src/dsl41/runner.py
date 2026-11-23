@@ -168,11 +168,11 @@ from dsl41.runner_admission import (
     classify_fault,
     dispatch_plan,
     fingerprint,
+    fresh_event,
     report_quarantine,
     spawn_superseded,
     trial_apply,
 )
-from dsl41.canon import CanonError, canonical_bytes
 from dsl41.runner_codes import Rejection
 from dsl41.runner_clock import Clock, EngineError, ZeroDelayCycleError
 from dsl41.idempotence import ENV_ATTEMPT, invocation_env
@@ -1581,8 +1581,11 @@ class Engine:
         Injected STATUS keeps its CHANGE_STATUS parity. source=None injects unattributed
         (oracle-direct scripts carry no provenance, DL-68). `request_id` makes the injection
         retryable: an exact retry under the same id is answered from its first decision and
-        applies nothing (concurrency-model ss4 step 2). Omitted, the engine names the input."""
-        self._enqueue(ev, source=source, request_id=request_id)
+        applies nothing (concurrency-model ss4 step 2). Omitted, the engine names the input.
+
+        An event off its kind's payload schema raises `AdmissionRefused` here, and nothing is
+        queued; the engine queues its own copy (`fresh_event`, DL-554)."""
+        self._enqueue(fresh_event(ev), source=source, request_id=request_id)
 
     def submit(
         self, ev: Event, envelope: Envelope, *, source: EventSource = "control"
@@ -1593,10 +1596,17 @@ class Engine:
         The envelope carries the precondition, so this is the only entry point that satisfies
         ss0's mandate. The awaitable resolves when step 7 records the result, or raises
         `AdmissionRefused` if steps 1-2 refuse it. It never resolves before the decision exists:
-        `command_committed` ("your envelope is durable") does not answer "did my kill land"."""
+        `command_committed` ("your envelope is durable") does not answer "did my kill land".
+        An event off its kind's payload schema fails the awaitable at once with that refusal,
+        and nothing is queued (`fresh_event`, DL-554)."""
         future: asyncio.Future[ApplyResult] = asyncio.get_running_loop().create_future()
+        try:
+            owned = fresh_event(ev)
+        except AdmissionRefused as exc:
+            future.set_exception(exc)
+            return future
         self._enqueue(
-            ev,
+            owned,
             source=source,
             request_id=envelope.request_id,
             envelope=envelope,
@@ -2067,15 +2077,9 @@ class Engine:
         The fork reaches the result the real apply will: `apply_attempt` reads nothing outside
         the oracle, and steps 5-7 do not yield to another writer. A gate rejection is not a
         refusal; the real apply decides and logs it. Every fault in either half refuses,
-        unlogged, and so does a payload the store cannot hold (ss3.2: no float, no lone
-        surrogate)."""
-        try:
-            canonical_bytes(attempt.payload)
-        except CanonError as exc:
-            return AdmissionRefused(
-                f"refused before admission: the payload cannot be recorded: {exc}",
-                code="invalid_argument",
-            )
+        unlogged. A payload the store cannot hold never gets here: the door refuses it
+        (`fresh_event`, DL-554), and only an input through `inject` or `submit` is a control
+        input."""
         named = attempt.payload.get("job")
         if isinstance(named, str) and named in self.oracle.store.tombstones:
             return AdmissionRefused(
@@ -2618,6 +2622,13 @@ class Engine:
         payload: dict[str, object] = {"job": job_ir.name, "run_number": run_number}
         payload |= status_payload(result, where=f"adapter for {job_ir.name!r}")
         at = self.now_present()
+        try:
+            # an adapter's result is a fresh event: it fits the schema before it is recorded,
+            # or the engine stops, as on a result it cannot read (DL-554)
+            completion = fresh_event(Event(at=at, kind="STATUS", payload=payload))
+        except AdmissionRefused as exc:
+            raise EngineError(f"adapter for {job_ir.name!r} returned {result!r}: {exc}") from exc
+        payload = completion.payload
         step: tuple[str, int] | None = None
         if self.journal is not None and run_id is not None:
             # the attempt's end and its plan, one transaction: the completion is the plan's one
@@ -2629,7 +2640,7 @@ class Engine:
             step = (run_id, 0)
         # source="adapter" makes this a COMPLETION, subject to the ss4 stale gate
         # (runner_admission)
-        self._enqueue(Event(at=at, kind="STATUS", payload=payload), step=step)
+        self._enqueue(completion, step=step)
 
     # ---- snapshots (spec-wiring 1b)
 

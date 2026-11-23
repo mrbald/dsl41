@@ -444,26 +444,29 @@ def _rehearse_bogus(tmp_path: Path, *, scenario: bool = True) -> Any:
     path = tmp_path / "scenario.json"
     path.write_text(
         '{"events":[{"at":"2026-07-01T08:00:00","kind":"STATUS",'
-        '"payload":{"job":"j","status":"BOGUS"}}]}'
+        '"payload":{"job":"j","status":"SUCCESS","hold":true}}]}'
     )
     args = ["rehearse", str(jil), "--start", "2026-07-01T08:00:00", "--hours", "1"]
     return CliRunner().invoke(app, [*args, *(["--scenario", str(path)] if scenario else [])])
 
 
 def test_rehearse_fails_on_a_scenario_event_that_faults(tmp_path: Path) -> None:
-    """No silent loss. Before the dry apply the event raised and rehearse
-    printed `rehearse failed: unknown status 'BOGUS'` with exit 1; it still
-    does, though the event is now refused before the log."""
+    """No silent loss. An event that fits the payload schema (DL-554) and still faults in the
+    oracle, a `hold` on a SUCCESS, is refused before the log: rehearse prints `rehearse
+    failed:` with the oracle's reason and exits 1."""
     result = _rehearse_bogus(tmp_path)
     assert result.exit_code == 1, result.output
     assert "rehearse failed:" in result.stderr
-    assert "unknown status 'BOGUS'" in result.stderr
+    assert "payload.hold is true only on a FAILURE" in result.stderr
     assert _rehearse_bogus(tmp_path, scenario=False).exit_code == 0
 
 
 def test_rehearse_names_the_refused_event_and_its_code(tmp_path: Path) -> None:
     err = _rehearse_bogus(tmp_path).stderr
-    assert 'refused STATUS {"job": "j", "status": "BOGUS"} @ 2026-07-01T08:00:00:' in err
+    assert (
+        'refused STATUS {"hold": true, "job": "j", "status": "SUCCESS"} @ 2026-07-01T08:00:00:'
+        in err
+    )
     assert ": apply_faulted: refused before admission" in err
 
 

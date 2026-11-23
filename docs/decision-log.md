@@ -28018,3 +28018,29 @@ relitigate an entry; append a new one.
   COST. A start that could run with a history table it cannot write no longer starts. The
   same store takes the journal's rows. A root written before this change keeps its starts
   with no row; DL-536's bounding gives them one where an `engine started` record remains.
+- DL-554 An event that comes from outside the engine is checked against a schema
+  (2026-11-24; BUG-109, and the owner's rule of that day: what comes in conforms to the
+  schema, else the engine fails fast with a good diagnostic; src/dsl41/runner_admission.py,
+  src/dsl41/runner.py, src/dsl41/runner_adapters.py, src/dsl41/runner_journal.py,
+  src/dsl41/cli_run.py, docs/control-protocol.md, tests/test_fresh_events.py; builds on
+  DL-151 and DL-228; closes BUG-109; no state-machine version change)
+  THE RULE. One function checks every event built outside the engine, per kind, and gives
+  the engine its own copy: `job` a scalar string on a job event; a STATUS's `status`
+  injectable or its `exit_code` an integer, `run_number` absent or an integer in the range
+  the history index holds, `hold` a boolean, `ended_at` a timestamp, `cause` a string; a
+  SET_GLOBAL's `name` and `value`; a KILLJOB's `kill_signals`; `deferred_cause` a string. A
+  boolean is never an integer. It runs in `Engine.inject` and `Engine.submit`, on a
+  scenario file before its entries are coerced and before the run root exists, and on an
+  adapter's result before it is recorded. A value that breaks it is refused with
+  `invalid_argument`, naming the field; nothing is journalled and no index is taken.
+  NOT ON A REPLAY. A stored record is read as it was written: a journal of an earlier build
+  that holds `run_number: true` replays, folds and indexes as before.
+  THE DEFECT. `Engine.inject` checked nothing. A rehearsal's file or an embedder could send
+  `run_number: true`, a string or a number of any size, and each reader guessed: the stale
+  gate read `true` as run 1, the fold fell back to the last run, the index stored 1. A
+  scenario's adapter entry `exit_code: false` became a scripted success. The engine also
+  queued the caller's own object, so changing it after the call changed what was journalled.
+  UNCHANGED. The control socket's own checks, every record's form, the oracle, the goldens.
+  COST. A malformed result from an in-process adapter stops the engine, as any adapter fault
+  does. Left as they are: a scripted TIMER's own fields; a wrapper status file with an end
+  time that is not a timestamp (BUG-115).

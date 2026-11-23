@@ -637,7 +637,11 @@ def _admission_events() -> dict[str, _Command | None]:
         "the same command": None,
         "another command": (_set_global("2"), {_G: 0}),
         "a failed precondition": (_set_global("3"), {_G: 7}),
-        "a faulting command": (Event(at=T0, kind="STARTJOB", payload={}), {"job:j": 0}),
+        # it fits the payload schema (DL-554) and faults in the oracle: a hold on a SUCCESS
+        "a faulting command": (
+            Event(at=T0, kind="STATUS", payload={"job": "j", "status": "SUCCESS", "hold": True}),
+            {"job:j": 0},
+        ),
         "an engine-made input": None,
     }
 

@@ -33,6 +33,7 @@ from test_history_index import (
     _replaced,
     _retried,
     _rev_between_runs,
+    _unchecked,
 )
 from test_run_openings import _LEAF, T0, _at, _ev, _Root
 from test_run_openings import _scenario as _run
@@ -240,24 +241,26 @@ def _empty_box(tmp_path: Path) -> None:
 
 
 def _true_run(tmp_path: Path) -> None:
-    """Runs 1 and 2 complete, then STATUS FAILURE with `run_number=true`: run 1's."""
+    """Runs 1 and 2 complete, then a stored STATUS FAILURE with `run_number=true`, admitted
+    by an earlier build: run 1's."""
 
     async def body(root: _Root) -> None:
         for minutes in (0, 2):
             await root.feed(_ev(minutes, "STARTJOB", job="j"))
             await root.engine.run_until_quiescent(_at(minutes + 1.5))
-        await root.feed(_ev(5, "STATUS", job="j", status="FAILURE", run_number=True))
+        await _unchecked(root, _ev(5, "STATUS", job="j", status="FAILURE", run_number=True))
 
     _run(tmp_path, _LEAF.format(cmd="x"), body, {("j", 1): (60.0, 0), ("j", 2): (60.0, 0)})
 
 
 def _past_integers(tmp_path: Path) -> None:
-    """A STATUS naming run 2**63, which the index holds as no run."""
+    """A stored STATUS naming run 2**63, admitted by an earlier build, which the index holds
+    as no run."""
 
     async def body(root: _Root) -> None:
         await root.feed(_ev(0, "STARTJOB", job="j"))
         await root.engine.run_until_quiescent(_at(2))
-        await root.feed(_ev(3, "STATUS", job="j", status="FAILURE", run_number=2**63))
+        await _unchecked(root, _ev(3, "STATUS", job="j", status="FAILURE", run_number=2**63))
         await root.feed(_ev(4, "STARTJOB", job="j"))
 
     _run(tmp_path, _LEAF.format(cmd="x"), body, {("j", 1): (60.0, 0)})

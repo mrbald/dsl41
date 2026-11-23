@@ -1213,9 +1213,10 @@ def _scenario_adapter(scenario: Path | None) -> "tuple[FakeAdapter, list[Event]]
     OSError/ValueError/TypeError/KeyError; the caller owns the refusal."""
     import json as json_mod
 
-    from dsl41.canon import naive_utc
+    from dsl41.canon import is_wire_int, naive_utc
     from dsl41.oracle_state import Event
     from dsl41.runner_adapters import FakeAdapter
+    from dsl41.runner_admission import AdmissionRefused, fresh_event
 
     script: dict[tuple[str, int], tuple[float, int] | None] = {}
     default: tuple[float, int] | None = (0.0, 0)
@@ -1226,6 +1227,19 @@ def _scenario_adapter(scenario: Path | None) -> "tuple[FakeAdapter, list[Event]]
     data = json_mod.loads(scenario.read_bytes())
     if not isinstance(data, dict):
         raise ValueError("expected a JSON object at the top level")
+    # Every event fits its kind's payload schema before an adapter entry is read and before
+    # anything is created (DL-554). An event's `at` reads as --start does (_naive_utc_arg): the
+    # engine sees naive UTC only (DL-44 (5)); canon.naive_utc owns the conversion (DL-178 (j),
+    # DL-179 (e)).
+    raw_events = data.get("events", [])
+    if not isinstance(raw_events, list):
+        raise ValueError('"events": expected a list')
+    for position, entry in enumerate(raw_events):
+        try:
+            ev = fresh_event(Event.model_validate(entry))
+        except (AdmissionRefused, ValueError) as exc:
+            raise ValueError(f"events[{position}]: {exc}") from exc
+        events.append(ev.model_copy(update={"at": naive_utc(ev.at)}))
     adapter_spec = data.get("adapter", {})
     if not isinstance(adapter_spec, dict):
         raise ValueError('"adapter": expected an object')
@@ -1236,10 +1250,15 @@ def _scenario_adapter(scenario: Path | None) -> "tuple[FakeAdapter, list[Event]]
     if isinstance(park_raw, str) or not isinstance(park_raw, list):
         raise ValueError('"adapter.park": expected a list of job names')
     park = frozenset(str(j) for j in park_raw)
-    for entry in adapter_spec.get("runs", []):
+    for position, entry in enumerate(adapter_spec.get("runs", [])):
         if not isinstance(entry, dict) or "job" not in entry or "run_number" not in entry:
             raise ValueError('adapter.runs entries need "job" and "run_number"')
-        key = (str(entry["job"]), int(entry["run_number"]))
+        # the selector is read as written, never coerced (DL-554)
+        if not isinstance(entry["job"], str):
+            raise ValueError(f"adapter.runs[{position}].job: expected a string")
+        if not is_wire_int(entry["run_number"]):
+            raise ValueError(f"adapter.runs[{position}].run_number: expected an integer")
+        key = (entry["job"], int(entry["run_number"]))
         if entry.get("park", False):
             if "duration_s" in entry or "exit_code" in entry:
                 raise ValueError(
@@ -1248,12 +1267,6 @@ def _scenario_adapter(scenario: Path | None) -> "tuple[FakeAdapter, list[Event]]
             script[key] = None
         else:
             script[key] = _scenario_completion(entry, f"adapter.runs {key[0]}#{key[1]}")
-    # An event's `at` reads as --start does (_naive_utc_arg): the engine sees naive UTC only
-    # (DL-44 (5)); canon.naive_utc owns the conversion (DL-178 (j), DL-179 (e)).
-    events = [
-        (ev := Event.model_validate(entry)).model_copy(update={"at": naive_utc(ev.at)})
-        for entry in data.get("events", [])
-    ]
     return FakeAdapter(script, default=default, park=park), events
 
 
@@ -1473,15 +1486,24 @@ def _scenario_completion(raw: object, where: str) -> tuple[float, int]:
     """One scenario completion, in BOTH spellings: the list `[duration_s, exit_code]` and the
     runs-entry object `{"duration_s": S, "exit_code": C}`. Malformed shapes refuse with the two
     accepted forms named."""
+    from dsl41.canon import is_wire_int
+
     if isinstance(raw, dict):
         if "duration_s" not in raw or "exit_code" not in raw:
             raise ValueError(f"{where}: object form needs duration_s and exit_code")
-        return float(raw["duration_s"]), int(raw["exit_code"])
-    if isinstance(raw, list) and len(raw) == 2:
-        return float(raw[0]), int(raw[1])
-    raise ValueError(
-        f'{where}: expected [duration_s, exit_code] or {{"duration_s": S, "exit_code": C}}'
-    )
+        duration, code = raw["duration_s"], raw["exit_code"]
+    elif isinstance(raw, list) and len(raw) == 2:
+        duration, code = raw
+    else:
+        raise ValueError(
+            f'{where}: expected [duration_s, exit_code] or {{"duration_s": S, "exit_code": C}}'
+        )
+    # a scripted result is read as written, never coerced: `true` is no exit code (DL-554)
+    if not (is_wire_int(duration) or isinstance(duration, float)):
+        raise ValueError(f"{where}: duration_s: expected a number, got {duration!r}")
+    if not is_wire_int(code):
+        raise ValueError(f"{where}: exit_code: expected an integer, got {code!r}")
+    return float(duration), int(code)
 
 
 def _rehearsal_engine(

@@ -562,15 +562,24 @@ def test_the_writer_indexes_only_the_kinds_it_names_by_what_they_name() -> None:
 
 
 async def _injected(run_root: Path, payload: dict[str, Any], source: Any = "control") -> Any:
-    """A fresh SQLite root, one STATUS injected as a rehearsal injects it, then a stop."""
+    """A fresh SQLite root, one STATUS admitted as an earlier build admitted it, before the
+    engine's door checked a fresh event (DL-554), then a stop."""
     engine = _start_engine(run_root)
-    engine.inject(Event(at=T0, kind="STATUS", payload=payload), source=source)
+    engine._enqueue(Event(at=T0, kind="STATUS", payload=payload), source=source)
     await engine.run_until_quiescent(T0 + timedelta(minutes=1))
     quarantined = list(engine.quarantined)
     await engine.shutdown()
     assert engine.journal is not None
     engine.journal.close()
     return quarantined
+
+
+async def _unchecked(root: _Root, event: Event) -> None:
+    """One event admitted as an earlier build admitted it, before the engine's door checked a
+    fresh event (DL-554): its records are what such a build stored. The engine quiescent
+    after it."""
+    root.engine._enqueue(event, source="control")
+    await root.engine.run_until_quiescent(event.at)
 
 
 def _journal_kinds(run_root: Path) -> list[tuple[int, str]]:
@@ -581,8 +590,9 @@ def _journal_kinds(run_root: Path) -> list[tuple[int, str]]:
 def test_a_status_naming_a_run_past_the_stores_integers_commits_with_no_named_run(
     tmp_path: Path,
 ) -> None:
-    """`run_number = 2**63` passes the inject and the admission: its input and decision commit
-    on SQLite, and their rows name the job and no run (DL-539)."""
+    """A stored `run_number = 2**63`, admitted by an earlier build: its input and decision
+    commit on SQLite, and their rows name the job and no run (DL-539). The door refuses such
+    a fresh value (DL-554, tests/test_fresh_events.py)."""
     run_root = tmp_path / "run"
     payload = {"job": "j", "status": "SUCCESS", "run_number": 2**63}
     asyncio.run(_injected(run_root, payload))
@@ -594,7 +604,7 @@ def test_a_status_naming_a_run_past_the_stores_integers_commits_with_no_named_ru
 
 
 #: One admission on a fresh SQLite root, in a child process: a STATUS whose run number is an
-#: `IntEnum` member valued 1. A child, so a writer that stalls inside C code is ended by the
+#: `IntEnum` member valued 1, admitted below the door as an earlier build admitted it. A child, so a writer that stalls inside C code is ended by the
 #: test's deadline instead of holding the test process.
 _ENUM_ADMISSION = """
 import asyncio, enum, sys
@@ -618,7 +628,8 @@ async def main() -> None:
         adapters={"CMD": FakeAdapter(default=None)},
     )
     payload = {"job": "j", "status": "SUCCESS", "run_number": Run.ONE}
-    engine.inject(Event(at=at, kind="STATUS", payload=payload), source="control")
+    # below the door, as an earlier build stored it: the door would make it a plain int
+    engine._enqueue(Event(at=at, kind="STATUS", payload=payload), source="control")
     await engine.run_until_quiescent(at + timedelta(minutes=1))
     await engine.shutdown()
     engine.journal.close()
@@ -628,8 +639,10 @@ asyncio.run(main())
 
 
 def test_an_int_enum_run_number_commits_and_names_its_value(tmp_path: Path) -> None:
-    """canon writes an `IntEnum` as its number; the index takes it as that plain integer, so
-    the admission commits promptly and its rows name run 1 (DL-539)."""
+    """A stored `IntEnum` run number, admitted below the door: canon writes it as its number
+    and the index takes it as that plain integer, so the admission commits promptly and its
+    rows name run 1 (DL-539). A fresh one is made a plain integer at the door (DL-554,
+    tests/test_fresh_events.py)."""
     run_root = tmp_path / "run"
     subprocess.run(
         [sys.executable, "-c", _ENUM_ADMISSION, str(run_root)], check=True, timeout=_WHOLE_S
@@ -639,15 +652,16 @@ def test_an_int_enum_run_number_commits_and_names_its_value(tmp_path: Path) -> N
 
 
 def test_a_boolean_run_number_is_indexed_as_the_run_the_fold_gives_it(tmp_path: Path) -> None:
-    """Runs 1 and 2 complete, then STATUS FAILURE with `run_number=true`. The fold reads an
-    `int` instance as its value (`runner_history.fold_run_rows`), so the FAILURE is run 1's;
-    the input's and the decision's rows name run 1 too."""
+    """Runs 1 and 2 complete, then a stored STATUS FAILURE with `run_number=true`, admitted by
+    an earlier build. The fold reads an `int` instance as its value
+    (`runner_history.fold_run_rows`), so the FAILURE is run 1's; the input's and the
+    decision's rows name run 1 too. The door refuses such a fresh value (DL-554)."""
 
     async def body(root: _Root) -> None:
         for minutes in (0, 2):
             await root.feed(_ev(minutes, "STARTJOB", job="j"))
             await root.engine.run_until_quiescent(_at(minutes + 1.5))
-        await root.feed(_ev(5, "STATUS", job="j", status="FAILURE", run_number=True))
+        await _unchecked(root, _ev(5, "STATUS", job="j", status="FAILURE", run_number=True))
 
     root, _ = _scenario(tmp_path, body, {("j", 1): (60.0, 0), ("j", 2): (60.0, 0)})
     assert [(row.run_number, row.status) for row in read_run_root(root.run)] == [
@@ -659,9 +673,10 @@ def test_a_boolean_run_number_is_indexed_as_the_run_the_fold_gives_it(tmp_path: 
 
 
 def test_a_status_with_no_job_has_no_row_and_its_records_stay_covered(tmp_path: Path) -> None:
-    """A STATUS with adapter provenance and no job is quarantined: its input and decision
-    commit, belong to no job's history and have no row, and the coverage over them claims
-    every row of a record that names a job; the scan agrees."""
+    """A STATUS with adapter provenance and no job, admitted by an earlier build, is
+    quarantined: its input and decision commit, belong to no job's history and have no row,
+    and the coverage over them claims every row of a record that names a job; the scan
+    agrees. The door refuses such a fresh event (DL-554)."""
     run_root = tmp_path / "run"
     [(result, _)] = asyncio.run(
         _injected(run_root, {"status": "SUCCESS", "run_number": 1}, source="adapter")

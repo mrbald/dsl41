@@ -552,3 +552,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-551 | A decided start is wanted until its run ends | [docs/runner-design.md](runner-design.md) |
 | DL-552 | A job's time limit is about twice its usual time, and the suite prints its slowest tests |  |
 | DL-553 | A start writes no record before its history row is committed | [docs/runner-design.md](runner-design.md) |
+| DL-554 | An event that comes from outside the engine is checked against a schema | [docs/control-protocol.md](control-protocol.md) |

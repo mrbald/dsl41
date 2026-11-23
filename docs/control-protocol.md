@@ -419,6 +419,27 @@ the strings a verb reads. A field the verb does not read is never copied
 or recorded in the store.
 PR-10a's seal obligation resolves to DL-424; scalar validation is DL-228's rule.
 
+The engine holds every event that comes from outside it to one payload schema
+per kind, whatever its door: this socket, an embedder's `inject` or `submit`,
+a rehearsal's scenario file, or an adapter's result (DL-554).
+
+| kind | schema |
+|---|---|
+| every job event, `TIMER` included | `job` a string |
+| `STATUS` | an injectable `status` or an integer `exit_code`, each checked when present; `run_number` absent or an integer from -2^63 to 2^63 - 1; `hold` a boolean; `ended_at` an ISO 8601 timestamp string; `cause` a string |
+| `SET_GLOBAL` | `name` a non-empty string, `value` a string |
+| `STARTJOB`, `FORCE_STARTJOB`, `TIMER` | `deferred_cause` a string when present |
+| `KILLJOB` | `kill_signals`, when present, an array of supported positive integer signals ending in KILL (9) |
+| every kind | every field can be recorded: its name a Unicode scalar string, its value in the store's grammar, with no float and no lone surrogate (ss3.2, DL-228) |
+
+A boolean is never an integer. Any other integer, an `IntEnum` member
+included, is taken as its plain value. A field the schema does not name is
+left as it is. A fresh event that breaks the schema is refused with
+`invalid_argument`, naming the field, what it expects and what came. Nothing
+is logged and no index is consumed. An adapter's result that
+breaks it stops the engine before the result is recorded. A replay is not a
+fresh event: a stored record keeps what its build admitted.
+
 `DISARM` (DL-158) clears the job's SEM-32 armed latch and does nothing else:
 no status move, no start, no wake, no timer touched. A target with no
 latch is an accepted no-op recorded in the store, the `OFF_HOLD` shape.

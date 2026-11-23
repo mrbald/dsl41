@@ -64,8 +64,9 @@ from typing import Any, Final, Literal, get_args
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from dsl41.oracle import Oracle
-from dsl41.canon import is_scalar_string, is_wire_int
+from dsl41.canon import CanonError, canonical_bytes, is_scalar_string, is_wire_int
 from dsl41.oracle_state import (
+    INJECTABLE_STATUSES,
     LIVE,
     TERMINAL,
     Event,
@@ -435,6 +436,132 @@ class AdmissionRefused(EngineError):
 
     def __init__(self, message: str, *, code: Code) -> None:
         super().__init__(message, code=code)
+
+
+#: The run numbers a fresh event may name and the history index holds: the store's signed
+#: 64-bit integers, so an index row never fails a commit its records would pass (DL-539, DL-554).
+RUN_NUMBER_MIN: Final = -(2**63)
+RUN_NUMBER_END: Final = 2**63
+
+#: The kinds whose payload names no job: SET_GLOBAL names a global, and an alarm is an output
+#: whose payload the engine never reads (DL-554).
+_JOBLESS_KINDS: Final = frozenset({"SET_GLOBAL", "MUST_START_ALARM", "MUST_COMPLETE_ALARM"})
+_JOB_KINDS: Final = frozenset(get_args(EventKind)) - _JOBLESS_KINDS
+#: The kinds the oracle reads a `deferred_cause` on: the starts and the TIMER (DL-554).
+_START_KINDS: Final = frozenset({"STARTJOB", "FORCE_STARTJOB", "TIMER"})
+
+
+def fresh_event(ev: Event) -> Event:
+    """An event from outside the engine, checked against its kind's payload schema, as the
+    engine's own copy: a later change to `ev` changes nothing the engine holds (DL-554).
+
+    Every job event names its `job` as a string. STATUS carries an injectable `status` or an
+    integer `exit_code`, and each is checked when present; `run_number` is absent or an integer
+    from `RUN_NUMBER_MIN` up to `RUN_NUMBER_END`; `hold` is a boolean, `ended_at` an ISO 8601
+    timestamp string and `cause` a string. SET_GLOBAL names a non-empty `name` and a string
+    `value`. A start or a TIMER carries `deferred_cause` as a string when present. KILLJOB's
+    `kill_signals`, when present, is an array of supported positive signals ending in KILL
+    (control-protocol ss3). Every field can be recorded: its name is a Unicode scalar string
+    and its value is in the store's grammar, with no float and no lone surrogate (ss3.2,
+    DL-228). A boolean is never an integer; any other `int`, an `IntEnum` member
+    included, is taken as its plain integer. A field the schema does not name is left as it
+    is.
+
+    Raises `AdmissionRefused` with `invalid_argument`, naming the field, what it expects and
+    what came. A replay does not come here: a stored record keeps what its build admitted."""
+    owned = ev.model_copy(deep=True)
+    payload, kind = owned.payload, owned.kind
+
+    def off(name: str, expected: str) -> AdmissionRefused:
+        got = reprlib.repr(payload[name]) if name in payload else "no field"
+        return AdmissionRefused(
+            f"{kind} payload.{name}: expected {expected}, got {got} (DL-554)",
+            code="invalid_argument",
+        )
+
+    if kind in _JOB_KINDS and not isinstance(payload.get("job"), str):
+        raise off("job", "a string")
+    if kind == "STATUS":
+        injectable = f"one of {sorted(INJECTABLE_STATUSES)}"
+        status = payload.get("status")
+        if "status" in payload and not (isinstance(status, str) and status in INJECTABLE_STATUSES):
+            raise off("status", injectable)
+        if "exit_code" in payload:
+            code = _plain_int(payload["exit_code"])
+            if code is None:
+                raise off("exit_code", "an integer")
+            payload["exit_code"] = code
+        elif "status" not in payload:
+            raise off("status", f"{injectable}, or an integer exit_code")
+        if "run_number" in payload:
+            run = _plain_int(payload["run_number"])
+            if run is None or not RUN_NUMBER_MIN <= run < RUN_NUMBER_END:
+                raise off("run_number", "an integer from -2**63 to 2**63 - 1, or no field")
+            payload["run_number"] = run
+        if "hold" in payload and not isinstance(payload["hold"], bool):
+            raise off("hold", "a boolean")
+        if "ended_at" in payload and not _is_timestamp(payload["ended_at"]):
+            raise off("ended_at", "an ISO 8601 timestamp string")
+        if "cause" in payload and not isinstance(payload["cause"], str):
+            raise off("cause", "a string")
+    elif kind == "SET_GLOBAL":
+        name = payload.get("name")
+        if not (isinstance(name, str) and name):
+            raise off("name", "a non-empty string")
+        if not isinstance(payload.get("value"), str):
+            raise off("value", "a string")
+    elif kind in _START_KINDS and "deferred_cause" in payload:
+        if not isinstance(payload["deferred_cause"], str):
+            raise off("deferred_cause", "a string")
+    elif kind == "KILLJOB" and "kill_signals" in payload:
+        signals = _kill_signals(payload["kill_signals"])
+        if signals is None:
+            raise off("kill_signals", "an array of supported positive signals ending in KILL (9)")
+        payload["kill_signals"] = signals
+    # every field can be recorded: its name a Unicode scalar string, its value in the store's
+    # grammar, with no float and no lone surrogate (ss3.2, DL-228, DL-554)
+    for name, value in payload.items():
+        if not is_scalar_string(name):
+            raise AdmissionRefused(
+                f"{kind} payload: the field name {name!r} is not a Unicode scalar string (DL-554)",
+                code="invalid_argument",
+            )
+        try:
+            canonical_bytes(value)
+        except CanonError:
+            raise off(name, "a value the store can record (no float, no lone surrogate)") from None
+    return owned
+
+
+def _plain_int(value: object) -> int | None:
+    """A payload integer as a plain `int`, or None: a boolean is not one (DL-152, DL-554)."""
+    return int(value) if isinstance(value, int) and is_wire_int(value) else None
+
+
+def _is_timestamp(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _kill_signals(value: object) -> list[int] | None:
+    """KILLJOB's signal override as a plain list, or None when it is off the contract's type
+    (control-protocol ss3, DL-462)."""
+    from dsl41.runtime_policy import RuntimePolicySettings
+
+    if not isinstance(value, (list, tuple)):
+        return None
+    try:
+        settings = RuntimePolicySettings.model_validate(
+            {"kill_signals": [_plain_int(n) for n in value]}
+        )
+    except ValueError:
+        return None
+    return list(settings.kill_signals)
 
 
 class TimeHalfStop(EngineError):

@@ -1072,7 +1072,11 @@ def test_an_input_naming_a_removed_job_is_refused_before_the_oracle(tmp_path: Pa
         except AdmissionRefused as exc:
             errors.append(exc)
         engine.inject(
-            Event(at=engine.clock.now(), kind="STATUS", payload={"job": "a", "run_number": 0}),
+            Event(
+                at=engine.clock.now(),
+                kind="STATUS",
+                payload={"job": "a", "run_number": 0, "exit_code": 0},
+            ),
             source="adapter",
         )
         await _until(lambda: engine.drops)  # the engine-made input is rejected, not applied
