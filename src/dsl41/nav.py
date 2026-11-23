@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from dsl41.conditions import GlobalAtom, JobRef, StatusAtom
@@ -88,11 +89,35 @@ def _adjacency(graph: DerivedGraph, *, reverse: bool, include_all: bool) -> Adja
     return adjacency
 
 
-def _node(adjacency: Adjacency, name: str) -> Node:
+CANDIDATE_LIMIT = 20
+
+
+def not_found_message(name: str, jobs: Iterable[str]) -> str:
+    """The missing-job line, then the estate's job names that contain the text (DL-548).
+
+    The match ignores case; the lookup itself stays exact. A name equal to the text apart
+    from case comes first, then the rest sorted. At most 20 names are listed. An empty
+    name lists none.
+    """
+    message = f"job {name!r} not found"
+    needle = name.casefold()
+    found = sorted(
+        (job for job in jobs if needle in job.casefold()),
+        key=lambda job: (job.casefold() != needle, job),
+    )
+    if not name or not found:
+        return message
+    lines = [message, "did you mean:", *(f"  {job}" for job in found[:CANDIDATE_LIMIT])]
+    if len(found) > CANDIDATE_LIMIT:
+        lines.append(f"  ... and {len(found) - CANDIDATE_LIMIT} more")
+    return "\n".join(lines)
+
+
+def _node(adjacency: Adjacency, name: str, jobs: Iterable[str]) -> Node:
     for external in (False, True):
         if (name, external) in adjacency:
             return name, external
-    raise NavNotFound(f"job {name!r} not found")
+    raise NavNotFound(not_found_message(name, jobs))
 
 
 def _walk(adjacency: Adjacency, start: Node, depth: int | None) -> dict[Node, tuple[Node, str]]:
@@ -140,7 +165,7 @@ def navigate(
         adjacency = _adjacency(
             graph, reverse=verb in {"fanins", "ancestors"}, include_all=include_all
         )
-        start = _node(adjacency, job)
+        start = _node(adjacency, job, graph.nodes)
         if verb in {"fanins", "fanouts"}:
             return _matches(
                 {
@@ -152,7 +177,7 @@ def navigate(
         if verb != "path":
             return _matches(found)
         assert target is not None
-        end = _node(adjacency, target)
+        end = _node(adjacency, target, graph.nodes)
         path: list[Match] = []
         current = end
         while current != start:
@@ -163,7 +188,7 @@ def navigate(
             current = previous
         return [Match(job), *reversed(path)]
     if job not in graph.nodes:
-        raise NavNotFound(f"job {job!r} not found")
+        raise NavNotFound(not_found_message(job, graph.nodes))
     tree = graph.box_tree
     parent = tree.parent.get(job)
     if verb == "box":

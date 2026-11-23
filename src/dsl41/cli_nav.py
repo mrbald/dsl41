@@ -14,7 +14,7 @@ from dsl41.derive import derive_graph
 from dsl41.dsl import CatalogBuilder, DslError, job_to_source
 from dsl41.ir import CatalogIR, LoweringError
 from dsl41.ast_jil import JilParseError
-from dsl41.nav import NavNotFound, navigate, validate_query
+from dsl41.nav import NavNotFound, navigate, not_found_message, validate_query
 
 
 def _emit_navigation(
@@ -36,7 +36,7 @@ def _emit_navigation(
         catalog = load()
         if verb == "show":
             if job not in catalog.jobs:
-                raise NavNotFound(f"job {job!r} not found")
+                raise NavNotFound(not_found_message(job, catalog.jobs))
             definition = job_to_source(catalog.jobs[job])
             typer.echo(
                 json.dumps({"name": job, "definition": definition}) if as_json else definition

@@ -27811,3 +27811,15 @@ relitigate an entry; append a new one.
   snapshot only move up, so an older bound is the more careful one. A restart forgets what
   is owed and its next snapshot reads a new bound. The stop drain takes no owed step.
   NOT BUILT. The archive database and its worker (FEAT-50).
+- DL-548 `nav` answers a name it does not find with the names that contain it
+  (2026-11-23; finding 21 of the operator-surface inventory; src/dsl41/nav.py,
+  src/dsl41/cli_nav.py, docs/nav.md, tests/test_nav.py)
+  THE RULE. A job name is matched exactly, as before. When it is not found, the message is
+  the same line, then the estate's job names that contain the given text, compared without
+  regard to case: a name that differs only in case first, the rest sorted, at most 20 with a
+  count of the rest. No match, or an empty name, gives the one line alone. The exit status
+  stays 1 and nothing goes to standard output.
+  WHY. On an estate of several hundred jobs an operator knows a fragment, not the name. The
+  old answer made them look the name up elsewhere first.
+  UNCHANGED. External and unresolved references are never offered: the candidates are the
+  estate's own jobs. No verb's answer changes for a name that exists.

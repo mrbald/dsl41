@@ -460,3 +460,87 @@ def test_embedded_estate_load_failure_is_exit_2(tmp_path: Path, body: str) -> No
     assert result.stdout == ""
     assert "estate()" in ANSI.sub("", result.stderr)
     assert "Traceback" not in result.stderr
+
+
+def _write_jobs(tmp_path: Path, names_: list[str], extra: str = "") -> Path:
+    path = tmp_path / "names.jil"
+    path.write_text(
+        "".join(f"insert_job: {n}\njob_type: c\ncommand: x\n\n" for n in names_) + extra,
+        encoding="utf-8",
+    )
+    return path
+
+
+def _nav_error(words: list[str], path: Path) -> tuple[int, str, str]:
+    result = runner.invoke(app, ["nav", words[0], str(path), *words[1:]])
+    return result.exit_code, result.stdout, ANSI.sub("", result.stderr)
+
+
+def test_missing_name_lists_the_three_names_that_contain_it(tmp_path: Path) -> None:
+    path = _write_jobs(tmp_path, ["B_FREEZE_X", "A_FREEZE", "FREEZE_C", "other"])
+    code, out, err = _nav_error(["fanins", "FREEZ"], path)
+    assert (code, out) == (1, "")
+    assert err == ("job 'FREEZ' not found\ndid you mean:\n  A_FREEZE\n  B_FREEZE_X\n  FREEZE_C\n")
+    code, out, err2 = _nav_error(["fanins", "FREEZ", "--json"], path)
+    assert (code, out, err2) == (1, "", err)
+
+
+def test_candidates_ignore_case_but_the_lookup_is_exact(tmp_path: Path) -> None:
+    path = _write_jobs(tmp_path, ["Freeze", "zfreeze", "other"])
+    code, out, err = _nav_error(["fanins", "FREEZE"], path)
+    assert (code, out) == (1, "")
+    assert err == "job 'FREEZE' not found\ndid you mean:\n  Freeze\n  zfreeze\n"
+
+
+def test_candidates_stop_at_twenty_and_count_the_rest(tmp_path: Path) -> None:
+    path = _write_jobs(tmp_path, [f"job_{i:02d}" for i in range(23)])
+    code, out, err = _nav_error(["fanins", "JOB_"], path)
+    lines = err.splitlines()
+    assert (code, out) == (1, "")
+    assert lines[:2] == ["job 'JOB_' not found", "did you mean:"]
+    assert lines[2:22] == [f"  job_{i:02d}" for i in range(20)]
+    assert lines[22:] == ["  ... and 3 more"]
+
+
+def test_no_candidate_keeps_the_single_line(tmp_path: Path) -> None:
+    path = _write_jobs(tmp_path, ["alpha"])
+    assert _nav_error(["fanins", "zzz"], path) == (1, "", "job 'zzz' not found\n")
+
+
+def test_case_twin_comes_first_even_when_it_sorts_later(tmp_path: Path) -> None:
+    path = _write_jobs(tmp_path, ["A_freeze", "Freeze"])
+    assert _nav_error(["fanins", "FREEZE"], path) == (
+        1,
+        "",
+        "job 'FREEZE' not found\ndid you mean:\n  Freeze\n  A_freeze\n",
+    )
+
+
+def test_empty_name_gets_no_candidates(tmp_path: Path) -> None:
+    path = _write_jobs(tmp_path, ["alpha"])
+    assert _nav_error(["fanins", ""], path) == (1, "", "job '' not found\n")
+
+
+@pytest.mark.parametrize(
+    ("words", "offered"),
+    [(["show", "ALPH"], "alpha"), (["path", "alpha", "BET"], "beta"), (["box", "ALPH"], "alpha")],
+)
+def test_show_path_and_box_offer_candidates(tmp_path: Path, words: list[str], offered: str) -> None:
+    path = _write_jobs(tmp_path, ["alpha", "beta"])
+    name = words[-1]
+    assert _nav_error(words, path) == (
+        1,
+        "",
+        f"job {name!r} not found\ndid you mean:\n  {offered}\n",
+    )
+
+
+def test_all_does_not_offer_or_change_external_names(tmp_path: Path) -> None:
+    path = _write_jobs(
+        tmp_path, ["alpha"], "insert_job: b\njob_type: c\ncommand: x\ncondition: s(ghost)\n"
+    )
+    assert _nav_error(["fanouts", "ghost", "--all"], path)[0] == 0
+    code, out, err = _nav_error(["fanouts", "ghost"], path)
+    assert (code, out, err) == (1, "", "job 'ghost' not found\n")
+    code, out, err = _nav_error(["fanouts", "gho", "--all"], path)
+    assert (code, out, err) == (1, "", "job 'gho' not found\n")

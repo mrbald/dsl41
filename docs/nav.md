@@ -94,6 +94,12 @@ A usage error exits 2 before any estate loads. These are usage errors:
 - `--explain` with `show`.
 
 Errors go to stderr.
+A job name is matched exactly.
+When it is not found, the message lists the estate's jobs whose names contain the text, after `did you mean:`.
+The match ignores case.
+A name that differs from the text only in case comes first; the rest are sorted.
+At most 20 are listed, then a count of the rest (DL-548).
+An empty name gets no list.
 Navigation does not run jobs or contact a running engine.
 
 ## Navigate a decompiled module
