@@ -729,6 +729,10 @@ reading the retained journal.
 a run that starts before the retained anchor is `partial`. Missing end
 evidence yields the reader marker `UNKNOWN`, never an invented oracle
 status. Each run is read under its opening configuration revision (DL-432).
+On a replay from a snapshot, a run that opens after the snapshot is read
+under the rev in force at its opening: the snapshot's `config_rev`, then the
+`CONFIG` marks after it. A retained `config applied` record older than the
+snapshot sets no run's rev (DL-549).
 Emitted events remain derived from inputs and are not stored.
 
 **Transition rows** (DL-536). Each trace entry the oracle appends while an

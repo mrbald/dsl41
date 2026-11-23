@@ -95,15 +95,18 @@ class _Root:
         assert answer.done()
 
     async def close(self) -> None:
-        """Shut the engine down, keeping each rev's catalog hash (`hashes`)."""
-        await self.engine.shutdown()
+        """Shut the engine down, keeping each rev's catalog hash (`hashes`). The store closes
+        and the root's lock is released on every path."""
         journal = self.engine.journal
         assert journal is not None
-        self.hashes = {
-            rev: load_configuration(journal.store, rev, where="t").catalog_hash
-            for rev in range(1, self.engine.config_rev + 1)
-        }
-        journal.close()
+        try:
+            await self.engine.shutdown()
+            self.hashes = {
+                rev: load_configuration(journal.store, rev, where="t").catalog_hash
+                for rev in range(1, self.engine.config_rev + 1)
+            }
+        finally:
+            journal.close()
 
 
 def _rows(root: _Root, job: str) -> list[RunRow]:
@@ -342,3 +345,42 @@ def test_the_numbering_check_fails_on_a_bypass_whose_entry_carries_no_number(
     monkeypatch.setattr(oracle_writers.OracleWriters, "_w_bypass", numberless)
     with pytest.raises(AssertionError, match="'j', \\[\\], 1"):
         runs_open_in_order(replayed())
+
+
+def test_a_read_error_while_the_root_closes_leaves_its_store_closed_and_its_lock_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revs 2 and 3 apply, a snapshot follows and `j` opens; reading rev 3's catalog hash at
+    teardown fails. The failure reaches the caller, the store is closed and the root's lock can
+    be taken again."""
+    import sqlite3
+    import sys
+
+    from dsl41.runner_clock import EngineError
+    from dsl41.runner_ledger import acquire_run_root
+
+    read = load_configuration
+
+    def refused(store: Any, rev: int, *, where: str) -> Any:
+        if rev == 3:
+            raise EngineError("injected read error")
+        return read(store, rev, where=where)
+
+    roots: list[_Root] = []
+
+    async def body(root: _Root) -> None:
+        roots.append(root)
+        await root.update(1, "insert_job: j\njob_type: c\ncommand: y\n")
+        await root.update(2, "insert_job: j\njob_type: c\ncommand: z\n")
+        root.engine.take_snapshot()
+        await root.feed(_ev(3, "STARTJOB", job="j"))
+        monkeypatch.setattr(sys.modules[__name__], "load_configuration", refused)
+
+    with pytest.raises(EngineError, match="injected read error"):
+        _scenario(tmp_path, _LEAF.format(cmd="x"), body)
+    [root] = roots
+    journal = root.engine.journal
+    assert journal is not None
+    with pytest.raises(sqlite3.ProgrammingError):
+        journal.store.last_seq()
+    acquire_run_root(root.run).release()

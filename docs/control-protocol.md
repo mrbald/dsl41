@@ -1007,9 +1007,7 @@ it as the whole fold does. A page's trace runs through the entry of the
 opening above it, so the fold sees when the next run began, and a STATUS
 admitted in the transaction that opened it reads alike in both. On a pruned
 store, the offline fold calls a run that began before its snapshot `partial`
-where this query calls it `full`, and it can read a run that opened after
-that snapshot under an older rev (BUG-110), where this query uses the rev
-stored with the opening.
+where this query calls it `full`.
 
 `watermark` and `as_of`, the time the records reached then, come from the
 moment the request is routed; the rows come from the read. `history` and

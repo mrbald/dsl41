@@ -479,8 +479,8 @@ def test_a_rejected_status_whose_time_half_opens_the_next_run_is_left_out(
 def test_a_pruned_store_reads_a_run_under_the_rev_its_opening_stored(tmp_path: Path) -> None:
     """Astra's sequence: rev 2 has `max_exit_success: 0`, rev 3 has 5, a snapshot follows rev 3,
     and a run opened after it exits 3. A prune leaves rev 2's record as the first retained one.
-    The page reads the run under rev 3, as the whole fold did before the prune (BUG-110 is the
-    offline fold after it)."""
+    The page reads the run under rev 3, as the whole fold did before the prune and after it
+    (DL-549)."""
 
     def text(command: str, most: int) -> str:
         return f"insert_job: j\njob_type: c\ncommand: {command}\nmax_exit_success: {most}\n"

@@ -1486,3 +1486,86 @@ def test_a_file_watch_run_gets_a_row_like_a_command() -> None:
     [row] = fold_run_rows(records, catalog=catalog)
     assert (row.job, row.run_number, row.status, row.duration_s) == ("w", 1, "SUCCESS", 180.0)
     assert "executor_id" not in RunRow.model_fields
+
+
+# ------------------------------------------- a pruned root's opening rev (DL-549)
+
+
+def _jil(command: str, most: int) -> str:
+    return f"insert_job: j\njob_type: c\ncommand: {command}\nmax_exit_success: {most}\n"
+
+
+def _pruned_rev_root(
+    tmp_path: Path, *, opened_before: bool, kept_rev: int, updated_after: bool = False
+) -> Any:
+    """Rev 2 has `max_exit_success: 0`, rev 3 has 5; `j` exits 3 in its one run, which opens
+    under rev 3 after the snapshot (or before it, ending after it when `opened_before`). With
+    `updated_after`, rev 4 (`max_exit_success: 0`) applies after the snapshot and the run opens
+    under it. The root is then pruned to `kept_rev`'s `config applied` record. Answers the
+    `_Root` and the whole fold before and after the prune."""
+    from store_surgery import rows
+    from test_run_openings import _LEAF, _at, _ev, _Root, _scenario
+
+    from dsl41.runner_store import SqliteStore
+
+    async def body(root: _Root) -> None:
+        await root.update(1, _jil("y", 0))
+        await root.update(2, _jil("z", 5))
+        if not opened_before:
+            root.engine.take_snapshot()
+        if updated_after:
+            await root.update(2.5, _jil("w", 0))
+        await root.feed(_ev(3, "STARTJOB", job="j"))
+        if opened_before:
+            await root.engine.run_until_quiescent(_at(3.5))
+            root.engine.take_snapshot()
+        await root.engine.run_until_quiescent(_at(5))
+
+    root, _ = _scenario(tmp_path, _LEAF.format(cmd="x"), body, {("j", 1): (60.0, 3)})
+    before = read_run_root(root.run)
+    [applied] = [
+        seq
+        for seq, kind, payload in rows(root.run)
+        if kind == "config" and payload.get("event") == "applied" and payload.get("rev") == kept_rev
+    ]
+    with closing(SqliteStore(root.run / "engine.db")) as store:
+        assert prune(store, applied, datetime(2999, 1, 1)) > 0
+        assert store.first_seq() == applied
+    return root, before, read_run_root(root.run)
+
+
+def _without_fidelity(row: RunRow) -> dict[str, Any]:
+    return row.model_dump(exclude={"fidelity"})
+
+
+@pytest.mark.parametrize(
+    ("opened_before", "kept_rev", "fidelity"),
+    [(False, 2, "full"), (True, 2, "partial"), (False, 3, "full")],
+    ids=["opened after the snapshot", "opened before the snapshot", "no update after the kept"],
+)
+def test_a_pruned_root_reads_a_run_under_the_rev_in_force_at_its_opening(
+    tmp_path: Path, opened_before: bool, kept_rev: int, fidelity: str
+) -> None:
+    """DL-549: a replay from a snapshot opens under the snapshot's rev, not under the first
+    retained `config applied` record. The run reads under rev 3, SUCCESS with exit 3, as the
+    whole fold read it before the prune; only a run that opened before the snapshot reads
+    `partial`."""
+    root, before, after = _pruned_rev_root(tmp_path, opened_before=opened_before, kept_rev=kept_rev)
+    [row] = [row for row in before if row.job == "j"]
+    assert (row.status, row.exit_code, row.catalog_hash) == ("SUCCESS", 3, root.hashes[3])
+    assert [_without_fidelity(r) for r in after] == [_without_fidelity(r) for r in before]
+    assert [r.fidelity for r in after if r.job == "j"] == [fidelity]
+
+
+def test_a_pruned_root_reads_a_run_after_a_later_update_under_that_update_s_rev(
+    tmp_path: Path,
+) -> None:
+    """DL-549: after the snapshot, the trace's `CONFIG` marks move the rev. Rev 4 applies after
+    the snapshot and the run opens under it: FAILURE with exit 3 under rev 4, as the whole fold
+    read it before the prune."""
+    root, before, after = _pruned_rev_root(
+        tmp_path, opened_before=False, kept_rev=2, updated_after=True
+    )
+    [row] = [row for row in before if row.job == "j"]
+    assert (row.status, row.exit_code, row.catalog_hash) == ("FAILURE", 3, root.hashes[4])
+    assert after == before

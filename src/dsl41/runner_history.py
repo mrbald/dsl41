@@ -930,8 +930,10 @@ def read_run_root(run_root: Path) -> list[RunRow]:
         )
         records = [w for _, record in store.read_from(0) if (w := wire_record(record)) is not None]
         replayed = _replay(store, configuration, str(run_root))
-        if not records or records[0].get("rec") != "segment":
-            # the retention pruned the opening: the snapshot's configuration row names it
+        if replayed.anchor is not None or not records or records[0].get("rec") != "segment":
+            # a replay from a snapshot opens its trace under the snapshot's rev, and its CONFIG
+            # marks move it; a retained configuration record older than the snapshot sets no
+            # run's rev (DL-549). The snapshot's configuration row names the opening.
             opening = replayed.replay.rev if replayed.anchor is None else replayed.anchor.config_rev
             opened = load_configuration(store, int(opening or 1), where=str(run_root))
             records.insert(

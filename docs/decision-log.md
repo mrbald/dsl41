@@ -27823,3 +27823,20 @@ relitigate an entry; append a new one.
   old answer made them look the name up elsewhere first.
   UNCHANGED. External and unresolved references are never offered: the candidates are the
   estate's own jobs. No verb's answer changes for a name that exists.
+- DL-549 The offline run history reads a run under the rev in force at its opening
+  (2026-11-23; BUG-110, found while reviewing the `history` query;
+  src/dsl41/runner_history.py, docs/runner-design.md, docs/control-protocol.md,
+  tests/test_run_history.py; narrows DL-113; closes BUG-110)
+  THE RULE. On a replay that starts at a snapshot, a run that opens after the snapshot is
+  read under the rev in force at its opening: the snapshot's `config_rev`, then the CONFIG
+  marks after it. `read_run_root` puts a segment of the snapshot's rev first whenever the
+  replay starts at a snapshot. A retained `config applied` record older than the snapshot
+  sets no run's rev.
+  THE DEFECT. The fold takes the trace's starting rev from the first record. On a pruned
+  root the first retained record could be the `config applied` record of an older rev, while
+  the snapshot was taken under a later one. A run that opened after the snapshot was then
+  judged under the older definition: with `max_exit_success` raised from 0 to 5, an exit of
+  3 read FAILURE where the engine, and the `history` query, say SUCCESS.
+  UNCHANGED. `fold_run_rows`, the rows of the `history` query, the snapshot's `runs`, and
+  every row of a root whose journal head survives.
+  COST. None known. History that an older build stored is read as it was written.
