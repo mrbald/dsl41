@@ -242,6 +242,7 @@ def test_kill_provenance_is_transient_and_first_emission_wins():
         dispatched={"j": 1},
         live={"j": 1},
         dispatchable=frozenset({"j"}),
+        starts=(),
         origins=origins,
     ) == [("KILL", "j", 1)]
     assert origins == {("KILL", "j", 1): 0}

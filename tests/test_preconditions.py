@@ -56,6 +56,7 @@ from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import (
     PROTOCOL_VERSION,
     AdmissionRefused,
+    Applied,
     Attempt,
     Envelope,
     EnvelopeError,
@@ -466,9 +467,9 @@ def test_a_late_status_after_a_deadline_records_one_kill_and_replays(tmp_path: P
     kills: list[tuple[str, datetime | None]] = []
     real_dispatch = engine._dispatch
 
-    def recording(emitted: list[Event], selected=None) -> None:
+    def recording(applied: Applied, selected=None) -> None:
         before = set(engine._live)
-        real_dispatch(emitted, selected)
+        real_dispatch(applied, selected)
         kills.extend((job, engine.frontiers.at) for job in sorted(before - set(engine._live)))
 
     engine._dispatch = recording  # type: ignore[method-assign]

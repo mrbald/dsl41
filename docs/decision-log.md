@@ -27840,3 +27840,29 @@ relitigate an entry; append a new one.
   UNCHANGED. `fold_run_rows`, the rows of the `history` query, the snapshot's `runs`, and
   every row of a root whose journal head survives.
   COST. None known. History that an older build stored is read as it was written.
+- DL-550 Only the engine's own start entry plans a launch
+  (2026-11-23; BUG-107, reproduced; src/dsl41/runner_admission.py, src/dsl41/runner.py,
+  src/dsl41/runner_journal.py, docs/runner-design.md, docs/glossary.md,
+  tests/test_own_starts.py, tests/test_dispatch.py, tests/test_run_openings.py; builds on
+  DL-537; narrows DL-234; closes BUG-107; no state-machine version change)
+  THE RULE. An emitted STARTING plans a launch only when the same input's trace holds the
+  engine's start entry for the job's current run: the `->STARTING` entry that carries the
+  run's number (DL-537). The ghost-run gate stays beside it: the run number must be past the
+  last one dispatched. `apply_attempt` reads those entries once, so the live engine and the
+  replay plan from the same set.
+  THE DEFECT. The gate alone took any emitted STARTING for a start while the run number was
+  above the dispatched one. A run number moves with no dispatch after an ON_NOEXEC bypass
+  and for every run of a box. An operator's `CHANGE_STATUS ... STARTING` on such a job, or on
+  a box since retyped to a command, then launched the command, also with ON_NOEXEC still
+  set, and a replay from genesis derived the same launch at a restart.
+  WHY THIS RULE. Keeping the gate level with the run numbers after each input closes the
+  later case and not the one where the bypass and the injection share an input. The trace
+  entry says which it is: an injected STARTING writes an entry with no number.
+  UNCHANGED. Emitted events, records, charts, snapshots, goldens. The state-machine version
+  stays 28: both builds resume the same roots and agree on every row (as in DL-315).
+  COST. A dispatch or a pending dispatch that an earlier build recorded for an injected
+  STARTING is carried out as recorded at the next start. Going back a build brings the old
+  behaviour back: its replay from genesis can derive, and launch, a start this rule
+  suppressed.
+  NOT BUILT. A start the engine decided that expired or ended before its launch, and is then
+  set to STARTING by hand, still launches (BUG-112).

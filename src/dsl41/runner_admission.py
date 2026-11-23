@@ -56,7 +56,7 @@ import json
 import reprlib
 import sys
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Final, Literal, get_args
@@ -65,7 +65,15 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 from dsl41.oracle import Oracle
 from dsl41.canon import is_scalar_string, is_wire_int
-from dsl41.oracle_state import LIVE, TERMINAL, Event, EventKind, JobRuntime, RuntimeState
+from dsl41.oracle_state import (
+    LIVE,
+    TERMINAL,
+    Event,
+    EventKind,
+    JobRuntime,
+    RuntimeState,
+    TraceEntry,
+)
 from dsl41.runner_clock import EngineError
 from dsl41.runner_codes import Code, Rejection
 from dsl41.state_machine import (
@@ -802,6 +810,17 @@ def stale_reason(oracle: Oracle, ev: Event) -> Rejection | None:
 type DispatchKind = Literal["SPAWN", "KILL"]
 
 
+def run_starts(entries: Iterable[TraceEntry]) -> frozenset[tuple[str, int]]:
+    """The `(job, run)` starts the engine's own start entries in `entries` begin: each status
+    entry into STARTING that carries its run's number (DL-537). An injected STARTING carries
+    none, and a bypass's numbered entry is a SUCCESS, so neither is a start (DL-550)."""
+    return frozenset(
+        (entry.job, entry.run_number)
+        for entry in entries
+        if entry.run_number is not None and entry.transition.endswith("->STARTING")
+    )
+
+
 def dispatch_plan(
     emitted: Sequence[Event],
     *,
@@ -809,16 +828,19 @@ def dispatch_plan(
     dispatched: Mapping[str, int],
     live: Mapping[str, int],
     dispatchable: frozenset[str],
+    starts: Collection[tuple[str, int]],
     origins: dict[tuple[DispatchKind, str, int], int] | None = None,
 ) -> list[tuple[DispatchKind, str, int]]:
     """The starts and kills one applied input implies, in emitted order: `(kind, job, run)`.
 
-    A pure function of what the oracle emitted and what the shell holds, so replay derives the
-    starts a live engine dispatched (`runner_journal.replay_inputs`). The ghost-run gate
-    (`runs[job] > dispatched[job]`) decides whether a start exists: a CHANGE_STATUS-parity
-    STARTING overwrite re-emits the status without advancing the run, and vendor parity launches
-    nothing. A terminal status for a job with no live run plans no kill. Alarms, boxes,
-    pseudo-entries and job types with no adapter plan nothing.
+    A pure function of what the oracle emitted, the batch's own start entries (`starts`, read
+    by `run_starts`) and what the shell holds, so replay derives the starts a live engine
+    dispatched (`runner_journal.replay_inputs`). An emitted STARTING plans a start only when
+    `starts` holds the job's current run (DL-550): an injected STARTING writes no numbered
+    entry, and vendor parity launches nothing. The ghost-run gate (`runs[job] >
+    dispatched[job]`) stays beside it, so a run is planned at most once (DL-234). A terminal
+    status for a job with no live run plans no kill. Alarms, boxes, pseudo-entries and job types
+    with no adapter plan nothing.
 
     One call plans each `(kind, job, run)` once (DL-232): two terminal transitions of one live
     run in one batch, such as a deadline firing inside a `CHANGE_STATUS SUCCESS` batch, plan one
@@ -833,8 +855,9 @@ def dispatch_plan(
             continue
         status = ev.payload.get("status")
         item: tuple[DispatchKind, str, int] | None = None
-        if status == "STARTING" and runs.get(job, 0) > dispatched.get(job, 0):
-            item = ("SPAWN", job, runs.get(job, 0))
+        run = runs.get(job, 0)
+        if status == "STARTING" and (job, run) in starts and run > dispatched.get(job, 0):
+            item = ("SPAWN", job, run)
         elif status in TERMINAL and job in live:
             item = ("KILL", job, live[job])
         if item is not None and item not in plan:
@@ -870,6 +893,9 @@ class Applied:
     emitted: list[Event] = field(default_factory=list)
     kill_emissions: frozenset[int] = frozenset()
     command_start: int | None = None
+    #: the runs the batch's own start entries begin (`run_starts`), the only starts
+    #: `dispatch_plan` plans, live and replayed alike (DL-550)
+    starts: frozenset[tuple[str, int]] = frozenset()
 
 
 def apply_attempt(
@@ -882,7 +908,7 @@ def apply_attempt(
     """Steps 5-7 for one admitted attempt, live or replayed.
 
     Live and replay share this function. `decided` is a durable decision from the log and wins
-    over the gate.
+    over the gate. The starts the batch's trace begins are read here once, for both (DL-550).
 
     `forced` is a quarantine (`quarantine_verdict`): the attempt is rejected without the gate
     and only the time half applies. Unlike `decided`, it carries no revisions; the result takes
@@ -891,6 +917,7 @@ def apply_attempt(
     ev = attempt.event()
     rejection: Rejection | None = None
     decision: Literal["applied", "rejected"]
+    traced = oracle.trace_length()
     with oracle.batch(attempt.at) as batch:  # step 5: the time half, timers first
         if decided is not None:
             decision = decided.decision
@@ -921,6 +948,7 @@ def apply_attempt(
         emitted=batch.emitted,
         kill_emissions=batch.kill_emissions,
         command_start=batch.command_start,
+        starts=run_starts(oracle.trace_since(traced)[1]),
     )
 
 

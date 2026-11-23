@@ -1796,7 +1796,8 @@ def replay_inputs(
 
     An attempt and its decision are one transaction, so an attempt with no decision means the
     store disagrees with itself and is refused. Each applied input's starts are derived as the
-    live engine plans them (`spawns`), for every catalog job that is not a box.
+    live engine plans them (`spawns`), from the start entries its own trace holds (DL-550), for
+    every catalog job that is not a box.
 
     An input that raises stops the replay with a `ReplayFault` that names it; a
     `StatechartError` stops it as itself, naming the input."""
@@ -1853,6 +1854,7 @@ def replay_inputs(
             dispatched=dispatched,
             live={},
             dispatchable=dispatchable,
+            starts=applied.starts,
         )
         for _kind, job, run_number in plan:  # with no live run, a plan holds starts only
             dispatched[job] = max(dispatched.get(job, 0), run_number)

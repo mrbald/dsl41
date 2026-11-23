@@ -65,8 +65,8 @@ The cut line follows the oracle's event contract:
 
 - **Oracle → shell**: the oracle emits every internal transition as a
   STATUS event (`_write` → `_emit`). An emitted
-  `STATUS(job, STARTING)` *is* the dispatch instruction, and only when its
-  run number is past the last dispatched one (§4).
+  `STATUS(job, STARTING)` *is* the dispatch instruction, and only for the
+  engine's own start of the job's current run (§4).
 - **Shell → oracle**: the shell injects a completion as
   `STATUS {job, run_number, …}`. A normal exit carries the raw exit code
   only, and the oracle applies the SEM-09 / DL-33 boundary itself
@@ -253,10 +253,18 @@ Installation must match the TOML and helper hook paths. At most one engine
 hook and one failure helper run concurrently. Both Ubuntu and EL8 service
 drills exercise systemd's platform-specific restart behavior.
 
-The two STARTING rows carry one more condition, the **ghost-run gate**: a
-STARTING spawns only when the job's run number is past the last one this
-engine dispatched. A CHANGE_STATUS overwrite re-emits STARTING without
-advancing the run number, and vendor parity launches nothing.
+The two STARTING rows carry two more conditions. A STARTING spawns only when
+the input's own trace holds the engine's start entry for the job's current
+run: the `->STARTING` entry that carries the run's number (DL-537, DL-550).
+The **ghost-run gate** keeps that start to one: the run number must be past
+the last one this engine dispatched. A CHANGE_STATUS overwrite re-emits
+STARTING with no numbered entry, and vendor parity launches nothing. This
+holds also where the run number moved with no dispatch: after an ON_NOEXEC
+bypass, or for a box retyped to a command. The rule plans no new launch; a
+dispatch or a pending dispatch that an earlier build recorded is carried out
+as recorded. An earlier build lacks the first condition. Going back to it
+brings the old behaviour back: its replay from genesis can derive, and launch
+at a restart, a start this rule suppressed.
 
 **Stale-completion gate.** Completions carry `(job, run_number)`. Every
 completion enters the common admission order (§7). The dry apply rejects

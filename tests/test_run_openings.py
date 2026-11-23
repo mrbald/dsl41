@@ -13,6 +13,7 @@ from reload_fixtures import prepare_estate, write_config
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,8 +38,16 @@ from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import VirtualClock
 from dsl41.runner_control import ControlServer
 from dsl41.runner_history import RunRow, read_run_root, run_history
-from dsl41.runner_journal import StoreReplay, decode_snapshot, load_configuration
+from dsl41.runner_journal import (
+    STORE_NAME,
+    StoreReplay,
+    decode_snapshot,
+    load_configuration,
+    read_journal,
+    replay_store,
+)
 from dsl41.runner_startup import start_run
+from dsl41.runner_store import SqliteStore
 from dsl41.runner_update import UpdateRequest
 
 T0 = datetime(2026, 7, 1, 8, 0)
@@ -111,6 +120,19 @@ class _Root:
 
 def _rows(root: _Root, job: str) -> list[RunRow]:
     return [row for row in read_run_root(root.run) if row.job == job]
+
+
+def _count_adapter_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, int]]:
+    """Every run a `FakeAdapter` is asked to carry out from now on."""
+    calls: list[tuple[str, int]] = []
+    real = FakeAdapter.run
+
+    async def counted(self: FakeAdapter, job_ir: Any, run_number: int, ctx: Any) -> int:
+        calls.append((job_ir.name, run_number))
+        return await real(self, job_ir, run_number, ctx)
+
+    monkeypatch.setattr(FakeAdapter, "run", counted)
+    return calls
 
 
 def _scenario(
@@ -230,26 +252,60 @@ def test_a_bypass_after_a_killed_leaf_leaves_the_killed_run_closed_and_adds_no_r
     assert run_number == 2
 
 
-def test_an_injected_starting_after_a_bypass_reads_the_dispatched_run_as_the_bypass_s(
-    tmp_path: Path,
-) -> None:
-    """BUG-107: ON_NOEXEC J, a start bypasses (run 1), an update, then an injected `STATUS
-    STARTING`: the engine dispatches J.1. The fold gives one row for J.1, under the bypass's
-    revision, and raises nothing."""
+def _genesis_spawns(run: Path) -> set[tuple[str, int]]:
+    """The starts a replay of the root from genesis derives (`Replay.spawns`)."""
+    with closing(SqliteStore(run / STORE_NAME, read_only=True)) as store:
+        return replay_store(store, where="t").replay.spawns
 
-    async def body(root: _Root) -> None:
+
+def _dispatched(run: Path) -> list[tuple[str, int]]:
+    return [(r["job"], r["run_number"]) for r in read_journal(run) if r["rec"] == "dispatch"]
+
+
+def test_an_injected_starting_after_a_bypass_launches_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-107, DL-550: ON_NOEXEC j, a start bypasses (run 1), an update, then an injected
+    `STATUS STARTING`. The injection writes no start entry, so nothing is dispatched or run,
+    live or in a replay from genesis, and the bypassed run has no row."""
+    calls = _count_adapter_calls(monkeypatch)
+
+    async def body(root: _Root) -> frozenset[str]:
         await root.feed(_ev(0, "ON_NOEXEC", job="j"), _ev(1, "STARTJOB", job="j"))
         await root.update(2, _LEAF.format(cmd="y"))
         await root.feed(_ev(3, "STATUS", job="j", status="STARTING"))
         await root.engine.run_until_quiescent(_at(6))
+        row = root.engine.oracle.store.job["j"]
+        assert (row.status, row.run_number) == ("STARTING", 1)
+        return root.engine.live_jobs()
 
-    root, _ = _scenario(tmp_path, _LEAF.format(cmd="x"), body, {("j", 1): (120.0, 0)})
-    [row] = _rows(root, "j")
-    assert row.run_number == 1
-    assert row.catalog_hash == root.hashes[1]
-    assert row.started_by is not None and row.started_by.startswith("ON_NOEXEC bypass")
-    assert (row.status, row.clock_source, row.exit_code) == ("SUCCESS", "journal", 0)
-    assert (row.started_at, row.ended_at, row.duration_s) == (_at(3), _at(5), 120.0)
+    root, live = _scenario(tmp_path, _LEAF.format(cmd="x"), body, {("j", 1): (120.0, 0)})
+    assert live == frozenset() and calls == []
+    assert _rows(root, "j") == []
+    assert _dispatched(root.run) == []
+    assert _genesis_spawns(root.run) == set()
+
+
+def test_an_injected_starting_on_a_box_retyped_to_a_command_launches_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-107, DL-550: box J runs as run 1, an update retypes J to a command, and an injected
+    `STATUS STARTING` re-emits STARTING at run 1. No start entry of run 1 is a command's, so
+    nothing is dispatched or run, live or in a replay from genesis."""
+    calls = _count_adapter_calls(monkeypatch)
+
+    async def body(root: _Root) -> frozenset[str]:
+        await root.feed(_ev(0, "STARTJOB", job="J"))
+        await root.update(3, "insert_job: J\njob_type: c\ncommand: x\n")
+        await root.feed(_ev(5, "STATUS", job="J", status="STARTING"))
+        row = root.engine.oracle.store.job["J"]
+        assert (row.status, row.run_number) == ("STARTING", 1)
+        return root.engine.live_jobs()
+
+    root, live = _scenario(tmp_path, "insert_job: J\njob_type: b\n", body)
+    assert live == frozenset() and calls == []
+    assert _dispatched(root.run) == []
+    assert _genesis_spawns(root.run) == set()
 
 
 def _window(run: int, minutes: float, status: str) -> dict[str, Any]:

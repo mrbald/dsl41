@@ -546,3 +546,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-543 | Pruning takes one bounded step at a time; snapshot cleanup commits on its own | [docs/runner-design.md](runner-design.md) |
 | DL-548 | `nav` answers a name it does not find with the names that contain it | [docs/nav.md](nav.md) |
 | DL-549 | The offline run history reads a run under the rev in force at its opening | [docs/runner-design.md](runner-design.md) |
+| DL-550 | Only the engine's own start entry plans a launch | [docs/glossary.md](glossary.md), [docs/runner-design.md](runner-design.md) |

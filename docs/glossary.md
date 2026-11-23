@@ -85,11 +85,11 @@ and [status](control-protocol.md#status-job).
 
 ### ghost run
 
-A `CHANGE_STATUS STARTING` overwrite that does not advance the run number.
-It does not request a command launch. The dispatch frontier prevents a
-second SPAWN for the same logical run.
-See [the ghost-run gate](runner-design.md#4-engine-loop--single-writer)
-and [DL-234](decision-log.md).
+A `CHANGE_STATUS STARTING` overwrite. It writes no numbered start entry and
+does not advance the run number, so it does not request a command launch.
+The dispatch frontier prevents a second SPAWN for the same logical run.
+See [the ghost-run gate](runner-design.md#4-engine-loop--single-writer),
+[DL-234](decision-log.md) and [DL-550](decision-log.md).
 
 ### incarnation
 

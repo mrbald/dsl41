@@ -41,9 +41,10 @@ therefore guards the REAL time domain, where a process exit can already be queue
 oracle decides terminal; virtual runs exercise it only white-box (test_runner.py).
 
 Dispatch table (ss4): an emitted STATUS STARTING for a job_type with a registered adapter
-spawns an adapter task, but only for an ORACLE-DECIDED start, recognized by the run_number
-bump every real start performs (the ghost-run gate). An injected CHANGE_STATUS-parity STARTING
-overwrite re-emits STARTING without bumping and, vendor parity, launches nothing. An emitted
+spawns an adapter task, but only for an ORACLE-DECIDED start: the input's trace holds the
+start's own entry, numbered with the job's current run, and the run is past the last one
+dispatched (the ghost-run gate; DL-537, DL-550). An injected CHANGE_STATUS-parity STARTING
+writes no numbered entry and, vendor parity, launches nothing. An emitted
 terminal status for a job with a live task cancels it (KILLJOB / term_run_time: the oracle
 decides, the shell kills). A cancelled adapter never reports, and anything it dies with other
 than the cancellation re-raises at the next settle. Boxes have no adapter row; ON_NOEXEC
@@ -152,6 +153,7 @@ from dsl41.runner_attempts import (
 from dsl41.runner_admission import (
     ENGINE_REQUEST_ID_PREFIX,
     AdmissionRefused,
+    Applied,
     ApplyResult,
     Attempt,
     DecisionIndex,
@@ -1491,9 +1493,11 @@ class Engine:
         #: real-domain wake signal, set on every enqueue and adapter-task completion
         self._activity = asyncio.Event()
         self._live: dict[str, _LiveRun] = {}
-        #: last run_number dispatched per job: the ghost-run gate. An injected CHANGE_STATUS
-        #: STARTING overwrite does not bump run_number and, vendor parity, launches nothing; only
-        #: an oracle-decided start advances the counter
+        #: last run_number dispatched per job: the ghost-run gate. A resume seeds it from every
+        #: row's run number (`runner_startup`), a bypassed run's included. In a live engine only
+        #: a planned start advances it: an oracle-decided start, with its own numbered start
+        #: entry; an injected CHANGE_STATUS STARTING writes none and, vendor parity, launches
+        #: nothing (DL-550)
         self._dispatched: dict[str, int] = {}
         #: cancelled tasks awaiting collection; _settle re-raises any non-CancelledError they die
         #: with
@@ -2015,7 +2019,7 @@ class Engine:
             else default_signals
             for index in applied.kill_emissions
         }
-        self._dispatch(applied.emitted, selected)
+        self._dispatch(applied, selected)
         # every start the input decided has its `dispatch` or its `dispatch_pending` now
         self._applying = False
         if pending.step is not None:
@@ -2109,21 +2113,23 @@ class Engine:
         )
 
     def _dispatch(
-        self, emitted: list[Event], selected: Mapping[int, tuple[int, ...]] | None = None
+        self, applied: Applied, selected: Mapping[int, tuple[int, ...]] | None = None
     ) -> None:
         """Carry out what one decided input implies, in the order its events were emitted
         (`dispatch_plan`, ss4). This is the only place a decided start or kill is acted on.
 
-        A planned start counts as dispatched for the ghost-run gate whether or not it launches
+        Only a run the input's own start entries begin is started (`Applied.starts`, DL-550). A
+        planned start counts as dispatched for the ghost-run gate whether or not it launches
         (DL-234), so a STARTING overwrite at the same run number plans no second one. A kill
         cancels the live task of the run it names, and nothing if that run is gone."""
         origins: dict[tuple[DispatchKind, str, int], int] = {}
         plan = dispatch_plan(
-            emitted,
+            applied.emitted,
             runs={job: rt.run_number for job, rt in self.oracle.store.job.items()},
             dispatched=self._dispatched,
             live={job: run.run_number for job, run in self._live.items()},
             dispatchable=self._dispatchable(),
+            starts=applied.starts,
             origins=origins,
         )
         for kind, job, run_number in plan:
