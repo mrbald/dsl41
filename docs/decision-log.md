@@ -27989,8 +27989,8 @@ relitigate an entry; append a new one.
   configuration or the workflow depends on the event. BUG-105 said the pull-request runs
   were the slower ones; they are not. The suite grew, and the runner's own variation is
   about a quarter of the time.
-  WHY. A limit that a green job can reach cancels a run that has passed every test. A hung
-  test is not what the job limit is for: `faulthandler_timeout` ends one after 120 s, with
-  its stack. The limit still turns a hung job into a red mark, later than before.
+  WHY. A limit that a green job can reach cancels a run that has passed every test.
+  COST. The job limit is what ends a hung job, and it now does so 10 to 15 minutes later.
+  `faulthandler_timeout` prints a hung test's stack after 120 s; it ends nothing.
   NOT DONE. The suite's time itself. The printed durations are the evidence the next look
   at it needs: whether a few files hold a worker while the others wait.

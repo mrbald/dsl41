@@ -162,8 +162,8 @@ jobs:
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     # DL-552: about twice the suite's usual time on this runner (549 to 837 s measured), so
-    # a slow runner cannot cancel a run that passed; a hung test is ended by
-    # faulthandler_timeout, not by this limit
+    # a slow runner cannot cancel a run that passed. This limit is what ends a hung job;
+    # faulthandler_timeout prints the hung test's stack after 120 s and ends nothing.
     timeout-minutes: 25
     strategy:
       fail-fast: false
