@@ -7,6 +7,7 @@ that holds no seq.
 
 from __future__ import annotations
 
+import re
 import signal
 import sqlite3
 import subprocess
@@ -25,6 +26,8 @@ from dsl41.runner_store import SqliteStore
 from dsl41.runner_transitions import agrees_through
 
 pytestmark = pytest.mark.usefixtures("cli_env")
+
+ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 #: `dsl41` with one store method replaced: `fail` raises the store's error, `die` kills the
 #: process where the method is entered.
@@ -66,6 +69,12 @@ def _journal(root: Path) -> list[tuple[Any, ...]]:
         return db.execute("SELECT * FROM journal ORDER BY seq").fetchall()
 
 
+def _err(result: subprocess.CompletedProcess[str]) -> str:
+    """A child's standard error with ANSI stripped: a traceback is styled where the terminal is
+    forced, as under GitHub Actions."""
+    return ANSI.sub("", result.stderr)
+
+
 def _histories(root: Path) -> list[tuple[str, int]]:
     with closing(SqliteStore(root / "engine.db", read_only=True)) as store:
         return store.histories()
@@ -82,16 +91,17 @@ def _named(result: subprocess.CompletedProcess[str], root: Path) -> None:
     (DL-553). Before the traceback only the cookie scan's line may stand beside it, and no
     other `dsl41: ERROR:` line is anywhere."""
     diagnostic = f"dsl41: ERROR: {root / 'engine.db'}: {LINE}"
-    lines = result.stderr.splitlines()
+    stderr = _err(result)
+    lines = stderr.splitlines()
     traceback = next(
         at for at, line in enumerate(lines) if line.startswith(("╭", "Traceback"))
     )  # rich's, or Python's
-    assert result.stderr.count(diagnostic) == 1, result.stderr
+    assert stderr.count(diagnostic) == 1, stderr
     assert [line for line in lines[:traceback] if not line.startswith(COOKIE_SCAN)] == [
         diagnostic
-    ], result.stderr
+    ], stderr
     assert [line for line in lines if line.startswith("dsl41: ERROR:")] == [diagnostic]
-    assert lines[-1].endswith("OperationalError: disk I/O error"), result.stderr
+    assert lines[-1].endswith("OperationalError: disk I/O error"), stderr
 
 
 def test_dl553_a_first_start_that_cannot_begin_its_history_fails_as_one_that_cannot_append(
@@ -109,14 +119,14 @@ def test_dl553_a_first_start_that_cannot_begin_its_history_fails_as_one_that_can
     _, root, failed = started["begin_history"]
     appended = started["append"][2]
     assert failed.returncode == appended.returncode == 1, failed.stderr + appended.stderr
-    last = {result.stderr.splitlines()[-1] for result in (failed, appended)}
+    last = {_err(result).splitlines()[-1] for result in (failed, appended)}
     assert len(last) == 1 and last.pop().endswith("OperationalError: disk I/O error")
     _named(failed, root)
     for args, root, _ in started.values():
         assert _journal(root) == []
         refused = _cli(*args)
         assert refused.returncode == 2, refused.stdout + refused.stderr
-        assert refusal(root / "engine.db") in " ".join(refused.stderr.split())
+        assert refusal(root / "engine.db") in " ".join(_err(refused).split())
 
 
 def test_dl553_a_restart_that_cannot_begin_its_history_appends_nothing_and_exits_as_an_append(
