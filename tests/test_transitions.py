@@ -38,11 +38,11 @@ from dsl41.runner import Engine
 from dsl41.runner_access import REQUIRED_TIER, Tier
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import Envelope
-from dsl41.runner_clock import VirtualClock
+from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_config import EngineSettings
 from dsl41.runner_control import ControlServer
 from dsl41.runner_journal import STORE_NAME, Journal
-from dsl41.runner_ledger import STATE_MACHINE_VERSION
+from dsl41.runner_ledger import STATE_MACHINE_VERSION, acquire_run_root
 from dsl41.runner_startup import resume_run, start_run, validate_resume
 from dsl41.runner_store import (
     Interval,
@@ -649,13 +649,13 @@ async def _ask(run_root: Path, request: dict[str, Any], *, status: bool = False)
     return (answer, engine, status_answer) if status else (answer, engine)
 
 
-@pytest.mark.parametrize("step", ["trim_transitions", "cover_transitions", "begin_history"])
-def test_a_failure_in_any_step_of_the_start_leaves_the_engine_running_and_the_verb_declining(
+@pytest.mark.parametrize("step", ["trim_transitions", "cover_transitions", "started_seqs"])
+def test_a_failure_in_a_tidying_step_of_the_start_leaves_the_engine_running_and_the_verb_declining(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str], step: str
 ) -> None:
-    """Whatever step raises, the start goes on and says so in one line; the run's admissions
-    still commit their rows; `transitions` declines with the reason and asserts nothing; the
-    next start runs the steps again and the verb serves."""
+    """Whichever tidying step raises, alone, the start goes on and says so in one line; the
+    run's admissions still commit their rows; `transitions` declines with the reason and
+    asserts nothing; the next start runs the steps again and the verb serves (DL-553)."""
     run_root = tmp_path / "run"
     with _as_previous_build(monkeypatch):  # so the start has a gap to record
         asyncio.run(_incarnation(run_root, genesis=True))
@@ -670,8 +670,8 @@ def test_a_failure_in_any_step_of_the_start_leaves_the_engine_running_and_the_ve
         + {
             "trim_transitions": f"settle the rows: {failed}",
             "cover_transitions": f"settle the rows: {failed}",
-            # the earlier build's start has no history row, so the first step writes one too
-            "begin_history": f"bound the earlier starts: {failed}; begin the history: {failed}",
+            # the earlier build's start has no history row, so the step has one to write
+            "started_seqs": f"bound the earlier starts: {failed}",
         }[step]
     )
     with monkeypatch.context() as patched:
@@ -699,25 +699,132 @@ def test_a_failure_in_any_step_of_the_start_leaves_the_engine_running_and_the_ve
     assert _coverage(run_root)[0] == Interval(1, before, False)
 
 
-def test_a_restored_branch_whose_start_failed_asserts_no_history_or_continuity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def _journal(run_root: Path) -> list[tuple[Any, ...]]:
+    """Every journal row, every column, as stored."""
+    with closing(sqlite3.connect(f"file:{run_root / STORE_NAME}?mode=ro", uri=True)) as db:
+        return db.execute("SELECT * FROM journal ORDER BY seq").fetchall()
+
+
+class _NoHistory:
+    """`SqliteStore.begin_history` failing with one error, kept to be found again."""
+
+    def __init__(self) -> None:
+        self.error = sqlite3.OperationalError("disk I/O error")
+
+    def __get__(self, store: SqliteStore, owner: type) -> Any:
+        def begin_history(history: str, first_seq: int | None = None) -> None:
+            raise self.error
+
+        return begin_history
+
+
+#: The one other line a restart prints before its history step, on Linux only: the engine
+#: names its signalling primitive when it is built (`runner_stops.EngineStops`, DL-436).
+_COOKIE_SCAN = "dsl41: cookie scan signalling: "
+
+
+def _named_once(capfd: pytest.CaptureFixture[str], where: object, error: str) -> None:
+    """The whole of standard error, but for the cookie scan's line: the one diagnostic line a
+    start that cannot begin its history prints before its error propagates (DL-553)."""
+    lines = capfd.readouterr().err.splitlines()
+    assert [line for line in lines if not line.startswith(_COOKIE_SCAN)] == [
+        f"dsl41: ERROR: {where}: begin the history: {error}; the start appends no record and"
+        " fails (DL-553)"
+    ]
+
+
+def test_dl553_a_restored_root_whose_history_fails_appends_nothing_and_its_next_start_owns_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    """Two branches of one stopped backup: the first runs on under a history a client reads;
-    the second is restored and its start cannot begin a history. It must not answer with the
-    copy's old history, and so cannot vouch for the client's rows."""
+    """The design check's sequence. A root is copied through seq 2 and the original runs on
+    under a history a client reads. The copy is restored and its start cannot begin a history:
+    the store's error propagates after one line, nothing is appended at seq 3, and the lock is
+    released. The next start begins its history at 3 and holds its records; the client's
+    history agrees with nothing here, the copy's own through 2."""
     run_root = tmp_path / "run"
-    asyncio.run(_incarnation(run_root, genesis=True))
+    asyncio.run(_close(_start(run_root)))
+    assert _last(run_root) == 2
     copy = tmp_path / "copy"
     shutil.copytree(run_root, copy)
-    first, _ = asyncio.run(_ask(run_root, {}))
-    assert first["ok"] and first["history"]
+    abandoned, _ = asyncio.run(_ask(run_root, {}))
+    assert abandoned["ok"] and _last(run_root) > 2
     shutil.rmtree(run_root)
     shutil.copytree(copy, run_root)
+    before = _journal(run_root)
+    with closing(SqliteStore(run_root / STORE_NAME, read_only=True)) as store:
+        [(restored, begun)] = store.histories()
+    assert begun == 1
+    capfd.readouterr()
+    failing = _NoHistory()
     with monkeypatch.context() as patched:
-        patched.setattr(SqliteStore, "begin_history", lambda self, history: 1 / 0)
-        answer, _ = asyncio.run(_ask(run_root, {"history": first["history"]}))
-    assert answer["code"] == "transitions_unavailable"
-    assert not {"history", "continuous_through", "entries", "covered"} & set(answer)
+        patched.setattr(SqliteStore, "begin_history", failing)
+        with pytest.raises(sqlite3.OperationalError) as raised:
+            asyncio.run(_resume(run_root, 10))
+    assert raised.value is failing.error
+    _named_once(capfd, run_root / STORE_NAME, "OperationalError: disk I/O error")
+    assert _journal(run_root) == before
+    acquire_run_root(run_root).release()
+    answer, _ = asyncio.run(_ask(run_root, {"history": abandoned["history"]}))
+    assert answer["ok"] is True and answer["continuous_through"] == 0
+    upto = _last(run_root)
+    with closing(SqliteStore(run_root / STORE_NAME, read_only=True)) as store:
+        histories = store.histories()
+    assert histories == [(restored, 1), (answer["history"], 3)]
+    assert runner_transitions.agrees_through(histories, restored, upto) == 2
+    assert [row[0] for row in _journal(run_root)] == list(range(1, upto + 1))
+
+
+def test_dl553_a_fresh_root_whose_history_fails_holds_no_record_and_its_next_start_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A first start that cannot begin its history raises the store's error after one line,
+    holds no record and releases the lock: an incomplete genesis, which the next start refuses
+    by name (DL-504)."""
+    run_root = tmp_path / "run"
+    failing = _NoHistory()
+    with monkeypatch.context() as patched:
+        patched.setattr(SqliteStore, "begin_history", failing)
+        with pytest.raises(sqlite3.OperationalError) as raised:
+            _start(run_root)
+    assert raised.value is failing.error
+    _named_once(capfd, run_root / STORE_NAME, "OperationalError: disk I/O error")
+    assert _journal(run_root) == []
+    acquire_run_root(run_root).release()
+    with pytest.raises(EngineError, match=r"holds no journal record.*\(DL-504\)"):
+        asyncio.run(_resume(run_root, 1))
+
+
+def test_dl553_a_full_store_reports_its_own_error_when_the_history_row_fails(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A store that may grow by no page: the history's insert fails with the full disk, which
+    SQLite answers by rolling the transaction back itself. The error raised and named is the
+    full disk, not a second rollback's, and no history or record is written."""
+    with closing(SqliteStore(tmp_path / "s.db")) as store:
+        (pages,) = store._db.execute("PRAGMA page_count").fetchone()
+        store._db.execute(f"PRAGMA max_page_count = {pages}")
+        with pytest.raises(sqlite3.OperationalError, match="full"):
+            for n in range(10**6):  # the table's last page filled
+                store._db.execute(
+                    "INSERT INTO transitions_history(history, first_seq) VALUES (?, 1)", (str(n),)
+                )
+        histories = store.histories()
+        capfd.readouterr()
+        with pytest.raises(sqlite3.OperationalError, match="^database or disk is full$"):
+            begin(store, where="t")
+        _named_once(capfd, "t", "OperationalError: database or disk is full")
+        assert not store._db.in_transaction
+        assert store.histories() == histories and store.last_seq() == 0
+
+
+def test_dl553_a_journal_not_yet_writable_refuses_an_append_and_writes_nothing() -> None:
+    store = MemoryStore()
+    journal = Journal(store, writable=False)
+    with pytest.raises(StoreError, match=r"committed its history row \(DL-553\)"):
+        journal.engine("started", T0)
+    assert store.last_seq() == 0 and journal.last_seq == 0
+    journal.writable = True
+    assert journal.engine("started", T0) == 1
 
 
 def test_a_restored_live_snapshot_whose_first_start_fails_its_trim_keeps_its_boundary() -> None:
@@ -755,12 +862,12 @@ def test_a_restored_live_snapshot_whose_first_start_fails_its_trim_keeps_its_bou
     assert answer["continuous_through"] == 3
 
 
-def test_a_start_whose_history_row_failed_is_bounded_by_the_next_start(
+def test_an_earlier_builds_start_with_no_history_row_is_bounded_by_the_next_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A start that could not write its own history row still recorded `engine started`. The
-    next start gives it a row just after the `engine started` before it, so the history before
-    it vouches for nothing that start wrote."""
+    """A start of a build before DL-553 whose history row failed went on and recorded `engine
+    started`. The next start gives it a row just after the `engine started` before it, so the
+    history before it vouches for nothing that start wrote."""
     run_root = tmp_path / "run"
     asyncio.run(_incarnation(run_root, genesis=True))
     first, _ = asyncio.run(_ask(run_root, {}))
@@ -768,8 +875,10 @@ def test_a_start_whose_history_row_failed_is_bounded_by_the_next_start(
     before = _last(run_root)
     with closing(SqliteStore(run_root / STORE_NAME, read_only=True)) as store:
         previous_start = store.started_seqs()[-1]
-    with monkeypatch.context() as patched:
-        patched.setattr(SqliteStore, "begin_history", lambda self, *args: 1 / 0)
+    with monkeypatch.context() as patched:  # the earlier build's start: no row, and it goes on
+        patched.setattr(
+            runner_startup, "begin_transitions", lambda store, *, where: Begun("no row", None)
+        )
         declined, _ = asyncio.run(_ask(run_root, {}))
     assert declined["code"] == "transitions_unavailable"
     served, _ = asyncio.run(_ask(run_root, {"history": held}))

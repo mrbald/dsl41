@@ -488,13 +488,10 @@ def _genesis(
         path = run_root / STORE_NAME
         store = SqliteStore(path, created_at=at, identity=identity)
         os.chmod(path, 0o600)
-    journal = Journal(store, lock=lock, path=path)
+    journal = Journal(store, lock=lock, path=path, writable=False)
     instance = uuid.uuid4().hex  # this engine start's token, recorded in `engine started`
     try:
-        # the first history (DL-536) and the history index's coverage (DL-539)
-        where = str(path or "the rehearsal store")
-        journal.transitions_declined, journal.history = begin_transitions(store, where=where)
-        journal.history_declined = settle_history(store, where=where)
+        _begin_start(journal, where=str(path or "the rehearsal store"))
         rev = store.put_config(configuration.to_bytes(), configuration.digest())
         journal.append(_config_applied(rev, configuration, journal, at))
         journal.engine("started", at, config_rev=rev, instance=instance)
@@ -526,6 +523,17 @@ def _genesis(
     engine.lifecycle.replay_done()  # genesis has nothing to replay
     engine.started.set()  # genesis recorded `engine started` above
     return engine
+
+
+def _begin_start(journal: Journal, *, where: str) -> None:
+    """The start's transition steps (`runner_transitions.begin`, DL-536) and the history
+    index's (DL-539). The transition rows claim only what this build committed, under a new
+    history. The journal becomes writable here and nowhere else: once the history's row is
+    committed, so this start appends nothing before it, its failed start's
+    `shutdown_during_startup` included; a start that cannot commit the row fails (DL-553)."""
+    journal.transitions_declined, journal.history = begin_transitions(journal.store, where=where)
+    journal.writable = True
+    journal.history_declined = settle_history(journal.store, where=where)
 
 
 def _config_applied(
@@ -604,8 +612,8 @@ async def resume_run(
     process, a wrapper, a spool or a timer (spec-restart, DL-433).
 
     A refused restart holds nothing: every task it started is cancelled and collected, the store
-    is closed with `shutdown_during_startup` recorded when it was opened, and the lock is
-    released last."""
+    is closed with `shutdown_during_startup` recorded when it was opened and the start's history
+    row committed (DL-553), and the lock is released last."""
     if grace_seconds is not None:
         settings = (settings or EngineSettings()).overridden(grace_term_s=grace_seconds)
     # acquire first (S6a, DL-99): a mutex taken after the first read or side effect is not a
@@ -714,8 +722,10 @@ async def _resume_under_lock(
         path=path,
         open_table=snapshot.open if snapshot is not None else None,
         position=snapshot.position if snapshot is not None else None,
+        # nothing is written until every refusal has had its chance and the history's row is
+        # committed (`_begin_start`, DL-553)
+        writable=False,
     )
-    journal.writable = False  # nothing is written until every refusal has had its chance
     journals.append(journal)
     for seq, record in tail:
         journal.open.note(seq, record)
@@ -838,14 +848,9 @@ async def _resume_under_lock(
     journal.store = SqliteStore(path)
     engine.decisions.fallback = _decision_lookup(journal.store)
     os.chmod(run_root, 0o700)
-    journal.writable = True  # every refusal has had its chance (spec-restart §1)
-    # the transition rows claim only what this build committed, under a new history; the steps
-    # write only those tables and a failure there leaves the start alone (DL-536)
-    journal.transitions_declined, journal.history = begin_transitions(
-        journal.store, where=str(path)
-    )
-    # the history index the same, after the history begun above (DL-539)
-    journal.history_declined = settle_history(journal.store, where=str(path))
+    # every refusal has had its chance (spec-restart §1); the steps write only the transition
+    # and history-index tables, and a failed tidying step leaves the start alone (DL-536)
+    _begin_start(journal, where=str(path))
     lock.note(at=clock.now())
     for job, rt in engine.oracle.store.job.items():
         if rt.run_number:

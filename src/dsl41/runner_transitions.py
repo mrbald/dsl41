@@ -6,21 +6,31 @@ decides reads them: duplicate detection, dispatch, restart and retention keep th
 Nothing replays records to fill rows: a row exists because this build committed it.
 
 `begin` runs once per engine start, after restart validation and never on the validate-only
-path. Each step runs on its own, so one that fails leaves the others done:
+path, before the start appends any record and before a failed restart may record its shutdown
+(DL-553). Its first step is required; the other two tidy the rows and run each on its own:
 
-1. Bound the earlier starts: a start whose own history row could not be written gets one,
-   beginning just after the `engine started` record before its own. A start writes its row
-   before any record of its own, so no earlier history vouches for a record it wrote.
-2. Begin the start's history after the last seq. A client that read rows under an earlier
+1. Begin the start's history after the last seq. A client that read rows under an earlier
    history can trust them up to the seq the next history began at; a restored copy forgets the
-   histories it never saw, so a cursor from the abandoned future reads as stale.
+   histories it never saw, so a cursor from the abandoned future reads as stale. The row says
+   which start wrote which records, so a start that cannot commit it appends no record. It
+   prints one diagnostic line, `dsl41: ERROR: <store>: begin the history: <error>; ...`, and
+   then the store's error propagates as an append error at the start does, with its traceback
+   (DL-553). A restart that commits the row and dies before any record leaves a history that
+   holds no seq: the next start's begins at the same seq and, listed after it, owns the seqs
+   from there. A first start that dies so leaves no record, and the next start meets DL-504's
+   refusal.
+2. Bound the earlier starts, on a root written before DL-553: a start whose own history row
+   could not be written, found by its retained `engine started` record, gets a row beginning
+   just after the retained `engine started` that precedes it. That boundary is conservative:
+   it can take in the tail of the start before. A start that died before writing its `engine
+   started`, or whose record was pruned, cannot be found and gets no row.
 3. Settle the rows: drop those and the coverage outside the retained records (an earlier build
    pruned without knowing the table, or a copy holds rows its journal lost), and record a gap
    over every retained interval the table does not name (a root older than the table, or
    records an earlier build appended). Coverage starts at the first record this build commits.
 
-If a step raises, the start goes on, one line says so, and `transitions` declines for this run
-with the reason (`declined`), which `status` shows too: it asserts no entries, coverage,
+If step 2 or 3 raises, the start goes on, one line says so, and `transitions` declines for this
+run with the reason (`declined`), which `status` shows too: it asserts no entries, coverage,
 continuity or history. The rows keep being committed with their records; the next start runs
 the steps again.
 
@@ -71,20 +81,29 @@ _CUTTABLE: Final[tuple[str, ...]] = ("cause", "job", "transition", "start_source
 
 class Begun(NamedTuple):
     """What the start's steps leave (DL-536, DL-541): why `transitions` declines for this run,
-    or None; and the history this start began, which `status` names, or None when any step
-    failed, even after the history was written."""
+    or None; and the history this start began, which `status` names, or None when a tidying
+    step failed, though the history was written (DL-553)."""
 
     declined: str | None
     history: str | None
 
 
 def begin(store: Store, *, where: str) -> Begun:
-    """Run the start's steps (module docstring), the history first and each step on its own,
-    so a failed trim or gap step keeps the start's history boundary."""
+    """Run the start's steps (module docstring). The history's row commits first, and a
+    failure there is the start's: one diagnostic line, then the error itself propagates
+    (DL-553). The two
+    tidying steps run after it, each on its own, so a failed one keeps the history boundary."""
     history = uuid.uuid4().hex
+    try:
+        store.begin_history(history)
+    except Exception as exc:
+        best_effort_report(
+            f"dsl41: ERROR: {where}: begin the history: {type(exc).__name__}: {exc};"
+            " the start appends no record and fails (DL-553)"
+        )
+        raise
     steps: tuple[tuple[str, Callable[[], None]], ...] = (
         ("bound the earlier starts", lambda: _bound_earlier_starts(store)),
-        ("begin the history", lambda: store.begin_history(history)),
         ("settle the rows", lambda: _settle_rows(store)),
     )
     reasons: list[str] = []
@@ -101,7 +120,8 @@ def begin(store: Store, *, where: str) -> Begun:
 
 
 def _bound_earlier_starts(store: Store) -> None:
-    """Give every retained engine start with no history row one, beginning just after the
+    """Give every retained engine start with no history row one (a start written before
+    DL-553, whose row could fail and leave it going on), beginning just after the
     `engine started` record before it: a start writes its history row before any record of its
     own and its `engine started` after, so the row cannot begin later than the start did, and
     an earlier history never vouches for a record this start wrote."""

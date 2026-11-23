@@ -27994,3 +27994,27 @@ relitigate an entry; append a new one.
   `faulthandler_timeout` prints a hung test's stack after 120 s; it ends nothing.
   NOT DONE. The suite's time itself. The printed durations are the evidence the next look
   at it needs: whether a few files hold a worker while the others wait.
+- DL-553 A start writes no record before its history row is committed
+  (2026-11-24; BUG-114, found while designing the archive; src/dsl41/runner_transitions.py,
+  src/dsl41/runner_startup.py, docs/runner-design.md, tests/test_history_first.py,
+  tests/test_transitions.py; narrows DL-536; closes BUG-114; no state-machine version change)
+  THE RULE. A start commits its history row before it appends any record, on a fresh root
+  and on a resume. On a resume the journal becomes writable for the start only after that.
+  A start that cannot commit the row fails as a start that cannot append a record fails:
+  the error is not caught, one line on standard error names the step, no record is
+  appended and the lock is released. The other two steps of the start's routine, bounding
+  the earlier starts and settling the rows, stay best-effort: each on its own, and
+  `transitions` declines for the run when one fails.
+  THE DEFECT. DL-536 made all three steps best-effort. Two tidy an optional read model. The
+  third says which start wrote which records. A start that went on without it appended its
+  records under the history before it: after a restore through seq 2 and a failed history
+  step, the cleanup's `shutdown_during_startup` took seq 3 under the first line's token,
+  where that line has another record. The `transitions` continuity and the archive's line
+  labels (DL-545) then name the wrong line for that span.
+  WHAT FOLLOWS. A fresh root whose first start fails there is an incomplete genesis
+  (DL-504), as when its first append fails. A start that commits its row and dies before any
+  record leaves an empty history: a later start with the same first seq owns the range.
+  UNCHANGED. Every record's form, the charts, the oracle, the goldens, the control protocol.
+  COST. A start that could run with a history table it cannot write no longer starts. The
+  same store takes the journal's rows. A root written before this change keeps its starts
+  with no row; DL-536's bounding gives them one where an `engine started` record remains.

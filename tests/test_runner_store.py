@@ -1275,3 +1275,46 @@ def test_empty_configuration_has_an_empty_job_order() -> None:
     configuration = Configuration(catalog=CatalogIR(), profile=RuntimeProfile())
     assert decode(configuration.to_bytes())["job_order"] == []
     assert Configuration.from_bytes(configuration.to_bytes(), where="empty") == configuration
+
+
+def test_dl553_a_store_created_on_a_full_disk_raises_the_full_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The store may grow to the pages a new store takes, and its meta rows need more: the
+    insert fails for want of a page and SQLite ends the transaction itself. The error raised
+    is the full disk, not a rollback's that would follow it."""
+    from dsl41 import runner_store
+
+    with closing(SqliteStore(tmp_path / "reference.db")) as reference:
+        (pages,) = reference._db.execute("PRAGMA page_count").fetchone()
+    connect = sqlite3.connect
+
+    def limited(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        db = connect(*args, **kwargs)
+        db.execute(f"PRAGMA max_page_count = {pages}")
+        return db
+
+    monkeypatch.setattr(runner_store.sqlite3, "connect", limited)
+    with pytest.raises(sqlite3.OperationalError, match="^database or disk is full$"):
+        SqliteStore(tmp_path / "s.db", identity={"large": "x" * 50_000})
+
+
+def test_dl553_a_read_whose_transaction_ended_raises_its_own_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read's transaction that ended inside the read, as SQLite ends one after some errors:
+    the read's own error propagates, not a closing COMMIT's."""
+    from dsl41 import runner_store
+    from dsl41.runner_store import HistoryQuery
+
+    failure = sqlite3.OperationalError("the read's own error")
+
+    def ended(rows: SqliteStore, query: HistoryQuery) -> None:
+        rows._db.execute("ROLLBACK")
+        raise failure
+
+    monkeypatch.setattr(runner_store, "_read_history", ended)
+    with closing(SqliteStore(tmp_path / "s.db")) as store:
+        with pytest.raises(sqlite3.OperationalError) as raised:
+            store.read_history(HistoryQuery("j", None, 1, 0, 1))
+        assert raised.value is failure and not store._db.in_transaction

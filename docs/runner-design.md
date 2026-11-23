@@ -979,21 +979,39 @@ seq it does not name as covered has no claim. A prune step removes the rows
 below the journal's new first seq and trims the coverage there,
 in its transaction. Nothing replays records to fill rows: a row exists
 because this build committed it. Each engine start, after restart
-validation and never on the validate-only path, runs three steps, each on
-its own (`runner_transitions.begin`). First, an earlier start whose own
-history row could not be written gets one, beginning just after the `engine
-started` record before its own. Then it records the start's history in
+validation and never on the validate-only path, runs three steps
+(`runner_transitions.begin`). First, it records the start's history in
 `transitions_history`: a restored copy forgets the histories it never saw,
 so a reader's cursor from the abandoned future reads as stale
-(control-protocol §4 `transitions`). Last, it drops rows and coverage
+(control-protocol §4 `transitions`). This step is required. It runs before
+the start appends any record, the `shutdown_during_startup` of a failed
+restart included, so every record lies under the history of the start that
+wrote it. The journal refuses an append until the row is committed. A
+start that cannot commit the row appends no record. It prints one
+diagnostic line, `dsl41: ERROR: <store>: begin the history: <error>; ...`,
+and then the store's error propagates as an append error at the start
+does, with its traceback: the engine exits 1 and the lock is released
+(DL-553). On a fresh root that leaves a store with no record, which the
+next start refuses (DL-504). A restart that commits the row and dies
+before any record leaves a history that holds no seq: the next start's
+history begins at the same seq and, listed after it, holds the seqs from
+there. A first start that dies so leaves no record, and the next start
+meets the same DL-504 refusal.
+The other two steps tidy the rows and run each on its own. First, on a root
+written before DL-553, an earlier start whose own history row could not be
+written gets one if its `engine started` record is retained. The row begins
+just after the retained `engine started` that precedes it, so it can take
+in the tail of the start before. A start that died before writing its
+`engine started`, or whose record was pruned, cannot be found and gets no
+row. Last, it drops rows and coverage
 outside the retained records and records a gap over every retained
 interval the table does not name: a root older than the table, or records
 an earlier build appended. Coverage therefore starts at the first record
 this build commits. An ordinary restart's tail is covered already, since
-its rows committed with their records. If a step raises, the start goes on
-and reports it in one line, and `transitions` declines for that run with
-the reason, which `status` shows too; rows keep being committed with their
-records, and the next start runs the steps again. The steps write
+its rows committed with their records. If a tidying step raises, the start
+goes on and reports it in one line, and `transitions` declines for that run
+with the reason, which `status` shows too; rows keep being committed with
+their records, and the next start runs the steps again. The steps write
 nothing but these tables, so what the restart decides, the live oracle and
 the journal are as they would be without them.
 

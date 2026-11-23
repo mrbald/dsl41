@@ -1176,6 +1176,7 @@ class Journal:
         path: Path | None = None,
         open_table: OpenTable | None = None,
         position: Position | None = None,
+        writable: bool = True,
     ) -> None:
         self.store = store
         #: the store file, None for a `MemoryStore`
@@ -1189,9 +1190,10 @@ class Journal:
         self.root_id = meta.get("root_id")
         self._lock = lock
         self._subscribers: list[Subscription] = []
-        #: False while a restart has not passed every refusal: nothing is recorded then, not
-        #: even `shutdown_during_startup`
-        self.writable = True
+        #: whether this start may append: False from an engine start's opening until it has
+        #: passed every refusal and committed its history row, and `append` refuses then, so
+        #: nothing is recorded, not even `shutdown_during_startup` (DL-553)
+        self.writable = writable
         self.open = open_table if open_table is not None else OpenTable()
         self.position = position if position is not None else Position()
         self.last_seq = store.last_seq()
@@ -1199,7 +1201,7 @@ class Journal:
         #: (`runner_transitions.begin`, DL-536); None when it serves
         self.transitions_declined: str | None = None
         #: the history this start began in the transition rows, once every start step
-        #: succeeded; `status` names it (DL-541). None otherwise
+        #: succeeded; `status` names it (DL-541). None after a failed tidying step (DL-553)
         self.history: str | None = None
         #: why the history index serves no read for this run: the start could not settle its
         #: rows (`runner_transitions.settle_history`, DL-539); None when it serves
@@ -1218,7 +1220,13 @@ class Journal:
         not know is refused before anything is written (`check_record`). `transitions` are the
         trace entries the first record produced, committed with it (DL-536). The history index's
         rows commit with them too, a run's opening under `rev`, the configuration rev in force
-        (`index_rows`, DL-539)."""
+        (`index_rows`, DL-539). A journal not yet `writable` refuses before anything is
+        written (DL-553)."""
+        if not self.writable:
+            raise StoreError(
+                "the journal takes no record before this start has passed every refusal and"
+                " committed its history row (DL-553)"
+            )
         dispatches = dict(self.open.dispatches)
         for seq, record in enumerate(records, start=self.next_seq()):
             check_record(record)

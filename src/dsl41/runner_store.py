@@ -1229,7 +1229,7 @@ class SqliteStore:
                 )
             self._db.execute("COMMIT")
         except BaseException:
-            self._db.execute("ROLLBACK")
+            _end(self._db, "ROLLBACK")
             raise
         self._check_schema()
 
@@ -1562,7 +1562,7 @@ class SqliteStore:
                 pruned_through=None if through is None else (int(through[0]), int(through[1])),
             )
         finally:
-            self._db.execute("COMMIT")
+            _end(self._db, "COMMIT")
 
     def cover_transitions(self, intervals: Sequence[Interval]) -> None:
         with self._transaction():
@@ -1677,7 +1677,7 @@ class SqliteStore:
         try:
             return _read_history(self, query)
         finally:
-            self._db.execute("COMMIT")
+            _end(self._db, "COMMIT")
 
     def _stamp_of(self, seq: int) -> datetime | None:
         row = self._db.execute("SELECT at_utc FROM journal WHERE seq = ?", (seq,)).fetchone()
@@ -1852,7 +1852,7 @@ class SqliteStore:
                 last_seq=self.last_seq(),
             )
         finally:
-            self._db.execute("COMMIT")
+            _end(self._db, "COMMIT")
 
 
 class _Transaction:
@@ -1868,4 +1868,12 @@ class _Transaction:
         if exc_type is None:
             self._db.execute("COMMIT")
         else:
-            self._db.execute("ROLLBACK")
+            _end(self._db, "ROLLBACK")
+
+
+def _end(db: sqlite3.Connection, statement: str) -> None:
+    """End the open transaction with `statement`, COMMIT or ROLLBACK, only while one is open.
+    SQLite ends a transaction by itself after some errors (a full disk): the statement would
+    then raise and hide the error that ended it (DL-553)."""
+    if db.in_transaction:
+        db.execute(statement)
