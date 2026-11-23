@@ -101,6 +101,7 @@ from dsl41.runner_journal import (
     Position,
     ReplayFault,
     decode_snapshot,
+    discharged_record,
     dispatched_runs,
     first_rev,
     load_configuration,
@@ -820,6 +821,7 @@ async def _resume_under_lock(
     engine.resume_at = last_at
     wires = [wire for _, record in tail if (wire := wire_record(record)) is not None]
     replay = _replay_into_engine(engine, wires, snapshot, start, path)
+    engine.unended = replay.unended
     if not clock.virtual:
         engine.frontiers = engine.frontiers.model_copy(
             update={"at": max(engine.frontiers.at or last_at, last_at)}
@@ -855,7 +857,7 @@ async def _resume_under_lock(
     scan = _first_reading(engine, tail, _interrupted_drain(tail) or frozenset())
     for step in steps:
         engine.catch_up(partial(step, scan))
-    engine.catch_up(partial(_owed, engine, wires, replay, last_at))
+    engine.catch_up(partial(_owed, engine, wires, replay.ended, last_at))
     if journal.open.update is not None:  # the update in STOPPING, its filter holding
         # Startup validates every open update's plan before adopting attempts (DL-432).
         assert opened_update is not None
@@ -1461,12 +1463,14 @@ def _cleanup(engine: Engine, attempt: OpenAttempt, _scan: object) -> None:
         engine._ladder_ended(run_id)  # nothing to stop: closed now
 
 
-def _owed(engine: Engine, wires: list[dict[str, Any]], replay: Any, last_at: datetime) -> None:
+def _owed(
+    engine: Engine, wires: list[dict[str, Any]], ended: Mapping[str, int], last_at: datetime
+) -> None:
     """The catch-up's owed work, once every observation and cleanup is taken (spec-restart §6):
     the plans the store holds unfinished, in seq order, then the pending starts; then the first
     look at a resumed update's stop set (DL-432)."""
     engine.perform_owed_plans()
-    _discharge_pending(engine, wires, replay, last_at)
+    _discharge_pending(engine, wires, ended, last_at)
     engine.update.look()
 
 
@@ -1565,19 +1569,29 @@ def _resume_watch(engine: Engine, job_ir: JobIR, attempt: OpenAttempt, last_at: 
 
 
 def _discharge_pending(
-    engine: Engine, wires: list[dict[str, Any]], replay: Any, last_at: datetime
+    engine: Engine, wires: list[dict[str, Any]], ended: Mapping[str, int], last_at: datetime
 ) -> None:
     """Step 7: each pending dispatch has one deferred item for the loop, which dispatches it
     while its run is still current. A start the replayed tail decided with no `dispatch` record
-    (the previous engine died between the decision and the record, DL-102) is made a
-    `dispatch_pending` first,
-    so it is durable until its `dispatch` commits. A run that already has an attempt, open or
-    dispatched in the tail, a pending record, or a replacement its plan queued is not started
-    again."""
+    (the previous engine died between the decision and the record, DL-102) and whose run has
+    not ended since (`Engine.unended`, DL-551) is made a `dispatch_pending` first, in the order
+    derived, so it is durable until its `dispatch` commits. A run that already has an attempt,
+    open or dispatched in the tail, a pending record, or a replacement its plan queued is not
+    started again.
+
+    A pending record whose run the replayed tail ended (`Replay.ended`: an input ended it, or a
+    configuration removed or retyped its job), before or after the record, is discharged with no
+    launch: an ended run is never wanted again. Only a store an earlier build wrote can hold
+    one, since this build discharges it with the record that ends the run. Where the tail shows
+    no end of the run, the record is carried out as recorded (DL-550, DL-551)."""
     assert engine.journal is not None
     table = engine.journal.open
     owed = sorted(table.pending.values(), key=lambda p: p.seq)
+    wall = engine.clock.now()
     for pending in owed:
+        if pending.run_number <= ended.get(pending.job, 0):
+            engine.journal.append(discharged_record(pending.seq, engine.now_present(wall=wall)))
+            continue
         # `Engine.defer` admits a pending start once, so one already queued stays covered (DL-425).
         engine.defer(Deferred(pending.job, pending.run_number, pending=pending.seq), after=last_at)
     covered = set(dispatched_runs(wires)) | {(p.job, p.run_number) for p in owed}
@@ -1587,15 +1601,15 @@ def _discharge_pending(
         for plan in table.plans.values()
         if any(step["step"] == "dispatch" for step in plan.steps)
     }
-    wall = engine.clock.now()
-    for job, rt in engine.oracle.store.job.items():
-        key = (job, rt.run_number)
-        if rt.status not in LIVE or key in covered or key not in replay.spawns:
+    unended, engine.unended = engine.unended, {}
+    for job, run in unended:
+        if (job, run) in covered:
             continue
         at = engine.now_present(wall=wall)
+        rt = engine.oracle.store.job[job]
         scheduled = rt.status_at if rt.status_at is not None else at
-        seq = engine.journal.append(pending_record(job, rt.run_number, scheduled, at))
-        engine.defer(Deferred(job, rt.run_number, pending=seq), after=last_at)
+        seq = engine.journal.append(pending_record(job, run, scheduled, at))
+        engine.defer(Deferred(job, run, pending=seq), after=last_at)
 
 
 def _record_start(

@@ -238,7 +238,6 @@ def test_kill_provenance_is_transient_and_first_emission_wins():
     origins = {}
     assert dispatch_plan(
         batch.emitted,
-        runs={"j": 1},
         dispatched={"j": 1},
         live={"j": 1},
         dispatchable=frozenset({"j"}),

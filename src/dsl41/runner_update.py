@@ -14,9 +14,10 @@ under the run of that process, and every named job whose row is STARTING or RUNN
 update stops, no job of its recorded dispatch filter is dispatched: the jobs it names, which are
 the plan's added, changed and removed jobs, the admitted box roots and their descendants in the
 old and in the new catalog (`reload_update.filter_of`, DL-527). A start the oracle decides for one
-is held as `dispatch_pending`. After the application each held start is released: one whose run
-is no longer wanted is discharged with no launch, any other is launched under the applied
-definition.
+is held as `dispatch_pending`. One whose run ends while it waits is discharged with the input
+that ends it, and one whose job the application removes or retypes with the `config applied`
+record (DL-551). After the application each held start left is released: one whose run is no
+longer wanted is discharged with no launch, any other is launched under the applied definition.
 
 An attempt of the stop set that ends while the update stops keeps its outcome back: the outcome
 and its follow-up plan are appended after the application, under the applied catalog and
@@ -93,7 +94,12 @@ from dsl41.runner_attempts import UNSETTLED, FollowUp
 from dsl41.runner_clock import EngineError
 from dsl41.runner_codes import Code
 from dsl41.runner_config import Configuration, RuntimeProfile, tz_aliases_of, with_host_settings
-from dsl41.runner_journal import CONFIG_MARKER, config_marker, update_box_roots
+from dsl41.runner_journal import (
+    CONFIG_MARKER,
+    config_marker,
+    discharged_record,
+    update_box_roots,
+)
 from dsl41.runner_ledger import STATE_MACHINE_VERSION
 from dsl41.runner_store import Record, Store
 from dsl41.runtime_policy import policy_values
@@ -786,7 +792,21 @@ class EngineUpdate:
         # the trace says where the rev moved, as a replay of the record does; the mark commits
         # with the record and reaches the trace once the record is durable (DL-536)
         mark = marker(at, CONFIG_MARKER, config_marker(application.rev))
-        journal.append(Record(at, "config", None, None, body), transitions=[mark])
+        # a removed or retyped job's row ended at the swap: its waiting starts are discharged
+        # with the record (DL-551)
+        store = engine.oracle.store
+        retired = engine.retire(
+            [
+                (job, (store.job.get(job) or store.tombstones[job]).run_number)
+                for job in application.removed
+            ]
+        )
+        journal.append(
+            Record(at, "config", None, None, body),
+            *(discharged_record(seq, at) for seq in retired),
+            transitions=[mark],
+        )
+        engine.unqueue(retired)
         engine.oracle.add_mark(mark)
         self._body = body
         return application

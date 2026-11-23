@@ -810,53 +810,99 @@ def stale_reason(oracle: Oracle, ev: Event) -> Rejection | None:
 type DispatchKind = Literal["SPAWN", "KILL"]
 
 
-def run_starts(entries: Iterable[TraceEntry]) -> frozenset[tuple[str, int]]:
-    """The `(job, run)` starts the engine's own start entries in `entries` begin: each status
-    entry into STARTING that carries its run's number (DL-537). An injected STARTING carries
-    none, and a bypass's numbered entry is a SUCCESS, so neither is a start (DL-550)."""
-    return frozenset(
-        (entry.job, entry.run_number)
-        for entry in entries
-        if entry.run_number is not None and entry.transition.endswith("->STARTING")
-    )
+@dataclass(frozen=True)
+class DecidedStart:
+    """A start the engine decided in one batch: run `run` of `job`, begun by the job's status
+    entry at `position` among that job's status entries in the batch (DL-551)."""
+
+    job: str
+    run: int
+    position: int
+
+
+@dataclass(frozen=True)
+class RunFold:
+    """What one batch's trace did to runs (`fold_runs`): the starts it decided whose run it did
+    not end, in the order it made them, and the runs it ended (DL-551)."""
+
+    starts: tuple[DecidedStart, ...] = ()
+    ended: frozenset[tuple[str, int]] = frozenset()
+
+
+def fold_runs(entries: Iterable[TraceEntry], runs: Mapping[str, int]) -> RunFold:
+    """Which runs one batch began and ended, read from its trace `entries` in order, with
+    `runs` each job's run number before the batch. It is the only reader of whether a run began
+    or ended in an input (DL-551).
+
+    Per job the fold keeps the current run. A status entry that carries a number sets it: the
+    engine's `->STARTING` or a bypass's `->SUCCESS` (DL-537). A numbered `->STARTING` opens a
+    start of that run. An entry that takes the job out of STARTING and RUNNING ends the current
+    run: it closes the run's start if this batch opened one, and reports the run as ended. A
+    move between STARTING and RUNNING closes nothing. An injected STARTING carries no number and
+    opens nothing (DL-550). Markers are not status entries."""
+    current = dict(runs)
+    seen: dict[str, int] = {}
+    opened: dict[tuple[str, int], DecidedStart] = {}
+    ended: set[tuple[str, int]] = set()
+    for entry in entries:
+        old, arrow, new = entry.transition.partition("->")
+        if not arrow:
+            continue
+        job = entry.job
+        position = seen.get(job, 0)
+        seen[job] = position + 1
+        if entry.run_number is not None:
+            current[job] = entry.run_number
+            if new == "STARTING":
+                opened[(job, entry.run_number)] = DecidedStart(job, entry.run_number, position)
+        if old in LIVE and new not in LIVE:
+            run = (job, current.get(job, 0))
+            opened.pop(run, None)
+            ended.add(run)
+    return RunFold(tuple(opened.values()), frozenset(ended))
 
 
 def dispatch_plan(
     emitted: Sequence[Event],
     *,
-    runs: Mapping[str, int],
     dispatched: Mapping[str, int],
     live: Mapping[str, int],
     dispatchable: frozenset[str],
-    starts: Collection[tuple[str, int]],
+    starts: Collection[DecidedStart],
     origins: dict[tuple[DispatchKind, str, int], int] | None = None,
 ) -> list[tuple[DispatchKind, str, int]]:
     """The starts and kills one applied input implies, in emitted order: `(kind, job, run)`.
 
-    A pure function of what the oracle emitted, the batch's own start entries (`starts`, read
-    by `run_starts`) and what the shell holds, so replay derives the starts a live engine
-    dispatched (`runner_journal.replay_inputs`). An emitted STARTING plans a start only when
-    `starts` holds the job's current run (DL-550): an injected STARTING writes no numbered
-    entry, and vendor parity launches nothing. The ghost-run gate (`runs[job] >
-    dispatched[job]`) stays beside it, so a run is planned at most once (DL-234). A terminal
-    status for a job with no live run plans no kill. Alarms, boxes, pseudo-entries and job types
-    with no adapter plan nothing.
+    A pure function of what the oracle emitted, the batch's surviving starts (`starts`, read by
+    `fold_runs`) and what the shell holds, so replay derives the starts a live engine
+    dispatched (`runner_journal.replay_inputs`). Each status write gives one trace entry and one
+    emitted STATUS of its job, in the same order, so an emitted STARTING is a start's own event
+    when it stands at the start's position among the job's emitted STATUS events. Only such an
+    event plans a start (DL-551): an injected STARTING writes no numbered entry, and vendor
+    parity launches nothing (DL-550); a start whose run the batch ended is not in `starts`. The
+    ghost-run gate (the start's run past `dispatched[job]`) stays beside it, so a run is planned
+    at most once (DL-234). Starts come in the order the batch made them, and kills at their
+    emitted positions. A terminal status for a job with no live run plans no kill. Alarms, boxes,
+    pseudo-entries and job types with no adapter plan nothing.
 
     One call plans each `(kind, job, run)` once (DL-232): two terminal transitions of one live
     run in one batch, such as a deadline firing inside a `CHANGE_STATUS SUCCESS` batch, plan one
-    kill. Whether a start is still wanted is `spawn_superseded`'s question, asked when it is
-    dispatched."""
+    kill. `spawn_superseded` is still asked when a start is dispatched."""
+    begun = {(start.job, start.position): start.run for start in starts}
+    seen: dict[str | None, int] = {}
     plan: list[tuple[DispatchKind, str, int]] = []
     for index, ev in enumerate(emitted):
         if ev.kind != "STATUS":
             continue
         job = ev.job()
+        position = seen.get(job, 0)
+        seen[job] = position + 1
         if job is None or job not in dispatchable:
             continue
         status = ev.payload.get("status")
         item: tuple[DispatchKind, str, int] | None = None
-        run = runs.get(job, 0)
-        if status == "STARTING" and (job, run) in starts and run > dispatched.get(job, 0):
+        run = begun.get((job, position))
+        if status == "STARTING" and run is not None and run > dispatched.get(job, 0):
             item = ("SPAWN", job, run)
         elif status in TERMINAL and job in live:
             item = ("KILL", job, live[job])
@@ -893,9 +939,11 @@ class Applied:
     emitted: list[Event] = field(default_factory=list)
     kill_emissions: frozenset[int] = frozenset()
     command_start: int | None = None
-    #: the runs the batch's own start entries begin (`run_starts`), the only starts
-    #: `dispatch_plan` plans, live and replayed alike (DL-550)
-    starts: frozenset[tuple[str, int]] = frozenset()
+    #: the starts the batch decided and did not end (`fold_runs`), the only starts
+    #: `dispatch_plan` plans, live and replayed alike (DL-551)
+    starts: tuple[DecidedStart, ...] = ()
+    #: the runs the batch ended, whose waiting starts are retired (DL-551)
+    ended: frozenset[tuple[str, int]] = frozenset()
 
 
 def apply_attempt(
@@ -908,7 +956,8 @@ def apply_attempt(
     """Steps 5-7 for one admitted attempt, live or replayed.
 
     Live and replay share this function. `decided` is a durable decision from the log and wins
-    over the gate. The starts the batch's trace begins are read here once, for both (DL-550).
+    over the gate. The runs the batch's trace begins and ends are read here once, for both, from
+    the run numbers before the batch (`fold_runs`, DL-551).
 
     `forced` is a quarantine (`quarantine_verdict`): the attempt is rejected without the gate
     and only the time half applies. Unlike `decided`, it carries no revisions; the result takes
@@ -918,6 +967,7 @@ def apply_attempt(
     rejection: Rejection | None = None
     decision: Literal["applied", "rejected"]
     traced = oracle.trace_length()
+    runs = {job: row.run_number for job, row in oracle.store.job.items()}
     with oracle.batch(attempt.at) as batch:  # step 5: the time half, timers first
         if decided is not None:
             decision = decided.decision
@@ -935,6 +985,7 @@ def apply_attempt(
             f"replay diverged at index {attempt.index}: the log records revisions"
             f" {decided.revisions} and this build derives {batch.revisions}"
         )
+    fold = fold_runs(oracle.trace_since(traced)[1], runs)
     return Applied(
         result=decided
         or ApplyResult(
@@ -948,7 +999,8 @@ def apply_attempt(
         emitted=batch.emitted,
         kill_emissions=batch.kill_emissions,
         command_start=batch.command_start,
-        starts=run_starts(oracle.trace_since(traced)[1]),
+        starts=fold.starts,
+        ended=fold.ended,
     )
 
 

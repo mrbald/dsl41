@@ -27945,3 +27945,32 @@ relitigate an entry; append a new one.
   engine's history list (BUG-114). A stopped archive lets the live store grow. The file
   shows dispatch environments; its mode (0600) is the access rule. Not built: the access
   log's lines.
+- DL-551 A decided start is wanted until its run ends
+  (2026-11-24; BUG-112 and BUG-113, found while fixing BUG-107; src/dsl41/runner_admission.py,
+  src/dsl41/runner.py, src/dsl41/runner_journal.py, src/dsl41/runner_startup.py,
+  src/dsl41/runner_update.py, docs/runner-design.md, tests/test_wanted_starts.py,
+  tests/test_dispatch.py, tests/test_own_starts.py, tests/test_update_member_holds.py;
+  builds on DL-550 and DL-537; narrows DL-550's cost and DL-315; closes BUG-112 and BUG-113;
+  no state-machine version change)
+  THE RULE. A start the engine decided is wanted until its run ends, and never after.
+  One fold over an input's trace, seeded with each job's run number before the input, says
+  which starts survive the input and which runs it ended: a numbered `->STARTING` opens a
+  start, an entry that takes the job out of the live statuses ends its run. The planner
+  launches only a surviving start, at the place of its own STARTING among the input's
+  events, so starts and kills keep the input's order. A start that waits (behind a group or
+  an update, in recovery, while draining) is discharged when its run ends or an update
+  removes or retypes its job, in the transaction of the record that ends it. The replay
+  runs the same fold, and a restart owes only the derived starts whose run has not ended.
+  THE DEFECT. Every place that asked "is this start still wanted?" asked the job's row as it
+  is now. An operator's `CHANGE_STATUS ... STARTING` does not move the run number and makes
+  the row live again, so a run that had ended looked like the start still waiting: at a
+  release, at a restart, and inside one input when the run ended and the status was set
+  again. The planner also read each job's final run number, so an input that opened `j.1`,
+  `k.1` and `j.2` launched `j.2` before `k.1`.
+  OLDER ROOTS. An open pending of an earlier build whose run the replayed records show
+  ended, by an input or by an update, is discharged. Where they show no ending it is
+  carried out as recorded (DL-550).
+  UNCHANGED. The oracle, the charts, the emitted events, every record's form, the snapshot,
+  the goldens. The state-machine version stays 28 (as in DL-550 and DL-315).
+  COST. A start's discharge now precedes the record that applies an update, where it
+  followed it. Going back a build brings the old behaviour back.

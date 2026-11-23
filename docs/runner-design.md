@@ -158,10 +158,12 @@ Dispatch table (emitted event → effect → what applying it does):
 | anything on a BOX                         | none   | none (folds are oracle logic)   |
 
 An effect is applied only after its decision is durable, and a start only
-after its `dispatch` record is. A start the job's row has moved past (a
-terminal status, a status that is not live, or another run number) is not
-launched (`spawn_superseded`, DL-232). The local adapter's wrapper is the
-engine's child, and the FW adapter starts no process.
+after its `dispatch` record is. A start the engine decided is wanted until
+its run ends, and never after (the start rule below, DL-551). The row is the
+last check at launch: a start the row has moved past (a terminal status, a
+status that is not live, or another run number) is not launched
+(`spawn_superseded`, DL-232). The local adapter's wrapper is the engine's
+child, and the FW adapter starts no process.
 
 The terminal-status row makes KILLJOB and term_run_time work with no
 adapter timeout logic: the oracle decides, the shell kills. The shell's own
@@ -253,18 +255,42 @@ Installation must match the TOML and helper hook paths. At most one engine
 hook and one failure helper run concurrently. Both Ubuntu and EL8 service
 drills exercise systemd's platform-specific restart behavior.
 
-The two STARTING rows carry two more conditions. A STARTING spawns only when
-the input's own trace holds the engine's start entry for the job's current
-run: the `->STARTING` entry that carries the run's number (DL-537, DL-550).
-The **ghost-run gate** keeps that start to one: the run number must be past
-the last one this engine dispatched. A CHANGE_STATUS overwrite re-emits
-STARTING with no numbered entry, and vendor parity launches nothing. This
-holds also where the run number moved with no dispatch: after an ON_NOEXEC
-bypass, or for a box retyped to a command. The rule plans no new launch; a
-dispatch or a pending dispatch that an earlier build recorded is carried out
-as recorded. An earlier build lacks the first condition. Going back to it
-brings the old behaviour back: its replay from genesis can derive, and launch
-at a restart, a start this rule suppressed.
+**The start rule (DL-551).** A start the engine decided is wanted until its
+run ends, and never after. One fold over each input's trace reads which runs
+the input began and ended (`runner_admission.fold_runs`), from each job's run
+number before the input. A status entry that carries a number sets the job's
+current run: the engine's `->STARTING` of a start, or the `->SUCCESS` of an
+ON_NOEXEC bypass (DL-537). A numbered `->STARTING` begins a start. An entry
+that takes the job out of STARTING and RUNNING ends the current run. A move
+between STARTING and RUNNING ends nothing. A CHANGE_STATUS overwrite writes
+STARTING with no number: it begins nothing, and vendor parity launches
+nothing (DL-550). This holds also where the run number moved with no
+dispatch: after an ON_NOEXEC bypass, or for a box retyped to a command.
+
+The two STARTING rows spawn only for a start the input began and did not
+end, at that start's own emitted STARTING. Starts go in the order the input
+made them; kills keep their emitted positions. The **ghost-run gate** keeps a
+start to one: its run must be past the last one this engine dispatched.
+
+A start that waits keeps its `dispatch_pending` record: one held behind its
+job's group or an update, deferred while a restart recovers, or pending while
+the engine drains. The input that ends its run discharges that record in the
+same transaction. So does the `config applied` record of an update that
+removes or retypes its job. No release launches it. A restart owes a start
+its replay derived with no record only while no later input ended its run
+and no later update removed or retyped its job. An operator's STARTING on the row afterwards launches nothing, live or at a
+restart.
+
+An earlier build can leave a pending record open for a run that ended. The
+restart discharges it, and launches nothing, where the replayed tail shows
+the run ended: an input ended it, or an update removed or retyped its job,
+before or after the record. An ended run is never wanted again. Where the
+tail shows no end of the run, the record is carried out as recorded. So is a
+dispatch or a pending dispatch that an earlier build recorded for an
+injected STARTING (DL-550). Going back a build brings the old behaviour back.
+Its replay from genesis can derive, and launch at a restart, a start this
+rule suppressed. It also launches a waiting start whose run ended when an
+operator set the row STARTING before the start's release.
 
 **Stale-completion gate.** Completions carry `(job, run_number)`. Every
 completion enters the common admission order (§7). The dry apply rejects
@@ -1186,6 +1212,8 @@ a dispatch record nor a derived start is left as it stands, for the
 operator (DL-425). A start superseded by the current oracle row is not
 launched (DL-232). All reconciliation injections are recorded in the store
 with source=reconcile.
+A derived start stays pending work only while no later input ended its run
+and no later update removed or retyped its job (DL-551).
 
 A mismatched or unreadable attempt record, or a split FW log, is quarantined
 with its reason and found pids (DL-433). Quarantine forces a hold wherever

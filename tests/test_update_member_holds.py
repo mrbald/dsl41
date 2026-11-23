@@ -1,9 +1,10 @@
 """While an update waits, no process is launched for a job it names, also when the plan leaves
 the job unchanged (DL-522, DL-525, DL-527). The named jobs are the plan's added, changed and
 removed jobs, the admitted box roots, and their descendants in the old and in the new catalog. A
-start the oracle decides for one waits as `dispatch_pending`. After the application it is
-released: discharged with no launch when its run is no longer wanted, else launched under the
-applied definition. Any other job starts at once, and the box restart's cascade can still end one
+start the oracle decides for one waits as `dispatch_pending`. One whose run ends while it waits
+is discharged with the input that ends it (DL-551). After the application the rest are released:
+discharged with no launch when the run is no longer wanted, else launched under the applied
+definition. Any other job starts at once, and the box restart's cascade can still end one
 (DL-527, THE LIMIT).
 
 The scenarios run on the virtual clock with `test_engine_stops_cookie`'s process stand-ins. The
@@ -335,9 +336,10 @@ def test_a_member_the_box_restart_ends_is_kept_back_and_started_once_in_the_new_
     stop. `m`, an idle unchanged member of the sub-box `B`, is woken while it waits, by its
     condition, by FORCE_STARTJOB or by the release of the unit it queues for: its run opens and
     one `dispatch_pending` is recorded, with no launch and no `dispatch`. So for the marked
-    `m2`. After the application the restart has ended run 1 of both: each kept start is
-    discharged with no launch, `m` is dispatched and launched once in the new box run under the
-    applied revision, and `m2` stays held (DL-463)."""
+    `m2`. The box restart's kill ends run 1 of both while the update waits, and each kept start
+    is discharged with that kill, with no launch (DL-551). After the application `m` is
+    dispatched and launched once in the new box run under the applied revision, and `m2` stays
+    held (DL-463)."""
     _Procs(monkeypatch)
     launches = _launches(monkeypatch)
     before, during = _wakes(wake)
@@ -359,12 +361,14 @@ def test_a_member_the_box_restart_ends_is_kept_back_and_started_once_in_the_new_
     assert seen["before"] == {"m": (idle, 0, False), "m2": ("INACTIVE", 0, False)}
     assert {key: seen[key] for key in ("during", "after")} == _m1_expected()
     assert _dispatch_revs(tmp_path, "m") == [(2, 2)]
+    # the box restart's kill ends run 1 while the update waits: its start is discharged then
+    # (DL-551)
     assert _starts(tmp_path, "m") == [
         ("pending", 1, False),
+        ("discharged", None, False),
         ("dispatch", 2, True),
-        ("discharged", None, True),
     ]
-    assert _starts(tmp_path, "m2") == [("pending", 1, False), ("discharged", None, True)]
+    assert _starts(tmp_path, "m2") == [("pending", 1, False), ("discharged", None, False)]
 
 
 # ---------------------------------------------------------------- M2: the named set, and no more
@@ -392,7 +396,8 @@ def test_a_moved_out_descendant_is_kept_back_and_launched_once_after_the_applica
     and `x` are kept back: each run opens with one `dispatch_pending` and no launch. `t`'s
     `term_run_time` passes while it is held, so its run ends TERMINATED. After the application
     the restart has not ended `d`'s or `x`'s run: each is dispatched and launched once in that
-    run, under the applied revision. `t`'s kept start is discharged once with no launch."""
+    run, under the applied revision. `t`'s kept start is discharged once with no launch, by the
+    input its runtime limit ended it in (DL-551)."""
     _Procs(monkeypatch)
     launches = _launches(monkeypatch)
     seen = asyncio.run(
@@ -424,7 +429,7 @@ def test_a_moved_out_descendant_is_kept_back_and_launched_once_after_the_applica
     for job in ("d", "x"):
         assert _starts(tmp_path, job) == [("pending", 1, False), ("dispatch", 1, True)]
         assert _dispatch_revs(tmp_path, job) == [(1, 2)]
-    assert _starts(tmp_path, "t") == [("pending", 1, False), ("discharged", None, True)]
+    assert _starts(tmp_path, "t") == [("pending", 1, False), ("discharged", None, False)]
     assert _starts(tmp_path, "u") == [("dispatch", 1, False)]
 
 
@@ -469,12 +474,14 @@ def test_a_restart_during_the_wait_holds_the_recorded_names_and_ends_as_the_uncu
     assert seen["filter"] == first["filter"]
     assert seen["during"] == {"m": ([], ("RUNNING", 1, False)), "m2": ([], ("RUNNING", 1, False))}
     assert seen["after"] == _m1_expected()["after"]
+    # the box restart's kill ends run 1 while the update waits: its start is discharged then
+    # (DL-551)
     assert _starts(tmp_path, "m") == [
         ("pending", 1, False),
+        ("discharged", None, False),
         ("dispatch", 2, True),
-        ("discharged", None, True),
     ]
-    assert _starts(tmp_path, "m2") == [("pending", 1, False), ("discharged", None, True)]
+    assert _starts(tmp_path, "m2") == [("pending", 1, False), ("discharged", None, False)]
 
 
 def test_a_root_whose_intent_records_the_narrower_filter_keeps_exactly_that_filter(
@@ -575,9 +582,10 @@ def test_a_member_of_a_moved_out_sub_box_is_kept_back_whatever_its_terminator_at
     """DL-527, DL-522: the update moves the sub-box `S` out of the restarting box `R`. `J`, an
     unchanged member of `S` and so a descendant of `R` in the old catalog, is woken while the
     update waits and is kept back, with or without `job_terminator` on `S` and `J`. With the
-    flags, the KILLJOB of `R` under the old catalog ends `S` and `J` (SEM-14, DL-348): after the
-    application `J`'s kept start is discharged and it is not launched. Without them its run
-    survives the restart, and it is launched once in that run after the application."""
+    flags, the KILLJOB of `R` under the old catalog ends `S` and `J` (SEM-14, DL-348): `J`'s kept
+    start is discharged with that kill, before the application, and it is not launched
+    (DL-551). Without them its run survives the restart, and it is launched once in that run
+    after the application."""
     _Procs(monkeypatch)
     launches = _launches(monkeypatch)
     seen = asyncio.run(
@@ -596,7 +604,7 @@ def test_a_member_of_a_moved_out_sub_box_is_kept_back_whatever_its_terminator_at
     assert seen["during"] == {"J": ([], ("RUNNING", 1, False))}
     if flags:
         assert seen["after"] == {"J": ([], ("TERMINATED", 1, False))}
-        assert _starts(tmp_path, "J") == [("pending", 1, False), ("discharged", None, True)]
+        assert _starts(tmp_path, "J") == [("pending", 1, False), ("discharged", None, False)]
     else:
         assert seen["after"] == {"J": ([1], ("RUNNING", 1, False))}
         assert _starts(tmp_path, "J") == [("pending", 1, False), ("dispatch", 1, True)]

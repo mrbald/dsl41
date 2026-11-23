@@ -11,7 +11,7 @@ sleep, no random data.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Collection
+from collections.abc import Iterable, Mapping
 from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -26,8 +26,9 @@ from transitions_check import (  # noqa: F401 -- autouse
 
 from dsl41 import runner_admission
 from dsl41.ir import lower_source
-from dsl41.oracle_state import Event
+from dsl41.oracle_state import Event, TraceEntry
 from dsl41.runner import Engine
+from dsl41.runner_admission import RunFold
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import VirtualClock
 from dsl41.runner_journal import STORE_NAME, read_journal, replay_store
@@ -122,18 +123,21 @@ def _run(run: Path, text: str, adapter: FakeAdapter, body: Any, job_type: str = 
     return asyncio.run(scenario())
 
 
-class _Every(Collection[tuple[str, int]]):
-    """Every `(job, run)`: the build before DL-550, which planned a start for any emitted
-    STARTING past the ghost-run gate."""
+_FOLD = runner_admission.fold_runs
 
-    def __contains__(self, item: object) -> bool:
-        return True
 
-    def __iter__(self) -> Any:
-        return iter(())
-
-    def __len__(self) -> int:
-        return 0
+def _every_starting(entries: Iterable[TraceEntry], runs: Mapping[str, int]) -> RunFold:
+    """The build before DL-550, which planned a start for any emitted STARTING past the
+    ghost-run gate: every `->STARTING` entry begins the job's current run."""
+    current = dict(runs)
+    numbered: list[TraceEntry] = []
+    for entry in entries:
+        if entry.run_number is not None:
+            current[entry.job] = entry.run_number
+        elif entry.transition.endswith("->STARTING"):
+            entry = entry.model_copy(update={"run_number": current.get(entry.job, 0)})
+        numbered.append(entry)
+    return _FOLD(numbered, runs)
 
 
 # ------------------------------------------------------- an injected STARTING
@@ -225,7 +229,7 @@ def test_an_earlier_build_s_dispatch_of_an_injected_starting_is_settled_as_recor
         await _feed(engine, _ev(2, "STATUS", job="j", status="STARTING"))
 
     with monkeypatch.context() as patch:
-        patch.setattr(runner_admission, "run_starts", lambda _entries: _Every())
+        patch.setattr(runner_admission, "fold_runs", _every_starting)
         _run(run, _SOLO, adapter, body)
     [record] = [r for r in read_journal(run) if r["rec"] == "dispatch"]
     assert (record["job"], record["run_number"], adapter.calls) == ("j", 1, [("j", 1)])
@@ -293,7 +297,7 @@ def test_an_earlier_build_s_pending_dispatch_of_an_injected_starting_launches_on
             await _close(third)
 
     with monkeypatch.context() as patch:
-        patch.setattr(runner_admission, "run_starts", lambda _entries: _Every())
+        patch.setattr(runner_admission, "fold_runs", _every_starting)
         asyncio.run(earlier_build())
     [pending] = _kinds(run, "dispatch_pending")
     assert (pending["job"], pending["run_number"], pending["event"]) == ("j", 1, "pending")

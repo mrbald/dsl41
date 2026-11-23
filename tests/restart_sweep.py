@@ -1318,8 +1318,8 @@ def _no_overlap(directory: Path) -> list[str]:
 def _nothing_lost(root: Path, final: list[tuple[int, str, dict[str, Any]]]) -> list[str]:
     """I7: every start the journal decided is, at quiescence, a dispatch, a closed pending record,
     a done plan step, or a recorded supersession. The decided starts are the runs replay plans
-    from the applied inputs (`Replay.spawns`: `dispatch_plan` over each input, less the starts
-    `spawn_superseded` refused, which is the supersession an input records), every run a
+    from the applied inputs (`Replay.spawns`: `dispatch_plan` over each input, which leaves out
+    a start the input itself ended, DL-551), every run a
     `dispatch_pending` names (a start held back by a drain, a held group or a recovery's
     `_owe`), and every replacement a plan step names. A start in `Replay.spawns` with no
     dispatch and no pending record is the start `_discharge_pending`'s second loop exists for

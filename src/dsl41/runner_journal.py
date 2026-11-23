@@ -66,7 +66,6 @@ from dsl41.runner_admission import (
     apply_attempt,
     describe_input,
     dispatch_plan,
-    spawn_superseded,
 )
 from dsl41.runner_clock import EngineError
 from dsl41.runner_codes import STORED_CODES
@@ -1455,6 +1454,18 @@ def pending_record(job: str, run_number: int, scheduled_at: datetime, at: dateti
     )
 
 
+def discharged_record(pending: int, at: datetime) -> Record:
+    """The close of the `dispatch_pending` record at seq `pending` with no launch: its run is no
+    longer wanted (DL-232, DL-551)."""
+    return Record(
+        at,
+        "dispatch_pending",
+        None,
+        None,
+        {"event": "discharged", "pending": pending, "dispatch": None},
+    )
+
+
 def ladder_done_record(attempt: str, at: datetime) -> Record:
     """An attempt whose outcome was committed while its ladder ran: the ladder has ended and the
     group is gone, so the attempt leaves the open table (DL-426)."""
@@ -1750,9 +1761,15 @@ class Replay:
     frontiers: Frontiers = field(default_factory=Frontiers)
     decisions: DecisionIndex = field(default_factory=DecisionIndex)
     #: every start a live engine dispatched, or would have: `dispatch_plan` over each applied
-    #: input, less the starts `spawn_superseded` refused. A run here with no `dispatch` record
-    #: is a start the previous engine decided and never launched (DL-102)
+    #: input. A run here with no `dispatch` record is a start the previous engine decided and
+    #: never launched (DL-102)
     spawns: set[tuple[str, int]] = field(default_factory=set)
+    #: the starts of `spawns` whose run no later input ended and no later configuration
+    #: removed or retyped, in the order derived: the starts still wanted (DL-551)
+    unended: dict[tuple[str, int], None] = field(default_factory=dict)
+    #: each job's latest run the replayed records ended: an input ended it, or a configuration
+    #: removed or retyped the job (DL-551)
+    ended: dict[str, int] = field(default_factory=dict)
     #: the configuration rev the oracle runs once the records are replayed
     rev: int | None = None
 
@@ -1771,11 +1788,15 @@ def config_marker(rev: int) -> str:
 type Configurations = Callable[[int], Configuration]
 
 
-def apply_configuration(oracle: Oracle, configuration: Configuration) -> None:
+def apply_configuration(oracle: Oracle, configuration: Configuration) -> tuple[str, ...]:
     """Swap `oracle`'s catalog for `configuration`'s, read under its profile, as the live
     update applied it (`Oracle.replace_catalog`): replay meets the swap where the update's
-    `config applied` record stands, between the same two inputs."""
-    oracle.replace_catalog(configuration.catalog, **oracle_reading(configuration.profile))
+    `config applied` record stands, between the same two inputs. Answers the jobs it removed,
+    a retyped one included."""
+    removed, _added = oracle.replace_catalog(
+        configuration.catalog, **oracle_reading(configuration.profile)
+    )
+    return removed
 
 
 def replay_inputs(
@@ -1799,8 +1820,10 @@ def replay_inputs(
 
     An attempt and its decision are one transaction, so an attempt with no decision means the
     store disagrees with itself and is refused. Each applied input's starts are derived as the
-    live engine plans them (`spawns`), from the start entries its own trace holds (DL-550), for
-    every catalog job that is not a box.
+    live engine plans them (`spawns`), from the starts its own trace decided and did not end
+    (DL-550, DL-551), for every catalog job that is not a box. The fold that reads them starts
+    from the run numbers of the rows the replay starts from. A start stays `unended` until a
+    later input ends its run or a configuration removes or retypes its job (DL-551).
 
     An input that raises stops the replay with a `ReplayFault` that names it; a
     `StatechartError` stops it as itself, naming the input."""
@@ -1828,7 +1851,13 @@ def replay_inputs(
                         f"the store applied configuration rev {found} and this replay has no"
                         " configurations to read it from"
                     )
-                apply_configuration(oracle, configs(found))
+                removed = apply_configuration(oracle, configs(found))
+                # a removed or retyped job's row ended between the inputs (DL-551)
+                replay.unended = {key: None for key in replay.unended if key[0] not in removed}
+                store = oracle.store
+                for job in removed:
+                    row = store.job.get(job) or store.tombstones[job]
+                    replay.ended[job] = max(replay.ended.get(job, 0), row.run_number)
                 # the trace says where the rev moved, as the live application's does
                 oracle.mark(
                     datetime.fromisoformat(record["at"]), CONFIG_MARKER, config_marker(found)
@@ -1853,16 +1882,18 @@ def replay_inputs(
             raise ReplayFault(attempt, exc) from exc
         plan = dispatch_plan(
             applied.emitted,
-            runs={job: rt.run_number for job, rt in oracle.store.job.items()},
             dispatched=dispatched,
             live={},
             dispatchable=dispatchable,
             starts=applied.starts,
         )
+        for job, run_number in sorted(applied.ended):
+            replay.unended.pop((job, run_number), None)
+            replay.ended[job] = max(replay.ended.get(job, 0), run_number)
         for _kind, job, run_number in plan:  # with no live run, a plan holds starts only
             dispatched[job] = max(dispatched.get(job, 0), run_number)
-            if spawn_superseded(oracle.store.job.get(job), run_number) is None:
-                replay.spawns.add((job, run_number))
+            replay.spawns.add((job, run_number))
+            replay.unended[(job, run_number)] = None
         replay.frontiers = replay.frontiers.admit(attempt.at).record(attempt.index)
     return replay
 

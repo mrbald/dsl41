@@ -7,10 +7,10 @@ carry it, each tested with the contrast that makes it non-vacuous:
   * **Supersession is by exact desired state**, not by generation. KILLJOB does not advance
     `run_number`, so a start for run N decided in the batch that ended run N must not launch
     (`spawn_superseded`).
-  * **Only the engine's own start plans a launch** (DL-550). An emitted STARTING plans a start
-    only when the batch's trace holds the job's numbered start entry for its current run; a
-    CHANGE_STATUS-parity STARTING overwrite writes none, and vendor parity launches nothing.
-    The ghost-run gate keeps a run to one start.
+  * **Only the engine's own start plans a launch** (DL-550, DL-551). An emitted STARTING plans
+    a start only when it is the event of a start the batch's trace decided and did not end; a
+    CHANGE_STATUS-parity STARTING overwrite writes no numbered entry, and vendor parity launches
+    nothing. The ghost-run gate keeps a run to one start.
 """
 
 from __future__ import annotations
@@ -28,7 +28,13 @@ from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, JobRuntime, TraceEntry
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
-from dsl41.runner_admission import Applied, dispatch_plan, run_starts, spawn_superseded
+from dsl41.runner_admission import (
+    Applied,
+    DecidedStart,
+    dispatch_plan,
+    fold_runs,
+    spawn_superseded,
+)
 from dsl41.runner_clock import VirtualClock
 from dsl41.runner_clock import EngineError
 from dsl41.runner_journal import read_journal, replay_inputs
@@ -62,26 +68,26 @@ def _dispatches(root: Path) -> list[tuple[str, int]]:
 
 
 def test_planning_reads_the_ghost_run_gate() -> None:
-    """An emitted STARTING with the job's own start entry for its current run plans a start,
-    once: the ghost-run gate keeps a run that was already dispatched from a second one."""
+    """An emitted STARTING that is a decided start's own event plans a start, once: the
+    ghost-run gate keeps a run that was already dispatched from a second one."""
     emitted = [_ev("STATUS", 0, job="j", status="STARTING")]
-    common = dict(live={}, dispatchable=frozenset({"j"}), starts={("j", 1)})
-    assert dispatch_plan(emitted, runs={"j": 1}, dispatched={}, **common) == [  # type: ignore[arg-type]
+    common = dict(live={}, dispatchable=frozenset({"j"}), starts=(DecidedStart("j", 1, 0),))
+    assert dispatch_plan(emitted, dispatched={}, **common) == [  # type: ignore[arg-type]
         ("SPAWN", "j", 1)
     ]
-    assert dispatch_plan(emitted, runs={"j": 1}, dispatched={"j": 1}, **common) == []  # type: ignore[arg-type]
+    assert dispatch_plan(emitted, dispatched={"j": 1}, **common) == []  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("starts", [set(), {("j", 1)}, {("k", 2)}])
+@pytest.mark.parametrize("starts", [(), (DecidedStart("j", 2, 1),), (DecidedStart("k", 2, 0),)])
 def test_a_starting_with_no_start_entry_for_the_current_run_plans_nothing(
-    starts: set[tuple[str, int]],
+    starts: tuple[DecidedStart, ...],
 ) -> None:
-    """DL-550: the run number past the gate is not enough. With no start entry, one for an
-    earlier run or one for another job, an emitted STARTING plans no start."""
+    """DL-550, DL-551: the run number past the gate is not enough. With no decided start, one
+    whose own event is another of the job's, or one for another job, an emitted STARTING plans
+    no start."""
     emitted = [_ev("STATUS", 0, job="j", status="STARTING")]
     plan = dispatch_plan(
         emitted,
-        runs={"j": 2},
         dispatched={},
         live={},
         dispatchable=frozenset({"j", "k"}),
@@ -91,7 +97,7 @@ def test_a_starting_with_no_start_entry_for_the_current_run_plans_nothing(
 
 
 def test_the_starts_are_the_numbered_starting_entries() -> None:
-    """`run_starts` reads a start from a `->STARTING` entry with a number only: an injected
+    """`fold_runs` reads a start from a `->STARTING` entry with a number only: an injected
     STARTING has none, and a bypass's numbered SUCCESS is no start (DL-537, DL-550)."""
 
     def entry(job: str, transition: str, run: int | None) -> TraceEntry:
@@ -103,13 +109,13 @@ def test_the_starts_are_the_numbered_starting_entries() -> None:
         entry("c", "INACTIVE->SUCCESS", 3),
         entry("d", "START_REFUSED", 2),
     ]
-    assert run_starts(entries) == {("a", 1)}
+    assert fold_runs(entries, {}).starts == (DecidedStart("a", 1, 0),)
 
 
 def test_a_terminal_with_no_live_run_plans_no_kill() -> None:
     """A kill that could only ever be superseded is not planned."""
     emitted = [_ev("STATUS", 0, job="j", status="SUCCESS")]
-    common = dict(runs={"j": 1}, dispatched={"j": 1}, dispatchable=frozenset({"j"}), starts=())
+    common = dict(dispatched={"j": 1}, dispatchable=frozenset({"j"}), starts=())
     assert dispatch_plan(emitted, live={}, **common) == []  # type: ignore[arg-type]
     assert dispatch_plan(emitted, live={"j": 1}, **common) == [("KILL", "j", 1)]  # type: ignore[arg-type]
 
@@ -123,7 +129,6 @@ def test_two_terminal_transitions_of_one_live_run_plan_one_kill() -> None:
     ]
     plan = dispatch_plan(
         emitted,
-        runs={"j": 1},
         dispatched={"j": 1},
         live={"j": 1},
         dispatchable=frozenset({"j"}),
@@ -135,7 +140,7 @@ def test_two_terminal_transitions_of_one_live_run_plan_one_kill() -> None:
 def test_boxes_and_ghosts_get_no_dispatch() -> None:
     """`dispatchable` is the catalog jobs with a registered adapter. A box folds from its
     members and a CHANGE_STATUS-invented entity has no definition, so neither is ever something
-    to act on; nor is an alarm. The box's STARTING has its own start entry, so only
+    to act on; nor is an alarm. The box's STARTING is a decided start's own event, so only
     `dispatchable` keeps it from a start."""
     emitted = [
         _ev("STATUS", 0, job="thebox", status="STARTING"),
@@ -143,11 +148,10 @@ def test_boxes_and_ghosts_get_no_dispatch() -> None:
     ]
     plan = dispatch_plan(
         emitted,
-        runs={"thebox": 1},
         dispatched={},
         live={},
         dispatchable=frozenset({"j"}),
-        starts={("thebox", 1)},
+        starts=(DecidedStart("thebox", 1, 0),),
     )
     assert plan == []
 
@@ -158,7 +162,6 @@ def test_an_injected_inactive_on_a_running_job_plans_no_kill() -> None:
     emitted = [_ev("STATUS", 0, job="j", status="INACTIVE")]
     plan = dispatch_plan(
         emitted,
-        runs={"j": 1},
         dispatched={"j": 1},
         live={"j": 1},
         dispatchable=frozenset({"j"}),
@@ -255,11 +258,11 @@ def test_cm09_a_start_is_never_launched_twice() -> None:
         emitted = await engine.run_until_quiescent(T0 + timedelta(minutes=1))
         task = engine._live["j"].task
         assert engine.live_jobs() == frozenset({"j"})
-        # the input's outcome again, its own start entry included (DL-550)
+        # the input's outcome again, its own decided start included (DL-551)
         result = engine.decisions.for_index(engine.frontiers.applied_index)
         assert result is not None
-        applied = Applied(result, emitted, starts=run_starts(engine.oracle.trace()))
-        assert applied.starts == {("j", 1)}
+        applied = Applied(result, emitted, starts=fold_runs(engine.oracle.trace(), {}).starts)
+        assert applied.starts == (DecidedStart("j", 1, 0),)
 
         engine._dispatch(applied)  # a second pass, deliberately
         engine._dispatch(applied)
@@ -626,33 +629,33 @@ def test_a_starting_overwrite_after_an_ended_run_launches_nothing(
     asyncio.run(scenario())
 
 
-def test_replay_derives_no_start_the_batch_itself_superseded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Replay derives the starts a live engine would have launched: a start the batch's own
-    end state supersedes is planned and counted, and not derived (`Replay.spawns`)."""
-    import dsl41.runner_journal as journal_mod
-
+def test_replay_derives_no_start_the_batch_itself_ended(tmp_path: Path) -> None:
+    """Replay derives the starts a live engine would have launched (`Replay.spawns`): `x`'s
+    deadline starts `j.1`, and `j`'s own runtime limit, already past due, ends it in that same
+    input, so neither the live engine nor the replay plans it (DL-551)."""
+    catalog = lower_source(
+        "insert_job: x\njob_type: c\ncommand: x\nterm_run_time: 1\n\n"
+        "insert_job: j\njob_type: c\ncommand: y\ncondition: t(x)\nterm_run_time: 1\n"
+    )
+    catalog.jobs["j"].sem.term_run_time_min = -1
     root = tmp_path / "run"
 
     async def scenario() -> None:
         engine = start_run(
-            lower_source(_SOLO_JIL),
-            root,
-            clock=VirtualClock(start=T0),
-            adapters={"CMD": FakeAdapter(default=None)},
+            catalog, root, clock=VirtualClock(start=T0), adapters={"CMD": FakeAdapter(default=None)}
         )
-        engine.inject(_ev("STARTJOB", 0, job="j"))
-        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        engine.inject(_ev("STARTJOB", 0, job="x"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=2))
+        row = engine.oracle.store.job["j"]
+        assert (row.status, row.run_number) == ("TERMINATED", 1)
         await engine.shutdown()
         assert engine.journal is not None
         engine.journal.close()
 
     asyncio.run(scenario())
-    records = read_journal(root)
-    assert replay_inputs(Oracle(lower_source(_SOLO_JIL)), records).spawns == {("j", 1)}
-    monkeypatch.setattr(journal_mod, "spawn_superseded", lambda *_a: "superseded")
-    assert replay_inputs(Oracle(lower_source(_SOLO_JIL)), records).spawns == set()
+    assert _dispatches(root) == [("x", 1)]
+    replay = replay_inputs(Oracle(catalog), read_journal(root))
+    assert replay.spawns == {("x", 1)} and list(replay.unended) == []
 
 
 def test_a_failed_dispatch_still_answers_the_durable_decision(tmp_path: Path) -> None:

@@ -41,10 +41,11 @@ therefore guards the REAL time domain, where a process exit can already be queue
 oracle decides terminal; virtual runs exercise it only white-box (test_runner.py).
 
 Dispatch table (ss4): an emitted STATUS STARTING for a job_type with a registered adapter
-spawns an adapter task, but only for an ORACLE-DECIDED start: the input's trace holds the
-start's own entry, numbered with the job's current run, and the run is past the last one
-dispatched (the ghost-run gate; DL-537, DL-550). An injected CHANGE_STATUS-parity STARTING
-writes no numbered entry and, vendor parity, launches nothing. An emitted
+spawns an adapter task, but only for an ORACLE-DECIDED start: the event is the one the input's
+numbered start entry wrote, the input did not end that run, and the run is past the last one
+dispatched (the ghost-run gate; DL-537, DL-550, DL-551). An injected CHANGE_STATUS-parity
+STARTING writes no numbered entry and, vendor parity, launches nothing. A decided start that
+waits is discharged in the transaction of the input that ends its run (DL-551). An emitted
 terminal status for a job with a live task cancels it (KILLJOB / term_run_time: the oracle
 decides, the shell kills). A cancelled adapter never reports, and anything it dies with other
 than the cancellation re-raises at the next settle. Boxes have no adapter row; ON_NOEXEC
@@ -113,7 +114,7 @@ import heapq
 import time
 import uuid
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta
 from enum import Enum, auto
@@ -195,6 +196,7 @@ from dsl41.runner_journal import (
     outcome_end,
     dispatch_record,
     check_dispatch,
+    discharged_record,
     encode_snapshot,
     follow_up_done,
     pending_record,
@@ -1534,6 +1536,10 @@ class Engine:
         #: apply first and a start they end is not launched (DL-102, DL-425)
         self._deferred: list[Deferred] = []
         self._deferred_after: datetime | None = None
+        #: the starts a restart's replay derived whose run has not ended since, in the order
+        #: derived (`Replay.unended`): every input the engine applies drops the runs it ends,
+        #: and the restart's owed step reads what is left (DL-551)
+        self.unended: dict[tuple[str, int], None] = {}
         #: killed tasks by id: their attempt is closed with a `stopped` outcome once reaped
         self._killed: dict[int, _LiveRun] = {}
 
@@ -2006,11 +2012,17 @@ class Engine:
             if pending.step is not None:
                 plan, position = pending.step
                 also.append(follow_up_done(plan, position, self.journal.next_seq(), pending.at))
+            # a waiting start of a run this input ended is discharged with it (DL-551)
+            retired = self.retire(applied.ended)
+            also += [discharged_record(seq, pending.at) for seq in retired]
             entries = self.oracle.trace_since(traced)[1]
             # a run opened here is indexed under the rev the engine runs (DL-539)
             self.journal.admission(
                 attempt, applied.result, *also, transitions=entries, rev=self.config_rev
             )
+            self.unqueue(retired)
+        for run in applied.ended:
+            self.unended.pop(run, None)
         self.frontiers = self.frontiers.record(attempt.index)
         if self.status_hooks is not None:
             try:
@@ -2140,14 +2152,16 @@ class Engine:
         """Carry out what one decided input implies, in the order its events were emitted
         (`dispatch_plan`, ss4). This is the only place a decided start or kill is acted on.
 
-        Only a run the input's own start entries begin is started (`Applied.starts`, DL-550). A
+        Only a start the input decided and did not end is started (`Applied.starts`, DL-551). A
         planned start counts as dispatched for the ghost-run gate whether or not it launches
         (DL-234), so a STARTING overwrite at the same run number plans no second one. A kill
-        cancels the live task of the run it names, and nothing if that run is gone."""
+        cancels the live task of the run it names. That run is the job's live run when the plan
+        is made, and nothing earlier in the plan replaces it: a kill is planned once per job, and
+        a start of the job ahead of its kill would be a start the input then ended, which is not
+        planned (DL-551)."""
         origins: dict[tuple[DispatchKind, str, int], int] = {}
         plan = dispatch_plan(
             applied.emitted,
-            runs={job: rt.run_number for job, rt in self.oracle.store.job.items()},
             dispatched=self._dispatched,
             live={job: run.run_number for job, run in self._live.items()},
             dispatchable=self._dispatchable(),
@@ -2169,10 +2183,8 @@ class Engine:
                 else:
                     self.spawn(job, run_number)
                 continue
-            live = self._live.get(job)
-            if live is not None and live.run_number == run_number:
-                del self._live[job]
-                self._kill(live, (selected or {}).get(origins[(kind, job, run_number)]))
+            live = self._live.pop(job)
+            self._kill(live, (selected or {}).get(origins[(kind, job, run_number)]))
 
     def _kill(self, live: _LiveRun, signals: tuple[int, ...] | None = None) -> None:
         """Stop a live attempt the oracle ended. An observed attempt gets `stop` with cause
@@ -2227,6 +2239,25 @@ class Engine:
         scheduled = row.status_at if row is not None and row.status_at is not None else at
         return self.journal.append(pending_record(job, run_number, scheduled, at))
 
+    def retire(self, ended: Collection[tuple[str, int]]) -> list[int]:
+        """The seqs of the open `dispatch_pending` records whose start is no longer wanted: a
+        start of a run in `ended`, or of an earlier run of its job. A start the engine decided
+        is wanted until its run ends (DL-551); its discharge commits with the record that ends
+        the run."""
+        assert self.journal is not None  # a pending record is the store's
+        last = {job: run for job, run in sorted(ended)}
+        return [
+            seq
+            for seq, pending in sorted(self.journal.open.pending.items())
+            if pending.run_number <= last.get(pending.job, 0)
+        ]
+
+    def unqueue(self, pendings: Collection[int]) -> None:
+        """Take the queued copies of the discharged `dispatch_pending` records `pendings` off the
+        held and the deferred starts, so no release launches them (DL-551)."""
+        self._held_starts = [item for item in self._held_starts if item.pending not in pendings]
+        self._deferred = [item for item in self._deferred if item.pending not in pendings]
+
     def _finish_recovery(self) -> None:
         """Lift the restart's barrier: carry out the dispatches the catch-up owes, each removed
         only once its `dispatch` (or its discharge) has committed, so one that raises leaves
@@ -2270,15 +2301,7 @@ class Engine:
                 # Every plan-less deferred start carries its durable pending record (DL-491).
                 assert item.pending is not None, "an owed start has a pending record"
                 assert self.journal is not None  # a pending record is the store's
-                self.journal.append(
-                    Record(
-                        self.now_present(wall=wall),
-                        "dispatch_pending",
-                        None,
-                        None,
-                        {"event": "discharged", "pending": item.pending, "dispatch": None},
-                    )
-                )
+                self.journal.append(discharged_record(item.pending, self.now_present(wall=wall)))
                 return
             if self._must_wait(item.job, item.run_number):
                 self._held_starts.append(item)  # until its job's group is gone (DL-426)
