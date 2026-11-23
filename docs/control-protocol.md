@@ -741,6 +741,18 @@ While the start could not settle the history index for the run
 carries `history_unavailable`, the reason text; it is absent otherwise.
 A client may ignore this additive field (DL-539).
 
+The answer always carries `archive`, the state of the archive database
+([runner-design §7](runner-design.md#7-journal-and-recovery-e1-prod-grade), DL-545).
+`state` is `off` when the engine keeps no archive, and the block holds nothing
+else, except `reason` when the engine has a store file and `archive_days`
+above 0 but was not started by `dsl41 run`, so it prunes without a copy. Otherwise `state` is `working` or `stopped`, and a stopped block carries
+`reason`, the text of the archive error. `verified_through` is the highest
+live journal seq this engine run has verified in the archive, `null` before
+the first verified batch and after a stop until the next one. `histories` is
+the count of the root's histories the archive holds, and `last_seq` the last
+seq of the newest history list it recorded, both from the last round that
+completed and `null` before one. A client may ignore this additive field.
+
 In the real domain, while the wall is below engine time, the answer carries
 `clock_hold: {"wall": <instant>, "until": <instant>}` (DL-493). Both instants
 use the `status_at` format. It is absent outside a hold and in the virtual

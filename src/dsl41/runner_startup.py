@@ -59,6 +59,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from dsl41 import runner
 from dsl41 import runner_procid as _procid
 from dsl41.display_time import format_local_at
 from dsl41.engine_charts import ENGINE_STOP, AttemptOutcome, ExitRecord
@@ -78,6 +79,7 @@ from dsl41.runner_adapters import (
     read_watch_log,
     spool_names_run,
 )
+from dsl41.runner_archive import ArchiveWorker
 from dsl41.runner_attempts import NO_GROUP, command_group, exit_record_from_status
 from dsl41.runner_clock import Clock, EngineError
 from dsl41.runner_config import (
@@ -209,6 +211,25 @@ def wire_from_profile(
         semantics=switches_of(profile),
     )
     return Wiring(adapters=cast("dict[str, JobAdapter]", adapters), scheduler=scheduler)
+
+
+def arm_archive(engine: Engine, run_root: Path, settings: EngineSettings) -> None:
+    """Give `engine` its archive worker under `settings` (DL-545): none with `archive_days`
+    0 or an engine with no store file, which prune as DL-543 does. The worker's thread starts
+    at the first snapshot round, and `Engine.shutdown` stops it within its deadline."""
+    path = settings.archive_file(run_root)
+    journal = engine.journal
+    if path is None or journal is None or journal.path is None:
+        return
+    engine.archive = ArchiveWorker(
+        journal.path,
+        path,
+        root=journal.store.meta(),
+        days=settings.archive_days,
+        step=runner.PRUNE_STEP,
+        now=engine.clock.now,
+        report=engine.archive_report,
+    )
 
 
 def _require_scheduler(catalog: CatalogIR, scheduler: Scheduler | None, where: str) -> None:

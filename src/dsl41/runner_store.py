@@ -40,7 +40,7 @@ import bisect
 import dataclasses
 import sqlite3
 import sys
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -226,6 +226,39 @@ class HistoryRead:
     owned: list[tuple[int, Record]] = field(default_factory=list)
     loose: list[tuple[int, Record]] = field(default_factory=list)
     configs: dict[int, bytes | None] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class RawBatch:
+    """One archive batch of the live rows as the tables hold them, read in one transaction
+    (DL-545). `records` are journal rows `(seq, at_utc, kind, actor, request_id, payload)`,
+    oldest first; `transitions`, `job_runs` and `job_records` are their derived rows, each read
+    only over the seqs its own coverage names as covered. `configs` are every configuration's
+    `(rev, digest)`, and `config_data` the `(rev, digest, data)` of those the read was not
+    told it knows. `first_seq` is the journal's oldest retained seq and `last_seq` its newest assigned
+    one; `histories` the history list `(history, first_seq)` in the live order (DL-536)."""
+
+    first_seq: int
+    records: list[tuple[int, str, str, str | None, str | None, bytes]]
+    transitions: list[tuple[int, int, str, str, bytes]]
+    job_runs: list[tuple[int, int, str, int, int]]
+    job_records: list[tuple[int, str, int | None]]
+    transitions_coverage: list[Interval]
+    history_coverage: list[Interval]
+    configs: list[tuple[int, str]]
+    config_data: list[tuple[int, str, bytes]] = field(default_factory=list)
+    histories: list[tuple[str, int]] = field(default_factory=list)
+    last_seq: int = 0
+
+
+def covered_parts(coverage: Sequence[Interval], first: int, last: int) -> list[tuple[int, int]]:
+    """The seqs from `first` to `last` that `coverage` names as covered, as intervals (DL-545)."""
+    parts = []
+    for interval in coverage:
+        low, high = max(interval.first, first), min(interval.last, last)
+        if interval.covered and low <= high:
+            parts.append((low, high))
+    return parts
 
 
 class Store(Protocol):
@@ -1738,6 +1771,88 @@ class SqliteStore:
                 record = Record(_unstamp(at), kind, actor, request_id, _decode_payload(payload))
                 found.append((int(seq), record))
         return found
+
+    # ---- the archive's reads (DL-545)
+
+    def raw_batch(
+        self, first: int, below: int, limit: int, known: Collection[tuple[int, str]] = ()
+    ) -> RawBatch:
+        """At most `limit` journal rows from seq `first` to below `below`, with their derived
+        rows, the coverage, the configurations' revs and the bytes of every one whose
+        `(rev, digest)` is not in `known`, the history list and the last seq, as stored, in one
+        read transaction: every part is read at the same point, and on a reader's connection it
+        holds no lock a writer waits on (WAL)."""
+        count = _step_limit(limit)
+        self._db.execute("BEGIN")
+        try:
+            records = [
+                (int(seq), str(at), str(kind), actor, request_id, bytes(payload))
+                for seq, at, kind, actor, request_id, payload in self._db.execute(
+                    "SELECT seq, at_utc, kind, actor, request_id, payload FROM journal"
+                    " WHERE seq >= ? AND seq < ? ORDER BY seq LIMIT ?",
+                    (int(first), int(below), count),
+                )
+            ]
+            transitions_coverage = self.transitions_coverage()
+            history_coverage = self.history_coverage()
+            transitions: list[tuple[int, int, str, str, bytes]] = []
+            job_runs: list[tuple[int, int, str, int, int]] = []
+            job_records: list[tuple[int, str, int | None]] = []
+            if records:
+                low, high = records[0][0], records[-1][0]
+                for a, b in covered_parts(transitions_coverage, low, high):
+                    transitions.extend(
+                        (int(seq), int(n), str(job), str(name), bytes(entry))
+                        for seq, n, job, name, entry in self._db.execute(
+                            "SELECT seq, n, job, transition, entry FROM transitions"
+                            " WHERE seq >= ? AND seq <= ? ORDER BY seq, n",
+                            (a, b),
+                        )
+                    )
+                for a, b in covered_parts(history_coverage, low, high):
+                    job_runs.extend(
+                        (int(seq), int(n), str(job), int(run), int(rev))
+                        for seq, n, job, run, rev in self._db.execute(
+                            "SELECT seq, n, job, run_number, rev FROM job_runs"
+                            " WHERE seq >= ? AND seq <= ? ORDER BY seq, n",
+                            (a, b),
+                        )
+                    )
+                    job_records.extend(
+                        (int(seq), str(job), None if run is None else int(run))
+                        for seq, job, run in self._db.execute(
+                            "SELECT seq, job, run_number FROM job_records"
+                            " WHERE seq >= ? AND seq <= ? ORDER BY seq",
+                            (a, b),
+                        )
+                    )
+            configs = [
+                (int(rev), str(digest))
+                for rev, digest in self._db.execute("SELECT rev, digest FROM configs ORDER BY rev")
+            ]
+            config_data: list[tuple[int, str, bytes]] = []
+            for rev in [rev for rev, digest in configs if (rev, digest) not in known]:
+                config_data.extend(
+                    (int(found), str(digest), bytes(data))
+                    for found, digest, data in self._db.execute(
+                        "SELECT rev, digest, data FROM configs WHERE rev = ?", (rev,)
+                    )
+                )
+            return RawBatch(
+                first_seq=self.first_seq(),
+                records=records,
+                transitions=transitions,
+                job_runs=job_runs,
+                job_records=job_records,
+                transitions_coverage=transitions_coverage,
+                history_coverage=history_coverage,
+                configs=configs,
+                config_data=config_data,
+                histories=self.histories(),
+                last_seq=self.last_seq(),
+            )
+        finally:
+            self._db.execute("COMMIT")
 
 
 class _Transaction:

@@ -27906,3 +27906,42 @@ relitigate an entry; append a new one.
   COST. An alarm is dated by its deadline, so after an outage longer than the window an old
   alarm is in the console and not in Problems. On a root upgraded in place the alarms read
   incomplete until an alarm of each kind is stored above the gap or retention prunes it.
+- DL-545 An archive database keeps verified copies of what retention prunes
+  (2026-11-24; FEAT-50, the owner's need of about 1.5 years of the engine's records for
+  audit, read with SQL; src/dsl41/runner_archive.py, src/dsl41/runner.py,
+  src/dsl41/runner_store.py, src/dsl41/runner_config.py, src/dsl41/runner_startup.py,
+  src/dsl41/runner_control.py, src/dsl41/cli_run.py, docs/runner-design.md, docs/deploy.md,
+  docs/control-protocol.md, docs/protocol-evolution.md, tests/test_archive.py,
+  tests/test_archive_live.py; builds on DL-543 and DL-536; additive in dialect 5, DL-217;
+  no state-machine version change; the live store's layout is unchanged)
+  THE RULE. Verified in this run: no live row is deleted until a worker, in this engine run,
+  has committed its copy to the archive, read it again and found it equal. Only that makes a
+  report, and only a report makes a prune step owed (DL-543). The worker only adds copies
+  and expires archive rows; only the engine deletes live rows.
+  WHAT A STORED ROW IS. Identity is content. A journal row is keyed by root, seq and a digest
+  of its bytes; the complete set of a seq's derived rows (transitions, run openings, record
+  owners) by a digest of the set; a configuration by root, rev and digest. One observation
+  per seq ties the row, its sets and the configuration it applies to the history of the
+  live store it was seen under. Nothing is compared to decide what a row is.
+  A RESTORE NEEDS NO HANDLING. The same seq with other bytes, as after a restore of the live
+  store to an older copy, is another row. Nothing is forked, set aside or stopped.
+  WHICH LINE. The archive records the live store's ordered history list (DL-536) and its
+  last seq, never infers them. The default views compute the current line from that and
+  say `on line`, `line not known` or `not archived` per seq; no join crosses an unknown seq.
+  VERIFYING. A batch is one image built from the live snapshot before any write: written,
+  read back and compared whole inside the transaction, and again after the commit on a new
+  connection. It is a check that the copy is right, not a defence against a database that
+  writes other than it is told.
+  EXPIRY. A row variant goes when archived more than `archive_days` (550) ago and its seq is
+  below the live store's first seq; what nothing refers to goes after it. 0 keeps no archive.
+  STOPS, with a reason in `status`: a failed read-back, a stored item whose bytes do not
+  give its digest, a file the engine cannot use. The way out is with the engine stopped:
+  move the file away and keep it; the next start records the gap.
+  REJECTED. Stopping on a difference, moving the archive aside, branches opened where rows
+  differ, rows keyed by the history token: each made the stored evidence depend on an
+  inference, or on the history row, which the engine writes best-effort. Repairing a damaged
+  row from the live one: a mismatch cannot tell a damaged key from a damaged body.
+  COST. About 45% more space than rows keyed by seq. The line labels are as good as the
+  engine's history list (BUG-114). A stopped archive lets the live store grow. The file
+  shows dispatch environments; its mode (0600) is the access rule. Not built: the access
+  log's lines.

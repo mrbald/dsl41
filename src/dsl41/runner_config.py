@@ -13,9 +13,9 @@ The configuration row (`Configuration`) is what the store's `configs` table hold
 the canonical catalog, the profile and the marked set (`non-idempotent.toml`). Recovery and the
 offline readers read the catalog and the switches from it, never from the estate files.
 
-`EngineSettings` is `RUN_ROOT/engine.toml`: the stop grace, the snapshot cadence and the
-retention window. The first `run` writes the defaults out; a flag overrides a value for one run
-and is not written back.
+`EngineSettings` is `RUN_ROOT/engine.toml`: the stop grace, the snapshot cadence, the
+retention window and the archive (DL-545). The first `run` writes the defaults out; a flag
+overrides a value for one run and is not written back.
 """
 
 from __future__ import annotations
@@ -330,9 +330,13 @@ class Configuration(BaseModel):
 SETTINGS_FILE: Final[str] = "engine.toml"
 
 
+#: The settings a root's `engine.toml` names only when they are not the defaults (DL-545).
+_ARCHIVE_KEYS: Final = frozenset({"archive_days", "archive_path"})
+
+
 class EngineSettings(BaseModel):
-    """`RUN_ROOT/engine.toml` (DL-424): the engine's stop grace, snapshot cadence and journal
-    retention. Seconds and days, as the file spells them."""
+    """`RUN_ROOT/engine.toml` (DL-424): the engine's stop grace, snapshot cadence, journal
+    retention and archive (DL-545). Seconds and days, as the file spells them."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -344,6 +348,12 @@ class EngineSettings(BaseModel):
     snapshot_interval_s: Annotated[float, Field(gt=0)] = 300.0
     #: journal rows older than this and behind the latest snapshot are pruned
     retention_days: Annotated[int, Field(gt=0)] = 90
+    #: days a verified copy of a pruned row stays in the archive; 0 keeps no archive, and
+    #: pruning deletes without a copy (DL-545)
+    archive_days: Annotated[int, Field(ge=0)] = 550
+    #: the archive database; None is `<run_root>/archive.db`, and a relative path is read under
+    #: the run root (DL-545)
+    archive_path: Annotated[str, Field(min_length=1)] | None = None
 
     def overridden(self, **values: float | int | None) -> EngineSettings:
         """These settings with each value that is not None replacing its field, for one run."""
@@ -351,7 +361,22 @@ class EngineSettings(BaseModel):
         return EngineSettings.model_validate({**self.model_dump(), **given})
 
     def to_toml(self) -> str:
-        return "".join(f"{name} = {value!r}\n" for name, value in self.model_dump().items())
+        # the archive's keys are written only when they differ from their defaults: an absent
+        # key is the default, and the build before the archive refuses a key it does not know
+        # (DL-545)
+        defaults = EngineSettings.model_fields
+        return "".join(
+            f"{name} = {value!r}\n"
+            for name, value in self.model_dump().items()
+            if name not in _ARCHIVE_KEYS or value != defaults[name].default
+        )
+
+    def archive_file(self, run_root: Path) -> Path | None:
+        """The archive database under these settings, None when `archive_days` is 0 (DL-545)."""
+        if self.archive_days == 0:
+            return None
+        path = Path(self.archive_path or "archive.db")
+        return path if path.is_absolute() else run_root / path
 
 
 def load_settings(run_root: Path, *, create: bool = True) -> EngineSettings:

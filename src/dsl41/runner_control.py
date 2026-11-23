@@ -1376,6 +1376,8 @@ class ControlServer:
         if journal is not None and journal.history_declined is not None:
             # DL-539: the same, while the history index serves no read for this run
             answer["history_unavailable"] = journal.history_declined
+        # DL-545: whether pruned rows are archived first, and how far this run verified
+        answer["archive"] = self.engine.archive_view()
         return answer
 
     def _globals(self, names: list[Any]) -> dict[str, Any]:

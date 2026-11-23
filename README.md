@@ -741,6 +741,10 @@ Runner:
   pruning, under one writer with synchronous commits, and the transition
   rows each record produced with their coverage; `MemoryStore` is its
   in-memory twin for rehearsal and tests.
+- `src/dsl41/runner_archive.py`: the archive database, `archive.db`, and its
+  worker thread: verified copies of the rows retention prunes, kept for
+  `archive_days` with the lines of history they were on, and read with SQL
+  through views of the current line (DL-545).
 - `src/dsl41/runner_transitions.py`: the committed transition rows: the
   start's settling of the rows with the retained journal, and the
   `transitions` query's request and answer (DL-536).
@@ -749,7 +753,7 @@ Runner:
 - `src/dsl41/runner_config.py`: what an engine runs under:
   `RuntimeProfile` and `runtime_hash`, the configuration row that holds the
   catalog, the profile and the marked set, and `engine.toml`'s stop grace,
-  snapshot cadence and retention.
+  snapshot cadence, retention and archive.
 - `src/dsl41/idempotence.py`: the idempotence declaration:
   `non-idempotent.toml` beside the main config names the jobs whose interrupted
   attempt waits for the operator, with its canonical bytes for the reload

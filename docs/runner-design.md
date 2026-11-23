@@ -743,6 +743,195 @@ under the rev in force at its opening: the snapshot's `config_rev`, then the
 snapshot sets no run's rev (DL-549).
 Emitted events remain derived from inputs and are not stored.
 
+**Archive** (DL-545). With `archive_days` above 0 (550 by default), a row
+retention prunes is copied first to a second SQLite file, `archive_path`
+(default `<run_root>/archive.db`). Two rules hold:
+
+1. Verified in this run. No live row is deleted until the archive worker,
+   in this engine run, has written its copy, read it back and found it
+   equal to the live rows. No "archived through" number is stored or
+   trusted across a restart.
+2. Two hands. The worker only adds to the archive and expires archive rows.
+   Only the engine deletes live rows, through the prune step above.
+
+The archive keeps two things apart. What it stores is keyed by content and
+depends on nothing that can be wrong. Which line of history a row is on is
+a label, computed when the archive is read, as good as the live store's
+history list, and it can say "line not known". Nothing is forked, set
+aside or stopped because rows differ: a live store put back to an older
+copy needs no step for the archive.
+
+- A journal row is keyed by root, seq and a SHA-256 digest of its fields:
+  timestamp, kind, actor, request id and payload bytes, each
+  length-prefixed, NULL distinct from empty text. The same seq with other
+  bytes is another row. Two lines with the same bytes at a seq share one
+  row.
+- A derived set is the complete set of one seq's rows in one derived table:
+  `transitions`, `job_runs` (run openings) or `job_records` (record
+  owners). It is keyed by root, table, seq and a digest of its rows in
+  numeric key order, and stored only where the live coverage claims the seq
+  complete. A complete empty set is a constant in the observation, not
+  rows. Two sets that differ at one seq, from two lines, are both evidence.
+- A configuration is keyed by root, rev and the live store's digest, with
+  its bytes. The worker reads it in the same live snapshot as the batch and
+  checks the bytes against the digest.
+- An observation records one seq of a batch: the history of the live list
+  the seq lay under (none for a seq before every history), the journal row,
+  the set of each derived table or no claim, and, for a `config applied`
+  record, the rev it names with the digest the live store held for it, or
+  that the live store holds no such rev. An observation is never changed.
+  A batch inserts its observation unless an identical one is stored, so an
+  earlier one that claims less stays beside it.
+- Lineage. In every batch, and in a round with nothing to copy, the worker
+  records the live store's history list (DL-536) as it is, ties in the
+  live order and empty histories kept, with its last seq. A list that
+  extends the newest stored one (the same entries, more at the end)
+  replaces it in place. Any other list is a new version: the line changed
+  under the archive, by a restore or by a history given afterwards to a
+  start that had recorded none. Earlier versions are kept.
+- Coverage records which journal seqs of the root are `covered`, `never
+  received` (pruned before this file saw them) or `expired`.
+
+The current line is computed when the archive is read. The newest list
+gives each seq up to its last seq the history that holds it: of the
+histories that begin at or before the seq, the last in the list's order;
+none for a seq before every history. An observation counts unless another
+of the same seq, history and journal row is equal wherever it makes a
+claim. A seq's state is decided in this order. It is `not archived` when
+no observation under its history counts (for a seq no history holds, no
+observation with no history), whether or not a history holds it. It is
+`line not known` when no history holds it or several observations count.
+It is `on line` when exactly one counts. Above the last seq nothing is on
+the current line. The views of [deploy.md](deploy.md#keep-the-archive)
+show the current line and mark the seqs that are not known. No join
+crosses one: a dispatch is joined to its outcome only when neither they
+nor any seq between them is not known. A configuration is bound to its
+observation, so it shows at any seq, marked. Other views show every row
+with its history.
+
+**Image and verification.** The worker turns each batch, and a round with
+nothing to copy, into one value before the transaction's first write, its
+image: the journal rows, sets, configurations and observations, the
+coverage, the history list and its last seq, and the time each item holds
+(a new item takes the time now as `archived_at`). One transaction writes
+what the archive lacks, reads the image back by key, compares the two whole
+and commits. A connection opened after the commit reads it again and
+compares again. Only that makes a report. The image is what a reader relies
+on and what authorizes a prune. It is a check that the copy is right, not a
+guard against a database that writes other than it is told: a list's
+`recorded_at`, a row id, or a row another writer added are not in it.
+
+Each stored item the batch names is checked when the batch reads it. A row,
+set or configuration whose bytes do not give its digest stops the worker,
+naming the item and both digests; so does stored text that cannot be read,
+or a set with rows and no header. Nothing is repaired: a mismatch cannot
+tell a damaged key from a damaged body. Damage is found when the item is
+next read for a batch; there is no background scrub.
+
+The worker is one thread per engine run (`runner_archive.py`), with its own
+read-only connection to the live store and the only writing connection to
+the archive. It starts at the first snapshot round. With the archive on, a
+snapshot round runs `prune_snapshots`, reads `prune_bound` and asks the
+worker for a round with that bound as its target; it takes no step itself.
+The stop's own snapshot asks for no round. Each round opens the archive,
+holds its lock from the open to the close, and closes it at the round's
+end. It works in order:
+
+- Copy and verify. From the live store's first seq to the target, in
+  batches of at most `PRUNE_STEP` journal rows, the worker reads a live
+  snapshot: the rows, their derived rows over the seqs each table's
+  coverage claims, the live configurations, the history list and the last
+  seq. It writes and verifies the batch's image, then reports the round's
+  verified range so far, from the first seq of its first batch. The bytes
+  of a configuration this run stored and read back in this file are not
+  read again. The round's last read has nothing to copy and records the list
+  and the last seq. A batch is bounded by journal rows only, as a prune
+  step is.
+- Expire. A journal row variant goes when it was archived more than the
+  current `archive_days` ago and its seq is below the live store's first
+  seq read then, at most `PRUNE_STEP` variants a transaction, with its
+  observations. A derived set or a history goes when nothing refers to it;
+  a history stays while a kept list names it. A configuration goes when it
+  was archived more than `archive_days` ago, the live store no longer holds
+  that rev with that digest, and no observation refers to it. Seqs with no
+  row left are recorded as `expired`. The newest list, its last seq and
+  the recorded gaps never expire. No engine expires another root's rows:
+  an operator removes a retired root's rows (docs/deploy.md).
+- Compact, after a round that expired something and while no stop is
+  asked: `PRAGMA incremental_vacuum` read to its end, `PRAGMA optimize`,
+  and a TRUNCATE checkpoint, which does nothing while a reader holds the
+  log.
+- Complete. Only then does the worker report the round complete, with the
+  count of the root's histories and the newest list's last seq.
+
+**Stops.** Any failure stops the round with its reason: a file the engine
+cannot use, live bytes it cannot store (text that is not UTF-8, or a
+configuration that does not match its digest), a damaged item, an image
+that does not read back, or an SQLite, disk or permission error. A
+failure inside a transaction rolls it back. The worker closes the archive
+and gives the lock back. A round stopped while it copies expires nothing.
+One stopped during expiry keeps the expiry transactions that committed
+before the stop and compacts nothing. A stopped round completes nothing.
+Each later round opens the configured path again, so a removed
+cause ends the stop.
+
+A report reaches the loop through `call_soon_threadsafe`. The loop ignores a
+report of an older round, and one that comes after its stop began. A
+`stopped` report clears what this run verified and what is owed. A verified
+range owes steps up to one past its last seq, never past the round's bound,
+and only when it begins at or below the live store's first seq as the loop
+reads it then. A range that begins above it owes nothing and stops the
+archive, since rows below it are not verified. The loop's owed step then
+deletes as above. Nothing else deletes journal rows. The engine writes one
+line to its output when the archive stops, with the reason, and one when it
+works again, after a round that completed; not one a round. Shutdown asks
+the worker to stop and waits for it up to five seconds. A worker that
+outlives the wait stops after its batch, which only adds copies, and its
+reports are ignored.
+
+The lock is an advisory `flock` on the sidecar `<path>.lock` beside the
+database's resolved path, so two symbolic names of one file take one lock.
+A round that cannot take it is stopped with "another engine holds the
+archive, or an operator holds its lock". Under the lock, before SQLite
+opens it, a file that is not a regular file, or has more than one hard
+link, is refused, and an absent file is created exclusively, mode 0600.
+Local file systems only.
+
+A writer creates an archive only where no file exists or the file is empty.
+It opens an existing one only when its `meta` names the layout
+`dsl41-archive-content-1`; any other file is refused, naming the layout it
+has, and is not written to. No step from another layout exists. An
+existing file whose mode, or whose `-wal` or `-shm`'s mode, lets group or
+others read or write it is refused with the reason. A file the engine
+creates is mode 0600, so its `-wal` and `-shm` are 0600 too. It is in WAL
+mode with `synchronous=FULL` (and `fullfsync` on macOS), with
+`auto_vacuum=INCREMENTAL` set before any table exists. Every table is keyed
+by `root_id` first:
+
+| Table | Rows |
+| --- | --- |
+| `meta` | `layout`, the layout's name. |
+| `roots` | One per root: `state_version`, `estate_name` and `created_at` from the live `meta`, and `first_archived_at`. |
+| `records` | The journal row as it was: `seq`, `digest`, `at_utc`, `kind`, `actor`, `request_id`, the payload's bytes verbatim as `TEXT`, and `archived_at`. Key `(root_id, seq, digest)`; no unique key on `request_id`. |
+| `sets` | One non-empty derived set: `table_name`, `seq`, `digest` and `size`, the count of its rows. |
+| `transitions`, `job_runs` | A set's rows, keyed by the set's `(root_id, seq, digest)` and `n`, with the live columns; a trace entry as `TEXT`. |
+| `job_records` | A set's one row, keyed by the set's `(root_id, seq, digest)`, with the live columns. |
+| `configs` | `(root_id, rev, digest)`, the configuration as `TEXT` and `archived_at`. |
+| `histories` | The live store's history names, each with an id local to this file. |
+| `lists`, `list_entries` | Each version of the history list: `recorded_at` and `last_seq`; per entry its `position`, history and `first_seq`. |
+| `observations` | `seq`, history, `record_digest`, one set digest per derived table (NULL for no claim, an empty value for a complete empty set), and `config_rev`, `config_digest` and `config_binding`. |
+| `coverage` | `(root_id, first_seq, last_seq, state)` for journal seqs; the state is `covered`, `never received` or `expired`. |
+
+The reading views are plain SQL in the file; deploy.md lists them. With
+`archive_days` 0 there is no worker, no file, and pruning is as above.
+`runner_archive.py` is outside the 100% branch-coverage gate list for now;
+its stop and rollback arms have tests of their own
+(`tests/test_archive.py`). Only `dsl41 run` arms the worker
+(`runner_startup.arm_archive`), for a new root and for a restart, legacy or
+main config. An engine built any other way, as tests and drills build one,
+prunes without an archive; with a store file and `archive_days` above 0 its
+`status` says `off` with that reason.
+
 **Transition rows** (DL-536). Each trace entry the oracle appends while an
 admission applies, its time half included, commits with that admission's
 `input` record, in the transaction of the input and its decision. An
@@ -1791,6 +1980,8 @@ the split cannot decay into a second name for one file.
 - `start_refusals.py`: the scheduler refusal counts that §9 and §11 show.
 - `display_time.py`: the host-local display time of §11 (DL-473).
 - `runner_store.py`: SQLite transactions, configuration rows and snapshots (DL-428).
+- `runner_archive.py`: the archive database and its worker, verified copies
+  of the rows retention prunes (DL-545).
 - `runner_transitions.py`: the start's settling of the transition rows and the
   `transitions` query's request and answer (DL-536).
 - `runner_runs.py`: the `history` query: a job's past runs, one page folded from the

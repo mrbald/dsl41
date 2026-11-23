@@ -570,6 +570,7 @@ lock, SQLite sidecars or a control socket
 refuses with exit 2 before changing the root or evaluating estate Python.
 Unreadable evidence also refuses. See the [genesis and restart contract](runner-design.md#7-journal-and-recovery-e1-prod-grade).
 Keep stop graces, snapshot interval and retention in `RUN_ROOT/engine.toml`.
+The archive's two settings live there too ([Keep the archive](#keep-the-archive)).
 With the default graces, the unit allows 45 seconds for a stop.
 Check that timeout before changing either grace.
 
@@ -644,6 +645,8 @@ The site's archiver may move only finished job output.
 It must leave everything else in the run root untouched, including `runs/`,
 `plans/`, the store (`engine.db` and its sidecars), `leader.lock`,
 `control.sock` and `engine.toml`.
+The archive (`archive.db`, its `-wal` and `-shm`, `archive.db.lock`, and any
+archive moved aside and kept) stays in place; see [Keep the archive](#keep-the-archive).
 The host's monitoring must watch disk space.
 
 ## Watch the engine and jobs
@@ -709,6 +712,312 @@ delivery failures. The hook runs as the service account. Keep it in its process
 group and keep its writes outside the run root. Follow the
 [hook contract](runner-design.md#4-engine-loop--single-writer) for thresholds,
 alarm flags, payloads, delivery bounds and the hook environment.
+
+## Keep the archive
+
+The archive holds copies of the records old enough to be pruned. The
+engine copies a record when it becomes old enough to leave the live store,
+and the record stays in both stores until the engine's prune step deletes
+it from the live store. A record that has never been old enough to be pruned
+is only in the live store: with the default `retention_days` of 90 that is
+every record of the last 90 days. A record copied under a shorter retention
+stays in the archive when the retention is raised. Read recent runs with
+`dsl41 runs` or `dsl41 query history`. An empty answer from the archive does
+not mean that nothing ran.
+
+The archive answers audit questions after the live store has let a record
+go: what ran, when, under which definition, with what outcome, and what
+operators did. The live store keeps `retention_days` (90) of the engine's
+records. Before retention deletes a record, the engine copies it to the
+archive database, reads the copy back and compares it. Only a verified copy
+lets the record go. The archive keeps the copy for `archive_days` (550). A
+record therefore lives about `retention_days` plus `archive_days` in all:
+about 640 days with the defaults. The newest `retention_days` are read from
+the live store, not the archive.
+
+| Setting in `engine.toml` | Default | Meaning |
+| --- | --- | --- |
+| `archive_days` | 550 | Days an archived row stays. 0 keeps no archive, and retention deletes without a copy. `--archive-days` overrides it for one run. |
+| `archive_path` | `<run_root>/archive.db` | The archive database. A relative path is read under the run root. Use a local file system. |
+
+A new root's `engine.toml` names neither key: an absent key is its
+default. Write a key only to change it. The build before the archive
+refuses an `engine.toml` that names either key, so before going back a
+build, remove those lines; that build then prunes without copying.
+
+The file's permissions are the access rule. The engine creates it mode 0600,
+owned by the service account, and its `-wal` and `-shm` take that mode. SQL
+on it shows every record the engine kept, dispatch environments included.
+The engine refuses to write an archive file, `-wal` or `-shm` that group or
+others may read or write, and the archive stops with that reason. Give a
+reader a copy, made as the service account, only where those contents may
+be seen.
+
+**Open it** read-only, as the service account, while the engine runs or
+not:
+
+```sh
+sqlite3 -readonly /srv/dsl41/runs/nightbank/archive.db
+```
+
+Keep reads short: a reader holding the log delays the engine's checkpoint
+of the archive. Between rounds the engine leaves no `-shm` beside the file,
+and some builds of the `sqlite3` shell then refuse a read-only open with
+`unable to open database file`. Open it without `-readonly` then, and run
+only `SELECT`: a write from the shell holds SQLite's write lock on the
+file, and the next round stops with `OperationalError: database is
+locked` and works again at the round after.
+
+**Lines of history.** A root's records can have more than one line. After
+the live store is put back to an older copy, the engine writes other
+records at seqs the archive already holds. The archive keeps every version
+of a seq it was shown, each under the history the live store gave it: one
+history per engine start (DL-536). The newest history list the archive
+recorded says which history holds each seq now; that is the current line.
+Each seq up to the list's last seq has one of three states:
+
+| State | Meaning |
+| --- | --- |
+| `not archived` | No version of the seq counts under the history that holds it, or, where no history holds the seq, no version with no history is stored. It was never received, it expired, it is still only in the live store, or only another line has it. |
+| `line not known` | A version is stored and no history holds the seq, or several versions count under the history that holds it. The default views show every one, marked, and join nothing across the seq. |
+| `on line` | One version of the seq counts under the history that holds it. Its rows are the current line's. |
+
+The states are decided in that order: a seq with nothing stored reads
+`not archived`, whether or not a history holds it.
+
+A version counts unless another of the same seq, history and record says
+the same and more: the archive keeps both, and the fuller one is shown. Two
+versions that disagree both count, and the seq reads `line not known`. A
+record the archive holds twice, once with its transitions and once with
+other transitions, is such a pair.
+
+**The views.** The default views show the current line. Each view from
+`line_records` to `line_dispatches` in the table carries `root_id`, `seq`,
+`state`, `history`, and `observation`, the number of the version a row
+comes from; rows of one version share it.
+
+| View | One row per | Its other columns |
+| --- | --- | --- |
+| `current_line` | Seq from 1 to the last seq, archived or not | `history`, `state` only. |
+| `line_records` | Journal record | `at_utc`, `kind`, `actor`, `request_id`, `payload` (the record's JSON text), `archived_at`. |
+| `line_transitions` | Transition a record made | `n`, `job`, `transition`, `entry` (JSON text). |
+| `line_run_openings` | Run a record opened | `n`, `job`, `run_number`, `rev`, the configuration revision the run opened under. |
+| `line_record_owners` | Record that belongs to a job's run | `job`, `run_number`; NULL for a record of no named run. |
+| `line_configurations` | Record that applied a configuration | `rev`, `digest`, `binding` (`bound`, or `the live store holds no such rev`), `data`, the configuration's text. The configuration is bound to the record's own version, not joined across seqs, so a seq that is `line not known` shows each version's own configuration, marked. |
+| `line_dispatches` | Dispatch | `at_utc`, `job`, `run_number`, `attempt`, and the outcome of the attempt: `outcome_seq`, `outcome_at`, `outcome`, `outcome_payload`. The outcome is NULL while the archive holds none on the current line, and when the dispatch, the outcome or any seq between them is `line not known`. An attempt with two outcome records has a row for each. |
+| `line_not_known` | Seq that reads `line not known` | None beyond `root_id` and `seq`. |
+| `line_ranges` | History of the current line | `history`, `first_seq`, `last_seq`: the seqs it holds. `history` NULL holds the seqs before every history. |
+
+The all-rows views show everything stored, with its history and no state:
+`all_records` (with `transitions`, `run_openings` and `record_owners`, each
+`no claim`, `empty` or a set digest, and the configuration columns),
+`all_transitions`, `all_run_openings`, `all_record_owners`,
+`all_configurations` (every stored configuration, with each record that
+applied it) and `all_lists` (every recorded version of the history list).
+`coverage` says which seqs are `covered`, `never received` or `expired`.
+`counted_observations` and `line_observations` are the views the others
+build on.
+
+The views compute the current line at each query. A query over a whole
+view reads every archived row, which takes seconds on a million rows; a
+query of the `line_` views on a `seq` range is quick. `line_dispatches`
+reads every outcome of the current line in each query. `current_line`
+starts at seq 1 at each query, and SQLite does not start it at a seq a
+query names: a lookup of one seq there walks to the last seq. For one seq,
+read its history and its state this way:
+
+```sh
+sqlite3 -readonly ARCHIVE "SELECT r.root_id, r.history,
+  coalesce((SELECT min(o.state) FROM line_observations AS o
+    WHERE o.root_id = r.root_id AND o.seq = 1234), 'not archived') AS state
+  FROM line_ranges AS r WHERE 1234 BETWEEN r.first_seq AND r.last_seq"
+```
+
+The views and the worked queries need SQLite's JSON functions. The
+SQLite of EL8 (3.26) has them.
+
+**Worked queries.** `ARCHIVE` is the archive's path, for example
+`/srv/dsl41/runs/nightbank/archive.db`. Times are UTC, as the engine stores
+them. `json_extract` reads a field of a JSON column. Each query shows the
+root and the state: one archive can hold several roots, and the same job
+and run number can occur under each. Add `AND root_id = '...'` to read one.
+
+What ran on a day the archive holds, older than `retention_days`:
+
+```sh
+sqlite3 -readonly ARCHIVE "SELECT root_id, seq, state, at_utc, job,
+  run_number, outcome, outcome_at FROM line_dispatches
+  WHERE at_utc >= '2026-05-04' AND at_utc < '2026-05-05' ORDER BY root_id, seq"
+```
+
+The outcome of one run, each attempt with the wrapper's status:
+
+```sh
+sqlite3 -readonly ARCHIVE "SELECT root_id, seq, state, attempt,
+  outcome_seq, outcome, outcome_payload FROM line_dispatches
+  WHERE job = 'nightly_load' AND run_number = 42 ORDER BY root_id, seq"
+```
+
+What operators did: each control input with whether it was applied or
+refused, each update's `config` records (`intent` when it began, `applied`
+when it took effect), and each drain. With access control on, the engine
+sets `claimed_actor` to the checked identity of the person who sent the
+request, in place of what the client sent. With access control off, it is
+the name the client gave, not a checked identity, and it can be absent.
+The journal does not name who asked for a drain.
+
+```sh
+sqlite3 -readonly ARCHIVE "SELECT r.root_id, r.seq, r.state, r.at_utc, r.kind,
+  CASE r.kind WHEN 'input' THEN json_extract(r.payload, '$.claimed_actor')
+    WHEN 'config' THEN r.actor END AS claimed_actor,
+  json_extract(d.payload, '$.decision') AS decision,
+  json_extract(d.payload, '$.reason') AS reason, r.payload
+  FROM line_records AS r LEFT JOIN line_records AS d
+  ON r.kind = 'input' AND r.state = 'on line' AND d.state = 'on line'
+  AND d.root_id = r.root_id AND d.seq = r.seq + 1 AND d.kind = 'decision'
+  WHERE (r.kind = 'input' AND r.actor = 'control') OR r.kind = 'config'
+  OR (r.kind = 'engine' AND json_extract(r.payload, '$.event') = 'draining')
+  ORDER BY r.root_id, r.seq"
+```
+
+The definition a run had. The opening gives the revision the run opened
+under; the configuration is the one the record that applied that revision
+is bound to, on the current line, with no seq between them that is `line
+not known`. When there is no such record (it is still in the live store, it
+expired, or its seq is not known), the archive does not know the
+definition: `digest` is NULL. Do not pick one from `all_configurations` by
+`rev`: after a restore one revision can have two bodies. A later attempt
+of the run can be dispatched under a newer revision: its dispatch record's
+`rev`, read with `json_extract(payload, '$.rev')` from `line_records`.
+
+```sh
+sqlite3 -readonly ARCHIVE "SELECT o.root_id, o.seq, o.state, o.rev,
+  c.seq AS applied_seq, c.digest, c.data FROM line_run_openings AS o
+  LEFT JOIN line_configurations AS c ON o.state = 'on line'
+  AND c.state = 'on line' AND c.root_id = o.root_id AND c.rev = o.rev
+  AND c.seq < o.seq AND NOT EXISTS (SELECT 1 FROM line_not_known AS u
+    WHERE u.root_id = o.root_id AND u.seq > c.seq AND u.seq < o.seq)
+  WHERE o.job = 'nightly_load' AND o.run_number = 42"
+```
+
+The records of a line the live store left: each record stored under
+another history than the one that holds its seq, and each above the last
+seq. `state` is the seq's state on the current line, NULL above the last
+seq. Two records under one history, as a failed start leaves them, are
+not told apart here; the default views show them at a seq that is `line
+not known`.
+
+```sh
+sqlite3 -readonly ARCHIVE "SELECT a.root_id, a.seq, a.history,
+  coalesce((SELECT min(o.state) FROM line_observations AS o
+    WHERE o.root_id = a.root_id AND o.seq BETWEEN a.seq AND a.seq),
+    'not archived') AS state,
+  a.at_utc, a.kind FROM line_ranges AS r CROSS JOIN all_records AS a
+  ON a.root_id = r.root_id AND a.seq >= r.first_seq AND a.seq <= r.last_seq
+  WHERE a.history IS NOT r.history
+  UNION ALL SELECT a.root_id, a.seq, a.history, NULL, a.at_utc, a.kind
+  FROM lists AS l CROSS JOIN all_records AS a
+  ON a.root_id = l.root_id AND a.seq > l.last_seq
+  WHERE l.version = (SELECT max(m.version) FROM lists AS m
+    WHERE m.root_id = l.root_id) ORDER BY 1, 2"
+```
+
+**What the archive does not promise.**
+
+- A line's label is as good as the live store's history list (DL-536). The
+  engine writes a start's history row best-effort: a start whose row could
+  not be written appends its records under the earlier history. Where that
+  leaves two versions of a seq, the seq reads `line not known`. Where it
+  leaves one, the label is wrong and nothing shows it. Every row is kept
+  either way.
+- A root begun under a build that recorded no histories gets them at its
+  first start under a build that does: each retained `engine started`
+  record begins one, the first from seq 1. Only a root with no retained
+  `engine started` record has seqs that no history holds, and those read
+  `line not known`.
+- Damage to an archived row is found when the row is next read for a
+  batch, not before. There is no background check.
+- The archive takes about one and a half to two times the space of the
+  same rows keyed by seq alone; where in that range depends on the
+  workload.
+
+**Status.** `dsl41 query status --json` carries `archive`. `state` is
+`working`, `stopped` with its `reason`, or `off`. `verified_through` is the
+highest live seq this engine run has verified. `histories` is the count of
+the root's histories the archive holds, and `last_seq` the last seq of the
+newest history list it recorded, after the last round that completed. Each
+is `null` until the engine knows it
+([control protocol](control-protocol.md)).
+
+The engine opens the archive for each snapshot round, holds a lock on
+`<file>.lock` beside the database's real path while the round runs, and
+closes it at the round's end. Each round opens the configured path again,
+so a stop whose cause is removed ends at the next round, with no restart.
+
+**A stopped archive** stops pruning. The live store then grows, and request
+ids below the bound stay taken: a retry is answered from the kept
+decision. The engine writes one line when the archive stops, with the
+reason, and one when it works again. What to do, by reason:
+
+| Reason | Do |
+| --- | --- |
+| `another engine holds the archive, or an operator holds its lock` | Find the holder: as root, `lsof <file>.lock` names the process. Give each engine its own `archive_path`; two names of one file share the lock. Release a lock an operator's tool holds. |
+| `<path>: mode <mode> lets group or others read or write it; ...` | `chmod 600` the file and its `-wal` and `-shm`, as the service account. |
+| `<path> is not a regular file` | Point `archive_path` at a regular file, or at a path where none exists yet. |
+| `<path>: the archive file has <n> hard links; ...` | Remove the other names of the file. |
+| `<path> is not a dsl41 archive: it names no layout` | Point `archive_path` at another file, or take the way out below. The engine never writes into this file. |
+| `<path>: archive layout <name>; this build writes dsl41-archive-content-1 only` | The file is from another build or an earlier layout. Run the build that wrote it, or take the way out below. |
+| `<path>: journal_mode is '<mode>', the archive needs WAL` | A tool changed the file's journal mode. With the engine stopped, run `sqlite3 <path> 'PRAGMA journal_mode=WAL'`. |
+| `<what> is not UTF-8 text and cannot be archived: ...` | A live record the archive cannot hold verbatim. Report it as a defect; pruning waits. |
+| `the live configuration rev <n> does not match its digest` | The live store's configuration row is damaged. Report it as a defect; pruning waits. |
+| `the archive's <item> is damaged: expected digest <d>, found <d>, for root <root>; pruning stops` | The archive file is damaged. Take the way out below. |
+| `the archive's <item> cannot be read as text, for root <root>; pruning stops` | As above. |
+| `the archive's <table> set at seq <n> has rows and no header, for root <root>; pruning stops` | As above. |
+| `the archive does not read back as the batch's image <inside the transaction, after the commit>: its <part> differ, for root <root>; pruning stops` | A batch the engine just wrote did not read back as written. Check the disk and the file system; the next round tries again. If it stops again, take the way out below. |
+| `a verified range begins at seq <n>, above the live store's first seq <m>: ...` | An engine defect. Report it; the next round verifies again. |
+| `DatabaseError: file is not a database` | `archive_path` names a file that is not an SQLite database. Point `archive_path` at another file, or take the way out below. |
+| `<error type>: <text>`, an SQLite, disk or permission error | Fix the cause the text names; the next round tries again. `OperationalError: database is locked` is a reader writing to the file. |
+
+**The way out for a damaged or unusable file**, with the engine stopped.
+Nothing in the engine repairs an archive file. Stop the engine. Find the
+database file `archive_path` resolves to: it may be a symbolic link, and
+then the file it points to is the one to move. Move that file, and any
+`-wal` and `-shm` beside that file, together to one new name in the same
+directory: `<name>-kept-<date>`, with `-wal` and `-shm` after it. Keep them
+with the audit records: they hold the only copies of what was pruned
+before. Start the engine. Its first
+round makes a new archive and records a gap over what that file never
+received, and pruning goes on.
+
+Each engine expires only its own root's copies, under its current
+`archive_days`, and only rows its live store no longer holds. A root that
+no engine runs any more (one a renewal replaced) keeps its copies until an
+operator removes them. As the service account, with its `root_id` from the
+`roots` table:
+
+```sh
+sqlite3 /srv/dsl41/runs/nightbank/archive.db "BEGIN;
+DELETE FROM observations WHERE root_id = 'ROOT'; DELETE FROM records WHERE root_id = 'ROOT';
+DELETE FROM sets WHERE root_id = 'ROOT'; DELETE FROM transitions WHERE root_id = 'ROOT';
+DELETE FROM job_runs WHERE root_id = 'ROOT'; DELETE FROM job_records WHERE root_id = 'ROOT';
+DELETE FROM configs WHERE root_id = 'ROOT'; DELETE FROM list_entries WHERE root_id = 'ROOT';
+DELETE FROM lists WHERE root_id = 'ROOT'; DELETE FROM histories WHERE root_id = 'ROOT';
+DELETE FROM coverage WHERE root_id = 'ROOT'; DELETE FROM roots WHERE root_id = 'ROOT';
+COMMIT; PRAGMA incremental_vacuum;"
+```
+
+A round that meets this write stops once and goes on at the next.
+
+An older build, or a run with `archive_days = 0`, prunes without copying.
+So does an engine built without `dsl41 run`, such as a test harness; its
+`status` shows `archive.state` as `off` with the reason.
+The rows it pruned show as `never received` in the archive's coverage.
+
+The archive holds the engine's own records: inputs and decisions,
+dispatches and outcomes, configurations, the transition rows and the
+history index. It does not hold the wrapper's spool evidence under
+`runs/`, the file watcher's poll log or job output. It does not yet hold
+the control socket's access log.
 
 ## Drain the engine
 
@@ -849,6 +1158,12 @@ same path. Restore any unit drop-ins. If you restore unit files, run
 `systemctl daemon-reload`. On a replacement host, run
 `systemctl enable dsl41-engine.service` if the service should start at boot. Follow
 [recovery](#recover-after-the-engine-or-box-dies) to start and check the engine.
+
+A restore of the live store to an older copy beside a newer archive (an
+`archive_path` outside the run root, or an `archive.db` kept from after the
+backup) needs no step for the archive: its first rounds record the restored
+line's history list, and the archive keeps both lines
+([Keep the archive](#keep-the-archive)).
 
 ## Reload a changed estate
 

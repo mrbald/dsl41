@@ -291,6 +291,12 @@ def run(
         help="Days of journal kept behind the latest snapshot, for this run only."
         " Default: retention_days in engine.toml.",
     ),
+    archive_days: int | None = typer.Option(
+        None,
+        "--archive-days",
+        help="Days a verified copy of a pruned journal row stays in the archive database,"
+        " for this run only; 0 keeps no archive. Default: archive_days in engine.toml.",
+    ),
     config: str | None = CONFIG_OPT,
 ) -> None:
     """Run an estate on this machine with real processes and a wall clock.
@@ -305,9 +311,9 @@ def run(
     after the grace), the engine records how each ended and exits 0.
     Jobs are tethered: when the engine dies, its jobs are terminated
     and their wrappers record it. The first run writes engine.toml with
-    the default stop grace, snapshot cadence and retention; the
-    --grace-term, --grace-kill, --snapshot-interval and --retention-days
-    flags override it for one run.
+    the default stop grace, snapshot cadence, retention and archive; the
+    --grace-term, --grace-kill, --snapshot-interval, --retention-days and
+    --archive-days flags override it for one run.
 
     While it runs, use 'dsl41 query' and 'dsl41 sendevent' from another
     terminal, or open the terminal UI with --ui here or 'dsl41 ui'
@@ -340,6 +346,7 @@ def run(
             "grace_kill",
             "snapshot_interval",
             "retention_days",
+            "archive_days",
         ),
     )
     if on_violation is not None:
@@ -413,6 +420,7 @@ def run(
                         "grace_kill_s": grace_kill,
                         "snapshot_interval_s": snapshot_interval,
                         "retention_days": retention_days,
+                        "archive_days": archive_days,
                     },
                 )
             )
@@ -905,12 +913,12 @@ async def _serve_run(
 
     The profile is REQUIRED and is the one source of every launch option read here (timezone,
     alias table, the FW window) (DL-137); `engine.toml` with `overrides` over it is the source
-    of the stop grace, the snapshot cadence and the retention."""
+    of the stop grace, the snapshot cadence, the retention and the archive."""
     import asyncio
 
     from datetime import UTC, datetime
 
-    from dsl41.runner_startup import start_run, wire_from_profile
+    from dsl41.runner_startup import arm_archive, start_run, wire_from_profile
     from dsl41.runner_control import ControlServer
     from dsl41.runner_startup import resume_run as _resume_run
     from dsl41.runner_access import AccessError
@@ -1078,6 +1086,8 @@ async def _serve_run(
         if hook_settings is not None and hook_settings.status_hook is not None:
             engine.status_hooks = StatusHooks(engine, hook_settings)
         load_settings(run_root)
+        # DL-545: pruned rows are copied and verified first; the shutdown stops the worker
+        arm_archive(engine, run_root, settings)
         if warns and engine.journal is not None:
             engine.journal.preflight(warns, engine.now_present())
         access = None

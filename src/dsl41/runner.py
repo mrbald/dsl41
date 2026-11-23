@@ -200,6 +200,7 @@ from dsl41.runner_journal import (
     pending_record,
 )
 from dsl41.runner_history import run_history
+from dsl41.runner_archive import STOP_DEADLINE_S, ArchiveWorker, Report
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, Proof
 from dsl41.runner_procid import COOKIE_ENV, cookie, current_boot_id, invocation_tag
 from dsl41.runner_store import Record
@@ -227,6 +228,13 @@ INSTANT_BUDGET_FLOOR: Final = 10_000
 #: counted. The loop takes a backlog's steps one at a time when nothing is due, so no ready task
 #: waits behind two (DL-543). A module constant so tests can lower it.
 PRUNE_STEP: Final = 2000
+
+#: The `off` reason of an engine with a store file and `archive_days` above 0 that was given no
+#: archive worker: only `dsl41 run` arms one (DL-545).
+UNARMED: Final = (
+    "the archive is not armed for this engine: it was not started by `dsl41 run`, and pruning"
+    " deletes without a copy"
+)
 
 
 @dataclass
@@ -568,6 +576,20 @@ class Engine:
         #: takes one more step against it each time nothing is due (DL-543). Not stored: a
         #: restart's next snapshot reads a bound of its own
         self._prune_owed: int | None = None
+        #: the archive worker (DL-545): None prunes as DL-543 does. With one, a snapshot round
+        #: asks it to copy and verify below the bound, and only its reports owe prune steps
+        self.archive: ArchiveWorker | None = None
+        #: the archive round the last snapshot asked for, and that round's bound; a report of
+        #: another round owes nothing
+        self._archive_round = 0
+        self._archive_bound: int | None = None
+        #: the highest seq the worker verified in this run, and why the archive stopped (None
+        #: while it works); not stored: a restart verifies again
+        self._archive_verified: int | None = None
+        self._archive_stopped: str | None = None
+        #: the count of the root's histories in the archive and the last seq of the newest
+        #: list it recorded, as the last report said; None before one
+        self._archive_lineage: tuple[int | None, int | None] | None = None
         #: the run history the snapshot this engine restarted from carried; each snapshot
         #: continues it with the trace since (`runner_history.run_history`)
         self.restored_runs: dict[str, list[dict[str, Any]]] = {}
@@ -2528,11 +2550,28 @@ class Engine:
         # a verdict taken while the join waited may have armed the held poll: teardown leaves
         # no timer armed (DL-524)
         self.stops.cancel_all()
+        await self._stop_archive()
         for task, result in zip(tasks, results, strict=True):
             if id(task) in self._corpses_raised:
                 continue  # _settle already raised this failure to a caller
             if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
                 raise result
+
+    async def _stop_archive(self) -> None:
+        """Stop the archive worker and wait for it within `STOP_DEADLINE_S` (DL-545). Every
+        report after this is of an older round and owes nothing. A worker that outlives the
+        deadline is left: it stops after its batch, and a batch only adds copies to the
+        archive, so no live row is deleted on its word."""
+        self._archive_round += 1
+        worker = self.archive
+        if worker is None:
+            return
+        worker.stop()
+        if not await asyncio.to_thread(worker.join, STOP_DEADLINE_S):
+            best_effort_report(
+                f"dsl41: WARNING: {worker.path}: the archive worker did not stop within"
+                f" {STOP_DEADLINE_S}s; the shutdown goes on without it (DL-545)"
+            )
 
     async def _run_adapter(
         self,
@@ -2606,7 +2645,9 @@ class Engine:
         every snapshot but the latest two goes, then one step of at most `PRUNE_STEP` rows
         below `min(snapshot seq, the oldest seq the open table refers to)` and older than
         `retention_days`; a longer backlog is owed to the loop, which takes it a step at a time
-        when nothing else is due (DL-543). Answers the snapshot's seq."""
+        when nothing else is due (DL-543). With an archive worker the round takes no step: it
+        asks the worker to verify copies below the bound, and the worker's reports owe the steps
+        (DL-545). Answers the snapshot's seq."""
         assert self.journal is not None
         journal = self.journal
         journal.prove()  # an engine that lost the root writes no snapshot (S6b)
@@ -2642,7 +2683,14 @@ class Engine:
             cutoff = now - timedelta(days=self.settings.retention_days)
             bound = journal.store.prune_bound(floor, cutoff)
             assert bound is not None  # the snapshot above is stored
-            self._prune_step(bound)
+            if self.archive is None:
+                self._prune_step(bound)
+            elif not self.draining:
+                # DL-545: the worker copies and verifies below the bound first; only its
+                # reports owe steps. The stop's own snapshot asks for no round
+                self._archive_round += 1
+                self._archive_bound = bound
+                self.archive.request(self._archive_round, bound)
         return seq
 
     def _prune_step(self, bound: int) -> None:
@@ -2660,6 +2708,74 @@ class Engine:
             self.decisions.evict_below(pruned.decision + 1)
         if store.first_seq() < bound:
             self._prune_owed = bound
+
+    def archive_report(self, report: Report) -> None:
+        """A worker's report, handed to the loop (DL-545). A report of another round than the
+        last asked for, or one that comes once the stop began, owes nothing more. A stop owes
+        nothing more until a later round verifies again. A verified range owes the steps up
+        to one past its last seq, never past the round's bound, and only when it begins at or
+        below the live store's first seq as the loop reads it now: then no unverified row
+        lies below its end. One that begins above it owes nothing and stops the archive. Only
+        a completed round says the archive works again and carries its lineage."""
+        if report.round != self._archive_round or self.draining:
+            return
+        if report.stopped is not None:
+            self._archive_stops(report.stopped)
+            return
+        if report.verified is not None:
+            assert self.journal is not None  # a worker is armed on an engine with a store
+            first = self.journal.store.first_seq()
+            if report.verified[0] > first:
+                self._archive_stops(
+                    f"a verified range begins at seq {report.verified[0]}, above the live"
+                    f" store's first seq {first}: the rows below it are not verified"
+                )
+                return
+            assert self._archive_bound is not None  # a round's report follows its request
+            self._archive_verified = report.verified[1]
+            self._prune_owed = min(report.verified[1] + 1, self._archive_bound)
+            self._activity.set()
+        if report.completed:
+            self._archive_lineage = (report.histories, report.last_seq)
+            if self._archive_stopped is not None:
+                self._archive_stopped = None
+                best_effort_report("dsl41: the archive works again; pruning goes on (DL-545)")
+
+    def _archive_stops(self, reason: str) -> None:
+        """The archive stopped: one line when it begins, not one a round; nothing is owed."""
+        if self._archive_stopped is None:
+            best_effort_report(
+                f"dsl41: WARNING: the archive stopped, so pruning waits: {reason} (DL-545)"
+            )
+        self._archive_stopped = reason
+        self._archive_verified = None
+        self._prune_owed = None
+
+    def archive_view(self) -> dict[str, Any]:
+        """The `status` answer's `archive` block (DL-545): `state` is `off`, `working` or
+        `stopped` with its `reason`; `verified_through` is the highest live seq this run has
+        verified, `histories` the count of the root's histories the archive holds and
+        `last_seq` the last seq of the newest history list it recorded, each null before it is
+        known. An engine with a store file and `archive_days` above 0 that was given no worker
+        prunes without a copy, and its `off` says so."""
+        if self.archive is None or self.journal is None:
+            unarmed = (
+                self.settings is not None
+                and self.settings.archive_days > 0
+                and self.journal is not None
+                and self.journal.path is not None
+            )
+            if not unarmed:
+                return {"state": "off"}
+            return {"state": "off", "reason": UNARMED}
+        view: dict[str, Any] = {"state": "working"}
+        if self._archive_stopped is not None:
+            view = {"state": "stopped", "reason": self._archive_stopped}
+        view["verified_through"] = self._archive_verified
+        lineage = self._archive_lineage
+        view["histories"] = None if lineage is None else lineage[0]
+        view["last_seq"] = None if lineage is None else lineage[1]
+        return view
 
 
 def _names_tombstone(oracle: Oracle, attempt: Attempt) -> bool:

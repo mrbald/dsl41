@@ -149,6 +149,21 @@ of this build settles them with the journal (runner-design §7): it drops
 the rows an older prune left and records the older build's appends as a
 gap. The `status` field `history_unavailable` is additive within dialect 5.
 
+**Archive (DL-545).** The archive is a separate file with its own layout,
+named in `meta.layout`. This build creates an archive only where no file
+exists or the file is empty, and opens only its own layout,
+`dsl41-archive-content-1`. It refuses any other file by the layout it
+names, or because it names none; the archive then stops and pruning waits. The engine never writes into a refused file, and no step from
+another layout exists. The reading views are part of the layout. The live
+store's `schema_version` stays 1 and gains no table. An older build ignores
+the archive and prunes without copying, and this build's next round records
+those rows as a gap. The `status` field `archive` is additive within
+dialect 5. The settings `archive_days` and `archive_path` are written to
+`engine.toml` only when set; the build before them refuses a file that
+names either, so going back a build needs those lines removed. A restore of
+the live store to an older copy beside a newer archive needs no step: the
+archive records the restored line's history list and keeps both lines.
+
 **Past runs (DL-540).** The `history` query is additive within dialect 5. It reads
 the history index and writes nothing. Its one new code, `history_unavailable`, is
 additive within dialect 5 too. The
