@@ -846,8 +846,26 @@ def test_cli_runs_json_and_csv_carry_catalog_hash_on_every_row(tmp_path: Path) -
     header, row, *_ = as_csv.output.splitlines()
     assert header.split(",")[0] == "job"
     assert row.split(",")[0] == "j1"
-    assert header.split(",")[-1] == "undecided"
-    assert row.split(",")[-1] == "false"  # csv spells bools as json does (DL-156)
+    # the columns as before DL-555, in their order, and the new one last
+    assert header.split(",") == [
+        "job",
+        "run_number",
+        "catalog_hash",
+        "started_at",
+        "ended_at",
+        "duration_s",
+        "status",
+        "exit_code",
+        "started_by",
+        "run_dir",
+        "box_name",
+        "clock_source",
+        "job_hash",
+        "fidelity",
+        "undecided",
+        "definition_unknown",
+    ]
+    assert row.split(",")[-2:] == ["false", ""]  # csv spells bools as json does (DL-156)
 
 
 def test_cli_runs_since_filters_out_earlier_runs(tmp_path: Path) -> None:

@@ -762,7 +762,9 @@ reading the retained journal.
 `journal` and `runs` restore the latest snapshot before folding the tail;
 a run that starts before the retained anchor is `partial`. Missing end
 evidence yields the reader marker `UNKNOWN`, never an invented oracle
-status. Each run is read under its opening configuration revision (DL-432).
+status. Each run is read under its opening configuration revision (DL-432)
+where the records hold it; a run whose opening rev none of them holds is a
+marked row (DL-555, **Run history** below).
 On a replay from a snapshot, a run that opens after the snapshot is read
 under the rev in force at its opening: the snapshot's `config_rev`, then the
 `CONFIG` marks after it. A retained `config applied` record older than the
@@ -1048,7 +1050,8 @@ them (control-protocol §4 `history`, DL-540).
 **Run history.** `dsl41 runs` is an offline projection, not a new record
 kind (DL-113). The row is `{job, run_number, catalog_hash, job_hash, started_at,
 ended_at, duration_s, status, exit_code, started_by, run_dir,
-box_name, clock_source, fidelity, undecided}` (DL-113, DL-136, DL-141).
+box_name, clock_source, fidelity, undecided, definition_unknown}` (DL-113,
+DL-136, DL-141, DL-555).
 `clock_source` says whether the timing came from the wrapper's spool or
 fell back to the store. `fidelity` says how much of the row could be
 established: `full`, `records_only` or `partial`. A run that begins before
@@ -1058,6 +1061,36 @@ the retained snapshot is `partial`; missing retained end evidence yields
 cannot re-decide. It does not decide the row: the earlier durable verdict
 or pre-completion status stands. A full-fidelity replay uses the recovered
 verdict (DL-156).
+
+A run's rev is recorded where it opens, never derived (DL-427, DL-432).
+`runs` reads a run's window where the store records it (DL-555). The history
+index holds each opening with its rev, and `transitions` the trace entries;
+both survive a prune. A run whose opening they hold, in the stretch both
+cover up to the store's last seq, takes its window from them: the opening's
+rev and cause and the transitions that follow, as `history` builds it. Any
+other run keeps the window of the replay and the snapshot; an opening the
+index holds below a later gap still gives its rev. Each run gets one window
+before any row is made. The reads of a root's store share one read
+transaction; the spool is read after it.
+Two openings of one run number in that stretch refuse the read, as
+`history` declines the job, until retention drops them. On an
+engine-written root the rows then equal the `history` rows except for the
+spool's times and `clock_source`, `fidelity` for a run that began before
+the snapshot, and the page-boundary STATUS (control-protocol §4 `history`).
+
+Where none of them holds a rev for a retained dispatch's run, the run costs
+one row, not the report. The row's
+`definition_unknown` is `no_opening_rev`, and it carries nothing that needs
+the definition: a null `catalog_hash`, `job_hash` and `box_name`. Its status
+comes only from that run's own end: the later of an explicit applied status
+and the trace's recorded close. A bare exit code gives no verdict, since
+SEM-09 needs the definition, and the snapshot row's current status is not
+the run's end: a box restart resets a finished member to INACTIVE with no
+new run. With neither, the status is null. The job, run number, run
+directory, times, `started_by` and the raw exit code are shown. `UNKNOWN`
+keeps its meaning above. A box window with no rev has no row, since another
+rev's type cannot say the job was a box; its members keep their own rows. A rev that is recorded and that the store holds no
+configuration for is a broken reference and refuses the read.
 
 An open run gets a row with a null `ended_at` and a null duration, never a
 fabricated one. Every CMD and FW start gets a `dispatch` record, so a file
@@ -1071,6 +1104,16 @@ A duration series breaks where the row's `job_hash` moved, falling back to
 row in the JSON and CSV formats, so an external consumer can segment
 either way. The table shows `catalog_hash` and marks a break where
 `job_hash` moved, or where `catalog_hash` moved for a row without a job hash.
+A row whose definition is not known shows `?` for its hash, box and unknown
+status and takes no part in a break; the next known row is compared with
+the last known one. JSON shows its nulls and CSV blank cells. `dsl41 runs`
+writes one line on standard error for each such row, in every format,
+naming the root, the job, the run and the reason, and exits 0. It exits 2
+for a root it cannot read, a store whose first start wrote no configuration
+among them, and for a malformed option such as `--since`. The `history`
+query has no such row: its row keeps the shape above without
+`definition_unknown`, and it declines a page whose fold reads a run under no
+definition.
 A start that produced no run is not a row: a dropped tick, a held job and
 a refused command produce no run-history row. dsl41 emits these facts and
 decides nothing about them: trends, thresholds and paging are the site's

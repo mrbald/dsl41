@@ -1947,36 +1947,44 @@ class RunsFormat(str, Enum):
 def _runs_table(rows: list[RunRow]) -> list[str]:
     """table format: fixed-width columns, sorted (job, started_at) by the caller, plus a labelled
     break wherever the SAME job's rows cross a definition change (`runner_history` decision 4;
-    never a hidden line, never a refusal to print)."""
+    never a hidden line, never a refusal to print). A row whose definition is not known shows
+    `?` for what needs it and takes no part in a break: the next known row is compared with
+    the last known one (decision 7, DL-555)."""
     header = (
         f"{'JOB':<32} {'RUN':>4} {'STARTED_AT':<26} {'DURATION_S':>10}"
         f" {'STATUS':<11} {'CLOCK':<7} {'HASH':<10} BOX"
     )
     from dsl41.runner_history import definition_change
 
+    def short(digest: str | None) -> str:
+        return "?" if digest is None else digest[:10]
+
     lines = [header]
     previous: RunRow | None = None
     for row in rows:
-        if previous is not None and previous.job == row.job:
+        known = row.definition_unknown is None
+        if known and previous is not None and previous.job == row.job:
             change = definition_change(previous, row)
             if change == "definition":
                 lines.append(
                     f"  -- {row.job}: definition changed"
-                    f" {previous.job_hash[:10] if previous.job_hash else '?'} ->"
-                    f" {row.job_hash[:10] if row.job_hash else '?'} --"
+                    f" {short(previous.job_hash)} -> {short(row.job_hash)} --"
                 )
             elif change == "catalog":
                 lines.append(
-                    f"  -- {row.job}: catalog changed {previous.catalog_hash[:10]} ->"
-                    f" {row.catalog_hash[:10]} (estate-wide: no per-job fingerprint here) --"
+                    f"  -- {row.job}: catalog changed {short(previous.catalog_hash)} ->"
+                    f" {short(row.catalog_hash)} (estate-wide: no per-job fingerprint here) --"
                 )
         duration = "-" if row.duration_s is None else f"{row.duration_s:.1f}"
+        status = row.status or "?"
+        box = row.box_name or ("-" if known else "?")
         lines.append(
             f"{row.job:<32} {row.run_number:>4} {row.started_at.isoformat():<26}"
-            f" {duration:>10} {row.status:<11} {row.clock_source:<7}"
-            f" {row.catalog_hash[:10]:<10} {row.box_name or '-'}"
+            f" {duration:>10} {status:<11} {row.clock_source:<7}"
+            f" {short(row.catalog_hash):<10} {box}"
         )
-        previous = row
+        if known:
+            previous = row
     return lines
 
 
@@ -1993,7 +2001,8 @@ def runs(
         RunsFormat.table,
         "--format",
         help="table: human-readable, with a marked break at every catalog"
-        " change. json or csv: every field, with catalog_hash on each row.",
+        " change. json or csv: every field, with catalog_hash on each row whose"
+        " definition is known.",
     ),
 ) -> None:
     """List the run history of one or more run roots.
@@ -2003,7 +2012,8 @@ def runs(
     and file-watch runs and boxes each get rows. Rows
     sort by job and start time across all the roots given. Where the
     catalog changed between runs, the table marks the break instead of
-    blending the series.
+    blending the series. A run whose definition is not known still gets
+    its row, marked, and one warning line on stderr.
 
     This command reads files only. It needs no running engine and no
     socket.
@@ -2011,13 +2021,29 @@ def runs(
     Exit codes: 0 history printed; 2 a root could not be read.
     """
     # Design: DL-113; not a control-protocol verb
-    from dsl41.runner_history import RunHistoryError, read_run_roots
+    from dsl41.runner_history import RunHistoryError, read_run_roots, run_order
 
     since_at = None if since is None else _naive_utc_arg(since, "--since")
+    rows: list[RunRow] = []
+    unknown: list[str] = []
     try:
-        rows = read_run_roots(list(run_roots), job=job, since=since_at)
+        for run_root in run_roots:
+            read = read_run_roots([run_root], job=job, since=since_at)
+            rows.extend(read)
+            # one line per run whose definition is not known, naming its root (DL-555)
+            unknown.extend(
+                f"warning: {run_root}: {row.job} run {row.run_number}:"
+                f" definition_unknown={row.definition_unknown}: neither the history index,"
+                " the snapshot nor the replay holds the rev the run opened under, so its row"
+                " has no hashes, no box and no verdict from a bare exit code"
+                for row in read
+                if row.definition_unknown is not None
+            )
     except RunHistoryError as exc:
         raise typer.Exit(refuse(exc)) from exc
+    rows.sort(key=run_order)
+    for line in unknown:
+        typer.echo(line, err=True)
 
     if any(row.fidelity == "records_only" for row in rows):
         # Loud on stderr as well as on the row, because the one degraded field that MISLEADS

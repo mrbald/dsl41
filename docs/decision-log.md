@@ -28044,3 +28044,32 @@ relitigate an entry; append a new one.
   COST. A malformed result from an in-process adapter stops the engine, as any adapter fault
   does. Left as they are: a scripted TIMER's own fields; a wrapper status file with an end
   time that is not a timestamp (BUG-115).
+- DL-555 The offline run history reads the windows the store records
+  (2026-11-25; BUG-108 and BUG-2; src/dsl41/runner_history.py, src/dsl41/runner_store.py,
+  src/dsl41/runner_runs.py, src/dsl41/cli_run.py, docs/runner-design.md,
+  docs/control-protocol.md, README.md, tests/test_runs_store_windows.py,
+  tests/test_runs_unknown_definition.py; builds on DL-539, DL-540 and DL-549; narrows the
+  consequence of DL-427 and DL-432, not their rule; closes BUG-108 and BUG-2)
+  THE RULE. `fold_run_rows` stays the one code that makes a row of run history. Where the
+  history index holds a run's opening and the store holds its transitions, `dsl41 runs`
+  gives the fold that run's window from them: the opening's rev, its cause, the transitions
+  that follow. Any other run keeps the window from the replay and the snapshot. Each job
+  and run gets exactly one window before any row is made; the boundary is a seq, read from
+  both coverages in the one read transaction that holds all the store's reads.
+  A RUN WITH NO KNOWN DEFINITION costs one row. Where no source holds an opening rev, the
+  row carries what the records give and a field `definition_unknown`; it has no hashes and
+  no box, its status is that run's own recorded end and never a verdict made from a bare
+  exit code, its end time is the process's. `dsl41 runs` prints the rows, names each such
+  run on standard error and exits 0. Nothing is derived (DL-427, DL-432).
+  THE DEFECT. Two readers answered one question from two sources: `dsl41 runs` from the
+  replay and the snapshot, the `history` query from the index and the stored transitions.
+  On a pruned root the first had lost what the second still held, and one run with no rev
+  it could find refused the whole report. BUG-2, BUG-108 and BUG-110 were that.
+  WHAT STILL REFUSES. A root that cannot be read, a foreign state version, a named rev
+  whose configuration row is missing, two openings of one run.
+  UNCHANGED. The `history` answer on the wire, every record's form, a healthy root's rows.
+  The two readers' rows are equal but for the spool's times, `fidelity` for a run that
+  began before the snapshot, and the documented page-boundary case.
+  COST. A root upgraded in place does not read in full: a run that an older build numbered
+  lies below the index and shows the snapshot's window, or the marked row. A job removed by
+  an update now reads `partial` after a pruned snapshot, where it read `full`.

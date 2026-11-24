@@ -41,6 +41,7 @@ import dataclasses
 import sqlite3
 import sys
 from collections.abc import Collection, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -249,6 +250,23 @@ class RawBatch:
     config_data: list[tuple[int, str, bytes]] = field(default_factory=list)
     histories: list[tuple[str, int]] = field(default_factory=list)
     last_seq: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class RunEvidence:
+    """What `dsl41 runs` reads of a root's history index and stored transitions, in the one
+    read transaction its reads of the store share (DL-555). `first_seq` and `last_seq` are the retained journal
+    range; both coverages are cut to it. `openings` are the `job_runs` rows `(seq, n, job,
+    run_number, rev)` and `transitions` the `transitions` rows `(seq, n, entry)`, each only
+    where its own coverage names the seq as covered, in key order. A table this file does not
+    have gives no rows and no coverage."""
+
+    first_seq: int
+    last_seq: int
+    history_coverage: list[Interval]
+    transitions_coverage: list[Interval]
+    openings: list[tuple[int, int, str, int, int]]
+    transitions: list[tuple[int, int, dict[str, Any]]]
 
 
 def covered_parts(coverage: Sequence[Interval], first: int, last: int) -> list[tuple[int, int]]:
@@ -1771,6 +1789,55 @@ class SqliteStore:
                 record = Record(_unstamp(at), kind, actor, request_id, _decode_payload(payload))
                 found.append((int(seq), record))
         return found
+
+    # ---- the run history's read (DL-555)
+
+    @contextmanager
+    def run_evidence(self) -> Iterator[RunEvidence]:
+        """One read transaction for a reader's reads of the store: it yields the history
+        index's openings, the stored transitions and both coverages (`RunEvidence`), and every
+        read of this store the caller makes inside the block sees the same point. On a reader's
+        connection it holds no lock a writer waits on (WAL)."""
+        self._db.execute("BEGIN")
+        try:
+            tables = {
+                str(name)
+                for (name,) in self._db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            first, last = self.first_seq(), self.last_seq()
+
+            def coverage(table: str, rows: tuple[str, ...]) -> list[Interval]:
+                if not {table, *rows} <= tables:
+                    return []
+                return _trimmed(self._coverage(table), first, last)
+
+            history = coverage("history_coverage", ("job_runs",))
+            stored = coverage("transitions_coverage", ("transitions",))
+            openings: list[tuple[int, int, str, int, int]] = []
+            for low, high in covered_parts(history, first, last):
+                openings.extend(
+                    (int(seq), int(n), str(job), int(run), int(rev))
+                    for seq, n, job, run, rev in self._db.execute(
+                        "SELECT seq, n, job, run_number, rev FROM job_runs"
+                        " WHERE seq >= ? AND seq <= ? ORDER BY seq, n",
+                        (low, high),
+                    )
+                )
+            transitions: list[tuple[int, int, dict[str, Any]]] = []
+            for low, high in covered_parts(stored, first, last):
+                transitions.extend(
+                    (int(seq), int(n), dict(_decode_payload(bytes(entry))))
+                    for seq, n, entry in self._db.execute(
+                        "SELECT seq, n, entry FROM transitions"
+                        " WHERE seq >= ? AND seq <= ? ORDER BY seq, n",
+                        (low, high),
+                    )
+                )
+            yield RunEvidence(first, last, history, stored, openings, transitions)
+        finally:
+            self._db.execute("COMMIT")
 
     # ---- the archive's reads (DL-545)
 

@@ -357,7 +357,7 @@ The client action says what a client does next:
 | `plan_cycle` | query | the AND-success skeleton has a cycle, so `plan` is disabled | operator |
 | `unknown_job` | query, or refused on a mutation | the job is not in the catalog (for `status`: in neither the catalog nor the store) | fix the request |
 | `transitions_unavailable` | query | the start could not settle the transition rows for this run; `error` gives the reason, and the answer asserts no entries, coverage, continuity or history (DL-536) | operator: fix the cause `error` names; the rows are still committed, and the next start tries again |
-| `history_unavailable` | query | `history` cannot serve the page: the start could not settle the history index for this run, the page shows one run number twice, or a run on it, or the opening above it, opened under a configuration rev the store holds no row for; `error` gives the reason (DL-540) | operator: for an unsettled index, fix the cause `error` names, and the next start settles it again; a run number shown twice or a missing configuration row stays until retention drops those openings |
+| `history_unavailable` | query | `history` cannot serve the page: the start could not settle the history index for this run, the page shows one run number twice, or a run on it, or the opening above it, opened under a configuration rev the store holds no row for, or a run on it has no opening entry with a rev though the index names one; `error` gives the reason (DL-540, DL-555) | operator: for an unsettled index, fix the cause `error` names, and the next start settles it again; a run number shown twice or a missing configuration row stays until retention drops those openings |
 | `no_journal` | stream or query | the run has no store to stream, or to read `transitions` from | operator |
 | `backfill_refused` | stream | the backfill met a store it cannot read as this estate's | operator |
 | `unknown_verb` | refused | `verb` names no `sendevent` verb | fix the request |
@@ -1015,7 +1015,9 @@ could not settle the history index (`status` shows `history_unavailable`),
 it answers `history_unavailable` with that reason. So does a page that shows one run
 number twice, naming the number, and a page whose run, or the opening
 above it, opened under a configuration rev the store holds no row for,
-naming the rev; no other configuration stands in for it. An answer that cannot hold one run or window
+naming the rev; no other configuration stands in for it. So does a page
+whose fold finds no opening entry with a rev for a run the index names,
+naming the run (DL-555). An answer that cannot hold one run or window
 within the byte cap, such as one for a job whose name alone passes it,
 answers `invalid_argument`.
 
@@ -1037,7 +1039,8 @@ answers `invalid_argument`.
 ```
 
 `row` is the run row of `dsl41 runs` (runner-design §7 **Run history**) with
-no spool, so its `clock_source` is `journal`. `attempts` are the run's
+no spool, so its `clock_source` is `journal`, and without the
+`definition_unknown` field of `runs`. `attempts` are the run's
 dispatches in order, each with its own rev and the outcome its `outcome`
 record holds, or null for none recorded; no environment is shown. A run
 shows at most its 50 newest attempts, and `attempts_cut` says some were left
@@ -1316,7 +1319,11 @@ A run's rev is the rev in force where the run opened. Off the wire, beside
 the run history DL-428's snapshot keeps, each retained run carries it as
 `rev`, required: a snapshot whose retained run lacks it does not read, and
 the store must use the binary's state version. `dsl41 runs` reads every run under that rev and
-never under a dispatch's.
+never under a dispatch's. `runs` takes a run's window, rev included, from the
+history index and the stored transitions where they cover its opening, as
+`history` does, and from the replay and the snapshot elsewhere. A run whose
+opening rev none of them holds is read under none: its row is marked
+`definition_unknown` and `runs` names it on standard error (DL-555).
 
 **Attempt and recovery fields** (DL-426), each additive, so a client that
 does not read them keeps working (§2):

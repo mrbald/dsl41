@@ -7,7 +7,9 @@ The index only finds records; the fold reads each record's own payload.
 1. **Boundary.** Full rows come only from the covered interval of the index that reaches the
    watermark; its first seq is the boundary, `full_from`. Nothing is stitched across a gap.
 2. **Page.** The cursor is a run number, newest first: the openings of the job at or above the
-   boundary and below the cursor. A page that shows one run number twice declines for the job.
+   boundary and below the cursor. A page that shows one run number twice declines for the job,
+   and so does one whose fold reads a run under no definition (DL-555): the index names its
+   opening, so the evidence disagrees, and the row keeps its shape.
 3. **Evidence**, run by run under a budget of rows (`runner_store.HistoryRead`): the job's trace
    entries and the CONFIG marks of each run's range, through the entry of the opening above the
    page, the records the index names for its run wherever they sit, and the records it names
@@ -28,14 +30,15 @@ The index only finds records; the fold reads each record's own payload.
    below the cursor, so `next` moves; one that cannot hold even that within the byte cap is
    refused (`AnswerTooLarge`).
 
-For a run opened at or above the boundary the row equals the whole fold's (`read_run_root`
-over the whole journal with the replayed trace and `spool={}`), with one exception: a STATUS
-with no run number admitted after the next run opened (a greater seq), at a time not later
-than that opening's and before that run's dispatch, when the two runs are on different pages.
-The whole fold gives it to the earlier run, by time; that run's page does not hold it. On one
-page the read gives it to the earlier run too. On a pruned store the whole fold calls a run
-that began before its snapshot `partial` where this read calls it `full`. No decision reads
-the answer.
+For a run opened at or above the boundary the row equals the row `dsl41 runs` gives
+(`read_run_root`, which takes such a run's window from the same index and stored transitions,
+DL-555) except in three ways. The spool's times, duration and `clock_source`: this read has
+no spool. `fidelity`: on a pruned store `runs` calls a run that began at or before the
+snapshot it replays from `partial`, where this read calls it `full`. And a STATUS with no run
+number admitted after the next run opened (a greater seq), at a time not later than that
+opening's and before that run's dispatch, when the two runs are on different pages: `runs`
+gives it to the earlier run, by time; that run's page does not hold it. On one page the read
+gives it to the earlier run too. No decision reads the answer.
 """
 
 from __future__ import annotations
@@ -140,7 +143,8 @@ def answer(
 ) -> dict[str, Any]:
     """Read one page and shape the whole answer, `header` included, within `byte_cap` encoded
     bytes. A read `stopped` says to stop raises `Stopped` at its next step. A page that shows a
-    run number twice, or names a rev the store holds no configuration for, raises `Declined`;
+    run number twice, names a rev the store holds no configuration for, or folds a run under
+    no definition (DL-555) raises `Declined`;
     an answer that cannot hold one item within the cap raises `AnswerTooLarge`."""
     query = HistoryQuery(request.job, request.cursor, request.limit, upto, budget)
     read = store.read_history(query)
@@ -283,12 +287,20 @@ def _runs(
         if row is None:
             out.append((run.run_number, None))
             continue
+        if row.definition_unknown is not None:
+            # the index names the run's opening and its rev, yet the page's trace opens no
+            # window for it: the evidence disagrees, and the answer's row has no shape for a
+            # run read under no definition (DL-555)
+            raise Declined(
+                f"run {run.run_number} of {job!r} has no opening entry on this page that"
+                " records its configuration rev, though the history index names one (DL-555)"
+            )
         attempts = _attempts(read.owned, run.run_number)
         out.append(
             (
                 run.run_number,
                 {
-                    "row": row.model_dump(mode="json"),
+                    "row": row.model_dump(mode="json", exclude={"definition_unknown"}),
                     "attempts": attempts[-ATTEMPTS_MAX:],
                     "attempts_cut": len(attempts) > ATTEMPTS_MAX,
                 },

@@ -70,13 +70,26 @@ five decisions shape it.
    anchor row and the trace after it, and a run that ended before the anchor with none of
    those is `UNKNOWN`, never RUNNING. `full` is only for a run the trace covers from its
    start.
+
+7. **A run's window is read where the store records it (DL-555).** A run's rev is recorded
+   where it opens, never derived (DL-427, DL-432). The store's history index holds each
+   opening with its rev, and its `transitions` table the trace entries, both kept through a
+   prune (DL-536, DL-539). A run whose opening they hold in the stretch both cover up to the
+   store's last seq takes its window from them, as the `history` query does: the opening's
+   rev and cause, and the transitions that follow it. Any other run keeps the window of the
+   replay and the snapshot, and an opening the index holds below a later gap still proves
+   its rev. Each run is given one window before any row is made. Where none of them holds a
+   rev for a retained dispatch's run, its row carries `definition_unknown` and nothing that
+   needs the definition: no `catalog_hash`, `job_hash` or `box_name`, and a status only from
+   that run's own end evidence. A rev that is recorded and that the store holds no
+   configuration for is a broken reference and still refuses the read.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -100,7 +113,7 @@ from dsl41.runner_journal import (
     wire_record,
 )
 from dsl41.runner_ledger import STATE_MACHINE_VERSION
-from dsl41.runner_store import Store
+from dsl41.runner_store import Interval, RunEvidence, Store
 
 
 class RunHistoryError(Exception):
@@ -110,20 +123,23 @@ class RunHistoryError(Exception):
 
 class RunRow(BaseModel):
     """One job run, folded from a run root's journal (and, where available,
-    its spool). See the module docstring for the five decisions this shape
+    its spool). See the module docstring for the decisions this shape
     encodes."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     job: str
     run_number: int
-    catalog_hash: str
+    #: the estate hash of the run's rev; None when the run's definition is not known (decision 7)
+    catalog_hash: str | None
     started_at: datetime
     ended_at: datetime | None = None
     duration_s: float | None = None
     #: the run's status, or `UNKNOWN` for a run that ended before the snapshot a pruned store
-    #: replays from with no retained record of how (decision 6)
-    status: JobStatus | Literal["UNKNOWN"]
+    #: replays from with no retained record of how (decision 6); None for a run whose
+    #: definition is not known where neither an explicit status nor the run's recorded close
+    #: says how it ended: a bare exit code needs the definition's SEM-09 boundary (decision 7)
+    status: JobStatus | Literal["UNKNOWN"] | None
     exit_code: int | None = None
     started_by: str | None = None
     run_dir: str | None = None
@@ -150,6 +166,12 @@ class RunRow(BaseModel):
     #: and the flag. Only True at `records_only` fidelity; a full-fidelity read takes the
     #: gate's recovered verdict.
     undecided: bool = False
+    #: why the run's definition is not known, or None when it is (decision 7, DL-555):
+    #: "no_opening_rev", neither the history index, the snapshot nor the replay holds the rev
+    #: the run opened under. The row then has a null `catalog_hash`, `job_hash` and
+    #: `box_name`, and a null `status` where no explicit status and no recorded close of that
+    #: run says how it ended.
+    definition_unknown: Literal["no_opening_rev"] | None = None
 
 
 @dataclass(frozen=True)
@@ -177,6 +199,10 @@ class _TraceWindow:
     #: the configuration rev in force where the run opened, in trace order; None where nothing
     #: says (an anchor row, a history written without it)
     rev: int | None = None
+    #: whether `status` and `ended_at` are this run's own recorded close; False where only an
+    #: anchor row's current status closes it, which a later change of the row can have set
+    #: (a box restart resets a finished member to INACTIVE with no new run)
+    recorded: bool = True
 
 
 def _marked_rev(entry: TraceEntry) -> int | None:
@@ -192,7 +218,10 @@ def definition_change(previous: RunRow, row: RunRow) -> Literal["definition", "c
 
     `"definition"` is this job's `job_hash` moving. `"catalog"` is the estate-wide fallback,
     returned only when a row has no fingerprint (`fidelity="records_only"`), so a caller reports
-    the weaker signal as weaker."""
+    the weaker signal as weaker. A row whose definition is not known crosses no change it could
+    show (decision 7)."""
+    if previous.definition_unknown is not None or row.definition_unknown is not None:
+        return None
     if previous.job_hash is not None and row.job_hash is not None:
         return None if previous.job_hash == row.job_hash else "definition"
     return None if previous.catalog_hash == row.catalog_hash else "catalog"
@@ -232,6 +261,7 @@ def _windows_from_entries(
     ended_at: datetime | None = None
     status: str | None = None
     partial = approximate = False
+    recorded = True
     if history and (anchor is None or history[-1].run_number >= anchor.run_number):
         windows = list(history[:-1])
         last = history[-1]
@@ -247,6 +277,7 @@ def _windows_from_entries(
         started_by = anchor.started_by or ""
         if anchor.status in _CLOSING:
             ended_at, status = anchor.last_end_at or anchor.status_at, anchor.status
+            recorded = False
     for position, entry in enumerate(entries):
         old, sep, new = entry.transition.partition("->")
         if not sep:
@@ -265,6 +296,7 @@ def _windows_from_entries(
                         partial,
                         approximate,
                         rev,
+                        recorded,
                     )
                 )
             run_number = entry.run_number
@@ -272,20 +304,29 @@ def _windows_from_entries(
             if new in TERMINAL:
                 ended_at, status = entry.at, new
             partial = approximate = False
+            recorded = True
             rev = revs[position] if position < len(revs) else None
         elif new in TERMINAL and started_at is not None:
             # SEM-01 latching: a later CHANGE_STATUS overwrites the close recorded for this run
-            ended_at, status = entry.at, new
+            ended_at, status, recorded = entry.at, new, True
         elif new == "INACTIVE" and old in LIVE and started_at is not None:
             # DL-242: the oracle moved a live run to INACTIVE with no STATUS input of its own
             # (the SEM-18 cascade from its box). The row closes at that instant, as for an
             # injected INACTIVE (DL-235). INACTIVE from a terminal status (a box-start reset)
             # leaves the recorded close alone.
-            ended_at, status = entry.at, new
+            ended_at, status, recorded = entry.at, new, True
     if started_at is not None:
         windows.append(
             _TraceWindow(
-                run_number, started_at, started_by, ended_at, status, partial, approximate, rev
+                run_number,
+                started_at,
+                started_by,
+                ended_at,
+                status,
+                partial,
+                approximate,
+                rev,
+                recorded,
             )
         )
     return windows
@@ -383,6 +424,96 @@ def run_history(
     return out
 
 
+@dataclass(frozen=True)
+class _StoredRuns:
+    """What the store's history index and transitions say of a root's runs (decision 7):
+    `windows`, each run's window from its indexed opening and the stored transitions that
+    follow it, for every run that opened in the covered stretch that reaches the store's last
+    seq; `revs`, the rev of every other run whose opening the index holds, one rev to a run."""
+
+    windows: dict[str, dict[int, _TraceWindow]]
+    revs: dict[tuple[str, int], int]
+
+
+def _suffix_start(coverage: Sequence[Interval], last: int) -> int | None:
+    """The first seq of the covered interval that reaches `last`, None when none does."""
+    return next((i.first for i in coverage if i.covered and i.first <= last <= i.last), None)
+
+
+def _stored_runs(evidence: RunEvidence, anchor_runs: Mapping[str, int]) -> _StoredRuns:
+    """The store's windows and revs (decision 7, DL-555). An opening counts only where the
+    index row and its numbered transition agree on the key, the job and the run. The boundary
+    is a seq: the start of the stretch both coverages hold up to the last seq, as `history`
+    reads full rows; a run that opened there gets its window from the stored transitions, read
+    from its opening through the entry of the job's next one. An opening below the boundary,
+    across a gap, proves its rev and no window. A run number with two openings above the
+    boundary is ambiguous, and the read refuses as `history` declines that job."""
+    entries = {(seq, n): entry for seq, n, entry in evidence.transitions}
+    matched = [
+        (seq, n, job, run, rev)
+        for seq, n, job, run, rev in evidence.openings
+        if (entry := entries.get((seq, n))) is not None
+        and entry.get("job") == job
+        and entry.get("run_number") == run
+    ]
+    history = _suffix_start(evidence.history_coverage, evidence.last_seq)
+    stored = _suffix_start(evidence.transitions_coverage, evidence.last_seq)
+    boundary = (
+        None if history is None or stored is None else max(history, stored, evidence.first_seq)
+    )
+    full: dict[str, dict[tuple[int, int], int]] = {}
+    numbers: dict[tuple[str, int], int] = {}
+    revs: dict[tuple[str, int], int | None] = {}
+    for seq, n, job, run, rev in matched:
+        if boundary is not None and seq >= boundary:
+            if (job, run) in numbers:
+                raise RunHistoryError(
+                    f"the history index shows run {run} of {job!r} twice, so the read cannot"
+                    " say which records are that run's; `history` declines the job too, and"
+                    " both stay so until retention drops those openings (DL-540)"
+                )
+            numbers[(job, run)] = seq
+            full.setdefault(job, {})[(seq, n)] = rev
+        else:
+            # two openings below the boundary that name two revs prove neither
+            revs[(job, run)] = rev if revs.get((job, run), rev) == rev else None
+    # each job's stored entries from its first opening in the stretch, in key order, in one
+    # pass over the rows
+    starts = {job: min(opened) for job, opened in full.items()}
+    by_job: dict[str, list[tuple[tuple[int, int], dict[str, Any]]]] = {job: [] for job in full}
+    for seq, n, entry in evidence.transitions:
+        owner = entry.get("job")
+        if isinstance(owner, str) and owner in starts and (seq, n) >= starts[owner]:
+            by_job[owner].append(((seq, n), entry))
+    windows: dict[str, dict[int, _TraceWindow]] = {}
+    for job, opened in full.items():
+        keyed = by_job[job]
+        found = _windows_from_entries(
+            [TraceEntry.model_validate(entry) for _, entry in keyed],
+            revs=[opened.get(key) for key, _ in keyed],
+        )
+        windows[job] = {
+            window.run_number: replace(window, partial=window.run_number <= anchor_runs.get(job, 0))
+            for window in found
+            if (job, window.run_number) in numbers and window.rev is not None
+        }
+    return _StoredRuns(
+        windows,
+        {key: rev for key, rev in revs.items() if rev is not None and key not in numbers},
+    )
+
+
+def _assigned(
+    replayed: Mapping[str, Mapping[int, _TraceWindow]], stored: _StoredRuns
+) -> dict[str, dict[int, _TraceWindow]]:
+    """One window per run, chosen once (decision 7): the store's where it holds the run's
+    opening in its covered stretch, the replay's and the snapshot's otherwise."""
+    windows = {job: dict(runs) for job, runs in replayed.items()}
+    for job, runs in stored.windows.items():
+        windows.setdefault(job, {}).update(runs)
+    return windows
+
+
 @dataclass(frozen=True, eq=False)
 class _Revision:
     """One configuration rev as the fold reads it: its catalog (None without one), its hash, and
@@ -399,9 +530,10 @@ class _Revisions:
     where the run opened, which the replayed trace's window carries and a snapshot's retained
     run history keeps. A run is not an attempt: a `dispatch` record's rev is that attempt's own
     and is never read as the run's. A run is read under that rev's catalog (its catalog hash,
-    its job fingerprint, its box and its exit-code verdict); a run whose row holds no rev, or a
-    rev the store holds no row for, is refused. With no rows (`catalogs` None) every run reads
-    `catalog` under the first segment's hash."""
+    its job fingerprint, its box and its exit-code verdict). A run whose row holds no rev is
+    read under none, and its row says so (decision 7); a rev the store holds no row for is
+    refused. With no rows (`catalogs` None) every run reads `catalog` under the first segment's
+    hash."""
 
     def __init__(
         self,
@@ -423,14 +555,19 @@ class _Revisions:
         """Each rev once."""
         return list(self._by_rev.values()) if self._catalogs else [self.only]
 
-    def of_rev(self, rev: int | None, run: str) -> _Revision:
-        """The revision a run row's `rev` names."""
+    def of_rev(self, rev: int | None, run: str) -> _Revision | None:
+        """The revision a run row's `rev` names, or None where the run's opening records no rev
+        (DL-555): the run is read under no definition, never under another rev's."""
         if not self._catalogs:
             return self.only
-        if rev is None or rev not in self._by_rev:
+        if rev is None:
+            return None
+        if rev not in self._by_rev:
+            # a recorded rev with no configuration row is a broken reference, not an absent
+            # fact: the read refuses (DL-555, DL-427)
             raise RunHistoryError(
-                f"run {run} records no configuration rev the store holds ({rev!r}): a run's"
-                " rev is recorded where it opens, never derived (DL-427)"
+                f"run {run} records configuration rev {rev}, which the store holds no row for:"
+                " a run's rev is recorded where it opens, never derived (DL-427)"
             )
         return self._by_rev[rev]
 
@@ -442,7 +579,9 @@ def _box_rows(
 ) -> list[RunRow]:
     """Every BOX job's run rows, entirely from the trace (decision 2); a box has no dispatch record
     and no spool. The windows are the caller's, so a box and a leaf in one fold are numbered
-    alike. A window is a box run only under a rev whose catalog has the job as a box."""
+    alike. A window is a box run only under a rev whose catalog has the job as a box, so a
+    window whose opening records no rev is none: another rev's type cannot say the job was a box
+    when it opened (decision 7). Its members' runs keep their own rows."""
     rows: list[RunRow] = []
     boxes = sorted(
         {
@@ -458,9 +597,9 @@ def _box_rows(
             if window.rev is None and window.approximate:
                 continue  # only an anchor row names it: retention dropped its record and rev
             revision = revisions.of_rev(window.rev, f"{job}.{window.run_number}")
-            catalog = revision.catalog
+            catalog = None if revision is None else revision.catalog
             job_ir = None if catalog is None else catalog.jobs.get(job)
-            if job_ir is None or job_ir.job_type != "BOX":
+            if revision is None or job_ir is None or job_ir.job_type != "BOX":
                 continue
             # an anchor row's window starts at the row's last status change, not the run's start
             duration = (
@@ -521,6 +660,47 @@ def _leaf_status(
         sem = catalog.jobs[job].sem if catalog is not None and job in catalog.jobs else Semantics()
         return ("SUCCESS" if sem.exit_is_success(exit_code) else "FAILURE"), exit_code
     return "RUNNING", None
+
+
+def _unknown_end(
+    completion: dict[str, Any] | None, window: _TraceWindow | None, earlier: bool
+) -> tuple[str | None, int | None, datetime | None]:
+    """The status, raw exit code and end of a run read under no definition (decision 7,
+    DL-555), from that run's own end evidence only. The verdict is the later of an explicit
+    applied status and the trace's recorded close, the close on a tie. The end is the process
+    end the completion records, a recovery's included, and None where it records none; only a
+    close later than every completion, which the trace alone records (KILLJOB, term_run_time),
+    ends the run at the close. A bare exit code is no verdict without the definition's SEM-09
+    boundary, and an anchor row's current status is not this run's close, so with neither the
+    status is None. A run with no end evidence reads as decisions 3 and 6 say: `UNKNOWN` when
+    a later run had started by the snapshot (`earlier`), else RUNNING where nothing says it
+    closed."""
+    exit_code: int | None = None
+    close: tuple[datetime, str] | None = None
+    if window is not None and window.recorded and window.status is not None:
+        if window.ended_at is not None:
+            close = (window.ended_at, window.status)
+    if completion is None:
+        if close is not None:
+            return close[1], None, close[0]
+        if earlier:
+            return "UNKNOWN", None, None
+        if window is not None and window.status is not None:
+            return None, None, None
+        return "RUNNING", None, None
+    payload = completion["payload"]
+    code = payload.get("exit_code")
+    exit_code = code if isinstance(code, int) else None
+    status = payload.get("status")
+    at = _parse_timestamp(str(completion["at"]))
+    ended = _journal_ended_at(completion)
+    if close is not None and close[0] > at:
+        return close[1], exit_code, close[0]
+    if isinstance(status, str) and (close is None or at > close[0]):
+        return status, exit_code, ended
+    if close is not None:
+        return close[1], exit_code, ended
+    return (None if exit_code is not None else "RUNNING"), exit_code, ended
 
 
 def attempt_index(record: Mapping[str, Any]) -> int | None:
@@ -678,17 +858,21 @@ def _emit_leaf_rows(
     trace_windows: Mapping[str, Mapping[int, _TraceWindow]],
     fidelity: Literal["full", "records_only"],
     anchor_runs: Mapping[str, int],
+    proven: Mapping[tuple[str, int], int],
 ) -> list[RunRow]:
     """Emit phase (D3): one `RunRow` per dispatched (job, run_number), in dispatch order, as a
     pure function of the leaf index. `anchor_runs` is each job's run at the snapshot a pruned
-    store replays from (decision 6)."""
+    store replays from (decision 6); `proven` the revs the index proves for runs it holds no
+    window of (decision 7)."""
     rows: list[RunRow] = []
     for key in index.order:
         job, run_number = key
         window = trace_windows.get(job, {}).get(run_number)
-        # the run row's rev, never an attempt's dispatch
-        revision = revisions.of_rev(None if window is None else window.rev, f"{job}.{run_number}")
-        catalog = revision.catalog
+        # the run row's rev, never an attempt's dispatch: its window's, else its indexed
+        # opening's (DL-555)
+        rev = window.rev if window is not None and window.rev is not None else proven.get(key)
+        revision = revisions.of_rev(rev, f"{job}.{run_number}")
+        catalog = None if revision is None else revision.catalog
         dispatch = index.dispatch_by_key[key]
         completion = index.completion_by_key.get(key)
         anchored = run_number <= anchor_runs.get(job, 0)
@@ -696,8 +880,11 @@ def _emit_leaf_rows(
         # Journal fallback keeps the run's first dispatch, on the journal clock (DL-485).
         journal_started = _parse_timestamp(str(index.first_dispatch_by_key[key]["started_at"]))
         journal_ended = _journal_ended_at(completion)
-        status: str
-        if completion is not None:
+        status: str | None
+        if revision is None:
+            earlier = anchored and run_number < anchor_runs[job]
+            status, exit_code, journal_ended = _unknown_end(completion, window, earlier)
+        elif completion is not None:
             status, exit_code = _leaf_status(job, catalog, completion)
         elif window is not None and window.status is not None:
             status, exit_code = window.status, None
@@ -729,7 +916,7 @@ def _emit_leaf_rows(
             RunRow(
                 job=job,
                 run_number=run_number,
-                catalog_hash=revision.catalog_hash,
+                catalog_hash=None if revision is None else revision.catalog_hash,
                 started_at=started_at,
                 ended_at=ended_at,
                 duration_s=duration,
@@ -739,8 +926,9 @@ def _emit_leaf_rows(
                 run_dir=run_dir,
                 box_name=box_name,
                 clock_source=clock_source,  # type: ignore[arg-type]
-                job_hash=revision.fingerprints.get(job),
+                job_hash=None if revision is None else revision.fingerprints.get(job),
                 fidelity="partial" if anchored else fidelity,
+                definition_unknown="no_opening_rev" if revision is None else None,
                 undecided=key in index.undecided_keys,
             )
         )
@@ -755,6 +943,7 @@ def _leaf_rows(
     fidelity: Literal["full", "records_only"],
     recovered: Sequence[ApplyResult],
     anchor_runs: Mapping[str, int],
+    proven: Mapping[tuple[str, int], int],
 ) -> list[RunRow]:
     """Every CMD/FW job's run rows, from `dispatch` + `input(kind=STATUS)` records (decision 1),
     with the trace as fallback for a close that produced no STATUS input (decision 2's
@@ -768,7 +957,7 @@ def _leaf_rows(
     }
     decided = _decided_attempts(records) if fidelity == "records_only" else frozenset()
     index = _index_leaves(records, rejected, decided, fidelity, trace_windows)
-    return _emit_leaf_rows(index, revisions, spool, trace_windows, fidelity, anchor_runs)
+    return _emit_leaf_rows(index, revisions, spool, trace_windows, fidelity, anchor_runs, proven)
 
 
 def fold_run_rows(
@@ -781,6 +970,7 @@ def fold_run_rows(
     anchor: Mapping[str, JobRuntime] | None = None,
     history: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     catalogs: Mapping[int, CatalogIR] | None = None,
+    evidence: RunEvidence | None = None,
 ) -> list[RunRow]:
     """The pure fold (DL-113): parsed journal records plus, optionally, a catalog
     (box_name/job_type/SEM-09) and a replayed trace (box run boundaries, started_by, the
@@ -802,7 +992,11 @@ def fold_run_rows(
 
     `catalogs` maps each configuration rev the records' segments name to its catalog: a run is
     then read under the rev it ran under (`_Revisions`). Without it every rev reads `catalog`,
-    each still labelled with its own segment's hash."""
+    each still labelled with its own segment's hash.
+
+    `evidence` is the store's history index and stored transitions (decision 7): a run whose
+    opening they hold in their covered stretch takes its window from them, in place of the
+    replay's and the snapshot's."""
     if not records or records[0].get("rec") != "segment":
         raise RunHistoryError("run history requires a journal starting with a segment record")
     if catalog is None and recovered:
@@ -815,8 +1009,13 @@ def fold_run_rows(
         )
     revisions = _Revisions(records, catalog, catalogs)
     first = records[0].get("rev")
-    trace_windows = _trace_windows_by_job(
-        trace, anchor, _history_windows(history or {}), first if is_wire_int(first) else None
+    anchor_runs = {job: row.run_number for job, row in (anchor or {}).items()}
+    stored = _StoredRuns({}, {}) if evidence is None else _stored_runs(evidence, anchor_runs)
+    trace_windows = _assigned(
+        _trace_windows_by_job(
+            trace, anchor, _history_windows(history or {}), first if is_wire_int(first) else None
+        ),
+        stored,
     )
     fidelity: Literal["full", "records_only"] = "records_only" if catalog is None else "full"
     rows: list[RunRow] = []
@@ -830,7 +1029,8 @@ def fold_run_rows(
             trace_windows,
             fidelity,
             recovered,
-            {job: row.run_number for job, row in (anchor or {}).items()},
+            anchor_runs,
+            stored.revs,
         )
     )
     return rows
@@ -918,43 +1118,57 @@ def read_run_root(run_root: Path) -> list[RunRow]:
     except EngineError as exc:
         raise RunHistoryError(str(exc)) from exc
     try:
-        meta = store.meta()
-        if meta.get("state_version") != str(STATE_MACHINE_VERSION):
-            raise RunHistoryError(
-                f"{run_root}: state version {meta.get('state_version')}, this build derives"
-                f" {STATE_MACHINE_VERSION}: one executable replays only what its own state"
-                " machine wrote (DL-424)"
-            )
-        configuration = Configuration.from_bytes(
-            store.get_config(store.current_config_rev()), where=str(run_root)
-        )
-        records = [w for _, record in store.read_from(0) if (w := wire_record(record)) is not None]
-        replayed = _replay(store, configuration, str(run_root))
-        if replayed.anchor is not None or not records or records[0].get("rec") != "segment":
-            # a replay from a snapshot opens its trace under the snapshot's rev, and its CONFIG
-            # marks move it; a retained configuration record older than the snapshot sets no
-            # run's rev (DL-549). The snapshot's configuration row names the opening.
-            opening = replayed.replay.rev if replayed.anchor is None else replayed.anchor.config_rev
-            opened = load_configuration(store, int(opening or 1), where=str(run_root))
-            records.insert(
-                0, {"rec": "segment", "rev": opening, "catalog_hash": opened.catalog_hash}
-            )
-        # every rev a segment opens, and every rev a retained run of the snapshot names
-        revs = {
-            int(record["rev"])
-            for record in records
-            if record.get("rec") == "segment" and is_wire_int(record.get("rev"))
-        }
-        if replayed.anchor is not None:
-            revs |= {
-                int(run["rev"])
-                for runs in replayed.anchor.runs.values()
-                for run in runs
-                if is_wire_int(run.get("rev"))
+        # the store's reads share one read transaction: the records, the replay, the
+        # configurations, the index and the transitions see the same point; the spool is read
+        # after it (DL-555)
+        with store.run_evidence() as evidence:
+            meta = store.meta()
+            if meta.get("state_version") != str(STATE_MACHINE_VERSION):
+                raise RunHistoryError(
+                    f"{run_root}: state version {meta.get('state_version')}, this build derives"
+                    f" {STATE_MACHINE_VERSION}: one executable replays only what its own state"
+                    " machine wrote (DL-424)"
+                )
+            current = store.current_config_rev()
+            if current < 1:
+                raise RunHistoryError(
+                    f"{run_root}: the store holds no configuration: its first start ended before"
+                    " writing one"
+                )
+            configuration = Configuration.from_bytes(store.get_config(current), where=str(run_root))
+            records = [
+                w for _, record in store.read_from(0) if (w := wire_record(record)) is not None
+            ]
+            replayed = _replay(store, configuration, str(run_root))
+            if replayed.anchor is not None or not records or records[0].get("rec") != "segment":
+                # a replay from a snapshot opens its trace under the snapshot's rev, and its CONFIG
+                # marks move it; a retained configuration record older than the snapshot sets no
+                # run's rev (DL-549). The snapshot's configuration row names the opening.
+                opening = (
+                    replayed.replay.rev if replayed.anchor is None else replayed.anchor.config_rev
+                )
+                opened = load_configuration(store, int(opening or 1), where=str(run_root))
+                records.insert(
+                    0, {"rec": "segment", "rev": opening, "catalog_hash": opened.catalog_hash}
+                )
+            # every rev a segment opens, every rev a retained run of the snapshot names, and
+            # every rev an indexed opening names (DL-555)
+            revs = {
+                int(record["rev"])
+                for record in records
+                if record.get("rec") == "segment" and is_wire_int(record.get("rev"))
             }
-        catalogs = {
-            rev: load_configuration(store, rev, where=str(run_root)).catalog for rev in revs
-        }
+            if replayed.anchor is not None:
+                revs |= {
+                    int(run["rev"])
+                    for runs in replayed.anchor.runs.values()
+                    for run in runs
+                    if is_wire_int(run.get("rev"))
+                }
+            revs |= {rev for _, _, _, _, rev in evidence.openings}
+            catalogs = {
+                rev: load_configuration(store, rev, where=str(run_root)).catalog for rev in revs
+            }
     except (EngineError, ValueError) as exc:
         raise RunHistoryError(f"{run_root}: {exc}") from exc
     finally:
@@ -964,18 +1178,27 @@ def read_run_root(run_root: Path) -> list[RunRow]:
         catalog=configuration.catalog,
         trace=replayed.oracle.trace(),
         spool=_read_all_spool(records),
-        anchor=None if replayed.anchor is None else replayed.anchor.rows.jobs,
+        # a removed job's run counter is in its tombstone: its runs before the snapshot are
+        # anchored like any other job's (decision 6)
+        anchor=None
+        if replayed.anchor is None
+        else {**replayed.anchor.rows.tombstones, **replayed.anchor.rows.jobs},
         history=None if replayed.anchor is None else replayed.anchor.runs,
         catalogs=catalogs,
+        evidence=evidence,
     )
+
+
+def run_order(row: RunRow) -> tuple[str, datetime]:
+    """The order rows print in and a segmentation break is computed over (decision 4)."""
+    return row.job, row.started_at
 
 
 def read_run_roots(
     run_roots: Sequence[Path], *, job: str | None = None, since: datetime | None = None
 ) -> list[RunRow]:
     """Every named run root's rows, combined and filtered (`--job`, `--since`), sorted by
-    (job, started_at): the shape the CLI prints and a segmentation break is computed over
-    (decision 4)."""
+    `run_order`: the shape the CLI prints."""
     rows: list[RunRow] = []
     for run_root in run_roots:
         rows.extend(read_run_root(run_root))
@@ -983,4 +1206,4 @@ def read_run_roots(
         rows = [row for row in rows if row.job == job]
     if since is not None:
         rows = [row for row in rows if row.started_at >= since]
-    return sorted(rows, key=lambda row: (row.job, row.started_at))
+    return sorted(rows, key=run_order)

@@ -1109,12 +1109,21 @@ def load_configuration_hash(engine: Engine, rev: int) -> str:
     return load_configuration(engine.journal.store, rev, where="t").catalog_hash
 
 
-def test_a_snapshot_or_a_history_with_a_run_and_no_rev_is_refused(tmp_path: Path) -> None:
+@pytest.mark.parametrize("pruned", [False, True])
+def test_a_snapshot_with_a_run_and_no_rev_is_refused_and_a_run_with_none_costs_one_row(
+    tmp_path: Path, pruned: bool
+) -> None:
     """A run's rev is recorded, never derived: a snapshot whose retained run lacks `rev` does
-    not read, and `runs` refuses a dispatch that names no rev the store holds."""
+    not read. A dispatch of `a.2`, a run whose opening the records do not hold, costs its own
+    row only (DL-555): `a.1` reads under rev 1, and `a.2` is marked with no hash, read whole
+    and with the head pruned to `a.1`'s dispatch. The dispatch's own rev 9 is never read."""
+    from contextlib import closing
+
     from dsl41.canon import canonical_bytes, decode
     from dsl41.runner_clock import EngineError
-    from dsl41.runner_history import RunHistoryError, read_run_root
+    from dsl41.runner_history import read_run_root
+    from dsl41.runner_journal import load_configuration
+    from dsl41.runner_store import SqliteStore
 
     async def scenario() -> None:
         engine = _engine(tmp_path, _jil({"a": "x"}), default=(0.0, 0))
@@ -1143,8 +1152,22 @@ def test_a_snapshot_or_a_history_with_a_run_and_no_rev_is_refused(tmp_path: Path
         _close(engine)
 
     asyncio.run(scenario())
-    with pytest.raises(RunHistoryError, match="run a.2 records no configuration rev"):
-        read_run_root(tmp_path / "run")
+    run_root = tmp_path / "run"
+    with closing(SqliteStore(run_root / "engine.db")) as store:
+        one = load_configuration(store, 1, where="t").catalog_hash
+        if pruned:
+            first = next(seq for seq, kind, _ in rows(run_root) if kind == "dispatch")
+            assert prune(store, first, T0 + timedelta(days=9999)) > 0
+    known, marked = sorted(read_run_root(run_root), key=lambda row: row.run_number)
+    assert (known.job, known.run_number, known.status, known.exit_code) == ("a", 1, "SUCCESS", 0)
+    assert (known.catalog_hash, known.definition_unknown) == (one, None)
+    assert known.fidelity == ("partial" if pruned else "full")
+    assert (marked.job, marked.run_number, marked.status) == ("a", 2, "RUNNING")
+    assert (marked.catalog_hash, marked.job_hash, marked.definition_unknown) == (
+        None,
+        None,
+        "no_opening_rev",
+    )
 
 
 def test_a_run_keeps_the_rev_it_opened_under_when_its_replacement_runs_under_the_next(

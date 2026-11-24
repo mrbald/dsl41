@@ -514,7 +514,11 @@ It is offline only: no control socket, no live engine. `--format`
 is `table` (default), `json`, or `csv`. Every row carries its
 `catalog_hash`, so a caller can segment a series by watching that field
 change. A run root with no stored inputs reports its rows as
-`fidelity=records_only`, with a warning on stderr.
+`fidelity=records_only`, with a warning on stderr. A run whose opening rev
+the read cannot find keeps its row, marked `definition_unknown`, with one
+warning line on stderr; the other rows print as usual. Such a row has a null
+`catalog_hash` and no verdict from a bare exit code. A null hash is not a
+change: skip the row when segmenting.
 
 ### Training estate (examples/nightbank)
 
