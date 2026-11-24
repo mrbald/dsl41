@@ -28129,3 +28129,13 @@ relitigate an entry; append a new one.
   attempt records or job output. An unset `expired_dir` does not preserve the earlier
   behaviour, an exception to the rule for missing settings in protocol-evolution.md. A set
   key makes the capture unreadable by an earlier build. One plan's removal takes one turn.
+- DL-558 Linux is the runtime; macOS is a development platform; EL7 is no target
+  (2026-11-24; owner rulings; `TODO.md`)
+  THE RULE. The engine's runtime platform is Linux. macOS is a development platform: the
+  suite runs there, and a defect that shows only on macOS ranks with tests and tooling,
+  never as a product bug. EL7 is not a target: nothing is required to pass on a Linux
+  without pidfd, and the engine's fallback for one stays as it is, unqualified.
+  THE REASON. Two open entries ranked as product bugs need macOS's `ps` path (BUG-7,
+  BUG-82), and one needs EL7's kernel (BUG-66). Sites run Linux under systemd.
+  COST. A macOS-only defect in the stop or wrapper path can stay open. The design pages
+  still describe the macOS mechanisms, which the development host uses.

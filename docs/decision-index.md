@@ -556,3 +556,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-555 | The offline run history reads the windows the store records | [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md) |
 | DL-556 | A restart refuses an unknown `[engine]` key | [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |
 | DL-557 | The run root's files follow the store's retention | [README.md](../README.md), [docs/control-protocol.md](control-protocol.md), [docs/deploy.md](deploy.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |
+| DL-558 | Linux is the runtime; macOS is a development platform; EL7 is no target |  |
