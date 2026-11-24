@@ -22,7 +22,6 @@ State handled outside a state machine and duplicated logic make the whole system
 
 In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-19 is the known hole in the atomic update rule (DL-522). It waits for the next change of the engine state version (owner, 2026-11-20). BUG-18 gets a pass that proves or dismisses it.
 
-- **BUG-10**: Restart ignores unknown `[engine]` keys such as `machine_polcy` and uses defaults until reread refuses them (DL-437).
 - **BUG-13**: The engine prints `clean_shutdown` before it exits; TERM in that window ends it with -15. With no socket while the lock is held, or with no peer pid from the socket, `engine stop --wait` waits for lock release rather than process exit, which exposes systemd ExecStop (DL-496).
 - **BUG-20**: Bounds and per-input scan cost of the live oracle's `_emitted` and `_kill_emissions` histories are unqualified (`src/dsl41/oracle_writers.py:135`, `src/dsl41/oracle.py:361-365`).
 - **BUG-48**: Update plan directories accumulate, even after stale refusals. Define their retention separately from attempt records (`src/dsl41/reread_worker.py:158`, `src/dsl41/runner_update.py:91`).

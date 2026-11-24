@@ -1146,8 +1146,8 @@ Restart restores the applied v3 catalog, profile and job order without lowering
 captured sources (DL-468). Captured JIL is parsed only for `spec` views; a scanner
 refusal leaves those views unavailable and the stored estate running.
 Placement and runtime-variable checks still apply (DL-437, DL-447).
-It has no legacy-root conversion, ignores unknown `[engine]` keys
-in host-only loading, and the pending-source scan blocks the loop.
+It refuses an unknown `[engine]` key by name (DL-556). It has no legacy-root
+conversion, and the pending-source scan blocks the loop.
 
 **Configuration.** A `configs` row holds the catalog, `RuntimeProfile` and
 non-idempotent marks. Main-config rows also hold captured source bytes and

@@ -157,7 +157,8 @@ def read_document(path: Path, raw: bytes | None = None) -> dict[str, Any]:
 
 
 def load_host(path: Path, raw: bytes | None = None) -> HostConfig:
-    """Restart validates format and current host settings; environment stays pending (DL-437)."""
+    """Restart validates the format, the `[engine]` key names and the host settings; the other
+    settings stay pending (DL-437, DL-556)."""
     document = read_document(path, raw)
     try:
         version = document.get("format_version")
@@ -166,6 +167,9 @@ def load_host(path: Path, raw: bytes | None = None) -> HostConfig:
         engine = document.get("engine")
         if not isinstance(engine, dict):
             raise ValueError("engine must be a table")
+        unknown = sorted(set(engine) - set(EngineConfig.model_fields))
+        if unknown:
+            raise ValueError(f"unknown key{'s' if len(unknown) > 1 else ''} {', '.join(unknown)}")
         names = tuple(HostConfig.model_fields)
         host = HostConfig.model_validate({key: engine[key] for key in names if key in engine})
         if not Path(host.run_root).is_absolute():

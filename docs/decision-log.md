@@ -28073,3 +28073,19 @@ relitigate an entry; append a new one.
   COST. A root upgraded in place does not read in full: a run that an older build numbered
   lies below the index and shows the snapshot's window, or the marked row. A job removed by
   an update now reads `partial` after a pruned snapshot, where it read `full`.
+- DL-556 A restart refuses an unknown `[engine]` key
+  (2026-11-24; BUG-10; `main_config.py`, `docs/runner-design.md`,
+  `docs/protocol-evolution.md`)
+  THE RULE. A main-config restart refuses, with exit 2, before any write to the run root, any
+  lock and any signal to a job, an `[engine]` table that holds a key no setting of the build
+  has, and names each such key. The check is on names only: the value of a setting a restart
+  does not apply stays pending and unchecked (DL-437). With a status hook configured, the
+  start attempts the `engine_refused` delivery before it exits (DL-446). A first start
+  refuses the same way, before its other findings. This closes limit K7 of DL-437.
+  THE REASON. A host setting applies only at a restart. A misspelt one, such as
+  `machine_polcy` or `acces_map`, left the engine on the default with no word, while reread
+  refused the same file. A name cannot be assigned to the host part or the pending part of
+  the table, so every unknown name refuses.
+  NOT BUILT. Unknown keys in `[estate]`, in `[lint]` and at the top level stay pending at a
+  restart; reread refuses them. A config written for a later build, with a new `[engine]`
+  key, refuses a restart of an earlier build.

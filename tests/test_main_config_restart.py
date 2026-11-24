@@ -13,6 +13,7 @@ import socket as socket_mod
 import subprocess
 import sys
 import time
+import tomllib
 from contextlib import closing, contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -1000,6 +1001,96 @@ def test_b2_invalid_launch_refuses_without_fallback(
     )
     assert result.returncode == 2, result.stdout + result.stderr
     assert rows(root) == before
+
+
+@pytest.mark.parametrize(
+    "keys,named",
+    [
+        ('machine_polcy = "local-eligible"\n', "unknown key machine_polcy"),
+        ('other_key = 1\nmachine_polcy = "strict"\n', "unknown keys machine_polcy, other_key"),
+    ],
+)
+def test_bug10_restart_refuses_an_unknown_engine_key(
+    short_root: Path, keys: str, named: str
+) -> None:
+    """A misspelt `[engine]` key refuses a restart before any write to the run root (DL-556)."""
+    path = estate_file(short_root)
+    root = short_root / "run"
+    with cli_engine(path):
+        pass
+    before = rows(root)
+    tree = {p: p.stat().st_mtime_ns for p in root.rglob("*")}
+    config_file(short_root, engine=keys)
+    result = subprocess.run(
+        [sys.executable, "-m", "dsl41", "run", "--config", str(path)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert named in result.stderr
+    assert rows(root) == before
+    assert {p: p.stat().st_mtime_ns for p in root.rglob("*")} == tree
+
+
+def test_bug10_the_refusal_reaches_the_status_hook(short_root: Path) -> None:
+    """The refusal is a start refusal: the hook gets one `engine_refused` (DL-446, DL-556)."""
+    out = short_root / "events"
+    hook = short_root / "hook"
+    hook.write_text(
+        f"#!{sys.executable}\nimport sys\nopen({str(out)!r}, 'ab').write(sys.stdin.buffer.read())\n"
+    )
+    hook.chmod(0o755)
+    path = estate_file(short_root)
+    with cli_engine(path):
+        pass
+    config_file(short_root, engine=f'status_hook = "{hook}"\nmachine_polcy = "local-eligible"\n')
+    result = subprocess.run(
+        [sys.executable, "-m", "dsl41", "run", "--config", str(path)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "machine_polcy" in result.stderr
+    received = [json.loads(line) for line in out.read_text().splitlines()]
+    assert len(received) == 1
+    assert received[0]["event"] == "engine_refused" and received[0]["exit_code"] == 2
+
+
+def test_bug10_restart_accepts_every_known_engine_key(short_root: Path) -> None:
+    """The check is on names; a restart with each `[engine]` key present still starts (DL-556)."""
+    (short_root / "access.toml").write_text('format_version = 1\nunmapped = "read"\n')
+    path = estate_file(short_root)
+    with cli_engine(path):
+        pass
+    engine = (
+        'environment = "applied"\njob_env = {NEW = "pending"}\nfw_default_interval_s = 30\n'
+        'job_profile = "/unused/profile"\njob_shell = "/bin/sh"\nstd_file_mode = "truncate"\n'
+        "kill_signals = [15, 9]\nset_job_attribute_environmentals = false\n"
+        'status_hook = "/bin/true"\nstatus_hook_long_running_s = 5\n'
+        'as_machine = ["executor"]\nmachine_policy = "local-eligible"\n'
+        'access_map = "access.toml"\n'
+    )
+    config_file(
+        short_root, engine=engine, estate="[estate.environments.applied]\nproperties = []\n"
+    )
+    assert set(tomllib.loads(path.read_text())["engine"]) == set(main.EngineConfig.model_fields)
+    with cli_engine(path) as ask:
+        assert ask()["revision"] == 1
+
+
+@pytest.mark.parametrize("known", ["fw_default_interval_s = 0\n", 'environment = "undeclared"\n'])
+def test_bug10_a_known_pending_value_a_reread_refuses_still_restarts(
+    short_root: Path, known: str
+) -> None:
+    """Only names are checked at a restart; the value of a pending setting is not (DL-556)."""
+    path = estate_file(short_root)
+    with cli_engine(path):
+        pass
+    config_file(short_root, engine=known)
+    with cli_engine(path) as ask:
+        assert ask()["revision"] == 1
 
 
 @pytest.mark.parametrize("damage", ["missing", "utf8", "directory", "symlink"])

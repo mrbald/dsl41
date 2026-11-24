@@ -60,7 +60,7 @@ a row.
 | Stored configurations | Startup/update → `Configuration.from_bytes` | `configuration_format_version`, 1, 2 or 3 | Refused for all three | Unsupported refuses; absent selects supported version 1 (DL-437, DL-438) | Retained `configs` rows |
 | Reload plans | update preparation → `read_plan` and update | `plan_format_version = 2`; `artifact_format_version` (PR-08d) | Ignored | Version 1 and an absent plan version refuse as retired (DL-486); other unsupported versions refuse; malformed plans return no plan. Unsupported artifact version makes `read_plan` return no plan; absent artifact version passes | Retained plan; an interrupted update requires it |
 | Main-config input mapping | `main_config.prepare` → `from_parts` | `format_version = 1` in `main-inputs.json` | Ignored | Unsupported or absent refuses (DL-437) | Retained plan or stored capture |
-| Main config | Site → `load_config` | `format_version = 1` | Refused; restart host loading has the limit below | Unsupported or absent refuses (DL-437) | Site's config file |
+| Main config | Site → `load_config` | `format_version = 1` | Refused; a restart refuses unknown names in `[engine]` only (DL-556) | Unsupported or absent refuses (DL-437) | Site's config file |
 | Control socket | Client → `ControlServer` | Integer `v = 5` on every request (DL-498) | Ignored except strict `as` wrappers and reread/update envelopes | v1 to v4 refuse by name with their retiring entries; other unsupported or absent values refuse as unknown. Connection stays open; every bundled writer stamps 5, no fallback | One request; `subscribe` lasts to hangup |
 
 A durable format can retire only when no retained instance needs its reader
@@ -267,9 +267,8 @@ not invalidate an otherwise matching retained configuration row. Missing runtime
 keys are omitted from recomputed definition hashes only at their earlier-behavior
 defaults. Drift refuses for a job already listed as changed. Placement and
 runtime-variable checks apply (DL-437, DL-447).
-It offers no legacy-root conversion and ignores
-unknown `[engine]` keys in its host-only load; the pending scan blocks the
-loop. These are limits.
+A restart refuses an unknown `[engine]` key by name (DL-556). It offers no
+legacy-root conversion, and the pending scan blocks the loop. These are limits.
 
 **Wrapper evidence and input.** Spool readers ignore unknown fields but
 reject a present version other than the integer 1; booleans and floats do
