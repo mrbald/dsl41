@@ -1452,3 +1452,104 @@ def test_source_descriptor_requires_bound_launch_input(tmp_path: Path, damage):
     parts[-1] = (parts[-1][0], canonical_bytes(metadata))
     with pytest.raises(RereadRefused):
         main.verified_from_parts(parts)
+
+
+def test_dl557_expired_dir_is_a_host_path_outside_the_run_root(tmp_path: Path) -> None:
+    """A relative path anchors at the config; the directory need not exist at load; the run
+    root itself, or a path inside it, refuses at load and at a restart's host read."""
+    path = estate_file(tmp_path, engine='expired_dir = "expired"\n')
+    expected = str(tmp_path / "expired")
+    assert main.launch_settings(main.load_config(path), path)["expired_dir"] == expected
+    assert main.launch_settings(main.load_host(path), path)["expired_dir"] == expected
+    config_file(tmp_path, engine='expired_dir = "/nonexistent/expired"\n')
+    assert main.load_host(path).expired_dir == "/nonexistent/expired"
+    for inside in ("run", "run/expired", f"{tmp_path}/run/x"):
+        config_file(tmp_path, engine=f'expired_dir = "{inside}"\n')
+        for load in (main.load_config, main.load_host):
+            with pytest.raises(RereadRefused, match="expired_dir must lie outside engine.run_root"):
+                load(path)
+    config_file(tmp_path, engine='expired_dir = "runx"\n')
+    assert main.load_host(path).expired_dir == "runx"  # a sibling's name is not inside
+    for bad in ('expired_dir = ""', "expired_dir = 3", 'expired_dir = "a/../b"'):
+        config_file(tmp_path, engine=bad + "\n")
+        with pytest.raises(RereadRefused):
+            main.load_config(path)
+
+
+def test_dl557_an_unset_expired_dir_is_no_launch_key_and_a_change_waits_for_a_restart(
+    tmp_path: Path,
+) -> None:
+    """Unset, the launch mapping has no `expired_dir`, as one stored before the setting
+    existed: a reread against it is not refused. Setting or clearing it is a host change
+    that a reread names."""
+    path = estate_file(tmp_path)
+    initial = main.prepare(path)
+    assert "expired_dir" not in initial.metadata["launch"]
+    stored = {key: value for key, value in initial.metadata["launch"].items()}
+    assert main.launch_settings(main.HostConfig.model_validate(stored), path) == stored
+    reread(live_of(initial), tmp_path / "plans", candidate=main.prepare(path))
+    config_file(tmp_path, engine='expired_dir = "expired"\n')
+    moved = main.prepare(path)
+    with pytest.raises(RereadRefused, match="launch settings changed: expired_dir;"):
+        reread(live_of(initial), tmp_path / "plans", candidate=moved)
+    config_file(tmp_path)
+    with pytest.raises(RereadRefused, match="launch settings changed: expired_dir;"):
+        reread(live_of(moved), tmp_path / "plans", candidate=main.prepare(path))
+
+
+#: the `[engine]` keys the build before DL-557 wrote into a capture's config
+BASE_ENGINE_KEYS = frozenset(
+    {
+        "access_map",
+        "as_machine",
+        "environment",
+        "fw_default_interval_s",
+        "job_env",
+        "job_profile",
+        "job_shell",
+        "kill_signals",
+        "machine_policy",
+        "run_root",
+        "set_job_attribute_environmentals",
+        "status_hook",
+        "status_hook_long_running_s",
+        "std_file_mode",
+    }
+)
+
+
+def test_dl557_an_unset_expired_dir_leaves_the_capture_as_the_base_build_wrote_it(
+    tmp_path: Path,
+) -> None:
+    """The base build dumped its config with its own keys only. Its capture, rebuilt from
+    those keys, has the same bytes as this build's from the same inputs, so an unchanged
+    update after an upgrade is unchanged; and it reopens and verifies here."""
+    from dsl41.canon import canonical_bytes, decode
+
+    path = estate_file(tmp_path)
+    estate = main.prepare(path)
+    parts = dict(estate.parts)
+    metadata = decode(parts[main.CAPTURE])
+    dumped = main.load_config(path).model_dump(mode="json")
+    engine = {key: value for key, value in dumped["engine"].items() if key in BASE_ENGINE_KEYS}
+    base = canonical_bytes({**metadata, "config": {**dumped, "engine": engine}})
+    assert parts[main.CAPTURE] == base
+    rebuilt = [(name, base if name == main.CAPTURE else data) for name, data in estate.parts]
+    assert main.encoded_parts(main.verified_from_parts(rebuilt)) == main.encoded_parts(estate)
+    config_file(tmp_path, engine='expired_dir = "expired"\n')
+    moved = decode(dict(main.prepare(path).parts)[main.CAPTURE])
+    assert moved["config"]["engine"]["expired_dir"] == "expired"
+
+
+def test_dl557_an_alias_of_the_run_root_refuses_at_load(tmp_path: Path) -> None:
+    """Links are resolved: an `expired_dir` that is a link to the run root, or to a place
+    inside it, refuses in both loaders."""
+    path = estate_file(tmp_path)
+    (tmp_path / "run" / "inside").mkdir(parents=True)
+    (tmp_path / "alias").symlink_to(tmp_path / "run")
+    (tmp_path / "deeper").symlink_to(tmp_path / "run" / "inside")
+    for alias in ("alias", "deeper", "alias/x"):
+        config_file(tmp_path, engine=f'expired_dir = "{alias}"\n')
+        for load in (main.load_config, main.load_host):
+            with pytest.raises(RereadRefused, match="expired_dir must lie outside engine.run_root"):
+                load(path)

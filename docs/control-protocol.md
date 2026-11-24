@@ -815,8 +815,9 @@ settings it runs under, `revision` the configuration rev, `status` and
 removed job's tombstone kept (`ON_HOLD`, `ON_ICE`, `ON_NOEXEC`), for the
 removed names that kept any. `launch` reports the main-config engine location
 and host settings (`run_root`, `as_machine`, `machine_policy`, `access_map`,
-`status_hook`, `status_hook_long_running_s`), or an empty object for a
-legacy engine (DL-437).
+`status_hook`, `status_hook_long_running_s`, and `expired_dir` only when it
+is set, DL-557), or an empty object for a legacy engine (DL-437). A client may
+ignore this additive key.
 
 `settings` holds `timezone`, `timezone_aliases`, `semantics`,
 `external_instances` and, for OPS and ADM, `job_env` (DL-447). It holds the runtime-policy

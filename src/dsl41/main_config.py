@@ -49,6 +49,7 @@ class HostConfig(HookSettings, StrictModel):
     as_machine: list[str] = []
     machine_policy: Literal["strict", "local-eligible"] = "strict"
     access_map: str | None = None
+    expired_dir: str | None = None
 
 
 class EngineConfig(HostConfig, RuntimePolicySettings):
@@ -123,11 +124,17 @@ def load_config(path: Path, raw: bytes | None = None) -> MainConfig:
             paths += [(value, True) for value in env.properties]
         paths += [
             (value, False)
-            for value in (engine.access_map, estate.timezone_map, estate.non_idempotent)
+            for value in (
+                engine.access_map,
+                engine.expired_dir,
+                estate.timezone_map,
+                estate.non_idempotent,
+            )
             if value is not None
         ]
         for value, pattern in paths:
             joined(path, value, pattern=pattern)
+        check_expired_dir(engine, path)
         if any(not name.strip() for name in engine.as_machine):
             raise ValueError("engine.as_machine names must be nonempty")
         if estate.environments and engine.environment is None:
@@ -177,6 +184,7 @@ def load_host(path: Path, raw: bytes | None = None) -> HostConfig:
         joined(path, host.run_root)
         if host.access_map is not None:
             joined(path, host.access_map)
+        check_expired_dir(host, path)
         if any(not name.strip() for name in host.as_machine):
             raise ValueError("engine.as_machine names must be nonempty")
         return host
@@ -195,8 +203,31 @@ def load_kill_signals(path: Path, raw: bytes) -> tuple[int, ...]:
         raise RereadRefused([f"{path}: engine.kill_signals: {exc}"]) from exc
 
 
+def check_expired_dir(host: HostConfig, path: Path) -> None:
+    """`expired_dir` is a path outside the run root, compared with links resolved, so an alias
+    of the root or of a place inside it refuses; whether it exists, and on which file system,
+    shows only in a retention round's line (DL-557)."""
+    if host.expired_dir is None:
+        return
+    expired = Path(os.path.realpath(joined(path, host.expired_dir)))
+    if expired.is_relative_to(os.path.realpath(host.run_root)):
+        raise ValueError("engine.expired_dir must lie outside engine.run_root")
+
+
+def config_document(config: MainConfig) -> dict[str, Any]:
+    """The config as a capture stores it. An unset `expired_dir` is no key, so a capture made
+    before the setting existed equals one made now from the same inputs (DL-557)."""
+    document = config.model_dump(mode="json")
+    if document["engine"]["expired_dir"] is None:
+        del document["engine"]["expired_dir"]
+    return document
+
+
 def launch_settings(config: MainConfig | HostConfig, path: Path) -> dict[str, object]:
+    """The host settings a restart applies. An unset `expired_dir` is no key, so a mapping
+    stored before the setting existed compares equal (DL-557)."""
     host = config.engine if isinstance(config, MainConfig) else config
+    expired = {} if host.expired_dir is None else {"expired_dir": joined(path, host.expired_dir)}
     return {
         "run_root": host.run_root,
         "as_machine": sorted(set(host.as_machine)),
@@ -204,6 +235,7 @@ def launch_settings(config: MainConfig | HostConfig, path: Path) -> dict[str, ob
         "access_map": None if host.access_map is None else joined(path, host.access_map),
         "status_hook": host.status_hook,
         "status_hook_long_running_s": host.status_hook_long_running_s,
+        **expired,
     }
 
 
@@ -293,7 +325,7 @@ def prepare(path: Path, raw: bytes | None = None) -> Estate:
         metadata: dict[str, Any] = {
             "format_version": 1,
             "config_path": str(path),
-            "config": config.model_dump(mode="json"),
+            "config": config_document(config),
             "launch": launch_settings(config, path),
             "records": records,
             "diagnostics": diagnostics,
@@ -344,7 +376,7 @@ def from_parts(
         config = MainConfig.model_validate(metadata["config"])
         metadata = {
             **metadata,
-            "config": config.model_dump(mode="json"),
+            "config": config_document(config),
             "launch": launch_settings(
                 HostConfig.model_validate(metadata["launch"]), Path(metadata["config_path"])
             ),
@@ -470,7 +502,7 @@ def verified_from_parts(parts: Sequence[tuple[str, bytes]]) -> Estate:
             raise ValueError("capture config path differs")
         config = load_config(path, dict(parts)[configs[0]["name"]])
         if (
-            config.model_dump(mode="json") != estate.metadata["config"]
+            config_document(config) != estate.metadata["config"]
             or launch_settings(config, path) != estate.metadata["launch"]
         ):
             raise ValueError("capture config bytes and metadata differ")

@@ -1070,7 +1070,7 @@ def test_bug10_restart_accepts_every_known_engine_key(short_root: Path) -> None:
         "kill_signals = [15, 9]\nset_job_attribute_environmentals = false\n"
         'status_hook = "/bin/true"\nstatus_hook_long_running_s = 5\n'
         'as_machine = ["executor"]\nmachine_policy = "local-eligible"\n'
-        'access_map = "access.toml"\n'
+        'access_map = "access.toml"\nexpired_dir = "expired"\n'
     )
     config_file(
         short_root, engine=engine, estate="[estate.environments.applied]\nproperties = []\n"
@@ -1867,3 +1867,22 @@ def test_a_seed_only_entry_whose_hash_moved_is_refused_on_reopen(short_root):
     plan.plan_json.write_bytes(canonical_bytes(document))
     with pytest.raises(EngineError, match="recovery refused"):
         reopen_plan(root, plan.token, configuration=stored)
+
+
+def test_dl557_a_root_without_expired_dir_restarts_and_rereads_and_a_set_one_applies_at_restart(
+    short_root: Path,
+) -> None:
+    """A root whose stored launch mapping has no `expired_dir` restarts and rereads with no
+    host change; set later, the setting applies at the next restart."""
+    path = estate_file(short_root)
+    with cli_engine(path) as ask:
+        assert "expired_dir" not in ask()["launch"]
+    stored = active_configuration(short_root / "run")
+    capture = main.decoded_parts(stored.source_capture, applied=stored)
+    assert "expired_dir" not in capture.metadata["launch"]
+    with cli_engine(path) as ask:
+        answer = ask("reread")
+        assert answer["ok"] and "launch settings changed" not in json.dumps(answer)
+    config_file(short_root, engine='expired_dir = "expired"\n')
+    with cli_engine(path) as ask:
+        assert ask()["launch"]["expired_dir"] == str(short_root / "expired")

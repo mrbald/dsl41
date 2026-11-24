@@ -9,7 +9,7 @@ import os
 import time
 from collections.abc import Callable, Iterator
 from contextlib import closing
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -639,3 +639,501 @@ def test_an_earlier_build_opens_and_prunes_a_root_this_build_left_in_a_drain(
         await _close(engine)
 
     asyncio.run(second())
+
+
+# ---- the run root's files follow the store (DL-557)
+
+#: older than a store whose first row is at T0, by more than a day
+_OLD = T0 - timedelta(days=3)
+_TOKEN = "0" * 64
+
+
+def _aged(path: Path, at: datetime) -> None:
+    stamp = at.replace(tzinfo=UTC).timestamp()
+    os.utime(path, (stamp, stamp))
+
+
+def _run_files(run_root: Path, name: str, at: datetime = _OLD) -> None:
+    """A finished command run's files: spool, attempt and run directories, both logs."""
+    attempt = run_root / "runs" / name / "1"
+    attempt.mkdir(parents=True)
+    (attempt / "spawn.json").write_text("{}")
+    (run_root / "logs").mkdir(exist_ok=True)
+    for path in (
+        attempt / "spawn.json",
+        attempt,
+        attempt.parent,
+        *(run_root / "logs" / f"{name}{suffix}" for suffix in (".out", ".err")),
+    ):
+        if not path.exists():
+            path.write_text("output\n")
+        _aged(path, at)
+
+
+def _plan_files(run_root: Path, token: str = _TOKEN, at: datetime = _OLD) -> None:
+    plan = run_root / "plans" / token
+    plan.mkdir(parents=True)
+    (plan / "plan.json").write_text("{}")
+    _aged(plan / "plan.json", at)
+
+
+def _left(run_root: Path) -> dict[str, list[str]]:
+    return {
+        kind: sorted(os.listdir(run_root / kind)) if (run_root / kind).exists() else []
+        for kind in ("runs", "logs", "plans")
+    }
+
+
+async def _listed(engine: Engine) -> None:
+    """Wait for the round's listing thread, then give the loop the turn that takes its report."""
+    worker = engine._retention_worker
+    assert worker is not None and worker.join(5)
+    await asyncio.sleep(0)
+
+
+def _lines(capsys: pytest.CaptureFixture[str]) -> list[str]:
+    return [line for line in capsys.readouterr().err.splitlines() if "DL-557" in line]
+
+
+def test_dl557_a_round_removes_old_files_keeps_new_ones_and_says_so_once(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The first snapshot after a start begins a round: an old run goes with its spool and
+    both logs, an old plan goes, a run newer than a day before the first row stays, a foreign
+    name stays. One line says what went. The next snapshot within a day begins no round."""
+    run_root = tmp_path / "run"
+
+    async def scenario() -> None:
+        engine = _start(run_root)
+        _run_files(run_root, "old.1")
+        _run_files(run_root, "new.1", T0 - timedelta(hours=12))
+        _plan_files(run_root)
+        (run_root / "runs" / "notes").mkdir()
+        _aged(run_root / "runs" / "notes", _OLD)
+        engine.take_snapshot()
+        await _listed(engine)
+        await engine.run_until_quiescent(engine.clock.now())
+        assert _left(run_root) == {
+            "runs": ["new.1", "notes"],
+            "logs": ["new.1.err", "new.1.out"],
+            "plans": [],
+        }
+        assert _lines(capsys) == ["dsl41: retention removed runs=1 logs=2 plans=1 (DL-557)"]
+        first = engine._retention_worker
+        _run_files(run_root, "later.1")
+        engine.take_snapshot()
+        await engine.run_until_quiescent(engine.clock.now())
+        assert engine._retention_worker is first and "later.1" in _left(run_root)["runs"]
+        assert _lines(capsys) == []
+        await _close(engine)
+
+    asyncio.run(scenario())
+
+
+def test_dl557_each_jobs_last_run_stays_and_an_empty_round_says_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two runs of `j` end; both runs' files are old. The first goes; the run of the last
+    dispatch stays. A round with nothing old says nothing."""
+    run_root = tmp_path / "run"
+
+    async def scenario() -> None:
+        engine = _start(run_root, FakeAdapter())
+        for _ in range(2):
+            engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "j"}))
+            await engine.run_until_quiescent(T0)
+        assert engine.oracle.store.job["j"].run_number == 2
+        _run_files(run_root, "j.1")
+        _run_files(run_root, "j.2")
+        engine.take_snapshot()
+        await _listed(engine)
+        await engine.run_until_quiescent(engine.clock.now())
+        assert _left(run_root)["runs"] == ["j.2"]
+        assert _lines(capsys) == ["dsl41: retention removed runs=1 logs=2 plans=0 (DL-557)"]
+        await _close(engine)
+
+    asyncio.run(scenario())
+
+    async def empty() -> None:
+        engine = _start(tmp_path / "empty")
+        engine.take_snapshot()
+        await _listed(engine)
+        assert engine._retention is not None and engine._retention.ended
+        await _close(engine)
+
+    asyncio.run(empty())
+    assert _lines(capsys) == []
+
+
+def test_dl557_an_open_attempt_keeps_its_run(tmp_path: Path) -> None:
+    """No ordinary sequence opens an attempt of a run other than its job's last dispatch, so
+    this run is kept by both clauses; the unit test of `kept_runs` isolates each."""
+    run_root = tmp_path / "run"
+
+    async def scenario() -> None:
+        engine = _start(run_root)  # an inert adapter: the run stays open
+        engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "j"}))
+        await engine.run_until_quiescent(T0)
+        assert engine.journal is not None and engine.journal.open.attempts
+        _run_files(run_root, "j.1")
+        engine.take_snapshot()
+        await _listed(engine)
+        await engine.run_until_quiescent(engine.clock.now())
+        assert _left(run_root)["runs"] == ["j.1"]
+        await engine.shutdown()
+        await _close(engine)
+
+    asyncio.run(scenario())
+
+
+def test_dl557_file_steps_are_bounded_and_never_share_a_turn_with_a_prune_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A prune backlog and three old runs, one entry a step: every prune step goes first,
+    each step has a turn for other tasks around it, and the owed entries go one a step."""
+    from dsl41 import runner_retention as retention
+
+    monkeypatch.setattr(runner, "PRUNE_STEP", _STEP)
+    monkeypatch.setattr(retention, "STEP", 1)
+    run_root = tmp_path / "run"
+
+    async def scenario() -> None:
+        engine = _start(run_root)
+        await _backlog(engine, 7)
+        for name in ("a.1", "b.1", "c.1"):
+            _run_files(run_root, name)
+        store = _store(engine)
+        log: list[tuple[Any, ...]] = []
+        _steps(store, monkeypatch, log)
+        real = retention.step
+
+        def logged(root: Path, round: Any, **options: Any) -> None:
+            real(root, round, **options)
+            log.append(("step", "files", len(os.listdir(root / "runs"))))
+
+        monkeypatch.setattr(retention, "step", logged)
+        bound = engine.take_snapshot()
+        await _listed(engine)
+        await _alongside(engine, log)
+        steps = [entry for entry in log if entry[0] == "step"]
+        files = [entry for entry in steps if entry[1] == "files"]
+        assert steps[-3:] == files == [("step", "files", n) for n in (2, 1, 0)]
+        assert _turn_between_steps(log) and store.first_seq() == bound
+        await _close(engine)
+
+    asyncio.run(scenario())
+
+
+def test_dl557_a_step_judges_by_the_earlier_first_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An entry the listing found old stays when the first row read at the step is earlier
+    than the round's and makes it new: rows are not monotone in time."""
+    run_root = tmp_path / "run"
+
+    async def scenario() -> None:
+        engine = _start(run_root)
+        _run_files(run_root, "a.1", T0 - timedelta(hours=36))
+        engine.take_snapshot()
+        await _listed(engine)
+        store = _store(engine)
+        monkeypatch.setattr(store, "first_at", lambda: T0 - timedelta(hours=12))
+        await engine.run_until_quiescent(engine.clock.now())
+        assert _left(run_root)["runs"] == ["a.1"]
+        await _close(engine)
+
+    asyncio.run(scenario())
+
+
+def _held_workers(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Every round's worker lists at once, on the test's thread, and holds its listing; the
+    test hands each listing to the engine itself, in the order it chooses."""
+    from dsl41 import runner_retention as retention
+
+    started: list[Any] = []
+
+    class Held(retention.RetentionWorker):
+        def start(self) -> None:
+            self.listing = retention.list_old(self.root, self.before, lambda: True)
+            started.append(self)
+
+    monkeypatch.setattr(retention, "RetentionWorker", Held)
+    return started
+
+
+def test_dl557_a_listing_of_an_earlier_round_owes_nothing_and_an_owed_round_is_ended(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A round begun a day later asks the earlier round's worker to stop, with no join, and
+    makes its listing owe nothing; a round with entries still owed is ended when the next
+    begins, and says what it did."""
+    run_root = tmp_path / "run"
+    workers = _held_workers(monkeypatch)
+
+    async def scenario() -> None:
+        engine = _start(run_root)
+        _run_files(run_root, "a.1")
+        engine.take_snapshot()
+        clock = engine.clock
+        assert isinstance(clock, VirtualClock)
+        clock._now = T0 + timedelta(days=1)
+        engine.inject(_setter(0, clock.now()), request_id="day")
+        engine.take_snapshot()  # round 2 begins before round 1's listing is handed over
+        first, second = workers
+        assert first._stopping.is_set() and not second._stopping.is_set()
+        engine.retention_report(first.number, first.listing)
+        round = engine._retention
+        assert round is not None and round.number == 2 and not round.owed
+        engine.retention_report(second.number, second.listing)
+        assert [entry.name for entry in round.owed] == ["a.1"]
+        clock._now = T0 + timedelta(days=2)
+        engine.take_snapshot()  # round 2 still owes a.1: it ends, having done nothing
+        assert round.ended and _lines(capsys) == []
+        third = workers[2]
+        engine.retention_report(third.number, third.listing)
+        await engine.run_until_quiescent(engine.clock.now())
+        assert _left(run_root)["runs"] == []
+        assert _lines(capsys) == ["dsl41: retention removed runs=1 logs=2 plans=0 (DL-557)"]
+        await _close(engine)
+
+    asyncio.run(scenario())
+
+
+def test_dl557_a_stop_between_steps_still_says_what_the_round_did(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from dsl41 import runner_retention as retention
+
+    monkeypatch.setattr(retention, "STEP", 1)
+    run_root = tmp_path / "run"
+    workers = _held_workers(monkeypatch)
+
+    async def scenario() -> None:
+        engine = _start(run_root)
+        for name in ("a.1", "b.1", "c.1"):
+            _run_files(run_root, name)
+        engine.take_snapshot()
+        engine.retention_report(workers[0].number, workers[0].listing)
+        engine._retention_step()  # one step of three, then the engine stops
+        await engine.shutdown()
+        assert len(_left(run_root)["runs"]) == 2
+        assert _lines(capsys) == ["dsl41: retention removed runs=1 logs=2 plans=0 (DL-557)"]
+        await _close(engine)
+
+    asyncio.run(scenario())
+
+
+def test_dl557_no_round_and_no_step_in_the_stop_drain(tmp_path: Path) -> None:
+    """A listing that comes once the stop began owes nothing, and the stop's own snapshot
+    begins no round."""
+    run_root = tmp_path / "run"
+
+    async def scenario() -> None:
+        engine = _start(run_root)
+        _run_files(run_root, "a.1")
+        engine.take_snapshot()
+        first = engine._retention
+        assert engine._retention_worker is not None and engine._retention_worker.join(5)
+        engine.lifecycle.stop_requested(DrainRequest(time.monotonic(), 0.05, 0.1))
+        await asyncio.sleep(0)
+        assert first is not None and not first.owed
+        clock = engine.clock
+        assert isinstance(clock, VirtualClock)
+        clock._now = T0 + timedelta(days=2)
+        await engine.run_until_quiescent(clock.now())
+        assert engine.stopped.is_set() and engine._retention is first
+        assert _left(run_root)["runs"] == ["a.1"]
+        await _close(engine)
+
+    asyncio.run(scenario())
+
+
+def test_dl557_a_stop_drain_begun_in_the_turn_before_a_file_step_takes_no_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_root = tmp_path / "run"
+
+    async def scenario() -> None:
+        engine = _start(run_root)
+        _run_files(run_root, "a.1")
+        engine.take_snapshot()
+        await _listed(engine)
+        owed = engine._owed_files
+        begun: list[str] = []
+
+        def stop() -> None:
+            engine.lifecycle.stop_requested(DrainRequest(time.monotonic(), 0.05, 0.1))
+            begun.append(engine.lifecycle.state)
+
+        def watched() -> bool:
+            answer = owed()
+            if answer and not begun:
+                asyncio.get_running_loop().call_soon(stop)  # runs in the loop's first turn
+            return answer
+
+        monkeypatch.setattr(engine, "_owed_files", watched)
+        await engine.run_until_quiescent(engine.clock.now())
+        assert begun == ["STOPPED"] and _left(run_root)["runs"] == ["a.1"]
+        await _close(engine)
+
+    asyncio.run(scenario())
+
+
+def test_dl557_a_file_step_after_the_root_was_lost_removes_nothing(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+
+    async def scenario() -> None:
+        engine = _start(run_root)
+        _run_files(run_root, "a.1")
+        engine.take_snapshot()
+        await _listed(engine)
+        os.unlink(run_root / "leader.lock")
+        with pytest.raises(EngineError, match="leader.lock was deleted"):
+            await engine.run_until_quiescent(engine.clock.now())
+        assert _left(run_root)["runs"] == ["a.1"]
+        await _close(engine)
+
+    asyncio.run(scenario())
+
+
+def test_dl557_a_restart_forgets_what_was_owed_and_its_first_snapshot_lists_again(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+
+    async def first() -> None:
+        engine = _start(run_root)
+        _run_files(run_root, "a.1")
+        engine.take_snapshot()
+        await _listed(engine)
+        assert engine._retention is not None and engine._retention.owed
+        await engine.shutdown()  # the owed entry is not taken
+        await _close(engine)
+
+    asyncio.run(first())
+    assert _left(run_root)["runs"] == ["a.1"]
+
+    async def second() -> None:
+        engine = await _resume(run_root, T0 + timedelta(hours=1))
+        assert engine._retention is None and not engine._owed_files()
+        engine.take_snapshot()
+        await _listed(engine)
+        await engine.run_until_quiescent(engine.clock.now())
+        assert _left(run_root)["runs"] == []
+        await _close(engine)
+
+    asyncio.run(second())
+
+
+def test_dl557_every_plan_stays_while_a_preparation_is_in_flight(tmp_path: Path) -> None:
+    """The control server's preparation slot keeps every plan; with it empty, the next round
+    takes the old plan."""
+    from dsl41.runner_control import ControlServer
+
+    run_root = tmp_path / "run"
+
+    async def scenario() -> None:
+        engine = _start(run_root)
+        server = ControlServer(engine, tmp_path / "control.sock")
+        _plan_files(run_root)
+        engine.take_snapshot()
+        await _listed(engine)
+        server._preparing_update = ("r", "f", asyncio.get_running_loop().create_future())
+        await engine.run_until_quiescent(engine.clock.now())
+        assert _left(run_root)["plans"] == [_TOKEN]
+        server._preparing_update = None
+        clock = engine.clock
+        assert isinstance(clock, VirtualClock)
+        clock._now = T0 + timedelta(days=1)
+        engine.inject(_setter(0, clock.now()), request_id="day")
+        await engine.run_until_quiescent(clock.now())
+        engine.take_snapshot()
+        await _listed(engine)
+        await engine.run_until_quiescent(clock.now())
+        assert _left(run_root)["plans"] == []
+        await _close(engine)
+
+    asyncio.run(scenario())
+
+
+def test_dl557_every_plan_stays_while_an_update_stops_its_jobs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from test_update_settlement import PGID, RUN_ID, _adopt, _engine, _estate, _jil, _plan, _Procs
+
+    _Procs(monkeypatch, p4194311=(PGID, True, True))
+
+    async def scenario() -> None:
+        engine = _engine(tmp_path, _jil({"j": "sleep 30"}))
+        assert engine.run_root is not None
+        engine.inject(Event(at=engine.clock.now(), kind="FORCE_STARTJOB", payload={"job": "j"}))
+        await engine.run_until_quiescent(engine.clock.now())
+        _adopt(engine, "j", RUN_ID, PGID)
+        _estate(tmp_path, _jil({"j": "sleep 31"}))
+        answer = engine.request_update(
+            UpdateRequest(_plan(engine, tmp_path), 1, engine.baseline_id, "u1")
+        )
+        await engine.run_until_quiescent(engine.clock.now())
+        assert isinstance(answer.result().decision, Admitted) and engine.update.stopping
+        start = engine.journal.store.first_at() if engine.journal is not None else None
+        assert start is not None
+        _plan_files(engine.run_root, at=start - timedelta(days=3))
+        engine.take_snapshot()
+        await _listed(engine)
+        await engine.run_until_quiescent(engine.clock.now())
+        assert _TOKEN in os.listdir(engine.run_root / "plans")
+        engine.stops.cancel_all()
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
+
+    asyncio.run(scenario())
+
+
+def test_dl557_an_expired_dir_takes_the_entries_in_their_places(tmp_path: Path) -> None:
+    run_root, expired = tmp_path / "run", tmp_path / "expired"
+    expired.mkdir()
+
+    async def scenario() -> None:
+        engine = _start(run_root)
+        engine.launch_settings = {"expired_dir": str(expired)}
+        _run_files(run_root, "a.1")
+        _plan_files(run_root)
+        engine.take_snapshot()
+        await _listed(engine)
+        await engine.run_until_quiescent(engine.clock.now())
+        await _close(engine)
+
+    asyncio.run(scenario())
+    assert _left(run_root) == {"runs": [], "logs": [], "plans": []}
+    assert _left(expired) == {
+        "runs": ["a.1"],
+        "logs": ["a.1.err", "a.1.out"],
+        "plans": [_TOKEN],
+    }
+
+
+def test_dl557_an_engine_with_no_run_root_or_no_settings_begins_no_round(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        bare = start_run(
+            lower_source(_JIL),
+            None,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+            settings=EngineSettings(retention_days=1),
+        )
+        bare.take_snapshot()
+        assert bare._retention is None
+        unset = _tracked(
+            start_run(
+                lower_source(_JIL),
+                tmp_path / "run",
+                clock=VirtualClock(start=T0),
+                adapters={"CMD": FakeAdapter(default=None)},
+            )
+        )
+        unset.take_snapshot()
+        assert unset._retention is None
+        await _close(unset)
+
+    asyncio.run(scenario())

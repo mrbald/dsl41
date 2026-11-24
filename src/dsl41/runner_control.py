@@ -503,6 +503,7 @@ class ControlServer:
         #: connection at once (ss5, DL-267)
         self._closing = False
         self._preparing_update: tuple[str, str, asyncio.Future[UpdateAnswer]] | None = None
+        engine.update.preparing = lambda: self._preparing_update is not None
         #: each subscription's backlog budget (ss5); tests lower it
         self.subscriber_budget = SUBSCRIBER_BACKLOG_BYTES
         #: the byte cap of one whole `transitions` answer (ss4); tests lower it

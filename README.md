@@ -749,6 +749,10 @@ Runner:
   worker thread: verified copies of the rows retention prunes, kept for
   `archive_days` with the lines of history they were on, and read with SQL
   through views of the current line (DL-545).
+- `src/dsl41/runner_retention.py`: the run root's file retention: the runs,
+  logs and plans older, by a day, than the store's first row, listed by a
+  worker thread and removed, or moved to `expired_dir`, in the loop's owed
+  steps (DL-557).
 - `src/dsl41/runner_transitions.py`: the committed transition rows: the
   start's settling of the rows with the retained journal, and the
   `transitions` query's request and answer (DL-536).

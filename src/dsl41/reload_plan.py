@@ -354,8 +354,8 @@ def check_reload_candidate(
     if live.launch != estate.metadata["launch"]:
         changed = sorted(
             key
-            for key in estate.metadata["launch"]
-            if live.launch.get(key) != estate.metadata["launch"][key]
+            for key in {*live.launch, *estate.metadata["launch"]}
+            if live.launch.get(key) != estate.metadata["launch"].get(key)
         )
         raise RereadRefused(
             [

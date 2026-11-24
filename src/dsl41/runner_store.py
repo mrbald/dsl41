@@ -304,6 +304,11 @@ class Store(Protocol):
         """The seq of the oldest retained record, or `last_seq() + 1` when none is retained."""
         ...
 
+    def first_at(self) -> datetime | None:
+        """The stamp of the oldest retained record, None when none is retained. The run root's
+        files follow it (DL-557)."""
+        ...
+
     def transitions_coverage(self) -> list[Interval]:
         """The covered intervals and the recorded gaps, in seq order (DL-536)."""
         ...
@@ -896,6 +901,9 @@ class MemoryStore:
 
     def first_seq(self) -> int:
         return self._rows[0].seq if self._rows else self._next_seq
+
+    def first_at(self) -> datetime | None:
+        return _unstamp(self._rows[0].row.at) if self._rows else None
 
     def transitions_coverage(self) -> list[Interval]:
         return list(self._coverage)
@@ -1495,6 +1503,10 @@ class SqliteStore:
     def first_seq(self) -> int:
         (found,) = self._db.execute("SELECT MIN(seq) FROM journal").fetchone()
         return self.last_seq() + 1 if found is None else int(found)
+
+    def first_at(self) -> datetime | None:
+        row = self._db.execute("SELECT at_utc FROM journal ORDER BY seq LIMIT 1").fetchone()
+        return None if row is None else _unstamp(row[0])
 
     def transitions_coverage(self) -> list[Interval]:
         return self._coverage("transitions_coverage")

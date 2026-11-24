@@ -28089,3 +28089,43 @@ relitigate an entry; append a new one.
   NOT BUILT. Unknown keys in `[estate]`, in `[lint]` and at the top level stay pending at a
   restart; reread refuses them. A config written for a later build, with a new `[engine]`
   key, refuses a restart of an earlier build.
+- DL-557 The run root's files follow the store's retention
+  (2026-11-24; owner ruling on the default and the setting; BUG-48 and BUG-50;
+  `runner_retention.py`, `runner.py`, `main_config.py`, `docs/runner-design.md`,
+  `docs/deploy.md`, `tests/test_run_root_retention.py`; builds on DL-543 and DL-545)
+  THE RULE. An entry under `runs/`, `logs/` or `plans/` is removed when it is older, by a
+  day, than the oldest row the live store keeps. A run is `runs/<job>.<run>/` with all in it
+  plus `logs/<job>.<run>.out` and `.err`, judged by the newest mtime among them; a plan is
+  `plans/<token>/`, judged by its `plan.json`, else by the directory. The horizon is the
+  earlier of the first row's `at_utc` when the round began and now, less 24 hours. Never
+  removed: a run a pending start, an open attempt or an unfinished follow-up names; each
+  job's last dispatch; every plan from a preparation's start to its admission or refusal,
+  and while an update stops. A name the engine does not write, an entry that is a symbolic
+  link, and output a job writes elsewhere are left alone. No setting of its own:
+  `retention_days`, the open floor and the archive move the horizon.
+  THE MECHANISM. A round begins at the first snapshot after a start, then at the first one
+  24 hours after the last began, never in the stop drain. A thread lists the three
+  directories in pages of 1000 to the end, past what it cannot read, and reports the old
+  entries; it writes nothing. The loop takes owed file steps as it takes prune steps, never
+  in one turn with one: each proves the lock (S6b), drops what is kept then, stats again and
+  removes at most 100 entries, one plan at most. A restart forgets what is owed. One line on
+  standard error for a round that removed something or met an error, a stop included.
+  THE SETTING. `[engine] expired_dir`, an optional host setting applied at a restart, is the
+  integration point for a site's archiver, which may watch it (a systemd path unit). Unset,
+  the default, an expired entry is removed. Set, it is moved there, keeping its place and
+  name, logs first; every destination name is checked first and one taken moves nothing,
+  and a file moves by `link` and `unlink`, so nothing is replaced. One directory serves one
+  root, on the file system of `runs/` and `logs/`. A failed move deletes nothing and counts
+  as an error; one failed partway leaves what moved. The engine never reads or empties it.
+  A path inside the run root, links resolved, refuses at load. Unset, it is no key in the
+  launch mapping or the captured config, so a root made before it compares equal;
+  `catalog.launch` carries it when set.
+  THE REASON. Only the store had retention. A command run leaves 4 files and 2 directories,
+  about 20 KB at a 4 KB block, plus its output; a waiting file watch appends about 160 B per
+  poll; a plan directory holds every captured input. None of it was ever removed.
+  COST. A `dsl41 runs` read a round overtakes reads journal times at the horizon. `status`
+  can name a log that is gone (FEAT-53). An open log keeps its space until closed. The first
+  round on an upgraded root removes what is older than the horizon; the archive holds no
+  attempt records or job output. An unset `expired_dir` does not preserve the earlier
+  behaviour, an exception to the rule for missing settings in protocol-evolution.md. A set
+  key makes the capture unreadable by an earlier build. One plan's removal takes one turn.

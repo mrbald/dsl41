@@ -235,6 +235,8 @@ include = [
     "src/dsl41/runner_journal.py",
     "src/dsl41/runner_ledger.py",
     "src/dsl41/runner_procid.py",
+    # the run root's file retention (DL-557)
+    "src/dsl41/runner_retention.py",
     "src/dsl41/runner_scheduler.py",
     "src/dsl41/runner_startup.py",
     "src/dsl41/runner_stops.py",

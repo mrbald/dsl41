@@ -296,6 +296,10 @@ class EngineUpdate:
         #: True while the update tier is posted to inside a single-writer step: an attempt that
         #: ends then posts at once instead of queueing a step
         self.direct = False
+        #: whether a preparation is in flight, from its start to its admission or refusal: the
+        #: control server's one slot answers it. File retention keeps every plan meanwhile
+        #: (DL-557)
+        self.preparing: Callable[[], bool] = lambda: False
 
     # ---- what the engine asks
 

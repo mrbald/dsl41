@@ -61,3 +61,8 @@ class EarlierPrune:
     def first_seq(self) -> int:
         """The engine reads it after a step; the build before DL-536 has no such read."""
         return int(next((seq for seq, _ in self._store.read_from(0)), self._store.last_seq() + 1))
+
+    def first_at(self) -> datetime | None:
+        """The engine reads it when a file retention round begins (DL-557); the earlier builds
+        have no such read."""
+        return next((record.at_utc for _, record in self._store.read_from(0)), None)

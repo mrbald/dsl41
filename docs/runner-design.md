@@ -771,6 +771,74 @@ under the rev in force at its opening: the snapshot's `config_rev`, then the
 snapshot sets no run's rev (DL-549).
 Emitted events remain derived from inputs and are not stored.
 
+**Run root files** (DL-557). The files the engine writes under the run root
+follow the journal's retention. An entry under `runs/`, `logs/` or `plans/`
+is removed when it is older, by a day, than the oldest row the live store
+keeps. `retention_days`, the open floor and the archive move that row; the
+files have no setting of their own. A run is `runs/<job>.<run>/` with
+everything in it, plus `logs/<job>.<run>.out` and `.err`, judged together by
+the newest mtime among them. A plan is `plans/<token>/`, judged by its
+`plan.json`, or by the directory when it has none. The horizon of a delete
+is the earlier of the first row's `at_utc` when the round began and the
+first row's `at_utc` now, less 24 hours: row stamps are not monotone in seq,
+and a retry appends to an old log. Never removed: a run that a pending
+start, an open attempt or an unfinished follow-up names; the run of each
+job's last dispatch; every plan from the start of a preparation to its
+admission or refusal, and while an update stops its jobs. A name the engine
+does not write (`<job>.<run>` read from the right, `.out` or `.err` for a
+log, a 64-digit hex token for a plan) is left alone, and so is output a job
+writes elsewhere. An entry that is a symbolic link, or a run with one, is not
+the engine's: it is not listed, judged, removed or moved. A linked `runs/`,
+`logs/` or `plans/` itself is still the engine's directory and is swept.
+
+A round begins at the first snapshot after a start, and then at the first
+snapshot at least 24 hours after the last round began; never in the stop
+drain, and no snapshot is taken while recovering. A thread of its own lists
+the three directories in pages of 1000 entries to the end, past entries it
+cannot read, and hands the loop the entries older than the horizon. It opens
+no store and writes nothing. The loop owes file steps as it owes prune
+steps, and takes them when nothing else is due and no prune step is owed,
+never both in one turn. Each step proves the run root's lock (S6b), drops
+the entries the open records and the update keep at that moment, reads each
+entry's age again against the horizon, and removes at most 100 entries, of
+them at most one plan, since a plan holds every captured part. A new round
+asks a worker still listing to stop and does not wait for it; shutdown waits
+for it off the loop. A restart forgets what is owed; its first snapshot
+lists again. A directory that fails while it is read counts as an error and
+the listing goes on. A round that removed something or met an error writes
+one line to standard error with its counts by kind and its first error,
+also when the engine stops between its steps. No journal row, `status` field or
+stored format records a round.
+
+With `[engine] expired_dir` set, an expired entry is moved into that
+directory, keeping its place and name: `<expired_dir>/runs/<job>.<run>/`,
+`<expired_dir>/logs/<job>.<run>.out` and `.err`, and
+`<expired_dir>/plans/<token>/`. A run's logs move before its directory. A
+move never replaces. Every destination name of the entry is checked first,
+both logs and the directory, whether or not the run has that part, and a
+name already there moves nothing of it. A file is moved by `link` there and
+`unlink` here, and `link` refuses a name that appeared after the check; a
+directory is renamed, which cannot replace a directory that holds anything.
+One `expired_dir` serves one run root, and `runs/`, `logs/`, `plans/` and
+`expired_dir` must be on one file system for a move. A move that fails (the
+directory is missing or not writable, it is on another file system, or a
+name is already there) deletes nothing and counts as an error. One that
+fails partway leaves what moved where it is and the rest in the run root;
+the next round tries the rest, which moves once the archiver has taken what
+moved. There is no copy. The engine makes the three subdirectories and
+never reads or empties the directory: it is where a site's archiver takes
+the entries from. The setting is a host setting, outside the run root with
+links resolved, applied at a restart. Unset, it is no key in the launch
+mapping or the captured config, so a root made before it compares equal.
+
+The limits of this rule are known. A `dsl41 runs` read that a round
+overtakes reads journal times for a run at the horizon. `status` can name
+the log of a job removed long ago and added again, whose file is gone. A
+process that holds a removed log open keeps its space until it closes it.
+The first round on a root upgraded in place removes every finished run's
+files older than the horizon; the archive holds neither attempt records nor
+job output.
+
 **Archive** (DL-545). With `archive_days` above 0 (550 by default), a row
 retention prunes is copied first to a second SQLite file, `archive_path`
 (default `<run_root>/archive.db`). Two rules hold:
@@ -1139,7 +1207,7 @@ roots cannot equal or contain each other.
 
 A main-config restart uses the last applied revision. Source, lint and
 `engine.environment` edits stay pending. Host `as_machine`,
-`machine_policy`, access policy and `engine.kill_signals` load from disk;
+`machine_policy`, access policy, `expired_dir` (DL-557) and `engine.kill_signals` load from disk;
 invalid values refuse with exit 2. The kill list affects later kills, including
 on updated roots. Other legacy launch checks remain in force (DL-462).
 Restart restores the applied v3 catalog, profile and job order without lowering

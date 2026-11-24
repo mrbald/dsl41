@@ -203,6 +203,7 @@ from dsl41.runner_journal import (
 )
 from dsl41.runner_history import run_history
 from dsl41.runner_archive import STOP_DEADLINE_S, ArchiveWorker, Report
+from dsl41 import runner_retention as retention
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, Proof
 from dsl41.runner_procid import COOKIE_ENV, cookie, current_boot_id, invocation_tag
 from dsl41.runner_store import Record
@@ -592,6 +593,12 @@ class Engine:
         #: the count of the root's histories in the archive and the last seq of the newest
         #: list it recorded, as the last report said; None before one
         self._archive_lineage: tuple[int | None, int | None] | None = None
+        #: the run root's file retention (DL-557): when the last round began on the engine's
+        #: clock, that round with its owed entries, and its listing worker. Not stored: a
+        #: restart forgets what is owed, and its first snapshot begins a round
+        self._retention_began: datetime | None = None
+        self._retention: retention.Round | None = None
+        self._retention_worker: retention.RetentionWorker | None = None
         #: the run history the snapshot this engine restarted from carried; each snapshot
         #: continues it with the trace since (`runner_history.run_history`)
         self.restored_runs: dict[str, list[dict[str, Any]]] = {}
@@ -1816,18 +1823,19 @@ class Engine:
                 # loses one
                 self._finish_recovery()
                 continue  # dispatch is not same-instant work: skip the budget
-            if self._owed_step() is not None and work.do in (_Do.QUIESCE, _Do.WAIT):
+            if self._owed_work() is not None and work.do in (_Do.QUIESCE, _Do.WAIT):
                 # nothing is due, so no admission is in progress: one owed step, with a turn for
                 # every other task before and after it, so no ready task waits behind two steps
                 # and an idle engine drains its backlog without spinning. An input that becomes
-                # due during the first turn is applied after this one step (DL-543)
+                # due during the first turn is applied after this one step (DL-543). A prune
+                # step goes before a file step, never in the same turn (DL-557)
                 await asyncio.sleep(0)
                 # a report in that turn may have begun a stop drain or deferred a start
-                owed = self._owed_step()
+                owed = self._owed_work()
                 if owed is not None:
-                    self._prune_step(owed)
+                    owed()
                     await asyncio.sleep(0)
-                continue  # a prune step is not same-instant work: skip the budget
+                continue  # a prune or file step is not same-instant work: skip the budget
             if work.do is _Do.EVENT:
                 _, _, pending = heapq.heappop(self._queue)
                 if pending.control is not None:
@@ -2578,6 +2586,7 @@ class Engine:
         # no timer armed (DL-524)
         self.stops.cancel_all()
         await self._stop_archive()
+        await self._stop_retention()
         for task, result in zip(tasks, results, strict=True):
             if id(task) in self._corpses_raised:
                 continue  # _settle already raised this failure to a caller
@@ -2674,6 +2683,14 @@ class Engine:
             return None
         return self._prune_owed
 
+    def _owed_work(self) -> Callable[[], None] | None:
+        """The owed step the loop may take now: a prune step first, else a file step; never
+        both in one turn (DL-543, DL-557)."""
+        bound = self._owed_step()
+        if bound is not None:
+            return lambda: self._prune_step(bound)
+        return self._retention_step if self._owed_files() else None
+
     def take_snapshot(self) -> int:
         """Snapshot the engine at the journal's last seq, then prune behind it (spec-wiring 1b):
         every snapshot but the latest two goes, then one step of at most `PRUNE_STEP` rows
@@ -2725,6 +2742,7 @@ class Engine:
                 self._archive_round += 1
                 self._archive_bound = bound
                 self.archive.request(self._archive_round, bound)
+            self._retention_round(wall)
         return seq
 
     def _prune_step(self, bound: int) -> None:
@@ -2784,6 +2802,93 @@ class Engine:
         self._archive_stopped = reason
         self._archive_verified = None
         self._prune_owed = None
+
+    # ---- the run root's files (DL-557)
+
+    def _retention_round(self, wall: datetime) -> None:
+        """Begin a round of the run root's file retention at the first snapshot after a start,
+        and then at the first snapshot `retention.EVERY` after the last round began, never in
+        the stop drain; a snapshot is never taken while recovering. A round still owed is
+        ended first, and a worker still listing is asked to stop and left: no join on the loop.
+        The worker lists the run root against the first row's stamp now, less a day; each
+        step reads the horizon again (DL-557)."""
+        if self.run_root is None or self.draining:
+            return
+        if self._retention_began is not None and wall - self._retention_began < retention.EVERY:
+            return
+        assert self.journal is not None  # a snapshot was just stored
+        self._retention_began = wall
+        self._retention_end()
+        if self._retention_worker is not None:
+            self._retention_worker.stop()
+        number = 1 if self._retention is None else self._retention.number + 1
+        first = self.journal.store.first_at()
+        self._retention = retention.Round(number, first)
+        before = retention.horizon(first, first)
+        assert before is not None  # the snapshot's own record is retained
+        worker = retention.RetentionWorker(self.run_root, before, number, self.retention_report)
+        worker.start()
+        self._retention_worker = worker
+
+    def retention_report(self, number: int, listing: retention.Listing) -> None:
+        """A round's listing, handed to the loop (DL-557). A listing of another round than the
+        last begun, or one that comes once the stop began, owes nothing."""
+        round = self._retention
+        assert round is not None  # a listing follows the round that asked for it
+        if round.number != number or self.draining:
+            return
+        round.listed(listing)
+        if round.owed:
+            self._activity.set()
+        else:
+            self._retention_end()
+
+    def _owed_files(self) -> bool:
+        """Whether the loop owes a file step and may take it now: at an applied boundary, not
+        recovering and not in the stop drain (DL-557)."""
+        owed = self._retention is not None and bool(self._retention.owed)
+        return owed and self.at_applied_boundary and not self.draining
+
+    def _retention_step(self) -> None:
+        """One owed file step once the run root's lock is proved (S6b): what the open records
+        and the update keep is read now, and so is the horizon (DL-557)."""
+        assert self.journal is not None and self.run_root is not None
+        assert self._retention is not None  # `_owed_files` said so
+        self.journal.prove()  # an engine that lost the root removes nothing (S6b)
+        round = self._retention
+        expired = self.launch_settings.get("expired_dir")
+        retention.step(
+            self.run_root,
+            round,
+            before=retention.horizon(round.first_at, self.journal.store.first_at()),
+            runs=retention.kept_runs(self.journal.open),
+            plans=self.update.token is not None or self.update.preparing(),
+            expired=None if expired is None else Path(str(expired)),
+        )
+        if not round.owed:
+            self._retention_end()
+
+    def _retention_end(self) -> None:
+        """End the round: its one line on standard error when it removed something or met an
+        error (DL-557)."""
+        round = self._retention
+        if round is None or round.ended:
+            return
+        round.ended = True
+        expired = self.launch_settings.get("expired_dir")
+        line = round.summary(None if expired is None else str(expired))
+        if line is not None:
+            best_effort_report(line)
+
+    async def _stop_retention(self) -> None:
+        """End the round, with its line for what its steps did, then stop its listing and wait
+        for it off the loop within `STOP_DEADLINE_S`. A listing only reads, so one that
+        outlives the wait is left; it reports nothing once stopped (DL-557)."""
+        self._retention_end()
+        worker = self._retention_worker
+        if worker is not None:
+            worker.stop()
+            await asyncio.to_thread(worker.join, STOP_DEADLINE_S)
 
     def archive_view(self) -> dict[str, Any]:
         """The `status` answer's `archive` block (DL-545): `state` is `off`, `working` or

@@ -640,8 +640,15 @@ before choosing any manual catch-up.
 Job output goes to each job's `std_out_file` and `std_err_file` when set.
 Each unset path falls back to `<run_root>/logs/<job>.<run>.{out,err}`.
 For stream placeholders, output prefixes and their limits, see [Set stream paths](authoring.md#set-stream-paths).
-The engine does not archive or delete job output, or monitor disk space.
-The site's archiver may move only finished job output.
+The engine removes default job output with the run's history (DL-557): a
+run's `logs/<job>.<run>.out` and `.err` go with its `runs/<job>.<run>/` once
+all of them are older, by a day, than the oldest record the live store keeps.
+With the defaults that is about 90 days. [Keep expired files](#keep-expired-files)
+moves them to a directory of the site's instead. The engine does not touch
+output a job writes to its own `std_out_file` or `std_err_file`, and does not
+monitor disk space.
+The site's archiver may move finished job output from `logs/`, or take expired
+entries from `expired_dir`.
 It must leave everything else in the run root untouched, including `runs/`,
 `plans/`, the store (`engine.db` and its sidecars), `leader.lock`,
 `control.sock` and `engine.toml`.
@@ -712,6 +719,52 @@ delivery failures. The hook runs as the service account. Keep it in its process
 group and keep its writes outside the run root. Follow the
 [hook contract](runner-design.md#4-engine-loop--single-writer) for thresholds,
 alarm flags, payloads, delivery bounds and the hook environment.
+
+## Keep expired files
+
+The engine keeps the files of a run, and each update plan, as long as the
+live store keeps the run's history, and one day more (DL-557). A run's files
+are `runs/<job>.<run>/` (the wrapper's spool, a file watch's `watch.jsonl`)
+and its default output `logs/<job>.<run>.out` and `.err`; a plan is
+`plans/<token>/`. A run goes when all of its files are older, by a day,
+than the oldest record the live store keeps, so `retention_days` (90) sets
+the age and the archive does not lengthen it. A plan goes by its
+`plan.json`'s age. The engine checks once a day, at a snapshot, and keeps
+every run that is open, each job's last run, and every plan while an update
+is prepared or stops. An entry that is a symbolic link is not the
+engine's and stays. One line on standard error names what a check removed
+or could not remove. `runs/`, `logs/` and `plans/` are the engine's alone:
+share none of them with anything else, through a link or otherwise.
+
+To keep the files instead, set a directory outside the run root in the
+main config and restart:
+
+```toml
+[engine]
+expired_dir = "/srv/dsl41/expired/nightbank"
+```
+
+The engine then moves each expired entry there, keeping its place and
+name: `runs/<job>.<run>/`, `logs/<job>.<run>.out` and `.err`, and
+`plans/<token>/` under that directory. A run's logs arrive before its
+directory. A move never replaces. The engine first checks every name the
+entry would take there, both logs and the directory, whether or not the run
+has that part; a name already there is an error, nothing of the entry
+moves, and it stays in the run root until the archiver has taken the
+earlier one away. A file is linked there and then unlinked in the run root,
+so a name that appears meanwhile is still not replaced. Give each run root
+its own `expired_dir`. This is the place to hook the site's archiver: a
+systemd path unit can watch the directory, and the archiver takes the
+entries away. The engine makes the three subdirectories and never reads or
+empties it. Create the directory, owned by the service account. `runs/`,
+`logs/`, `plans/` and `expired_dir` must be on one file system for a move. A move that
+fails leaves the entry in the run root, deletes nothing, and is named in the
+check's line; the next check tries again. A move that fails partway, such
+as a rename across file systems after the logs moved, leaves what moved
+under `expired_dir` and the rest in the run root; a later check moves the
+rest once the archiver has taken what moved. A path that is the run root or inside it, also
+through a link, refuses the start; a missing directory does not, and shows
+only in that line.
 
 ## Keep the archive
 
@@ -1016,7 +1069,9 @@ The rows it pruned show as `never received` in the archive's coverage.
 The archive holds the engine's own records: inputs and decisions,
 dispatches and outcomes, configurations, the transition rows and the
 history index. It does not hold the wrapper's spool evidence under
-`runs/`, the file watcher's poll log or job output. It does not yet hold
+`runs/`, the file watcher's poll log or job output: those leave with the
+live history, removed or moved to `expired_dir`
+([Keep expired files](#keep-expired-files)). It does not yet hold
 the control socket's access log.
 
 ## Drain the engine
@@ -1311,6 +1366,14 @@ fresh root for the main-config service. There is no root migration command.
 
 Application inputs and reviewed updates are independent of that selection.
 
+The first start of a release with DL-557 checks the run root at its first
+snapshot. That first round removes, over several steps, every finished
+run's files and every plan older, by a day, than the oldest record the live
+store keeps, or moves them to `expired_dir` when it is set. It keeps what
+is always kept: open runs, each job's last run, and plans while an update
+is prepared or stops. Set `expired_dir` before that start to keep the
+files; the archive holds neither attempt records nor job output.
+
 For one package that replaces the engine at the unit's fixed executable path,
 use the following variant (DL-474). It also covers a package that carries estate
 files. The unit's `ExecStart` must use `run --config`.
@@ -1564,7 +1627,7 @@ Main-config restart restores the last applied catalog, profile and job order
 from the store. Estate and lint edits remain pending, including invalid
 `engine.environment` selections. Restart still reads the selected config
 as TOML and requires its supported format. It applies current `as_machine`,
-`machine_policy`, access-map and status-hook settings; invalid host settings refuse with
+`machine_policy`, access-map, status-hook and `expired_dir` settings; invalid host settings refuse with
 exit 2. An omitted access map selects owner-only access. These settings stay
 effective while an interrupted update applies its captured plan.
 Other runtime-profile fields retain their stored values and checks (DL-437).

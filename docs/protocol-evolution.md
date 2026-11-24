@@ -249,7 +249,7 @@ must neither equal nor contain the engine root, nor lie inside it.
 Main-config restart restores the last applied revision. Estate, lint and
 `engine.environment` edits stay pending. Disk host identity,
 `machine_policy`, the access map, the status hook settings (`status_hook`,
-`status_hook_long_running_s`; DL-446) and the current `kill_signals` apply at launch;
+`status_hook_long_running_s`; DL-446), `expired_dir` (DL-557) and the current `kill_signals` apply at launch;
 invalid values exit 2 (DL-462). The kill list changes later kills, not replay
 or ordinary leftover cleanup. It is excluded from job-definition hashes, as are
 `job_env` (DL-447) and `fw_default_interval_s` (DL-469).
@@ -257,9 +257,11 @@ Stored configuration and plan formats do not change.
 A missing interrupted-update plan refuses before writes or signals.
 With the same state and format versions, restart restores the applied v3 IR,
 profile and job order without recompiling captures (DL-468). Missing settings
-take current defaults, which must preserve the earlier behavior. Captured config
-and launch metadata are compared through the current models, without rewriting
-retained bytes. A scanner refusal only makes `spec` source views unavailable.
+take current defaults, which must preserve the earlier behavior. The one
+exception is `expired_dir`: unset, the engine removes the run root's expired
+files, which an earlier build kept (DL-557). Captured config and launch
+metadata are compared through the current models, without rewriting retained
+bytes. A scanner refusal only makes `spec` source views unavailable.
 An interrupted update still compiles its captured candidate; a candidate the
 new binary rejects, or whose job diff differs from the recorded plan, refuses
 restart before writes or signals (DL-468). Compiler version metadata alone does
