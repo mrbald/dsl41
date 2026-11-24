@@ -102,10 +102,6 @@ In fix order. BUG-20, BUG-48 and BUG-50 are measured first. BUG-19 is the known 
 - **BUG-103**: Four lint rules still speak for the retired backend (DL-424): the texts of L008 and L016 mention it, and L014 and L020 exist only for its mapping (`src/dsl41/lint.py`). Drop the two mentions; decide whether L014 and L020 are retired or restated for this runner (DL-530).
 - **BUG-115**: A wrapper status file with a valid shape and an end time that is not a timestamp stops the engine and keeps it from resuming. A status with `outcome: "exited"`, `exit_code: 0` and `ended_at: "yesterday"` goes through `observe`, `status_recorded` and `commit_outcome`: the journal commits the outcome and its follow-up, then raises `ValueError` while it updates its open-attempt table (`src/dsl41/runner_journal.py`, `outcome_end`), and rebuilding that table from the committed records raises again at the next start. Reproduced in memory. The shipped wrapper writes valid timestamps, so it needs a damaged or hand-edited spool file; a torn write gives invalid JSON, which is already handled as a malformed record. Fix direction: treat an unparseable `ended_at` as a malformed record before the append, as `exit_code: true` is (DL-554); that needs the `ExitRecord` to say so (`src/dsl41/engine_charts.py`, `src/dsl41/runner_attempts.py`), or `outcome_end` to tolerate a stored bad value.
 
-### Unranked
-
-- **BUG-56**: When the engine or a wrapper dies on Linux, are job processes lost or left behind? macOS measured clean; Linux not measured. Not approved until its plan is accepted.
-
 ## Features
 
 ### Next, in priority order

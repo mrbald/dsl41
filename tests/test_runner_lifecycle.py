@@ -44,11 +44,13 @@ from subprocess_harness import mypy_report
 
 from dsl41 import runner_procid, runner_wrapper
 from dsl41.ir import lower_source
+from dsl41.oracle_state import Event
 from dsl41.reload_diff import catalog_hash_v2 as catalog_hash
 from dsl41.runner_adapters import Failed, LocalCommandAdapter, Terminated
 from dsl41.runner_clock import RealClock
+from dsl41.runner_config import EngineSettings
 from dsl41.runner_journal import read_journal, read_records, replay_inputs
-from dsl41.runner_startup import resume_run
+from dsl41.runner_startup import resume_run, start_run
 
 WRAPPER = Path(runner_wrapper.__file__)
 PROCID = Path(runner_procid.__file__)
@@ -691,6 +693,192 @@ def test_sigkill_engine_midrun_then_resume(tmp_path: Path) -> None:
         }
     # the oracle is told nothing about an interruption
     assert not [r for r in stored if r.kind == "input" and r.payload.get("source") == "reconcile"]
+
+
+def _cookie_of(pid: int) -> str:
+    """The `DSL41_COOKIE` a live process carries. Linux only: it reads /proc."""
+    for item in (Path("/proc") / str(pid) / "environ").read_bytes().split(b"\0"):
+        if item.startswith(b"DSL41_COOKIE="):
+            return item.split(b"=", 1)[1].decode()
+    raise AssertionError(f"pid {pid} carries no cookie")
+
+
+def _cookie_carriers(cookie: str) -> list[int]:
+    """Pids whose environment carries `DSL41_COOKIE=<cookie>`. Linux only: it reads /proc."""
+    needle = f"DSL41_COOKIE={cookie}".encode()
+    found = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        with contextlib.suppress(OSError):
+            if needle in (entry / "environ").read_bytes().split(b"\0"):
+                found.append(int(entry.name))
+    return found
+
+
+def test_bug56_a_wrapper_killed_while_the_engine_lives_leaves_nothing_of_its_attempt(
+    tmp_path: Path,
+) -> None:
+    """BUG-56, the live half: the wrapper is SIGKILLed and the engine lives. The command
+    ignores TERM, has a child in its group and an escapee in a session of its own, so the
+    ladder must run to KILL. Linux ends the escapee by its cookie; off Linux the engine leaves
+    it by design (runner-design.md s8a, `process-leak` row), so nothing is asserted there.
+
+    What the contract says, and this pins:
+    - wrapper-protocol.md s3 (the evidence table): "No readable record (wrapper gone, record
+      timeout, unread version, or restart)" is attempt outcome `unobservable`, consumer action
+      "Apply the interruption rule". The outcome's cause is that of the stop the attempt took
+      (state-machines.md, `end_unobservable`): `wrapper_lost`, the tier's stop for a wrapper
+      gone with its command alive (DL-426).
+    - runner-design.md s7 (the interruption rule): `rerun` is "dispatch the next attempt of
+      the same live run. The oracle receives no completion", so the job stays RUNNING.
+    - wrapper-protocol.md s3 (DSL41_COOKIE): "What is left of an attempt is the live
+      membership of its proven process group and the processes that carry its cookie". The
+      stop ladder takes both: TERM, `grace_term_s`, then KILL. Off Linux there is no cookie
+      read and the leader and the group decide (runner-design.md s8a, `process-leak` row).
+    """
+    run_root = tmp_path / "run"
+    script = tmp_path / "job.sh"
+    escape = tmp_path / "escape.py"
+    escape.write_text(
+        "import os, sys, time\nos.setsid()\nopen(sys.argv[1], 'w').write(str(os.getpid()))\n"
+        "time.sleep(300)\n"
+    )
+    # each attempt records its pids in files of its own, named by its ordinal (DSL41_ATTEMPT)
+    script.write_text(
+        "trap '' TERM\n"
+        f"sleep 300 &\necho $! > {tmp_path}/child.$DSL41_ATTEMPT\n"
+        f"{sys.executable} {escape} {tmp_path}/escapee.$DSL41_ATTEMPT &\n"
+        "wait\n"
+    )
+
+    def recorded(kind: str, ordinal: int) -> int | None:
+        """The pid an attempt's script wrote, once the file has its content."""
+        with contextlib.suppress(OSError, ValueError):
+            return int((tmp_path / f"{kind}.{ordinal}").read_text())
+        return None
+
+    # `exec`, so the script is the group's leader on every /bin/sh: dash forks for `-c`
+    text = f"insert_job: j\njob_type: c\ncommand: exec /bin/sh {script}\n"
+    grace = EngineSettings(grace_term_s=0.5, grace_kill_s=1.0)
+    settle_s = grace.grace_term_s + grace.grace_kill_s + 10.0
+    on_linux = sys.platform.startswith("linux")
+
+    def alive(pid: int) -> bool:
+        return pid_alive(pid) and not runner_procid.proc_is_zombie(pid)
+
+    def group_gone(pgid: int) -> bool:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        return False
+
+    def outcomes() -> list[dict]:
+        return [r.payload for _, r in read_records(run_root) if r.kind == "outcome"]
+
+    async def until(predicate, timeout_s: float = settle_s) -> None:
+        async with asyncio.timeout(timeout_s):
+            while not predicate():
+                await asyncio.sleep(0.02)
+
+    async def scenario() -> tuple[dict, dict, str, list[str]]:
+        engine = start_run(
+            lower_source(text),
+            run_root,
+            clock=RealClock(),
+            adapters={"CMD": LocalCommandAdapter(grace_seconds=grace.grace_term_s)},
+            hold_open=True,
+            settings=grace,
+        )
+        loop = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
+        engine.inject(Event(at=engine.clock.now(), kind="STARTJOB", payload={"job": "j"}))
+        first_spool = run_root / "runs" / "j.1" / "1"
+        second_spool = run_root / "runs" / "j.1" / "2"
+        try:
+            await until(
+                lambda: (
+                    (first_spool / "spawn.json").exists()
+                    and recorded("child", 1) is not None
+                    and recorded("escapee", 1) is not None
+                )
+            )
+            first = read_json(first_spool / "spawn.json")
+            child, escapee = recorded("child", 1), recorded("escapee", 1)
+            assert child is not None and escapee is not None
+            assert first["wrapper_pid"] not in (first["command_pid"], child, escapee)
+            assert first["command_pgid"] == first["command_pid"]
+            assert os.getpgid(escapee) == escapee != first["command_pgid"]  # its own session
+            cookies = [_cookie_of(first["command_pid"])] if on_linux else []
+            if on_linux:
+                assert _cookie_of(escapee) == cookies[0]  # outside the group, in the cookie
+            os.kill(first["wrapper_pid"], signal.SIGKILL)
+            # the command and its child go with the engine up
+            await until(lambda: not alive(first["command_pid"]) and not alive(child))
+            await until(lambda: group_gone(first["command_pgid"]))
+            if on_linux:
+                await until(lambda: not alive(escapee))
+                await until(lambda: _cookie_carriers(cookies[0]) == [])
+            await until(lambda: len(outcomes()) >= 1)
+            await until(lambda: (second_spool / "spawn.json").exists())
+            assert not loop.done()
+            status = engine.oracle.store.job["j"].status
+            second = read_json(second_spool / "spawn.json")
+            await until(lambda: recorded("child", 2) is not None)
+            await until(lambda: recorded("escapee", 2) is not None)
+            escapee2 = recorded("escapee", 2)
+            assert escapee2 is not None
+            cookies += [_cookie_of(second["command_pid"])] if on_linux else []
+            await engine.request_stop()
+            await asyncio.wait_for(loop, settle_s)
+            await until(lambda: group_gone(second["command_pgid"]))
+            await until(lambda: not alive(second["command_pid"]))
+            if on_linux:
+                await until(lambda: not alive(escapee2))
+                await until(lambda: all(_cookie_carriers(c) == [] for c in cookies))
+            return first, second, status, cookies
+        finally:
+            if not loop.done():
+                loop.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await loop
+            await engine.shutdown()
+            assert engine.journal is not None
+            engine.journal.close()
+
+    pids: list[int] = []
+    try:
+        first, second, status, cookies = asyncio.run(scenario())
+        pids = [first["command_pid"], second["command_pid"]]
+    finally:
+        # every pid either attempt recorded, on every platform and on a failure path too
+        for path in tmp_path.glob("child.*"):
+            with contextlib.suppress(OSError, ValueError, ProcessLookupError):
+                os.kill(int(path.read_text()), signal.SIGKILL)
+        for path in tmp_path.glob("escapee.*"):
+            with contextlib.suppress(OSError, ValueError, ProcessLookupError):
+                os.kill(int(path.read_text()), signal.SIGKILL)
+    assert status == "RUNNING"
+    stored = [record for _, record in read_records(run_root)]
+    dispatches = [r.payload for r in stored if r.kind == "dispatch"]
+    assert [d["ordinal"] for d in dispatches] == [1, 2]
+    [outcome] = [
+        r.payload
+        for r in stored
+        if r.kind == "outcome" and r.payload["attempt"] == dispatches[0]["attempt"]
+    ]
+    assert (outcome["outcome"], outcome["cause"]) == ("unobservable", "wrapper_lost")
+    assert not (run_root / "runs" / "j.1" / "1" / "status.json").exists()
+    [plan] = [
+        r.payload
+        for r in stored
+        if r.kind == "follow_up"
+        and r.payload["event"] == "plan"
+        and r.payload["attempt"] == dispatches[0]["attempt"]
+    ]
+    assert plan["plan"] == "rerun"
+    assert len(set(cookies)) == len(cookies)  # one cookie per attempt
+    assert not any(alive(pid) for pid in pids)
 
 
 def test_resume_refuses_catalog_drift(tmp_path: Path) -> None:
