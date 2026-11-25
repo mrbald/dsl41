@@ -190,7 +190,14 @@ to derive state. A state-28 build that does not know the key ignores it and
 recomputes the roots, so a crash during the update can lose a box from its scope.
 Let an open update finish
 (`status.update` absent) before rollback or takeover by a standby on the older
-package (DL-489).
+package (DL-489). From DL-559 on a new admission always writes `[]`: only an intent
+an earlier build stored names roots, and this build completes it as that build did.
+
+**Membership refusal (DL-559).** The `update` refusal code `tree_active` and the `reread`
+field `preview.update_refusal` are additive within dialect 5. A refusal writes nothing, so
+the store, the records, the snapshot and the state version are unchanged. A client that
+does not know the field ignores it; one that does not know the code prints it as any
+refusal.
 
 **Main-config captures and plans (DL-437, DL-438).** New configuration rows use version 3.
 A required `job_order` list names every catalog job exactly once. The catalog

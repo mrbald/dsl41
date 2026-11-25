@@ -3,7 +3,7 @@
 ## Purpose
 
 `dsl41 reread` reports current launch-config sources against the engine catalog (DL-463).
-`dsl41 update` prepares and applies current sources to the running engine: it stops every process the engine owns at admission for a job the plan changes or removes or for a member of a box it restarts ([DL-525](../decision-log.md)), swaps the catalog, the settings and the marked set, and keeps the engine running throughout ([DL-427](../decision-log.md)).
+`dsl41 update` prepares and applies current sources to the running engine: it stops every process the engine owns at admission for a job the plan changes or removes ([DL-525](../decision-log.md)), swaps the catalog, the settings and the marked set, and keeps the engine running throughout ([DL-427](../decision-log.md)). It never restarts a box: an update that changes box membership while a touched tree is active is refused `tree_active` ([DL-559](../decision-log.md)).
 
 ## Fate
 
@@ -15,13 +15,13 @@ Its intent and its application are store records, so a crash between them resume
 - `dsl41 reread -S SOCK` previews; `dsl41 update -S SOCK [--wait]` prepares and applies current inputs. Both default to DSL41_SOCKET. They use v5 ADM requests (DL-498); there is no token or consent handoff (DL-463).
 - `reload_plan.reread` computes and stores the plan; `runner_update.EngineUpdate.admit` checks it against the engine's state now; `reload_update.admission_data` builds the admitted data; `reload_update.plan_application` and `apply_application` compute and apply the swap.
 - `runner_update.EngineUpdate` binds the update chart's tier to the engine: the admission as one step of the single writer, the stops through the attempt tier, the dispatch filter, the application and its records.
-- The store records `config intent` (the token, the stop set with the attempt each stop interrupts, the dispatch filter, the admitted box roots in `restart_boxes`, the request's id and fingerprint) and `config applied` (the new rev, its segment fields and the job sets). A configuration row holds each rev's catalog, profile and marked set (DL-489).
+- The store records `config intent` (the token, the stop set with the attempt each stop interrupts, the dispatch filter, the box roots in `restart_boxes`, `[]` for every new admission, the request's id and fingerprint) and `config applied` (the new rev, its segment fields and the job sets). A configuration row holds each rev's catalog, profile and marked set (DL-489).
 - `status` shows `config_rev`, `update_window_s` and, while an update stops, the update and the jobs it waits for; the TUI shows the rev and the update in its subtitle. Once applied, `spec` and `spec_drift` follow the applied plan.
 
 ## States
 
 One update request's states are [update](../state-machines.md#update): IDLE, STOPPING, APPLIED and REFUSED, with the token and the stop set as the instance's data.
-STOPPING contains WAITING for the stop set and ENDING_BOXES while the old box runs' KILLJOBs commit (DL-487).
+STOPPING contains WAITING for the stop set and ENDING_BOXES while the old box runs' KILLJOBs commit (DL-487); only an intent an older build wrote has any: one that names roots, or one without `restart_boxes`, whose roots recovery recomputes and which can end a live box (DL-489).
 The apply row orders the application, journal, time advance, marked-member holds, box starts
 and finish; the update step awaits the intents the synchronous tier hands back (DL-488).
 The anchor holds the generated diagram and transition table.
@@ -30,10 +30,10 @@ The [chart lifecycles](../chart-lifecycles.md) view lists each target state with
 ## Invariants
 
 - One update is in flight at a time; a second is refused with `update_in_progress` ([DL-427](../decision-log.md)).
-- Admission rechecks revision and current stops. Running boxes do not refuse; structural edits restart outermost affected boxes and their running members (DL-463).
+- Admission rechecks revision and current stops. An update never restarts a box (DL-559). One that changes box membership (a job added, removed, moved to another box or retyped that is a BOX or has a box in either catalog) is refused `tree_active` when it would stop a job or a job of a touched tree is active: its row is QUE_WAIT, STARTING or RUNNING, or the engine owns a process of it. The touched trees are each such job's top-level ancestor in each catalog, with every descendant in either catalog. The refusal names the stops and the active jobs of those trees, writes nothing, and goes through the chart's REFUSED row. An admitted one records `restart_boxes: []` and applies in its admission step.
 - The engine loads the main-config candidate from the version 2 plan's captured inputs and runs it under the captured settings (DL-486).
 - A kept job whose definition differs only in its `status:` line is unchanged and seed-only: the edit adds no reason to stop, filter or mark it, and removes none ([DL-533](../decision-log.md)).
-- While the update stops, no job of its recorded dispatch filter is dispatched: the plan's added, changed and removed jobs, the boxes it restarts, and their members in the old and in the new catalog ([DL-527](../decision-log.md)). A start the oracle decides for one waits as `dispatch_pending`. After the application it goes if its run is still wanted, or it is discharged with no launch when the restart ended its run.
+- While the update stops, no job of its recorded dispatch filter is dispatched. A new admission's filter is the plan's added, changed and removed jobs; an older build's intent may also name the boxes it restarts and their members in the old and in the new catalog, or be narrower. A restart holds exactly the filter the intent recorded ([DL-527](../decision-log.md)). A start the oracle decides for one waits as `dispatch_pending`. After the application it goes if its run is still wanted, or it is discharged with no launch when its run ended.
 - An attempt the update stops keeps its outcome back until the application, so its follow-up plan is chosen under the applied catalog and marked set, once, and the `config applied` record names it: a removed job gets none, a marked one is held, any other reruns the same run under its new definition ([DL-424](../decision-log.md)). An interrupted attempt that at the application is not of a live row's current run gets none ([DL-525](../decision-log.md)).
 - A stop is finished when its job's next run could go: its ladder done and a reading finding nothing of it left, not at its record ([DL-431](../decision-log.md)). The update applies only once every stop is finished, an attempt that ended before the admission while its cleanup still runs included.
 - An interrupted attempt of a job whose `non-idempotent.toml` mark the plan changes keeps its outcome back too, so its plan follows the applied mark; the update neither stops nor waits for it.
@@ -47,7 +47,7 @@ The [chart lifecycles](../chart-lifecycles.md) view lists each target state with
 ## Failure and recovery
 
 - A crash between `config intent` and `config applied` is resumed by the restart's fold, which restores the update in STOPPING with its dispatch filter holding; nothing waits for it. The catch-up observes its attempts like any open one, and what is left of each gets the live cleanup (the ladder, the reading after). The update applies as a step of the loop once its stops are finished, wherever the last one finishes: in the catch-up, at the first look the catch-up queues when every stop was finished before the crash, or later. The recovered outcomes of jobs outside its stop set are fed under the old catalog before it. No job of the plan is dispatched and no kept outcome is committed before the application (DL-433).
-- Recovery uses the intent's admitted box roots and derives their members from both catalogs, so it finishes the remaining kills, holds and starts. Only an absent `restart_boxes` recomputes the roots; `[]` stays empty. Malformed roots or a name that is not a BOX of either the applied or candidate catalog refuse before writes or signals (DL-489).
+- Recovery uses the intent's box roots and derives their members from both catalogs, so an intent an earlier build stored with roots finishes its remaining kills, holds and starts. Only an absent `restart_boxes` recomputes the roots; `[]` stays empty. Malformed roots or a name that is not a BOX of either the applied or candidate catalog refuse before writes or signals (DL-489).
 - A plan an older `reread` wrote (no estate directory) is refused `stale_plan` before anything is written.
 - A plan directory removed while an update stops refuses the restart by name.
 - The admission checks the plan's revision and the catalog hash preparation saw before it writes anything, so the application's own check of them cannot fail after the intent. Any other raise while applying is a crash, not a state: the engine dies, and the restart resumes the update; a raise the same input meets every time stops every restart, and the operator restores or removes the run root.
@@ -72,7 +72,7 @@ The [chart lifecycles](../chart-lifecycles.md) view lists each target state with
 - `test_restart_resumes_the_box_roots_of_a_stopping_update`
 - `test_a_plan_whose_catalog_hash_is_not_the_engines_is_refused`
 - `test_a_stale_token_and_an_open_update_are_refused_and_a_retry_is_answered_once`
-- `test_a_box_that_started_since_preparation_is_restarted`
+- `test_a_box_that_started_since_preparation_refuses_the_membership_change`
 - `test_a_changed_job_gets_a_rebuilt_tick_and_an_unchanged_one_keeps_its_own`
 - `test_the_update_applies_only_once_each_stop_is_finished`
 - `test_an_interruption_of_a_newly_marked_job_waits_for_the_applied_marked_set`
@@ -95,25 +95,15 @@ The [chart lifecycles](../chart-lifecycles.md) view lists each target state with
 - `test_box_scope_compatibility_and_refusals`
 - `test_retyped_command_box_scope_recovers_as_the_uncut_update`
 - `test_a_status_only_update_applies_live_with_no_stop_and_restart_keeps_the_rows`
+- `test_feat31_a_member_added_removed_or_moved_under_a_running_box_is_refused`
+- `test_dl559_a_membership_change_in_quiet_trees_applies_in_its_admission_step`
+- `test_dl559_a_refusal_writes_nothing_and_its_retry_is_decided_on_the_state_then`
 
-DL-463 box orchestration commits KILLJOBs before application; otherwise kept member
-outcomes would choose old-run replacements. After the swap, ON_HOLD every marked
-non-INACTIVE member, even one that already finished, before FORCE_STARTJOB of retained
-outermost boxes. Removed boxes stay stopped. The new run and old end are visible to
-normal successors. A crash after `config applied` can leave a box stopped: put its marked
-non-INACTIVE members on hold before force-starting it. No automatic completion after that record
-is promised (DL-489).
+Only an intent an older build wrote restarts boxes: its stored roots, or for a body without `restart_boxes` the recomputed ones (DL-463, DL-489). It completes as that build did: the old box runs' KILLJOBs commit before the application, so kept member outcomes cannot choose old-run replacements; after the swap every marked non-INACTIVE member is put on hold, even one that already finished, before FORCE_STARTJOB of the retained outermost boxes; removed boxes stay stopped. Once `config applied` is recorded nothing completes such a restart by itself: a crash then can leave a box stopped, and the operator's step is in [Reload a changed estate](../deploy.md#reload-a-changed-estate) (DL-463, DL-489). The next state version removes this path (FEAT-54).
 
 The CLI/TUI status annotation caches the last reread forecast in memory. A new reread replaces it when the revision it read is still the applied one (DL-521); a failed reread, an applied update and a restart clear it. Update never consumes it.
-Forecast labels follow the first-match rule in the [control protocol](../control-protocol.md#2-transport-and-framing-frozen) (DL-490).
-`restart_box` names only roots the update starts again. Jobs of both catalogs
-inside such a root in the candidate carry `restart`, retyped jobs and sub-boxes
-included. A marked job the plan keeps without retyping carries `hold` when it is
-a stop or is not INACTIVE inside the box scope. A retyped job's INACTIVE row is
-not held by its mark (DL-490, D12=MARK).
-The stop list includes every running box that ends with the roots.
-The forecast reads statuses, not flags or the terminator cascade: held or iced
-members can read `restart` without running. A running `job_terminator` member whose own box the update ends, moved to outside every restarting root, is ended with the old box run; the forecast reads `rerun` for a command and nothing for a sub-box (DL-490, BUG-69).
+Forecast labels follow the first-match rule in the [control protocol](../control-protocol.md#2-transport-and-framing-frozen) (DL-559): `hold`, `remove` or `rerun`, each for a stop.
+The forecast reads statuses, not flags. `preview.update_refusal` forecasts the `tree_active` refusal from the same function and inputs as the admission, the jobs the engine owns a process of included, and is `null` when the update's preparation would refuse first. Both read their stops from one rule, `reload_plan.stop_runs`. `dsl41 reread` prints the refusal as one line, offers no apply command, and exits 1. A job the plan retypes prints as replaced by a new job of its name; a removed one keeps "no replacement".
 
 ## Open findings
 

@@ -1307,6 +1307,13 @@ class Engine:
         live = self._live.get(job)
         return live.run_number if live is not None and live.attempt not in self._facts else None
 
+    def owned_runs(self) -> dict[str, int]:
+        """Each job with a process the engine still owns, with that process's run
+        (`owned_run`), by job in name order: what an update's admission and `reread`'s
+        forecast read as owned (DL-525, DL-559)."""
+        jobs = {facts.job for facts in self._facts.values()} | self._live.keys()
+        return {job: run for job in sorted(jobs) if (run := self.owned_run(job)) is not None}
+
     def stop_done(self, attempt: str) -> bool:
         """Whether an ended attempt's stop is finished as its job's next run would wait for
         it: its ladder done and its group not held, so a reading found nothing of it left

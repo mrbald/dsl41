@@ -459,7 +459,7 @@ class World:
         elif document["live_rev"] != self.rev:
             decision = Refused(document["token"], STALE_PLAN)
         else:
-            decision = admission_data(document, live=self.live(), candidate=candidate)
+            decision = admission_data(document, live=self.live())
         effects = Effects(then=self.apply)
 
         def prepare(_admitted: Admitted) -> Application:
@@ -788,8 +788,7 @@ def _in_running_box(tmp_path: Path, *, seed: bool) -> tuple[World, Any, dict[str
     """OPS_B runs with OPS_SPOOL_C; the update adds sibling ZZ_NEW_C, and with `seed` also
     gives OPS_SPOOL_C a `status:` line."""
     from reload_fixtures import prepare_estate as prepared
-    from dsl41.reload_plan import box_scope
-    from dsl41.reload_update import plan_of
+    from dsl41.reload_plan import tree_active
     from dsl41.reread_worker import preview
 
     tmp_path.mkdir()
@@ -805,8 +804,8 @@ def _in_running_box(tmp_path: Path, *, seed: bool) -> tuple[World, Any, dict[str
         _seed(world, "OPS_SPOOL_C", "ON_HOLD")
     result, document, candidate = world.reread()
     live = world.live()
-    admitted = admission_data(document, live=live, candidate=candidate)
-    scope = box_scope(plan_of(document, live.catalog), live, candidate)
+    admitted = admission_data(document, live=live)
+    refused = tree_active(live.catalog, candidate, live.status, live.owned, admitted.stop_set)
     forecast = preview(prepared(world.estate), live)
     return (
         world,
@@ -814,27 +813,34 @@ def _in_running_box(tmp_path: Path, *, seed: bool) -> tuple[World, Any, dict[str
         {
             "stop": result.stop,
             "admitted": (admitted.stop_set, admitted.dispatch_filter, admitted.stop_runs),
-            "roots": scope.roots,
-            "forecast": (forecast["stop"], forecast["effects"], forecast["marks"]),
+            "refused": refused,
+            "forecast": (
+                forecast["stop"],
+                forecast["effects"],
+                forecast["marks"],
+                forecast["update_refusal"],
+            ),
         },
     )
 
 
-def test_a_seed_only_member_of_a_restarted_box_is_scoped_as_an_unchanged_member(
+def test_a_seed_only_member_of_a_refusing_box_is_named_as_an_unchanged_member(
     tmp_path: Path,
 ) -> None:
-    """DL-533 with DL-463 and DL-527: the seed-only edit adds nothing and removes nothing. The
-    member is stopped, filtered and marked exactly as it is without the edit."""
+    """DL-533 with DL-559: the seed-only edit adds nothing and removes nothing. A member added
+    under the running box refuses the update by the running box and its running member, and the
+    seed-only member is named exactly as it is without the edit; it is no stop and not filtered."""
     _, plain, unchanged = _in_running_box(tmp_path / "plain", seed=False)
     _, seeded, edited = _in_running_box(tmp_path / "seeded", seed=True)
     assert [change.name for change in seeded.plan.seed_only] == ["OPS_SPOOL_C"]
     assert plain.plan.seed_only == ()
     assert seeded.plan.changed == plain.plan.changed == ()
     assert edited == unchanged
-    assert unchanged["roots"] == ("OPS_B",)
-    assert "OPS_SPOOL_C" in unchanged["stop"]
-    assert "OPS_SPOOL_C" in unchanged["admitted"][1]
-    assert unchanged["forecast"][2]["OPS_SPOOL_C"] == {"change": "unchanged", "action": "restart"}
+    assert unchanged["stop"] == ()
+    assert "OPS_B" in unchanged["refused"] and "OPS_SPOOL_C" in unchanged["refused"]
+    assert "OPS_SPOOL_C" not in unchanged["admitted"][1]
+    assert unchanged["forecast"][3] == {"code": "tree_active", "names": list(unchanged["refused"])}
+    assert "OPS_SPOOL_C" not in unchanged["forecast"][2]
 
 
 def test_a_removed_jobs_tombstone_keeps_its_hold_and_shows_on_re_add(
@@ -1443,7 +1449,7 @@ def test_update_prints_the_decision_and_with_wait_the_application(
     _command_change(world, "OPS_HEARTBEAT_C")
     _, document, candidate = world.reread()
     token = document["token"]
-    decision = admission_data(document, live=world.live(), candidate=candidate)
+    decision = admission_data(document, live=world.live())
     send = _send(world, UpdateReply(decision))
     assert update_command(send=send) == 0
     assert send.calls == [("update", {"wait": False})]

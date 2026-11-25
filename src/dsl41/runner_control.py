@@ -236,6 +236,10 @@ CONFIG_KEY = "config"
 _REFUSALS = {
     "stale_plan": "the plan was diffed against another configuration rev: run update again",
     "update_in_progress": "another update is stopping its jobs: {names}",
+    "tree_active": (
+        "the update changes box membership and these jobs are active or would be stopped:"
+        " {names}; stop them or wait for them, then update again"
+    ),
 }
 
 
@@ -940,14 +944,18 @@ class ControlServer:
             self.engine.reread_marks = marks
         details = answer.get("preview", {}).get("definition_changes")
         if details is not None:
+            # a drain or an open update refuses an update before its admission could, so the
+            # forecast follows that order and gives no `tree_active` then (DL-559)
             if self.engine.draining:
                 details["blocked"].append(
                     "the engine is draining; it takes no update until it restarts"
                 )
+                answer["preview"]["update_refusal"] = None
             if self.engine.update.token is not None or self._preparing_update is not None:
                 details["blocked"].append(
                     "another update is open or preparing; wait for it to finish"
                 )
+                answer["preview"]["update_refusal"] = None
         return answer
 
     def _catalog(self, *, authority: Tier = Tier.ADM) -> dict[str, Any]:

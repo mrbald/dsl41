@@ -1256,21 +1256,26 @@ Its applied and unchanged lines both name the catalog revision and hash.
 
 Reread only reports current launch-config and glob inputs: added, changed,
 removed and unchanged jobs, findings, and what update would stop, rerun, hold
-or remove. A running box does not refuse a preview. Broken input explains why
-no diff is available. Exit 0 means no running stop, 1 means running stops,
-and 2 means no diff or failure to reach the engine.
+or remove. A running box does not refuse a preview; when the update would be
+refused `tree_active`, reread prints one line that names the jobs in the way.
+A job the update retypes is shown as replaced by a new job of its name.
+Broken input explains why no diff is available. Exit 0 means no running stop
+and no forecast `tree_active` refusal, 1 means running stops or that refusal,
+and 2 means no diff or failure to reach the engine. A finding that would make
+update refuse at its preparation (a blocking lint finding, changed host launch
+settings, a preflight error) is printed as `update would refuse: ...` and does
+not change the exit status; reread then forecasts no `tree_active`, since
+update refuses first.
 
 A kept job whose only edit is its `status:` line is counted apart, as
 `status line only N`, in both commands. A box whose own edit is its `status:`
 line and whose members change is counted as changed (membership) by `reread`
 and under `status line only` by `update`; each command's counts add up. Its row shows the line's old and new value and says the
 edit itself sets no flag. Update stops nothing and changes no flag for that
-edit; use `sendevent` to hold or release the job. A job inside a box that the
-update restarts is still stopped with the box, and held if it is marked
-(DL-463, DL-533).
+edit; use `sendevent` to hold or release the job. Such a job inside a box whose
+members the update changes counts as any member of that box (DL-533, DL-559).
 
-Status in the CLI and TUI annotates changed/removed jobs and unchanged members
-of boxes update would restart with this forecast.
+Status in the CLI and TUI annotates changed and removed jobs with this forecast.
 It describes reread time. Another reread replaces it when the revision it read
 is still the applied one (DL-521); failed reread, applied update and engine
 restart clear it. It is held only in engine memory.
@@ -1290,30 +1295,23 @@ refusal/failure. No token or stop-consent argument is used.
 Affected ordinary jobs stop through TERM, grace and KILL. A retained idempotent
 job gets another attempt of the same run under the new definition; a marked
 job is held; a removed job gets no replacement (DL-424, DL-432).
-A structural edit of a running box stops its running members, ends its old
-rows with KILLJOB, applies, and force-starts the retained outermost box.
-The KILLJOBs commit before application so members get no old-run replacement.
-Before FORCE_STARTJOB, every marked member whose row is not INACTIVE is put
-ON_HOLD, including members that had already finished in that box run (D11).
-Unmarked members run through normal box-start semantics. Removed boxes stay
-stopped. The new box start opens a new run, and normal successors and
-terminators can observe the old run's end (DL-463).
+An update never restarts a box (DL-559). An update that changes box
+membership (a job added, removed, moved to another box or retyped that is a
+box or sits in one) is applied only when it stops nothing and every job of the
+touched box trees is quiet: not QUE_WAIT, STARTING or RUNNING, and with no
+process left. The touched trees are the outermost box or job holding each of
+those jobs, before and after the edit, with everything in them. Otherwise update prints
+`update: refused tree_active: NAMES` and exits 2; nothing is written. To apply
+such a change to a busy tree, stop the named jobs (or wait for them), run
+update, then start the box again. One busy job refuses the whole update. A job
+outside every box is added, removed or retyped as before, with its stop.
 
-A box that is idle when the update is admitted is not restarted. If the
-update changes that box's members, and the box starts while the update is
-still stopping other jobs, the box can stay RUNNING after the application
-with no member left to end it (BUG-19). Before such an update, check the
-box's status. If it is not on hold, run `sendevent ON_HOLD --job BOX`, and
-after the update has applied run `sendevent OFF_HOLD --job BOX`; releasing
-the hold can start the box if it is eligible. If the box was already on
-hold, leave that hold alone: releasing it would undo a hold someone set.
-A box has one hold flag, so agree with the other operators that nobody
-changes the hold on that box until you have released it.
-
-A crash during box restart can leave the box stopped. Before operator
-force-start, put its marked non-INACTIVE members on hold, including members
-that finished earlier. Then force-start the retained unmarked box. There is
-no separate automatic completion protocol for this box restart.
+Upgrade note: an update that restarted a running box in 2.0.0 is now refused.
+An update the older build left stopping with box roots in its intent is
+completed by this build as that build would have done it. A crash after its
+`config applied` can leave such a box stopped: before force-starting it, put
+its marked non-INACTIVE members on hold, including members that finished
+earlier (DL-463, DL-489).
 
 Preparation runs under the engine account and startup cwd/environment, in a
 separate interpreter. Its deadline is 120 seconds; cancellation terminates,

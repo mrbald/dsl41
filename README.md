@@ -786,10 +786,12 @@ Runner:
 - `src/dsl41/reload_plan.py`: `reread` as a module: it loads the estate from disk, lints it under its policy, diffs it against
   the live catalog the engine supplies, and stores
   the candidate files and `plan.json` under `plans/<token>/`, the plan file
-  last.
+  last. Its `tree_active` gives the names of the update's box-membership refusal,
+  for the admission and the forecast alike (DL-559).
 - `src/dsl41/reload_update.py`: the 2.x update machine: the
   declared `UPDATE` statechart (IDLE, STOPPING, APPLIED, REFUSED), the
-  admission that re-checks the revision and the stop set,
+  admission that re-checks the revision and the stop set (a box-membership change
+  is refused while a touched tree is active, DL-559),
   the tier that records the intent in the store, stops each job and applies,
   and the application's per-job carry onto the oracle's state.
 - `src/dsl41/runner_update.py`: the engine's side of the update: the

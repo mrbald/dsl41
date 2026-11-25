@@ -111,17 +111,27 @@ class _Client:
         return answer
 
 
+#: Runs `dsl41 run` after `update_legacy.install`: the engine admits as before DL-559.
+_LEGACY_RUN = (
+    "import runpy, sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); "
+    "import update_legacy; update_legacy.install(Path(sys.argv[2])); "
+    "sys.argv = ['dsl41', 'run', '--config', sys.argv[3]]; "
+    "runpy.run_module('dsl41', run_name='__main__')"
+)
+
+
 @asynccontextmanager
-async def _cli(path):
-    """A real CLI engine; tests kill its process at a journaled crash boundary."""
+async def _cli(path, *, legacy=False):
+    """A real CLI engine; tests kill its process at a journaled crash boundary. With `legacy`,
+    the engine admits an update as the build before DL-559 did (`update_legacy`)."""
     root = Path(main.load_host(path).run_root)
     log_path = root.parent / "live-engine.log"
+    command = [sys.executable, "-m", "dsl41", "run", "--config", str(path)]
+    if legacy:
+        tests = str(Path(__file__).resolve().parent)
+        command = [sys.executable, "-c", _LEGACY_RUN, tests, str(root), str(path)]
     with log_path.open("w") as log:
-        child = subprocess.Popen(
-            [sys.executable, "-m", "dsl41", "run", "--config", str(path)],
-            stdout=log,
-            stderr=log,
-        )
+        child = subprocess.Popen(command, stdout=log, stderr=log)
         client = _Client(root)
         try:
             await _until(
@@ -307,7 +317,9 @@ def test_drain_prunes_every_decision_and_frees_its_request_id(tmp_path):
 
 @linux_only
 def test_restart_resumes_the_box_roots_of_a_stopping_update(short_root):
-    """t2 4: a real crash leaves an admitted restart_boxes intent."""
+    """t2 4: a real crash leaves an admitted restart_boxes intent. Only a build before DL-559
+    wrote one: the first engine admits as that build did (`update_legacy`), and the restarted
+    engine, this build unpatched, resumes the intent to its end."""
     childfile = short_root / "child"
     command = _script(short_root, "box-member", _stubborn(childfile) + "wait\n")
     text = "insert_job: BX\njob_type: b\n" + _job(command, "box_name: BX\n")
@@ -315,7 +327,7 @@ def test_restart_resumes_the_box_roots_of_a_stopping_update(short_root):
     root = short_root / "run"
 
     async def scenario():
-        async with _cli(path) as (client, engine):
+        async with _cli(path, legacy=True) as (client, engine):
             await client.event("STARTJOB", "BX")
             first_child = await _written(childfile)
             (short_root / "jobs.jil").write_text(text + _job("true", "box_name: BX\n", "new"))

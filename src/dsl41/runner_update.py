@@ -4,8 +4,10 @@ the engine's store, its attempt tier, its oracle and its scheduler.
 An update request is one step of the engine's single writer (`Engine.request_update`). Its
 admission reads the version 2 plan `reread` stored under `plans/<token>/`, loads its captured
 main-config inputs (DL-486), and re-checks the runtime
-preconditions against the engine's state now (`EngineUpdate.admit`). A refusal is the
-reply and writes nothing. An admission appends `config intent` (the token, the stop set with the
+preconditions against the engine's state now (`EngineUpdate.admit`). An update that changes
+box membership is refused `tree_active` unless nothing has to stop and the touched trees are
+quiet (`reload_plan.tree_active`): a new admission never restarts a box, and only an intent an
+earlier build stored names box roots (DL-559). A refusal is the reply and writes nothing. An admission appends `config intent` (the token, the stop set with the
 attempt each stop interrupts, the dispatch filter, the admitted box roots (DL-489), and the
 request's id and fingerprint), then
 stops each attempt of the stop set with cause `update_stop` through the attempt tier. The stop
@@ -63,6 +65,7 @@ from dsl41.idempotence import Exceptions
 from dsl41.ir import CatalogIR
 from dsl41.oracle_reads import marker
 from dsl41.reload_plan import (
+    NO_SCOPE,
     BoxScope,
     Estate,
     Live,
@@ -74,10 +77,12 @@ from dsl41.reload_plan import (
     ends_with_roots,
     marked_holds,
     root_starts,
+    tree_active,
 )
 from dsl41.reload_diff import catalog_hash_v2, diff
 from dsl41.reload_update import (
     STALE_PLAN,
+    TREE_ACTIVE,
     UPDATE_IN_PROGRESS,
     Admitted,
     Application,
@@ -287,7 +292,7 @@ class EngineUpdate:
         #: each cancelled task is taken up again, by job (`_choose_follow_ups`)
         self._chosen: dict[str, FollowUp] = {}
         self._takes_up: dict[str, bool] = {}
-        self._box_scope = BoxScope((), frozenset())
+        self._box_scope = NO_SCOPE
         #: the jobs the dispatch filter held while the update stopped, released after it
         self._held: frozenset[str] = frozenset()
         #: called with each applied plan once the update applied live (the control server's
@@ -358,7 +363,13 @@ class EngineUpdate:
         )
         from dsl41.runner_environment import path_environment
 
-        live = replace(live, path_environment=path_environment(engine.startup_env))
+        # the jobs the engine owns a process of: the admission and `reread`'s worker read them
+        # (DL-525, DL-559)
+        live = replace(
+            live,
+            path_environment=path_environment(engine.startup_env),
+            owned=engine.owned_runs(),
+        )
         if engine.source_capture:
             import base64
             from dsl41.canon import decode
@@ -435,18 +446,15 @@ class EngineUpdate:
                 unchanged={"rev": engine.config_rev, "catalog_hash": applied.catalog_hash},
             )
         live = self.live()
-        plan = plan_of(opened.plan, live.catalog)
-        scope = box_scope(plan, live, opened.estate.catalog)
-        decision = self._owned_stops(
-            admission_data(
-                opened.plan,
-                live=live,
-                candidate=opened.estate.catalog,
-                scope=scope,
-            ),
-            live.catalog,
+        decision = admission_data(opened.plan, live=live)
+        # an update that changes box membership applies only with nothing to stop and the
+        # touched trees quiet; it never restarts a box (DL-559)
+        names = tree_active(
+            live.catalog, opened.estate.catalog, live.status, live.owned, decision.stop_set
         )
-        self._begin(request, opened, decision, scope)
+        if names:
+            return self._decide(Refused(request.token, TREE_ACTIVE, names))
+        self._begin(request, opened, decision)
         answer = self._answer = UpdateAnswer(decision)
         answer.applied = asyncio.get_running_loop().create_future()
         self._post(lambda tier: tier.admit(decision))
@@ -462,27 +470,11 @@ class EngineUpdate:
     def _no_application(admitted: Admitted) -> Application:
         raise AssertionError(f"a refused update {admitted.token} reached its application")
 
-    def _owned_stops(self, admitted: Admitted, catalog: CatalogIR) -> Admitted:
-        """The admission with every named job that has a process the engine owns in its stop
-        set, whatever the job's row says, each with the run of that process: a job of the
-        admitted filter in the live catalog, never a box (DL-525, DL-527). So the filter's added
-        jobs and its roots count only when the plan retypes them, and then it removes them too.
-        A job of the rows' stop set with no such process keeps its row's run and is down at
-        once."""
-        runs = dict(admitted.stop_runs)
-        for job in admitted.dispatch_filter:
-            if job in catalog.jobs and catalog.jobs[job].job_type != "BOX":
-                run = self.engine.owned_run(job)
-                if run is not None:
-                    runs[job] = run
-        stops = tuple(sorted(runs))
-        return replace(admitted, stop_set=stops, stop_runs=tuple((job, runs[job]) for job in stops))
-
-    def _begin(
-        self, request: UpdateRequest, opened: OpenedPlan, admitted: Admitted, scope: BoxScope
-    ) -> None:
+    def _begin(self, request: UpdateRequest, opened: OpenedPlan, admitted: Admitted) -> None:
+        """Install a new admission: it restarts no box, so its intent records
+        `restart_boxes: []` (DL-559)."""
         attempts = {job: self.engine.attempt_of_run(job, run) for job, run in admitted.stop_runs}
-        self._install(request, opened, admitted, attempts, {}, scope)
+        self._install(request, opened, admitted, attempts, {}, NO_SCOPE)
 
     def _install(
         self,

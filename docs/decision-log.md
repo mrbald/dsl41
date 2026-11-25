@@ -25897,6 +25897,7 @@ relitigate an entry; append a new one.
   NARROWED BY DL-498: v5 carries reread and the tokenless update; the v3 exception is gone.
   NARROWED BY DL-521: a reread stores its forecast only for the revision still applied.
   NARROWED BY DL-527: while the update waits, no member of a box it restarts is launched.
+  SUPERSEDED IN PART BY DL-559: THE BOX CASE stands only for an older build's resumed intent.
 - DL-465 Five-day dependency cooldown (2026-11-04; owner ruling; README Release)
   uv excludes registry artifacts younger than five days through
   `[tool.uv] exclude-newer = "5 days"`. Both Dependabot ecosystems, uv and
@@ -26290,6 +26291,7 @@ relitigate an entry; append a new one.
   keep true. `--json` on `reread` and `update`: no reader asked for it. A general sentence
   about what an update does to boxes: the answer cannot prove one. An outcome text that
   gives a cause or the job's later state: the kind describes the follow-up of one stop.
+  NARROWED BY DL-559: `reread` also exits 1 when it forecasts a `tree_active` refusal.
 
 - DL-483 Start and reread count lint findings; the missed-start report leaves armed holds out
   (2026-11-10; owner rulings on the pilot trip list; lint.py, main_config.py, cli_reload.py,
@@ -26441,6 +26443,8 @@ relitigate an entry; append a new one.
   finish) stay in the update step until the next slice. The recovery window stays
   `config intent` to `config applied` (DL-463). A crash between a box's KILLJOB and a
   member's is BUG-67.
+  NARROWED BY DL-559: only an older build's resumed intent ends box runs: one that names roots,
+  or one without the key, whose roots are recomputed and can end a live box.
 
 - DL-488 The UPDATE chart's apply row names the whole sequence after the box stop
   (2026-11-11; operator ruling on the FEAT-10 chart review; reload_update.py, runner.py,
@@ -26463,6 +26467,7 @@ relitigate an entry; append a new one.
   applied and leaves its boxes stopped for the operator, as DL-463 states. Neither clock
   yields there in production, and nothing reuses an engine
   after such a cancel.
+  NARROWED BY DL-559: the holds and box starts act only for an older build's resumed intent.
 
 - DL-489 An update's intent records its box roots, and recovery restarts those boxes
   (2026-11-11; owner ruling on the FEAT-10 chart review, X1; fixes BUG-67;
@@ -26493,6 +26498,7 @@ relitigate an entry; append a new one.
   REJECTED. A version step: it blocks every rollback of the release for this one case.
   A new record kind an older build refuses: it needs no snapshots while an update stops.
   A durable box restart after `config applied` (X2): not now.
+  NARROWED BY DL-559: a new admission records `[]`; only an older intent names roots.
 - DL-490 The reread forecast labels a box restart as the update carries it out
   (2026-11-12; owner; fixes BUG-68, closes FEAT-9; reload_plan.py, reread_worker.py,
   runner_update.py, cli_output.py, control-protocol)
@@ -26528,6 +26534,7 @@ relitigate an entry; append a new one.
   recorded choice for box members in `config applied.stopped`: it changes a journal
   record to mend a wording. Ending the moved-out sub-box to match the old forecast: a
   job that leaves a box keeps its run (DL-463).
+  NARROWED BY DL-559: no label is `restart_box` or `restart`; the update restarts no box.
 - DL-491 Behavior is read from charts and pure functions; a case can occur only from
   validated input (2026-11-12; owner; agent-workflow.md, agents/coordination.md,
   agents/review.md)
@@ -27396,6 +27403,8 @@ relitigate an entry; append a new one.
   every job the restart ends. Two versions of it were each incomplete, and each held jobs the
   restart never ends. Reconsider only with a case where an unnamed job's start during the wait
   does harm that its end by the cascade does not already do.
+  NARROWED BY DL-559: a new admission's filter names only the plan's jobs; a restart holds any
+  intent's filter exactly as recorded, an older and narrower one included.
 - DL-528 The job row's `held` field says nothing about a start that waits
   (2026-11-20; owner approval; docs/control-protocol.md, docs/runner-design.md,
   src/dsl41/runner_control.py; corrects the reason DL-94's field carried in the two
@@ -28139,3 +28148,40 @@ relitigate an entry; append a new one.
   BUG-82), and one needs EL7's kernel (BUG-66). Sites run Linux under systemd.
   COST. A macOS-only defect in the stop or wrapper path can stay open. The design pages
   still describe the macOS mechanisms, which the development host uses.
+- DL-559 An update never restarts a box; a box-membership change waits for quiet trees
+  (2026-11-25; owner ruling; src/dsl41/reload_plan.py,
+  src/dsl41/runner_update.py, src/dsl41/reread_worker.py, src/dsl41/cli_output.py,
+  docs/control-protocol.md, docs/blocks/update.md; closes BUG-18, BUG-46, BUG-69, BUG-70,
+  BUG-71, BUG-72 and FEAT-31)
+  THE RULE. (1) S is every job added, removed, moved to another box or retyped that is a BOX
+  or has a box, in either catalog. A job outside every box in both that is no BOX in either is
+  not in S: it is added, removed or retyped as before, with its stop. (2) With S empty the
+  update works as before in every respect. (3) T is the top-level ancestor of each job of S in
+  each catalog that has it, with every descendant of those ancestors in either catalog.
+  (4) A live job is quiet when its row is not QUE_WAIT, STARTING or RUNNING and the engine
+  owns no process of it (DL-525). (5) The update is refused `tree_active` when its stop set,
+  owned stops included, is not empty or a job of T is not quiet. `names` is the stop set and
+  the jobs of T that are not quiet, sorted. Like `stale_plan` it writes no record and no
+  revision, through the chart's REFUSED row. (6) A new admission has no restart roots: its
+  scope is empty, its intent stores `restart_boxes: []`, and nothing is ended, held or
+  force-started for a box. With nothing to stop it applies in its admission step; with an
+  empty S, one that stops jobs applies after them, as before. (7) `reread` gives the same
+  refusal from the same pure function (`reload_plan.tree_active`) and the same inputs, the
+  engine's owned names included, as `preview.update_refusal`; it still shows the whole diff.
+  THE REASON. Updates are made while the affected jobs are down. A refusal can be predicted
+  and ends nothing; a restart computed at admission from the job states can end a box
+  `reread` never showed. The seven items were cases of one missing rule.
+  THE COST. A structural change to a busy tree takes an operator's stop, update and start.
+  One busy job refuses the whole update (DL-522 keeps it atomic).
+  WHAT IT TOUCHES. It supersedes the box case of DL-463 for new admissions, and narrows what
+  DL-487 to DL-490 and DL-527 built on it to an intent an older build wrote: its stored roots,
+  or for a body without the key the recomputed ones, complete as before until FEAT-54. DL-427: the
+  admission gains a refusal before any write. DL-469: only such an intent kills a box and
+  emits its `job_terminated`. DL-482: `reread` also exits 1 when it forecasts the refusal, and
+  no update answer names a restarted box. DL-522 and DL-525: the named set and the owned stops
+  gain the members of restarted boxes only for such an intent. DL-526: the box actions after
+  the application occur only for it. DL-533: a seed-only member of T counts as any member.
+  UNCHANGED. The UPDATE chart, the intent's shape, the journal and the state version. The
+  code and the preview key are additive within dialect 5.
+  OPEN. A crash between the intent and the application of an update with nothing to stop
+  (BUG-19); a changed job in an open box is not evaluated again (BUG-116).

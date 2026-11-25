@@ -27,6 +27,7 @@ from test_update_member_holds import _start as _start_estate
 from test_update_owned_processes import _crash, _observed, _started, _teardown
 from test_update_settlement import SIGNALED, _plan, _request
 from test_update_watches import _launches
+from update_legacy import legacy_admission
 from transitions_check import (  # noqa: F401 -- autouse
     rows_equal_their_replay,
     rows_equal_their_replay_once,
@@ -769,7 +770,8 @@ def test_an_earlier_build_s_pending_of_a_job_an_update_retyped_is_discharged(
     update, which retypes `j`, and died before the release: the pending record stays open. The
     replayed tail shows the configuration that ended `j`'s row, so the restart discharges it
     before an operator's `STATUS STARTING` or `RUNNING` is admitted: nothing launches, and the
-    start-up completes."""
+    start-up completes. That build also admitted the retype into a BOX while it stopped `c`,
+    which DL-559 refuses now, so it admits as the build before DL-559 (`update_legacy`)."""
     _Procs(monkeypatch)
     launches = _launches(monkeypatch)
     old = _job("c", "job_type: c\ncommand: sleep 30\n") + _job("j", _fw(tmp_path, 'v(GO) = "go"'))
@@ -784,6 +786,7 @@ def test_an_earlier_build_s_pending_of_a_job_an_update_retyped_is_discharged(
         ladders.alive.add(PGID)
         engine = _start_estate(tmp_path, old, ())
         with monkeypatch.context() as patch:
+            legacy_admission(patch, tmp_path / "run")
             patch.setattr(Engine, "retire", lambda _engine, _ended: [])
             patch.setattr(EngineUpdate, "finish", finish)
             try:

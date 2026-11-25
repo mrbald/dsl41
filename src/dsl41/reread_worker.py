@@ -14,6 +14,7 @@ from dsl41.lint import lint_summary_lines
 from dsl41.main_config import fingerprint, policy_report, prepare
 from dsl41.reload_diff import (
     FieldDifference,
+    Plan,
     definition_record,
     difference_view,
     diff,
@@ -25,13 +26,10 @@ from dsl41.reload_plan import (
     check_reload_candidate,
     RereadRefused,
     preflight_items,
-    box_members,
-    box_scope,
-    ends_with_roots,
-    marked_holds,
     reread,
-    root_starts,
+    stop_runs,
     stop_set,
+    tree_active,
 )
 
 
@@ -155,6 +153,19 @@ def _seed_values(live: CatalogIR, candidate: CatalogIR, name: str) -> dict[str, 
     return {"before": view["before"], "after": view["after"]}
 
 
+def _tree_active(candidate: Any, live: Live, plan: Plan) -> tuple[str, ...]:
+    """The `tree_active` refusal the update would give, from the same function and inputs as
+    its admission; none when its preparation refuses first (a blocking lint finding, changed
+    host launch settings, a preflight ERROR), as the update meets that refusal before it
+    reaches the admission (DL-559)."""
+    try:
+        check_reload_candidate(candidate, live)
+    except RereadRefused:
+        return ()
+    stops = tuple(stop_runs(plan, live))
+    return tree_active(live.catalog, candidate.catalog, live.status, live.owned, stops)
+
+
 def preview(
     candidate: Any,
     live: Live,
@@ -164,16 +175,8 @@ def preview(
 ) -> dict[str, Any]:
     """A passive diff and the forecast at reread time, never an admission (DL-463)."""
     plan = diff(live.catalog, candidate.catalog, live.settings, candidate.settings)
-    scope = box_scope(plan, live, candidate.catalog)
     marked = candidate.metadata["non_idempotent"]
-    boxes = {
-        name
-        for name in ends_with_roots(scope, candidate.catalog)
-        if name in live.catalog.jobs
-        and live.catalog.jobs[name].job_type == "BOX"
-        and live.status.get(name) == "RUNNING"
-    }
-    stops = sorted(set(stop_set(plan, live, candidate.catalog, scope=scope)) | boxes)
+    stops = list(stop_set(plan, live))
     changed: list[dict[str, Any]] = [
         {"name": item.name, "reason": item.reason} for item in plan.changed
     ]
@@ -185,43 +188,26 @@ def preview(
         for name in structural
         if name not in plan.removed and name not in {item.name for item in plan.changed}
     ]
-    restarting = root_starts(scope, candidate.catalog, marked)
-    restart_members = box_members(candidate.catalog, restarting) & live.catalog.jobs.keys()
-    holds = marked_holds(scope, marked, live.status)
-    effects = []
-    for name in stops:
-        action = (
-            "hold"
+    # an update restarts no box, so every effect is a stop's (DL-559)
+    effects = [
+        {
+            "job": name,
+            "action": "hold"
             if name in marked and name not in plan.removed
-            else "restart_box"
-            if name in restarting
-            else "restart"
-            if name in restart_members
             else "remove"
             if name in plan.removed
-            else "rerun"
-        )
-        effects.append({"job": name, "action": action})
-    effects += [
-        {"job": name, "action": "hold"}
-        for name in holds
-        if name not in stops and name not in plan.removed
+            else "rerun",
+        }
+        for name in stops
     ]
     actions = {item["job"]: item["action"] for item in effects}
-    unchanged = restart_members & set(plan.unchanged) - {item["name"] for item in changed}
-    for name in sorted(restart_members):
-        actions.setdefault(name, "restart")
-    effect_order = dict.fromkeys([*stops, *holds, *sorted(restart_members)])
-    effects = [{"job": name, "action": actions[name]} for name in effect_order if name in actions]
     marks = {
         item["name"]: {"change": "changed", "action": actions.get(item["name"])} for item in changed
     }
     marks.update(
         {name: {"change": "removed", "action": actions.get(name)} for name in plan.removed}
     )
-    marks.update(
-        {name: {"change": "unchanged", "action": actions[name]} for name in sorted(unchanged)}
-    )
+    refused = _tree_active(candidate, live, plan)
     messages: list[str] = []
     summary: list[str] = []
     suffix: list[str] = []
@@ -276,6 +262,7 @@ def preview(
         ),
         "stop": stops,
         "effects": effects,
+        "update_refusal": {"code": "tree_active", "names": list(refused)} if refused else None,
         "marks": marks,
         "restored": [
             {"name": name, "flags": list(live.tombstones[name])}

@@ -190,8 +190,8 @@ def test_box_scope_keeps_both_catalogs_and_admitted_roots(tmp_path: Path) -> Non
     assert (
         reload_plan.ends_with_roots(reload_plan.BoxScope((), frozenset()), candidate) == frozenset()
     )
-    assert reload_plan.stop_set(plan, live, candidate, scope=scope) == ("MOVED", "REMOVED")
-    assert reload_plan.stop_set(plan, live, candidate) == ("MOVED", "REMOVED")
+    # the stop set is the rows' alone: a scope adds no member to it (DL-559)
+    assert reload_plan.stop_set(plan, live) == ("MOVED", "REMOVED")
     ended = replace(live, status={"BX": "TERMINATED"})
     assert reload_plan.box_scope(plan, ended, candidate, roots=scope.roots) == scope
     assert reload_plan.box_scope(plan, ended, candidate).roots == ()

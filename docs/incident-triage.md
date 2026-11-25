@@ -406,8 +406,10 @@ to the application. `SPEC DRIFT: estate files changed on disk` and
 The pending-count line prints only when N is above zero (DL-483).
 To adopt the sources, [review an update](deploy.md#reload-a-changed-estate).
 
-A crash during box update can leave the box stopped (DL-463). Before force-start,
-put all its marked non-INACTIVE members on hold, including previously finished ones.
+An update never restarts a box (DL-559). Only an update an older build left open with a
+box restart restarts one; a crash after its application can leave that box stopped (DL-463,
+DL-489). Before force-start, put all its marked non-INACTIVE members on hold, including
+previously finished ones.
 
 Evidence can contain credentials or private estate data. Check every file
 before sharing. Preserve the original run root; do not delete or edit its

@@ -50,7 +50,7 @@ def reread_command(
         *view["diagnostics"],
     ]:
         typer.echo(message, err=True)
-    return 1 if view["stop"] else 0
+    return 1 if view["stop"] or view.get("update_refusal") else 0
 
 
 def _render_refusal(refusal: Refused) -> None:
@@ -184,7 +184,7 @@ def update_reply_of(answer: Mapping[str, Any]) -> UpdateReply:
     return UpdateReply(decision, application, request_id=str(answer.get("request_id", "")))
 
 
-_CHART_CODES = frozenset({"stale_plan", "update_in_progress"})
+_CHART_CODES = frozenset({"stale_plan", "update_in_progress", "tree_active"})
 
 
 def _run(command: Callable[[], int]) -> None:

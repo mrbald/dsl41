@@ -199,7 +199,7 @@ Hook observations skip rows with no catalog job (DL-500).
 | Event | Observation |
 | --- | --- |
 | `job_failure` | Every actual transition from another status into FAILURE at `OracleWriters._write`, including BOX and injected statuses. Carries resolved Boolean `alarm_if_fail`, default true (DL-469). |
-| `job_terminated` | Every actual transition from another status into TERMINATED, including update box-restart kills. Carries resolved Boolean `alarm_if_terminated`, default true; that default is unverified against AutoSys (DL-469). |
+| `job_terminated` | Every actual transition from another status into TERMINATED, including the box kills of a resumed update that restarts boxes (DL-559). Carries resolved Boolean `alarm_if_terminated`, default true; that default is unverified against AutoSys (DL-469). |
 | `alarm` | A SEM-34 timer emits `MUST_START_ALARM` or `MUST_COMPLETE_ALARM`. These deadline alarms are independent of hook flags, notification attributes and runtime thresholds (DL-469). |
 | `job_hold` | A false→true `on_hold` write at `OracleWriters._flag`, including auto-hold and interruption hold. |
 | `job_long_running` | Once per RUNNING interval per engine invocation when admitted time minus its `status_at` reaches its effective per-job or global threshold. Check once per second and recheck the row before enqueueing. Restart may notify again. Scheduling is unchanged. |
@@ -1233,28 +1233,37 @@ admits nothing: no intent, revision, configuration record or stop. Its answer
 carries `unchanged: {rev, catalog_hash}` (DL-478).
 A kept job whose definition differs only in its `status:` line is seed-only: the plan
 lists it in `unchanged` and in `seed_only` with both definition hashes, and the edit adds
-no reason to stop, filter or mark it. A box scope that holds it treats it as an
+no reason to stop, filter or mark it. A touched tree that holds it treats it as an
 unchanged member. It applies as a new revision with the row untouched; `config applied`
 lists it in `seed_only` for display (SEM-24, DL-533). Recovery checks each seed-only
 entry by name and both hashes, as it checks a changed one. A restart's comparison of the
 launched estate with the stored one still counts such an edit as a change.
 Ordinary jobs keep the interruption rule:
-stop, swap, then choose rerun/hold/none under the new catalog. Structural running-box
-changes stop members, commit KILLJOBs before application to prevent old-run replacement,
-then hold every marked non-INACTIVE member (including finished members) before a new
-outermost box run. The intent stores the admitted box roots in `restart_boxes`;
-recovery uses them and derives members from both catalogs. Only a missing key
-recomputes the roots. Before recovery acts, malformed roots or a name that is not
-a BOX of either the applied or candidate catalog refuse by name (DL-489).
-A crash before `config applied` resumes the update with its admitted scope.
-A crash after it can leave a box stopped;
-put marked non-INACTIVE members on hold before force-starting it. Successors observe
-the old run's end. No automatic completion after `config applied` is promised
-(DL-463, DL-489).
+stop, swap, then choose rerun/hold/none under the new catalog.
+An update never restarts a box (DL-559). An update that changes box membership (a job
+added, removed, moved to another box or retyped that is a BOX or has a box in either
+catalog) is admitted only when nothing has to stop and every job of the touched trees is
+quiet: its row is not QUE_WAIT, STARTING or RUNNING and the engine owns no process of it.
+The touched trees are the top-level ancestor of each such job in each catalog that has
+it, with all their descendants in either catalog. Otherwise the update is refused
+`tree_active` with the stops and the active jobs of those trees, and nothing is written.
+`reread` forecasts that refusal with the same function (`reload_plan.tree_active`) from
+the same inputs. An admitted one records `restart_boxes: []` and applies in its admission
+step. A job outside every box that is no BOX in either catalog is updated as any other.
+An intent an earlier build stored can name box roots in `restart_boxes`; recovery
+completes it as that build did: it stops the roots' members, commits KILLJOBs before the
+application to prevent old-run replacement, then holds every marked non-INACTIVE member
+(including finished members) before a new outermost box run. Recovery derives the
+members from both catalogs, and only a missing key recomputes the roots. Before
+recovery acts, malformed roots or a name that is not a BOX of either the applied or
+candidate catalog refuse by name (DL-489). What a crash after `config applied` leaves, and
+the operator's step then, are in [Reload a changed estate](deploy.md#reload-a-changed-estate).
 An unfinished stop keeps the update in STOPPING; this path has no cancel verb.
-An update is atomic across the jobs it adds, changes or removes and the members of a
-box it restarts: their processes are stopped, none of them is launched while the update waits, and the new definitions are
-published once, after every stopped process is gone (DL-522).
+An update is atomic across the jobs it names: those it adds, changes or removes, and for an
+older build's intent the members of the boxes it restarts, as its recorded stop list and
+dispatch filter name them. Their processes are stopped, none of them is launched while the
+update waits, and the new definitions are published once, after every stopped process is
+gone (DL-522).
 
 Without `engine.db`, genesis is allowed only without surviving runtime
 evidence (DL-443, DL-445). Attempt entries under `runs/`, material under

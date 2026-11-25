@@ -17,7 +17,8 @@ settings and the token-bound runtime revision but excluded from job-definition h
 
 Refusals, all as `RereadRefused`: a blocking lint finding, changed host launch settings,
 or a preflight ERROR. Preflight WARNs go into `plan.json` as `preflight_warnings`.
-Running boxes are restarted by update (DL-463).
+An update never restarts a box: one that changes box membership while a touched tree is
+active is refused `tree_active` (the function `tree_active`, DL-559); `reread` forecasts it.
 
 Write order in `plans/<token>/`: each candidate file by the durable-write sequence, `plan.json`
 last. `plan.json` lists every part with its sha256, so `read_plan` takes a directory as complete
@@ -38,6 +39,7 @@ from dsl41.ast_jil import JilFile, render_statement
 from dsl41.canon import ARTIFACT_FORMAT_VERSION, CanonError, canonical_bytes, decode
 from dsl41.ir import CatalogIR, job_name_from_subject
 from dsl41.minify_rules import JOB_SUBCOMMANDS
+from dsl41.oracle_state import LIVE_OR_QUEUED
 from dsl41.reload_diff import Plan, catalog_hash_v2, diff, plan_token, running_boxes
 from dsl41.runner_preflight import PreflightItem, preflight
 from dsl41.runner_config import MachinePolicy
@@ -84,6 +86,9 @@ class Live:
     runs: Mapping[str, int] = field(default_factory=dict)
     launch: Mapping[str, object] = field(default_factory=dict)
     path_environment: Mapping[str, str] | None = None
+    #: each job the engine owns a process of, whatever its row says, with the run of that
+    #: process (`Engine.owned_runs`, DL-525, DL-559)
+    owned: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -263,8 +268,67 @@ def box_members(catalog: CatalogIR, boxes: Sequence[str]) -> set[str]:
         members |= more
 
 
+def membership_changes(old: CatalogIR, new: CatalogIR) -> frozenset[str]:
+    """The jobs whose place in the box tree differs between `old` and `new`: each job added,
+    removed, moved to another box or retyped that is a BOX or has a box in either catalog. A job
+    outside every box in both that is no BOX in either is not one (DL-559, rule 1)."""
+    names = old.jobs.keys() | new.jobs.keys()
+
+    def moved(name: str) -> bool:
+        before, after = old.jobs.get(name), new.jobs.get(name)
+        return (
+            before is None
+            or after is None
+            or before.job_type != after.job_type
+            or before.box.box_name != after.box.box_name
+        )
+
+    def boxed(name: str) -> bool:
+        return any(
+            job.job_type == "BOX" or job.box.box_name is not None
+            for job in (old.jobs.get(name), new.jobs.get(name))
+            if job is not None
+        )
+
+    return frozenset(name for name in names if moved(name) and boxed(name))
+
+
+def _top(catalog: CatalogIR, name: str) -> str:
+    """The top-level ancestor of `name` in `catalog`, `name` itself outside every box."""
+    while (parent := catalog.jobs[name].box.box_name) is not None:
+        name = parent
+    return name
+
+
+def tree_active(
+    old: CatalogIR,
+    new: CatalogIR,
+    status: Mapping[str, str],
+    owned: Collection[str],
+    stops: Collection[str],
+) -> tuple[str, ...]:
+    """The names a `tree_active` refusal gives, sorted and unique; empty when the update is
+    not refused (DL-559). With no membership change (`membership_changes`) nothing is refused.
+    Otherwise the touched trees are the top-level ancestor of each changed job in each catalog
+    that has it, with every descendant of those ancestors in either catalog. The update is
+    refused when its stop set is not empty or a job of those trees is not quiet: its row is
+    QUE_WAIT, STARTING or RUNNING, or the engine owns a process of it (`owned`). The names are
+    the stop set and the jobs of the trees that are not quiet. The admission and the `reread`
+    forecast both call this with the same inputs."""
+    changed = membership_changes(old, new)
+    if not changed:
+        return ()
+    tops = {
+        _top(catalog, name) for name in changed for catalog in (old, new) if name in catalog.jobs
+    }
+    trees = tops | box_members(old, sorted(tops)) | box_members(new, sorted(tops))
+    busy = {name for name in trees if status.get(name) in LIVE_OR_QUEUED or name in owned}
+    return tuple(sorted(busy | set(stops)))
+
+
 def restart_boxes(plan: Plan, live: Live, candidate: CatalogIR) -> tuple[str, ...]:
-    """Only outermost structurally edited running boxes need a forced start (DL-463)."""
+    """The outermost structurally edited running boxes: the roots a resumed intent without
+    `restart_boxes` restarts (DL-463, DL-489). A new admission has none (DL-559)."""
     boxes = set(running_boxes(plan, candidate, live.status))
     nested = set().union(*(box_members(live.catalog, (box,)) for box in boxes))
     return tuple(sorted(boxes - nested))
@@ -272,16 +336,22 @@ def restart_boxes(plan: Plan, live: Live, candidate: CatalogIR) -> tuple[str, ..
 
 @dataclass(frozen=True)
 class BoxScope:
-    """The admitted roots and descendants from both catalogs (DL-463, DL-489)."""
+    """The admitted roots and descendants from both catalogs (DL-463, DL-489). Only a resumed
+    intent has roots; a new admission's scope is `NO_SCOPE` (DL-559)."""
 
     roots: tuple[str, ...]
     members: frozenset[str]
 
 
+#: The scope of every new admission: no root, no member (DL-559).
+NO_SCOPE = BoxScope((), frozenset())
+
+
 def box_scope(
     plan: Plan, live: Live, candidate: CatalogIR, roots: tuple[str, ...] | None = None
 ) -> BoxScope:
-    """Use admitted roots when supplied, including an empty tuple (DL-489)."""
+    """A resumed intent's scope: its recorded roots when supplied, an empty tuple included, and
+    the roots recomputed for an intent without the key (DL-489)."""
     roots = restart_boxes(plan, live, candidate) if roots is None else roots
     return BoxScope(
         roots, frozenset(box_members(live.catalog, roots) | box_members(candidate, roots))
@@ -316,22 +386,12 @@ def root_starts(scope: BoxScope, catalog: CatalogIR, marked: Collection[str]) ->
     ]
 
 
-def stop_set(
-    plan: Plan,
-    live: Live,
-    candidate: CatalogIR | None = None,
-    *,
-    scope: BoxScope | None = None,
-) -> tuple[str, ...]:
-    """Changed or removed jobs and members of the box scope whose row is STARTING or RUNNING,
-    sorted; never a box (spec-reload step 5). A seed-only job adds nothing (DL-533). `reread`
-    previews with it. The update's admission starts from it and adds every named job with a
-    process the engine owns, whatever its row says (DL-525)."""
+def stop_set(plan: Plan, live: Live) -> tuple[str, ...]:
+    """Changed or removed jobs whose row is STARTING or RUNNING, sorted; never a box
+    (spec-reload step 5). A seed-only job adds nothing (DL-533). `reread`'s stop list is this;
+    the update stops `stop_runs`, which adds the named jobs whose processes the engine owns
+    (DL-525)."""
     names = {change.name for change in plan.changed} | set(plan.removed)
-    if scope is None and candidate is not None:
-        scope = box_scope(plan, live, candidate)
-    if scope is not None:
-        names |= scope.members
     return tuple(
         sorted(
             name
@@ -341,6 +401,20 @@ def stop_set(
             and live.catalog.jobs[name].job_type != "BOX"
         )
     )
+
+
+def stop_runs(plan: Plan, live: Live) -> dict[str, int]:
+    """The update's stops, by job in name order, each with the run its stop interrupts: every
+    job of `stop_set` under its row's run, and every job the plan adds, changes or removes that
+    is in the live catalog, is no BOX and has a process the engine owns (`Live.owned`), under
+    that process's run, whatever its row says (DL-525). The admission records this mapping and
+    the forecast's `tree_active` reads its names, so the two choose the same stops (DL-559)."""
+    runs = {job: live.runs.get(job, 0) for job in stop_set(plan, live)}
+    named = {*plan.added, *(change.name for change in plan.changed), *plan.removed}
+    for job in named & live.owned.keys():
+        if job in live.catalog.jobs and live.catalog.jobs[job].job_type != "BOX":
+            runs[job] = live.owned[job]
+    return {job: runs[job] for job in sorted(runs)}
 
 
 def check_reload_candidate(
@@ -390,7 +464,7 @@ def reread(
     estate = candidate
     items = check_reload_candidate(estate, live, start)
     plan = diff(live.catalog, estate.catalog, live.settings, estate.settings)
-    stop = stop_set(plan, live, estate.catalog)
+    stop = stop_set(plan, live)
     restored = tuple(
         (name, tuple(live.tombstones[name])) for name in plan.added if live.tombstones.get(name)
     )
@@ -449,6 +523,7 @@ def read_plan(plans_dir: Path, token: str) -> dict[str, Any] | None:
 
 
 __all__ = [
+    "NO_SCOPE",
     "PLAN_JSON",
     "STOPPABLE",
     "Estate",
@@ -456,8 +531,11 @@ __all__ = [
     "RereadRefused",
     "RereadResult",
     "estate_settings",
+    "membership_changes",
     "read_plan",
     "reread",
     "spec_texts",
+    "stop_runs",
     "stop_set",
+    "tree_active",
 ]

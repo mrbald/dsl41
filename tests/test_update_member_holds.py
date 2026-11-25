@@ -1,5 +1,7 @@
-"""While an update waits, no process is launched for a job it names, also when the plan leaves
-the job unchanged (DL-522, DL-525, DL-527). The named jobs are the plan's added, changed and
+"""While an update that restarts a box waits, no process is launched for a job it names, also
+when the plan leaves the job unchanged (DL-522, DL-525, DL-527). Only an intent the build before
+DL-559 wrote restarts a box now; each scenario admits as that build did (`update_legacy`), and
+the restart's scenarios resume that intent (DL-489, DL-559). The named jobs are the plan's added, changed and
 removed jobs, the admitted box roots, and their descendants in the old and in the new catalog. A
 start the oracle decides for one waits as `dispatch_pending`. One whose run ends while it waits
 is discharged with the input that ends it (DL-551). After the application the rest are released:
@@ -28,6 +30,7 @@ from test_update_atomic import _Ladders, _update_steps
 from test_update_owned_processes import _crash, _observed, _started, _teardown
 from test_update_settlement import SIGNALED, _close, _plan, _request
 from test_update_watches import _launches
+from update_legacy import legacy_admission
 
 from dsl41 import main_config as main
 from dsl41.oracle_state import Event
@@ -173,6 +176,8 @@ async def _admit(
     engine = _start(tmp_path, old, marked)
     seen: dict[str, Any] = {}
     stopped = False
+    # the intent of a box restart is written as the build before DL-559 wrote it
+    legacy_admission(monkeypatch, tmp_path / "run")
     try:
         for event in before:
             engine.inject(event)

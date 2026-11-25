@@ -760,7 +760,12 @@ def test_a_stale_token_and_an_open_update_are_refused_and_a_retry_is_answered_on
     assert [c["event"] for c in _configs(run_root)] == ["applied", "intent", "applied"]
 
 
-def test_a_box_that_started_since_preparation_is_restarted(tmp_path: Path) -> None:
+def test_a_box_that_started_since_preparation_refuses_the_membership_change(
+    tmp_path: Path,
+) -> None:
+    """DL-559: the plan adds a member to bx while bx is idle; bx starts before the update is
+    sent. The admission reads the state now: it refuses `tree_active` naming the running box
+    and its running member, and writes no record."""
     box = ANCHOR + "insert_job: bx\njob_type: b\ncondition: s(anchor)\n\n"
     member = "insert_job: m\njob_type: c\ncommand: sleep 30\nbox_name: bx\n\n"
     estate = Estate(tmp_path, box + member)
@@ -779,7 +784,8 @@ def test_a_box_that_started_since_preparation_is_restarted(tmp_path: Path) -> No
 
     asyncio.run(scenario())
     [answer] = answers
-    assert isinstance(answer.decision, Admitted)
+    assert answer.decision == Refused(answer.decision.token, "tree_active", ("bx", "m"))
+    assert [c["event"] for c in _configs(run_root)] == ["applied"]
 
 
 def test_a_changed_job_gets_a_rebuilt_tick_and_an_unchanged_one_keeps_its_own(
@@ -1174,21 +1180,46 @@ def test_reread_and_update_over_the_control_socket(short_root: Path) -> None:
             JOB.replace("true", "sleep 32") + box + JOB.replace("A", "NEW") + "box_name: BX\n"
         )
         preview = runner.invoke(app, ["reread", "-S", str(sock)])
-        assert preview.exit_code == 1 and "C   would be ON_HOLD" in preview.output
-        assert ask("status")["jobs"]["BX"]["reread"]["action"] == "restart_box"
+        # DL-559: a member added under running BX: the forecast and the update refuse it by
+        # the running box and its running member, and nothing is written
+        assert preview.exit_code == 1, preview.output
+        assert (
+            "update would be refused: it changes box membership and these jobs are active or"
+            " would be stopped: B, BX"
+        ) in preview.output
+        assert ask("status")["jobs"]["BX"]["reread"] == {"change": "changed", "action": None}
+        refused = runner.invoke(app, ["update", "-S", str(sock), "--wait"])
+        assert refused.exit_code == 2, refused.output
+        assert "update: refused tree_active: B, BX" in refused.output
+        assert ask()["revision"] == 2
+        # the operator's stop: B is killed, and BX if it still runs, until the tree is quiet
+        for job in ("B", "BX"):
+            status = ask("status")
+            if status["jobs"][job]["status"] in {"QUE_WAIT", "STARTING", "RUNNING"}:
+                assert roundtrip(
+                    sock,
+                    {
+                        "cmd": "sendevent",
+                        "verb": "KILLJOB",
+                        "payload": {"job": job},
+                        "baseline_id": status["baseline_id"],
+                        "request_id": f"kill-{job}",
+                        "expect": {f"job:{job}": status["jobs"][job]["state_rev"]},
+                    },
+                )["ok"]
+            deadline = time.monotonic() + 10
+            while (row := ask("status")["jobs"][job])["status"] in {
+                "QUE_WAIT",
+                "STARTING",
+                "RUNNING",
+            } or row.get("attempt"):
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
         box_result = runner.invoke(app, ["update", "-S", str(sock), "--wait"])
         assert box_result.exit_code == 0, box_result.output
-        deadline = time.monotonic() + 10
-        while (
-            ask("status")["jobs"]["B"].get("attempt", {}).get("n") != 1
-            or ask("status")["jobs"]["B"]["run_number"] != 2
-        ):
-            assert time.monotonic() < deadline
-            time.sleep(0.01)
         jobs = ask("status")["jobs"]
-        assert jobs["BX"]["run_number"] == 2
-        assert jobs["C"]["on_hold"] and jobs["C"]["run_number"] == 1
-        assert jobs["B"]["attempt"]["after"] is None
+        assert jobs["BX"]["run_number"] == 1
+        assert jobs["NEW"]["status"] == "INACTIVE" and not jobs["C"]["on_hold"]
         source.unlink()
         retry = runner.invoke(app, ["update", "-S", str(sock), "--request-id", rid, "--wait"])
         assert retry.exit_code == 0, retry.output

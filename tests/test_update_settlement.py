@@ -182,7 +182,12 @@ def test_config_applied_records_the_settled_follow_up(
                 jobs["j"] = "sleep 31"
             candidate = _jil(jobs)
             if case == "retyped":
-                candidate = _jil({"b": "sleep 30"}) + "insert_job: j\njob_type: b\n\n"
+                # a standalone job retyped outside every box stops as today; one retyped into a
+                # BOX changes box membership and is refused while it runs (DL-559)
+                candidate = (
+                    _jil({"b": "sleep 30"})
+                    + "insert_job: j\njob_type: f\nwatch_file: /synthetic/never\n\n"
+                )
             _estate(tmp_path, candidate, {"j": "posts twice"} if case == "marked" else None)
             answer = await _request(engine, _plan(engine, tmp_path))
             assert isinstance(answer.decision, Admitted)
@@ -1336,7 +1341,7 @@ def test_live_update_selects_the_attempt_of_each_admitted_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from dsl41.runner_update import open_plan
-    from dsl41.reload_plan import BoxScope
+    from dsl41.reload_plan import NO_SCOPE
 
     async def scenario() -> None:
         engine = _engine(tmp_path, _jil({"a": "x", "b": "x"}))
@@ -1357,9 +1362,9 @@ def test_live_update_selects_the_attempt_of_each_admitted_run(
                 UpdateRequest(token, 1, engine.baseline_id, "u"),
                 opened,
                 admitted,
-                BoxScope((), frozenset()),
             )
             assert selected == [("a", 3), ("b", 5)]
+            assert update._box_scope == NO_SCOPE  # a new admission restarts no box (DL-559)
             assert update._attempts == {"a": "a-attempt", "b": None}
             assert update._cleaning == {} and update._moved == {"b"}
             assert update._held == {"a", "b"} and update._admitted == admitted

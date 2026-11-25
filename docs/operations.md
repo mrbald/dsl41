@@ -22,9 +22,12 @@ questions.
   stop. Decide which findings block (`[lint] refuse`).
 - **Timing.** An update stops the running jobs it names and applies all its changes
   together, once every stop is finished (DL-522). While it waits, it launches no job it
-  names: added, changed and removed jobs, the boxes it restarts and their members
-  (DL-527). Name the windows for an update, and what you do when `reread` exits 1
-  (running jobs would stop).
+  names: added, changed and removed jobs (DL-527). It never restarts a box: an update that
+  changes box membership is refused `tree_active` while it would stop a job or a job of a
+  touched box tree is queued, starting, running or has a process left (DL-559). Name the
+  windows for an update, and what you do when `reread` exits 1 (running jobs would stop,
+  or it forecasts a `tree_active` refusal). A finding that would refuse the update at its
+  preparation, such as a host-setting edit, is printed and does not change the exit status.
 - **New jobs.** Live at once, or held in the JIL with `status: ON_HOLD` and released by
   a named person? A `status:` line seeds the hold, ice or noexec flag when the job's
   row is made: on a root's first start and on a job an update adds. It is never
@@ -40,8 +43,7 @@ questions.
 - **Going back.** No command applies a previous configuration. Going back means
   restoring the previous files and running `reread` and `update` again. That is an
   update like any other: it stops the running jobs it names (DL-522). It cannot
-  un-stop a run (DL-424), undo a restarted box's new run (DL-463) or undo what a job
-  did outside the engine.
+  un-stop a run (DL-424) or undo what a job did outside the engine.
 - **Notice.** Who is told before an update that stops jobs, and after it?
 
 An edit of only the `status:` line of a job that stays in the estate is not a reason to
@@ -52,9 +54,9 @@ own edit is its `status:` line and whose members change is the exception: `rerea
 counts it as changed (membership) and `update` counts it under `status line only`, and
 each command's counts add up to its jobs. The line takes
 effect when the job's row is made again: on a fresh root, or when a later update adds
-the job back. To hold or release the job now, use `sendevent`. A job inside a box that
-the update restarts is still stopped with the box (DL-463)
-([reload a changed estate](deploy.md#reload-a-changed-estate)).
+the job back. To hold or release the job now, use `sendevent`. Such a job inside a box
+whose members the update changes counts as any member of that box: if it runs, the update
+is refused (DL-559) ([reload a changed estate](deploy.md#reload-a-changed-estate)).
 
 ## Release a go-live that loads every job on hold
 

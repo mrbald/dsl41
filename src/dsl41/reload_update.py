@@ -45,7 +45,7 @@ from dsl41.ir import CatalogIR
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import JobRuntime
 from dsl41.reload_diff import Change, Plan, catalog_hash_v2, retyped_jobs
-from dsl41.reload_plan import BoxScope, Live, box_scope, stop_set
+from dsl41.reload_plan import NO_SCOPE, BoxScope, Live, stop_runs
 from dsl41.semantics import SemanticSwitches
 from dsl41.semantics import resolve as resolve_switches
 from dsl41.state_machine import (
@@ -101,6 +101,8 @@ FINISH: Final = "finish"
 
 STALE_PLAN: Final = "stale_plan"
 UPDATE_IN_PROGRESS: Final = "update_in_progress"
+#: The update changes box membership while it has a stop or a touched tree is active (DL-559).
+TREE_ACTIVE: Final = "tree_active"
 
 #: The states of the chart's outer phase region.
 UPDATE_STATES: Final = ("IDLE", "STOPPING", "APPLIED", "REFUSED")
@@ -129,10 +131,11 @@ class Admitted:
 @dataclass(frozen=True)
 class Refused:
     """The admission's no: the code and the names it concerns, sorted (none for `stale_plan`;
-    the open update's token for `update_in_progress`)."""
+    the open update's token for `update_in_progress`; the stops and the active jobs of the
+    touched trees for `tree_active`, DL-559)."""
 
     token: str
-    code: Literal["stale_plan", "update_in_progress"]
+    code: Literal["stale_plan", "update_in_progress", "tree_active"]
     names: tuple[str, ...] = ()
 
 
@@ -175,21 +178,16 @@ def filter_of(plan: Plan, scope: BoxScope) -> frozenset[str]:
     return _touched(plan) | set(scope.roots) | scope.members
 
 
-def admission_data(
-    plan_doc: Mapping[str, Any],
-    *,
-    live: Live,
-    candidate: CatalogIR,
-    scope: BoxScope | None = None,
-) -> Admitted:
-    """Build admitted data for a current prepared candidate and its stop set (DL-463)."""
-    token = str(plan_doc["token"])
+def admission_data(plan_doc: Mapping[str, Any], *, live: Live) -> Admitted:
+    """Build admitted data for a current prepared candidate: its stops, each under the run it
+    interrupts (`stop_runs`: the rows' stops and the processes the engine owns, DL-525), and
+    its dispatch filter (DL-463). A new admission restarts no box: its scope is `NO_SCOPE`
+    (DL-559)."""
     plan = plan_of(plan_doc, live.catalog)
-    if scope is None:
-        scope = box_scope(plan, live, candidate)
-    stops = stop_set(plan, live, candidate, scope=scope)
-    runs = tuple((job, live.runs.get(job, 0)) for job in stops)
-    return Admitted(token, stops, filter_of(plan, scope), runs)
+    runs = stop_runs(plan, live)
+    return Admitted(
+        str(plan_doc["token"]), tuple(runs), filter_of(plan, NO_SCOPE), tuple(runs.items())
+    )
 
 
 # -- the chart
@@ -629,6 +627,7 @@ __all__ = [
     "JOURNAL_INTENT",
     "LOOK",
     "STALE_PLAN",
+    "TREE_ACTIVE",
     "START_BOXES",
     "STOP_ATTEMPT",
     "UPDATE_IN_PROGRESS",

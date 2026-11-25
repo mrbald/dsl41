@@ -25,6 +25,7 @@ from dsl41.runner_startup import active_configuration, resume_run, start_run
 from dsl41.runner_store import MemoryStore, Record, SqliteStore
 from dsl41.runner_update import UpdateRequest
 from test_main_config import JOB, PYTHON, T0, config_file, estate_file
+from update_legacy import legacy_admission
 
 
 @pytest.mark.usefixtures("cli_env")
@@ -1400,6 +1401,8 @@ def test_box_restart_commits_kills_and_holds_finished_marked_members(
 
     The cancellation cases cover restart and operator completion under DL-463.
     Same-engine reuse after cancellation can leave the update unfinished (DL-488).
+    The update is admitted as the build before DL-559 admitted it (`update_legacy`): only such
+    an intent restarts a box now, and the cut cases resume it.
     """
     from dsl41.runner_update import settings_of
 
@@ -1430,6 +1433,7 @@ def test_box_restart_commits_kills_and_holds_finished_marked_members(
             source_capture=main.encoded_parts(initial),
         )
         engine.launch_settings = initial.metadata["launch"]
+        legacy_admission(monkeypatch, short_root / "run")
         try:
             engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "BX"}))
             await engine.run_until_quiescent(T0)
@@ -1598,9 +1602,12 @@ def test_box_restart_commits_kills_and_holds_finished_marked_members(
 
 @pytest.mark.parametrize("snapshot", [False, True])
 def test_retyped_command_box_scope_recovers_as_the_uncut_update(short_root, monkeypatch, snapshot):
-    """DL-489: admission can select a running command that the candidate makes a BOX."""
+    """DL-489: an intent of the build before DL-559 (`update_legacy`) can name a running
+    command that the candidate makes a BOX as a root; it recovers as the uncut update. A new
+    admission refuses that update while the command runs (DL-559, BUG-71)."""
 
     async def scenario(directory: Path, crash: bool):
+        legacy_admission(monkeypatch, directory / "run")
         path = config_file(directory)
         (directory / "a.jil").write_text(JOB.replace("A", "BX"))
         initial = main.prepare(path)
@@ -1671,7 +1678,8 @@ def test_retyped_command_box_scope_recovers_as_the_uncut_update(short_root, monk
     "roots", ["missing", [], None, "BX", [7], ["A"], ["absent"], ["BX", "BX"], ["Z", "BX"]]
 )
 def test_box_scope_compatibility_and_refusals(short_root: Path, monkeypatch, snapshot, roots):
-    """DL-489: only absence recomputes; invalid roots refuse before writes or signals."""
+    """DL-489: only absence recomputes; invalid roots refuse before writes or signals. The
+    intent is written as the build before DL-559 wrote it (`update_legacy`)."""
     import sqlite3
     from dsl41 import reload_plan, runner_procid, runner_startup
     from dsl41.runner_config import EngineSettings
@@ -1692,6 +1700,7 @@ def test_box_scope_compatibility_and_refusals(short_root: Path, monkeypatch, sna
             launched=main.profile_of(initial),
             source_capture=main.encoded_parts(initial),
         )
+        legacy_admission(monkeypatch, root)
         try:
             engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "BX"}))
             await engine.run_until_quiescent(T0)
@@ -1810,7 +1819,12 @@ def test_box_scope_compatibility_and_refusals(short_root: Path, monkeypatch, sna
 
 
 @pytest.mark.parametrize("remove", [False, True])
-def test_box_restart_is_outermost_and_removed_boxes_stay_stopped(short_root: Path, remove):
+def test_box_restart_is_outermost_and_removed_boxes_stay_stopped(
+    short_root: Path, monkeypatch, remove
+):
+    """DL-559: the forecast restarts no box; it says the update would be refused by the running
+    tree. DL-463: the update a stored intent of the build before DL-559 carries
+    (`update_legacy`) restarts only the outermost box, and a removed box stays stopped."""
     from dsl41.reread_worker import preview
 
     text = (
@@ -1833,6 +1847,7 @@ def test_box_restart_is_outermost_and_removed_boxes_stay_stopped(short_root: Pat
             source_capture=main.encoded_parts(initial),
         )
         engine.launch_settings = initial.metadata["launch"]
+        legacy_admission(monkeypatch, short_root / "run")
         try:
             engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "BX"}))
             await engine.run_until_quiescent(T0)
@@ -1848,20 +1863,16 @@ def test_box_restart_is_outermost_and_removed_boxes_stay_stopped(short_root: Pat
             (short_root / "a.jil").write_text(replacement)
             candidate = main.prepare(path)
             view = preview(candidate, engine.update.live())
-            assert {effect["job"]: effect["action"] for effect in view["effects"]}["BX"] == (
-                "remove" if remove else "restart_box"
-            )
-            assert [
-                effect["job"] for effect in view["effects"] if effect["action"] == "restart_box"
-            ] == ([] if remove else ["BX"])
-            assert "INNER" in view["stop"]
+            assert view["effects"] == ([{"job": "MEMBER", "action": "remove"}] if remove else [])
+            assert view["stop"] == (["MEMBER"] if remove else [])
+            assert view["update_refusal"] == {
+                "code": "tree_active",
+                "names": ["BX", "INNER", "MEMBER"],
+            }
             if not remove:
                 assert len(view["added"]) + len(view["changed"]) + view["unchanged"] == len(
                     candidate.catalog.jobs
                 )
-                assert {effect["job"]: effect["action"] for effect in view["effects"]}[
-                    "INNER"
-                ] == "restart"
             plan = reread(
                 engine.update.live(),
                 short_root / "run" / "plans",
@@ -1893,7 +1904,10 @@ def test_box_restart_is_outermost_and_removed_boxes_stay_stopped(short_root: Pat
 
 
 @pytest.mark.parametrize("case", ["retype", "move_out", "move_out_marked", "move_in"])
-def test_box_restart_preserves_replacement_run_ownership(short_root: Path, case):
+def test_a_running_tree_refuses_a_retype_or_a_move_over_the_socket(short_root: Path, case):
+    """DL-559: over the socket, the running box BX retyped into a command, or MOVER moved out
+    of it or into it while both run. `reread` labels the stops only and forecasts the
+    refusal; `update` is refused with the same names, and the runs go on untouched."""
     from dsl41.runner_control import roundtrip
     from test_main_config_restart import cli_engine
     from test_runner_control import wait_for
@@ -1945,12 +1959,13 @@ def test_box_restart_preserves_replacement_run_ownership(short_root: Path, case)
             wait_for(lambda: ask("status")["jobs"]["MOVER"]["status"] == "RUNNING")
         (short_root / "a.jil").write_text(new)
         view = roundtrip(socket, {"cmd": "reread", "v": 5})["preview"]
-        if case != "retype":
-            assert {item["job"]: item["action"] for item in view["effects"]}["MOVER"] == (
-                "hold" if marked else "restart" if case == "move_in" else "rerun"
-            )
-            assert view["stop"] == ["BX", "MOVER", "STAY"]
-        applied = roundtrip(
+        stop = "STAY" if case == "retype" else "MOVER"
+        action = "remove" if case == "retype" else "hold" if marked else "rerun"
+        assert view["stop"] == [stop]
+        assert view["effects"] == [{"job": stop, "action": action}]
+        names = ["BX", "STAY"] if case == "retype" else ["BX", "MOVER", "STAY"]
+        assert view["update_refusal"] == {"code": "tree_active", "names": names}
+        refused = roundtrip(
             socket,
             {
                 "cmd": "update",
@@ -1960,144 +1975,129 @@ def test_box_restart_preserves_replacement_run_ownership(short_root: Path, case)
                 "baseline_id": ask("status")["baseline_id"],
             },
         )
-        assert applied["ok"] and applied["application"], applied
-        if case == "retype":
-            assert ask("status")["jobs"]["BX"]["status"] == "INACTIVE"
-            assert not [
-                body for _, kind, body in rows(root) if kind == "dispatch" and body["job"] == "BX"
+        assert not refused["ok"] and refused["refused"], refused
+        assert (refused["code"], refused["names"]) == ("tree_active", names)
+        assert ask()["revision"] == 1
+        jobs = ask("status")["jobs"]
+        assert jobs["STAY"]["status"] == "RUNNING" and jobs["STAY"]["run_number"] == 1
+        assert jobs["STAY"]["attempt"]["n"] == 1
+        if case != "retype":
+            assert jobs["MOVER"]["status"] == "RUNNING" and jobs["MOVER"]["attempt"]["n"] == 1
+        assert not [
+            body
+            for _, kind, body in rows(root)
+            if kind == "config" and body.get("event") == "intent"
+        ]
+
+
+_FOUR = ["BX", "INNER", "KEEP", "MEMBER"]
+
+
+@pytest.mark.parametrize("marked", [True, False])
+def test_a_resumed_box_restart_holds_a_marked_mover_on_its_run(short_root, monkeypatch, marked):
+    """DL-463, DL-489, DL-490: an intent of the build before DL-559 (`update_legacy`) moves the
+    running MOVER out of the running box BX and restarts BX. The engine dies after the intent;
+    the restart resumes it. A marked mover stays held on run 1 and is not run again; an
+    unmarked one reruns as run 1 under the new definition. STAY runs again in BX's run 2."""
+
+    async def scenario():
+        estate = 'non_idempotent = "non-idempotent.toml"\n'
+        path = config_file(short_root, estate=estate)
+        (short_root / "non-idempotent.toml").write_text(
+            '[jobs]\nMOVER = "synthetic effect"\n' if marked else "[jobs]\n"
+        )
+        box = "insert_job: BX\njob_type: b\n" + JOB.replace("A", "STAY") + "box_name: BX\n"
+        mover = JOB.replace("A", "MOVER")
+        (short_root / "a.jil").write_text(box + mover + "box_name: BX\n")
+        initial = main.prepare(path)
+        clock = VirtualClock(start=T0)
+        root = short_root / "run"
+        engine = start_run(
+            initial.catalog,
+            root,
+            clock=clock,
+            adapters={"CMD": FakeAdapter(default=None)},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        legacy_admission(monkeypatch, root)
+        try:
+            engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "BX"}))
+            await engine.run_until_quiescent(T0)
+            (short_root / "a.jil").write_text(box + mover)
+            plan = reread(
+                engine.update.live(), root / "plans", candidate=main.prepare(path), start=T0
+            )
+            engine.request_update(UpdateRequest(plan.token, 1, engine.baseline_id, "mover"))
+
+            def cut(job, cause):
+                raise EngineError("cut after intent")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(engine.update, "stop_attempt", cut)
+                with pytest.raises(EngineError, match="cut after intent"):
+                    await engine.run_until_quiescent(T0)
+            assert engine.journal.open.update["restart_boxes"] == ["BX"]
+            await engine.shutdown()
+            engine.journal.close()
+            stored = active_configuration(root)
+            engine = await resume_run(
+                stored.catalog,
+                root,
+                clock=clock,
+                adapters={"CMD": FakeAdapter(default=None)},
+                declared=stored.profile,
+                stored_sources=True,
+            )
+            await engine.run_until_quiescent(T0)
+            assert engine.config_rev == 2
+            row = engine.oracle.store.job["MOVER"]
+            assert row.run_number == 1 and row.on_hold == marked
+            assert row.status == ("FAILURE" if marked else "RUNNING")
+            assert engine.oracle.catalog.jobs["MOVER"].box.box_name is None
+            assert engine.oracle.store.job["BX"].run_number == 2
+            assert engine.oracle.store.job["STAY"].run_number == 2
+            mover_dispatches = [
+                record.payload
+                for _, record in engine.journal.store.read_from(0)
+                if record.kind == "dispatch" and record.payload["job"] == "MOVER"
             ]
-            forced = [
-                body
-                for _, kind, body in rows(root)
-                if kind == "input" and body.get("kind") == "FORCE_STARTJOB"
-            ]
-            assert len(forced) == 1
-        else:
-            if marked:
-                wait_for(lambda: ask("status")["jobs"]["MOVER"]["on_hold"])
-            else:
-                wait_for(
-                    lambda: (
-                        ask("status")["jobs"]["MOVER"].get("attempt", {}).get("n")
-                        == (1 if case == "move_in" else 2)
-                    )
-                )
-            wait_for(lambda: ask("status")["jobs"]["STAY"]["run_number"] == 2)
-            jobs = ask("status")["jobs"]
-            row = jobs["MOVER"]
-            assert row["run_number"] == (2 if case == "move_in" else 1)
-            if marked:
-                assert row["on_hold"] and row["status"] == "FAILURE"
-            else:
-                assert row["status"] == "RUNNING"
-                assert row["attempt"]["after"] == (None if case == "move_in" else "update_stop")
-            assert jobs["STAY"]["attempt"]["n"] == 1
-            assert jobs["STAY"]["attempt"]["after"] is None
-            assert not [
-                body
-                for _, kind, body in rows(root)
-                if kind == "dispatch"
-                and body["job"] == "STAY"
-                and body.get("after") == "update_stop"
-            ]
+            assert [d.get("after") for d in mover_dispatches] == (
+                [None] if marked else [None, "update_stop"]
+            )
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(
-    "case,change,action,expected_effects",
+    "case,mark,expected_effects,names",
     [
-        (
-            "nested",
-            "unchanged",
-            "restart",
-            [
-                {"job": "BX", "action": "restart_box"},
-                {"job": "INNER", "action": "restart"},
-                {"job": "KEEP", "action": "restart"},
-                {"job": "MEMBER", "action": "restart"},
-            ],
-        ),
-        (
-            "in_place",
-            "changed",
-            "restart",
-            [
-                {"job": "BX", "action": "restart_box"},
-                {"job": "INNER", "action": "restart"},
-                {"job": "KEEP", "action": "restart"},
-                {"job": "MEMBER", "action": "restart"},
-            ],
-        ),
-        (
-            "held",
-            "unchanged",
-            "hold",
-            [
-                {"job": "BX", "action": "restart_box"},
-                {"job": "INNER", "action": "restart"},
-                {"job": "KEEP", "action": "restart"},
-                {"job": "MEMBER", "action": "hold"},
-            ],
-        ),
-        (
-            "finished",
-            "unchanged",
-            "restart",
-            [
-                {"job": "BX", "action": "restart_box"},
-                {"job": "KEEP", "action": "restart"},
-                {"job": "INNER", "action": "restart"},
-                {"job": "MEMBER", "action": "restart"},
-            ],
-        ),
-        (
-            "finished_held",
-            "unchanged",
-            "hold",
-            [
-                {"job": "BX", "action": "restart_box"},
-                {"job": "KEEP", "action": "restart"},
-                {"job": "MEMBER", "action": "hold"},
-                {"job": "INNER", "action": "restart"},
-            ],
-        ),
-        (
-            "move_out",
-            "changed",
-            "rerun",
-            [
-                {"job": "BX", "action": "restart_box"},
-                {"job": "INNER", "action": "restart"},
-                {"job": "KEEP", "action": "restart"},
-                {"job": "MEMBER", "action": "rerun"},
-            ],
-        ),
-        (
-            "move_out_held",
-            "changed",
-            "hold",
-            [
-                {"job": "BX", "action": "restart_box"},
-                {"job": "INNER", "action": "restart"},
-                {"job": "KEEP", "action": "restart"},
-                {"job": "MEMBER", "action": "hold"},
-            ],
-        ),
+        ("nested", None, [], _FOUR),
+        ("in_place", {"change": "changed", "action": "rerun"}, [("MEMBER", "rerun")], _FOUR),
+        ("held", None, [], _FOUR),
+        ("finished", None, [], ["BX", "KEEP"]),
+        ("finished_held", None, [], ["BX", "KEEP"]),
+        ("move_out", {"change": "changed", "action": "rerun"}, [("MEMBER", "rerun")], _FOUR),
+        ("move_out_held", {"change": "changed", "action": "hold"}, [("MEMBER", "hold")], _FOUR),
         (
             "retype",
-            "removed",
-            "remove",
-            [
-                {"job": "BX", "action": "remove"},
-                {"job": "INNER", "action": "remove"},
-                {"job": "KEEP", "action": "remove"},
-                {"job": "MEMBER", "action": "remove"},
-            ],
+            {"change": "removed", "action": "remove"},
+            [("KEEP", "remove"), ("MEMBER", "remove")],
+            _FOUR,
         ),
     ],
 )
-def test_box_restart_marks_unchanged_members(
-    short_root: Path, case, change, action, expected_effects
+def test_a_membership_change_under_a_running_box_marks_only_its_stops(
+    short_root: Path, case, mark, expected_effects, names
 ):
+    """DL-559, FEAT-31: members added under the running box BX and its sub-box INNER, with
+    MEMBER unchanged, changed in place, finished, marked, moved out, or the whole tree retyped
+    into a command. `reread` labels only the stops and marks only changed and removed jobs; no
+    job reads `restart`. It forecasts the refusal by the active jobs of the tree, and `update`
+    is refused with those names and writes nothing. A finished sub-box is quiet."""
     from dsl41.reread_worker import preview
     from dsl41.runner_control import roundtrip
     from test_main_config_restart import cli_engine
@@ -2141,16 +2141,19 @@ def test_box_restart_marks_unchanged_members(
         answer = roundtrip(socket, {"v": 5, "cmd": "reread"})
         assert answer["ok"], answer
         view = answer["preview"]
-        effects = {item["job"]: item["action"] for item in view["effects"]}
         jobs = ask("status")["jobs"]
-        assert jobs["MEMBER"]["reread"] == {"change": change, "action": action}
+        assert jobs["MEMBER"].get("reread") == mark
         forecast = preview(main.prepare(path), live)
-        assert view["effects"] == expected_effects
-        assert forecast["marks"]["MEMBER"] == {"change": change, "action": action}
-        assert effects["MEMBER"] == action
-        if change == "unchanged":
-            assert "MEMBER" not in {item["name"] for item in view["changed"]}
-        applied = roundtrip(
+        assert view["effects"] == [
+            {"job": job, "action": action} for job, action in expected_effects
+        ]
+        assert forecast["marks"].get("MEMBER") == mark
+        assert not any(
+            (row.get("reread") or {}).get("action") in {"restart", "restart_box"}
+            for row in jobs.values()
+        )
+        assert view["update_refusal"] == {"code": "tree_active", "names": names}
+        refused = roundtrip(
             socket,
             {
                 "v": 5,
@@ -2160,26 +2163,20 @@ def test_box_restart_marks_unchanged_members(
                 "baseline_id": ask("status")["baseline_id"],
             },
         )
-        assert applied["ok"] and applied["application"], applied
-        if case in {"nested", "in_place", "held", "finished_held"}:
-            stopped = [["KEEP", "none"]]
-            if case != "finished_held":
-                stopped.append(["MEMBER", "none"])
-            assert applied["application"]["stopped"] == stopped
-            recorded = [
-                body
-                for _, kind, body in rows(short_root / "run")
-                if kind == "config" and body.get("event") == "applied" and body["rev"] == 2
-            ]
-            assert len(recorded) == 1 and recorded[0]["stopped"] == stopped
-        if case in {"held", "finished_held"}:
-            member_row = ask("status")["jobs"]["MEMBER"]
-            assert member_row["on_hold"] and member_row["run_number"] == 1
-        assert not any(row.get("reread") for row in ask("status")["jobs"].values())
+        assert not refused["ok"] and (refused["code"], refused["names"]) == ("tree_active", names)
+        assert ask()["revision"] == 1
+        assert not [
+            body
+            for _, kind, body in rows(short_root / "run")
+            if kind == "config" and body.get("event") == "intent"
+        ]
 
 
 @pytest.mark.parametrize("nested", [False, True])
-def test_box_restart_holds_before_starts_in_name_order(short_root: Path, nested: bool):
+def test_box_restart_holds_before_starts_in_name_order(short_root: Path, monkeypatch, nested: bool):
+    """DL-463, DL-488: the update a stored intent of the build before DL-559 carries
+    (`update_legacy`) holds the marked members, then starts the outermost boxes, in name
+    order."""
     path = config_file(short_root, estate='non_idempotent = "marked.toml"\n')
     (short_root / "marked.toml").write_text(
         '[jobs]\nZ_HELD = "synthetic effect"\nA_HELD = "synthetic effect"\n'
@@ -2204,6 +2201,7 @@ def test_box_restart_holds_before_starts_in_name_order(short_root: Path, nested:
             launched=main.profile_of(initial),
             source_capture=main.encoded_parts(initial),
         )
+        legacy_admission(monkeypatch, short_root / "run")
         try:
             for name in ["ZB"] if nested else ["ZB", "AB"]:
                 engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": name}))
@@ -2248,7 +2246,13 @@ def test_box_restart_holds_before_starts_in_name_order(short_root: Path, nested:
 @pytest.mark.parametrize(
     "case", ["moved_box", "unchanged_box", "in_place_running", "in_place_finished", "move_in"]
 )
-def test_dl490_forecast_labels_follow_candidate_membership(short_root: Path, monkeypatch, case):
+def test_dl559_forecast_names_every_active_job_of_a_touched_tree(
+    short_root: Path, monkeypatch, case
+):
+    """DL-559, BUG-46: a member added to the running box BX, with a sub-box moved out, a member
+    changed in place (running or finished) or a standalone running job moved in. The forecast
+    labels only the stops and says the update would be refused by every active job of the
+    touched trees, the sub-box's unchanged members included. It writes nothing."""
     from dsl41.reread_worker import preview
     from dsl41.runner_control import ControlServer
 
@@ -2304,32 +2308,25 @@ def test_dl490_forecast_labels_follow_candidate_membership(short_root: Path, mon
 
             monkeypatch.setattr(server, "_prepare_reload", prepare)
             view = (await server._reread({"v": 5, "cmd": "reread"}))["preview"]
-            effects = [("BX", "restart_box")]
-            marks = {"BX": {"change": "changed", "action": "restart_box"}}
+            stop = case in {"in_place_running", "move_in"}
+            effects = [("MEMBER", "rerun")] if stop else []
+            marks = {"BX": {"change": "changed", "action": None}}
             if case == "moved_box":
-                effects += [("INNER_KEEP", "rerun"), ("KEEP", "restart"), ("MEMBER", "rerun")]
                 marks["INNER"] = {"change": "changed", "action": None}
-            else:
-                effects += [
-                    ("INNER", "restart"),
-                    ("INNER_KEEP", "restart"),
-                    ("KEEP", "restart"),
-                    ("MEMBER", "restart"),
-                ]
-                marks["INNER"] = {
-                    "change": "changed" if case == "move_in" else "unchanged",
-                    "action": "restart",
-                }
-                marks["INNER_KEEP"] = {"change": "unchanged", "action": "restart"}
-                marks["MEMBER"] = {
-                    "change": "unchanged" if case == "unchanged_box" else "changed",
-                    "action": "restart",
-                }
-            marks["KEEP"] = {"change": "unchanged", "action": "restart"}
+            elif case == "move_in":
+                marks["INNER"] = {"change": "changed", "action": None}
+            if case != "moved_box" and case != "unchanged_box":
+                marks["MEMBER"] = {"change": "changed", "action": "rerun" if stop else None}
             assert view["effects"] == [{"job": name, "action": action} for name, action in effects]
-            assert view["stop"] == [
-                name for name, _ in effects if name != "MEMBER" or case != "in_place_finished"
-            ]
+            assert view["stop"] == [name for name, _ in effects]
+            # a finished MEMBER is quiet: its row is SUCCESS and the engine owns no process of it
+            finished = case == "in_place_finished"
+            active = ["INNER_KEEP", "KEEP", *([] if finished else ["MEMBER"])]
+            assert list(engine.owned_runs()) == active
+            assert view["update_refusal"] == {
+                "code": "tree_active",
+                "names": ["BX", "INNER", *active],
+            }
             jobs = (await server._dispatch({"cmd": "status"}))["jobs"]
             assert {name: row["reread"] for name, row in jobs.items() if "reread" in row} == marks
             assert list(engine.journal.store.read_from(0)) == before
@@ -2343,9 +2340,16 @@ def test_dl490_forecast_labels_follow_candidate_membership(short_root: Path, mon
 @pytest.mark.parametrize(
     "case", ["cmd_root", "fw_running", "fw_finished", "outside", "fw_finished_moved_out"]
 )
-def test_dl490_retyped_jobs_follow_the_new_box_scope(short_root: Path, case):
+def test_dl559_a_retyped_job_in_a_running_tree_refuses_and_one_outside_is_replaced(
+    short_root: Path, case
+):
+    """DL-559, BUG-71: a running command retyped into a box with members, and a watch member of
+    the running box BX retyped into a command (running, finished, or finished and moved out),
+    change box membership: the update is refused by the active jobs of the tree, as the
+    forecast says, and writes nothing. A parent whose member's first run already succeeded is
+    not stranded. A standalone running watch retyped outside every box is stopped and replaced
+    by an INACTIVE command of its name, as before (DL-424)."""
     from dsl41.reload_diff import diff
-    from dsl41.reload_plan import box_scope, root_starts
     from dsl41.reread_worker import preview
 
     path = config_file(short_root, estate='non_idempotent = "marked.toml"\n')
@@ -2406,79 +2410,54 @@ def test_dl490_retyped_jobs_follow_the_new_box_scope(short_root: Path, case):
             live = engine.update.live()
             changes = diff(live.catalog, candidate.catalog, live.settings, candidate.settings)
             assert name in changes.added and name in changes.removed
-            scope = box_scope(changes, live, candidate.catalog)
             forecast = preview(candidate, live)
-            action = (
-                "restart_box"
-                if case == "cmd_root"
-                else "remove"
-                if case == "outside"
-                else None
-                if case == "fw_finished_moved_out"
-                else "restart"
-            )
-            assert forecast["marks"][name] == {"change": "removed", "action": action}
-            expected_effects = (
-                [{"job": name, "action": action}]
-                if case in {"cmd_root", "outside"}
-                else [
-                    {"job": "BX", "action": "restart_box"},
-                    {"job": "KEEP", "action": "restart"},
-                ]
-                if case == "fw_finished_moved_out"
-                else [
-                    {"job": "BX", "action": "restart_box"},
-                    {"job": "KEEP", "action": "restart"},
-                    {"job": "MEMBER", "action": "restart"},
-                ]
-            )
-            if finished:
-                expected_effects.append({"job": "A_FINISHED", "action": "restart"})
-            assert forecast["effects"] == expected_effects
-            assert [
-                effect["job"] for effect in forecast["effects"] if effect["action"] == "restart_box"
-            ] == root_starts(scope, candidate.catalog, candidate.metadata["non_idempotent"])
-            assert (name in forecast["stop"]) == (not case.startswith("fw_finished"))
+            stops = [] if case.startswith("fw_finished") else [name]
+            assert forecast["stop"] == stops
+            assert forecast["effects"] == [{"job": job, "action": "remove"} for job in stops]
+            assert forecast["marks"][name] == {
+                "change": "removed",
+                "action": "remove" if stops else None,
+            }
             plan = reread(live, short_root / "run" / "plans", candidate=candidate, start=T0)
             answer = engine.request_update(
                 UpdateRequest(plan.token, 1, engine.baseline_id, "retyped-forecast")
             )
             await engine.run_until_quiescent(T0)
+            decision = answer.result().decision
+            if case != "outside":
+                names = (
+                    ["BX"]
+                    if case == "cmd_root"
+                    else ["BX", "KEEP", *([] if case.startswith("fw_finished") else ["MEMBER"])]
+                )
+                assert forecast["update_refusal"] == {"code": "tree_active", "names": names}
+                assert decision == Refused(plan.token, "tree_active", tuple(names))
+                assert engine.config_rev == 1 and not engine.update.stopping
+                assert not [
+                    record
+                    for _, record in engine.journal.store.read_from(before)
+                    if record.kind == "config"
+                ]
+                return
+            assert forecast["update_refusal"] is None
             body = answer.result().applied.result()
             assert engine.config_rev == 2
-            if not case.startswith("fw_finished"):
-                assert [name, "none"] in body["stopped"]
-            else:
-                assert name not in dict(body["stopped"])
+            assert [name, "none"] in body["stopped"]
             row = engine.oracle.store.job[name]
             assert not row.on_hold
-            outside = case in {"outside", "fw_finished_moved_out"}
-            assert row.status == ("INACTIVE" if outside else "RUNNING")
-            assert row.run_number == (1 if outside else 2)
-            if finished:
-                assert engine.oracle.store.job["A_FINISHED"].run_number == 2
+            assert row.status == "INACTIVE" and row.run_number == 1
             records = list(engine.journal.store.read_from(before))
             inputs = [
                 (record.payload.get("kind"), record.payload.get("payload", {}).get("job"))
                 for _, record in records
                 if record.kind == "input"
             ]
-            forced = [job for kind, job in inputs if kind == "FORCE_STARTJOB"]
-            assert forced == ([] if case == "outside" else ["BX"])
-            if case == "cmd_root":
-                assert ("KILLJOB", "BX") in inputs
-                assert engine.oracle.catalog.jobs["BX"].job_type == "BOX"
-                assert engine.oracle.store.job["NEW"].status == "RUNNING"
-                assert inputs.index(("KILLJOB", "BX")) < inputs.index(("FORCE_STARTJOB", "BX"))
-            else:
-                dispatched = [
-                    record.payload
-                    for _, record in records
-                    if record.kind == "dispatch" and record.payload["job"] == name
-                ]
-                assert len(dispatched) == (0 if outside else 1)
-                if dispatched:
-                    assert dispatched[0]["run_number"] == 2
+            assert [job for kind, job in inputs if kind == "FORCE_STARTJOB"] == []
+            assert not [
+                record.payload
+                for _, record in records
+                if record.kind == "dispatch" and record.payload["job"] == name
+            ]
         finally:
             await engine.shutdown()
             engine.journal.close()
@@ -2500,7 +2479,10 @@ def test_dl490_a_removed_name_cannot_be_marked(short_root: Path):
 
 
 @pytest.mark.parametrize("kind", ["BOX", "CMD"])
-def test_dl490_moved_out_terminator_ends_without_its_own_kill_or_start(short_root: Path, kind):
+def test_dl559_a_moved_out_terminator_refuses_and_nothing_ends(short_root: Path, kind):
+    """DL-559, BUG-18, BUG-69: a running `job_terminator` member, a command or a sub-box with
+    its running member, moved out of the running box BX. The update is refused by the running
+    tree, as the forecast says, so no old box run is ended and nothing kills the member."""
     from dsl41.reread_worker import preview
 
     mover = (
@@ -2538,52 +2520,31 @@ def test_dl490_moved_out_terminator_ends_without_its_own_kill_or_start(short_roo
             candidate = main.prepare(path)
             live = engine.update.live()
             forecast = preview(candidate, live)
-            # BUG-69: the forecast does not read the old box's terminator cascade.
             assert forecast["marks"]["MOVER"] == {
                 "change": "changed",
                 "action": None if kind == "BOX" else "rerun",
             }
-            assert forecast["stop"] == (
-                ["BX", "CHILD", "KEEP"] if kind == "BOX" else ["BX", "KEEP", "MOVER"]
-            )
+            assert forecast["stop"] == ([] if kind == "BOX" else ["MOVER"])
             assert forecast["effects"] == (
-                [
-                    {"job": "BX", "action": "restart_box"},
-                    {"job": "CHILD", "action": "rerun"},
-                    {"job": "KEEP", "action": "restart"},
-                ]
-                if kind == "BOX"
-                else [
-                    {"job": "BX", "action": "restart_box"},
-                    {"job": "KEEP", "action": "restart"},
-                    {"job": "MOVER", "action": "rerun"},
-                ]
+                [] if kind == "BOX" else [{"job": "MOVER", "action": "rerun"}]
             )
+            names = ("BX", "CHILD", "KEEP", "MOVER") if kind == "BOX" else ("BX", "KEEP", "MOVER")
+            assert forecast["update_refusal"] == {"code": "tree_active", "names": list(names)}
             plan = reread(live, short_root / "run" / "plans", candidate=candidate, start=T0)
             answer = engine.request_update(
                 UpdateRequest(plan.token, 1, engine.baseline_id, "moved-terminator")
             )
             await engine.run_until_quiescent(T0)
-            assert answer.result().applied.done() and engine.config_rev == 2
+            assert answer.result().decision == Refused(plan.token, "tree_active", names)
+            assert engine.config_rev == 1
             row = engine.oracle.store.job["MOVER"]
-            assert row.status == "TERMINATED" and row.run_number == 1
-            assert engine.oracle.catalog.jobs["MOVER"].box.box_name is None
-            records = list(engine.journal.store.read_from(before))
-            inputs = [
-                (record.payload.get("kind"), record.payload.get("payload", {}).get("job"))
-                for _, record in records
-                if record.kind == "input"
-            ]
-            assert ("KILLJOB", "BX") in inputs and ("FORCE_STARTJOB", "BX") in inputs
-            assert ("KILLJOB", "MOVER") not in inputs
-            assert ("FORCE_STARTJOB", "MOVER") not in inputs
+            assert row.status == "RUNNING" and row.run_number == 1
+            assert engine.oracle.store.job["BX"].status == "RUNNING"
             assert not [
                 record
-                for _, record in records
-                if record.kind == "dispatch" and record.payload["job"] == "MOVER"
+                for _, record in engine.journal.store.read_from(before)
+                if record.kind in {"input", "config", "dispatch"}
             ]
-            if kind == "CMD":
-                assert ["MOVER", "none"] in answer.result().applied.result()["stopped"]
         finally:
             await engine.shutdown()
             engine.journal.close()
@@ -2591,7 +2552,9 @@ def test_dl490_moved_out_terminator_ends_without_its_own_kill_or_start(short_roo
     asyncio.run(scenario())
 
 
-def test_dl490_moved_out_box_keeps_its_run(short_root: Path):
+def test_dl559_a_sub_box_moved_out_of_a_running_box_refuses(short_root: Path):
+    """DL-559, BUG-70: the running sub-box INNER moves out of the running box BX. The update is
+    refused by the running tree and the sub-box keeps its run; nothing is ended or started."""
     old = (
         "insert_job: BX\njob_type: b\ninsert_job: INNER\njob_type: b\nbox_name: BX\n"
         + JOB.replace("A", "MEMBER")
@@ -2630,18 +2593,18 @@ def test_dl490_moved_out_box_keeps_its_run(short_root: Path):
                 UpdateRequest(plan.token, 1, engine.baseline_id, "moved-box")
             )
             await engine.run_until_quiescent(T0)
-            assert answer.result().applied.done() and engine.config_rev == 2
-            assert engine.oracle.catalog.jobs["INNER"].box.box_name is None
+            assert answer.result().decision == Refused(
+                plan.token, "tree_active", ("BX", "INNER", "KEEP", "MEMBER")
+            )
+            assert engine.config_rev == 1
+            assert engine.oracle.catalog.jobs["INNER"].box.box_name == "BX"
             row = engine.oracle.store.job["INNER"]
             assert row.status == "RUNNING" and row.run_number == 1
-            inputs = [
-                (record.payload.get("kind"), record.payload.get("payload", {}).get("job"))
+            assert not [
+                record
                 for _, record in engine.journal.store.read_from(before)
-                if record.kind == "input"
+                if record.kind in {"input", "config", "dispatch"}
             ]
-            assert ("KILLJOB", "BX") in inputs and ("FORCE_STARTJOB", "BX") in inputs
-            assert ("KILLJOB", "INNER") not in inputs
-            assert ("FORCE_STARTJOB", "INNER") not in inputs
         finally:
             await engine.shutdown()
             engine.journal.close()
@@ -2650,7 +2613,9 @@ def test_dl490_moved_out_box_keeps_its_run(short_root: Path):
 
 
 @pytest.mark.parametrize("case", ["in_place_running", "in_place_finished", "move_in"])
-def test_dl490_changed_member_opens_a_new_box_run(short_root: Path, case):
+def test_dl490_changed_member_opens_a_new_box_run(short_root: Path, monkeypatch, case):
+    """DL-490: in the box restart a stored intent of the build before DL-559 carries
+    (`update_legacy`), a changed or moved-in member runs in the new box run."""
     member = JOB.replace("A", "MEMBER")
     old = (
         "insert_job: BX\njob_type: b\n"
@@ -2673,6 +2638,7 @@ def test_dl490_changed_member_opens_a_new_box_run(short_root: Path, case):
             launched=main.profile_of(initial),
             source_capture=main.encoded_parts(initial),
         )
+        legacy_admission(monkeypatch, short_root / "run")
         try:
             for name in ["BX", "MEMBER"] if case == "move_in" else ["BX"]:
                 engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": name}))
@@ -2731,7 +2697,9 @@ def test_dl490_changed_member_opens_a_new_box_run(short_root: Path, case):
     asyncio.run(scenario())
 
 
-def test_dl490_box_kills_include_removed_and_queued_members_in_order(short_root: Path):
+def test_dl490_box_kills_include_removed_and_queued_members_in_order(short_root: Path, monkeypatch):
+    """DL-487, DL-490: the box restart a stored intent of the build before DL-559 carries
+    (`update_legacy`) ends the boxes first, then removed and queued members, in order."""
     resource = "resources: (LOCK, QUANTITY=1)\n"
     removed = JOB.replace("A", "REMOVED") + "box_name: ZB\n"
     old = (
@@ -2760,6 +2728,7 @@ def test_dl490_box_kills_include_removed_and_queued_members_in_order(short_root:
             launched=main.profile_of(initial),
             source_capture=main.encoded_parts(initial),
         )
+        legacy_admission(monkeypatch, short_root / "run")
         try:
             for name in ("HOLDER", "ZB"):
                 engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": name}))
@@ -2792,7 +2761,9 @@ def test_dl490_box_kills_include_removed_and_queued_members_in_order(short_root:
     asyncio.run(scenario())
 
 
-def test_box_restart_ends_boxes_before_done_sibling_can_start(short_root: Path):
+def test_box_restart_ends_boxes_before_done_sibling_can_start(short_root: Path, monkeypatch):
+    """DL-463, DL-487: in the box restart a stored intent of the build before DL-559 carries
+    (`update_legacy`), the boxes end before a sibling waiting on `d(A1)` can start."""
     old = (
         "insert_job: ZB\njob_type: b\ninsert_job: AB\njob_type: b\nbox_name: ZB\n"
         + JOB.replace("A", "A1")
@@ -2813,6 +2784,7 @@ def test_box_restart_ends_boxes_before_done_sibling_can_start(short_root: Path):
             launched=main.profile_of(initial),
             source_capture=main.encoded_parts(initial),
         )
+        legacy_admission(monkeypatch, short_root / "run")
         try:
             engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "ZB"}))
             await engine.run_until_quiescent(T0)

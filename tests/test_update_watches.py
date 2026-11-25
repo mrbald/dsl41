@@ -25,6 +25,7 @@ from test_engine_stops_cookie import PGID, T0, _Procs
 from test_update_atomic import _Ladders, _update_steps
 from test_update_owned_processes import _crash, _observed, _started, _teardown
 from test_update_settlement import SIGNALED, _close, _jil, _plan, _request
+from update_legacy import legacy_admission
 
 from dsl41 import main_config as main
 from dsl41.oracle_state import Event
@@ -300,8 +301,9 @@ def _box(tmp_path: Path, *, added: bool) -> str:
 def test_an_unchanged_watch_of_a_restarted_box_is_not_launched_while_the_update_waits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str
 ) -> None:
-    """DL-526, DL-463, DL-525: an update that adds a member to the running box `b` restarts it.
-    It stops `c` and `w`, the members with a process, though the plan leaves both unchanged. It
+    """DL-526, DL-463, DL-525: an update that adds a member to the running box `b` restarts it,
+    admitted as the build before DL-559 admitted it (`update_legacy`): only such an intent
+    restarts a box now. It stops `c` and `w`, the members with a process, though the plan leaves both unchanged. It
     waits for `c`'s stop. On the live path, and after the engine dies and restarts during that
     wait, `w` neither launches nor polls before the application. After it, the box's restart
     ends run 1 and opens run 2: run 1 of `w` is closed once with no plan, `config applied` names
@@ -319,6 +321,7 @@ def test_an_unchanged_watch_of_a_restarted_box_is_not_launched_while_the_update_
         ladders = _Ladders(monkeypatch)
         ladders.alive.add(PGID)
         engine = _start(tmp_path, _box(tmp_path, added=False), "stable")
+        legacy_admission(monkeypatch, tmp_path / "run")
         engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "b"}))
         await engine.run_until_quiescent(T0)
         attempt, wrapper = _observed(engine, "c", PGID)

@@ -356,8 +356,7 @@ def test_every_update_outcome_has_true_text(monkeypatch, style):
         "its own result stands",
         "rerun under the new definition",
         "now ON_HOLD",
-        "stopped, no follow-up of its own (in a restarted box, a marked member kept without"
-        " retyping is ON_HOLD; other members follow the box if allowed to run)",
+        "stopped, no follow-up of its own",
     ):
         assert text in result.stdout
 
@@ -847,8 +846,7 @@ def test_r3_application_text_has_no_general_box_rule_and_preserves_outcomes(styl
         "its own result stands",
         "stopped, rerun under the new definition",
         "stopped, now ON_HOLD (automatic rerun withheld)",
-        "stopped, no follow-up of its own (in a restarted box, a marked member kept without"
-        " retyping is ON_HOLD; other members follow the box if allowed to run)",
+        "stopped, no follow-up of its own",
     ):
         assert sum(text in line for line in lines) == 1
 
@@ -1308,10 +1306,13 @@ def test_a_box_with_a_seed_and_a_membership_change_is_counted_once_as_changed(tm
     ]
 
 
-def test_a_marked_seed_only_member_of_a_restarted_box_shows_its_seed_and_its_hold(tmp_path, style):
-    """DL-533 with DL-463: running m1 is marked non-idempotent, its `status:` line alone
-    changes, and B gains m2. The seed row says what the edit does; the effects line says the
-    restart holds m1. The update's row carries both."""
+def test_a_marked_seed_only_member_of_a_refusing_box_shows_its_seed_and_the_refusal(
+    tmp_path, style
+):
+    """DL-533 with DL-559: running m1 is marked non-idempotent, its `status:` line alone
+    changes, and B gains m2. The seed row says what the edit does; the forecast stops nothing
+    and says the update would be refused by B and m1. The application row of a resumed update
+    that restarted B still carries both."""
     from dsl41.cli_output import application_lines, reread_lines
 
     text = _BOXED.replace(
@@ -1319,11 +1320,9 @@ def test_a_marked_seed_only_member_of_a_restarted_box_shows_its_seed_and_its_hol
     )
     answer = _boxed_answer(tmp_path, text, {"B": "RUNNING", "m1": "RUNNING"}, marked="m1")
     view = answer["preview"]
-    assert view["effects"] == [
-        {"job": "B", "action": "restart_box"},
-        {"job": "m1", "action": "hold"},
-    ]
-    assert view["marks"]["m1"] == {"change": "unchanged", "action": "hold"}
+    assert view["effects"] == [] and view["stop"] == []
+    assert "m1" not in view["marks"]
+    assert view["update_refusal"] == {"code": "tree_active", "names": ["B", "m1"]}
     source = f"source: - -> {tmp_path / 'a.jil'}"
     if style is OutputStyle.focused:
         rows = [
@@ -1340,12 +1339,10 @@ def test_a_marked_seed_only_member_of_a_restarted_box_shows_its_seed_and_its_hol
         "changed 1 job, added 1, removed 0, status line only 1, unchanged 1",
         *rows,
         "",
-        "if applied now: stopping 2 running jobs: B, m1",
-        "  B   would restart as a new box run",
-        "  m1   would be ON_HOLD (marked as not safe to rerun)",
-        "marked non-idempotent: m1 (synthetic mark)",
+        "if applied now: no running job is stopped",
+        "update would be refused: it changes box membership and these jobs are active or"
+        " would be stopped: B, m1",
         f"read from: {tmp_path / 'a.jil'}",
-        "apply with: dsl41 update",
         "forecast at reread time; update rereads before applying",
     ]
     application = Application(
@@ -1361,10 +1358,7 @@ def test_a_marked_seed_only_member_of_a_restarted_box_shows_its_seed_and_its_hol
         (("m1", "none"),),
         seed_only=(("m1", None, "ON_HOLD"),),
     )
-    outcome = (
-        "stopped, no follow-up of its own (in a restarted box, a marked member kept without"
-        " retyping is ON_HOLD; other members follow the box if allowed to run)"
-    )
+    outcome = "stopped, no follow-up of its own"
     rows = (
         [f"  m1   {outcome}", f"  m1   {SEED_ROW}"]
         if style is OutputStyle.focused
@@ -1375,6 +1369,69 @@ def test_a_marked_seed_only_member_of_a_restarted_box_shows_its_seed_and_its_hol
         "  changed 0 jobs, added 1, removed 0, status line only 1",
         *rows,
     ]
+
+
+def test_a_forecast_refusal_names_every_job_in_the_neutral_layout_and_offers_no_apply(
+    tmp_path, style
+):
+    """DL-559: under a forecast `tree_active` refusal reread prints no "apply with" line. The
+    neutral layout names every job in the way; the focused one keeps its short list."""
+    from dsl41.cli_output import reread_lines
+
+    answer = _boxed_answer(tmp_path, _BOXED, {"B": "RUNNING", "m1": "RUNNING"})
+    names = ["B", "c1", "c2", "c3", "m1"]
+    answer["preview"]["update_refusal"] = {"code": "tree_active", "names": names}
+    lines = reread_lines(answer, style, "dsl41 update")
+    shown = "B, c1, c2, c3, m1" if style is OutputStyle.neutral else "B, c1, c2 and 2 more"
+    assert (
+        "update would be refused: it changes box membership and these jobs are active or"
+        f" would be stopped: {shown}"
+    ) in lines
+    assert not [line for line in lines if line.startswith("apply with:")]
+
+
+def test_an_older_engines_box_restart_labels_still_print(tmp_path, style):
+    """DL-559: an engine before DL-559 forecasts its box restarts with `restart_box` and
+    `restart` and sends no `update_refusal`. A newer client prints both labels in both
+    layouts, and the apply line as before."""
+    from dsl41.cli_output import reread_lines
+
+    answer = _boxed_answer(tmp_path, _BOXED, {"B": "RUNNING", "m1": "RUNNING"})
+    view = answer["preview"]
+    del view["update_refusal"]
+    view["stop"] = ["B", "m1"]
+    view["effects"] = [
+        {"job": "B", "action": "restart_box"},
+        {"job": "m1", "action": "restart"},
+    ]
+    lines = reread_lines(answer, style, "dsl41 update")
+    assert "  B   would restart as a new box run" in lines
+    assert "  m1   would restart with its box" in lines
+    assert "apply with: dsl41 update" in lines
+
+
+def test_bug72_a_retyped_stop_reads_as_replaced_and_a_removed_one_as_removed(tmp_path, style):
+    """BUG-72, DL-559: the running `R` is retyped into a file watch and the running `G` is
+    removed, outside every box. Both are stops with the `remove` label; the text says a new job
+    of its name replaces `R` and that `G` gets no replacement. No refusal is forecast."""
+    from dsl41.cli_output import reread_lines
+    from test_main_config import config_file, live_of
+
+    path = config_file(tmp_path)
+    command = "job_type: c\ncommand: true\nmachine: localhost\n\n"
+    (tmp_path / "a.jil").write_text(f"insert_job: R\n{command}insert_job: G\n{command}")
+    before = main_config.prepare(path)
+    (tmp_path / "a.jil").write_text("insert_job: R\njob_type: f\nwatch_file: /synthetic/never\n\n")
+    view = preview(main_config.prepare(path), live_of(before, {"R": "RUNNING", "G": "RUNNING"}))
+    assert view["effects"] == [
+        {"job": "G", "action": "remove"},
+        {"job": "R", "action": "remove"},
+    ]
+    assert view["update_refusal"] is None
+    answer = {"ok": True, "live_rev": 1, "source": {"path": str(path)}, "preview": view}
+    lines = reread_lines(answer, style, "dsl41 update")
+    assert "  R   would be replaced by a new job of the same name" in lines
+    assert "  G   would be removed; no replacement" in lines
 
 
 def test_identical_seeds_on_a_box_that_lost_its_member_and_on_a_job_group_as_all(tmp_path):

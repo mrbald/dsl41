@@ -66,11 +66,12 @@ Code = Literal[
     # stored on a rejected decision: a mutation admitted after `stop_requested`
     # (spec-wiring 2b); an `update` while draining is refused with it
     "engine_draining",
-    # `update`'s refusals (spec-reload): the plan was diffed against another rev, it edits
-    # a running box's membership, it stops running jobs without consent, or another update
-    # is stopping
+    # `update`'s refusals (spec-reload): the plan was diffed against another rev, another
+    # update is stopping, or it changes box membership while it has a stop or a touched tree
+    # is active (DL-559)
     "stale_plan",
     "update_in_progress",
+    "tree_active",
 ]
 
 #: every code, for the table test and the decision writer

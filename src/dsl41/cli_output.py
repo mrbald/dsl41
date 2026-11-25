@@ -288,7 +288,9 @@ class ReloadView:
     effect_index: int
 
 
-def prepare_reread(answer: Mapping[str, Any], apply_command: str) -> ReloadView:
+def prepare_reread(
+    answer: Mapping[str, Any], apply_command: str, style: OutputStyle = OutputStyle.focused
+) -> ReloadView:
     view = answer["preview"]
     changed = view["changed"]
     details = view.get("definition_changes")
@@ -382,17 +384,39 @@ def prepare_reread(answer: Mapping[str, Any], apply_command: str) -> ReloadView:
             else "no running job is stopped"
         )
     )
+    refusal = view.get("update_refusal")
+    if refusal:
+        # the admission's own refusal, forecast from the same function; the neutral layout
+        # names every job in the way (DL-559)
+        names = refusal["names"]
+        footer.append(
+            "update would be refused: it changes box membership and these jobs are active or"
+            " would be stopped: "
+            + (
+                ", ".join(map(one_line, names))
+                if style is OutputStyle.neutral
+                else names_text(names)
+            )
+        )
     effect_index = len(footer)
     effects = {
         "rerun": "would rerun under the new definition",
         "hold": "would be ON_HOLD (marked as not safe to rerun)",
         "remove": "would be removed; no replacement",
+        # an engine that restarts boxes forecasts them with these two labels (DL-490)
         "restart_box": "would restart as a new box run",
         "restart": "would restart with its box",
     }
+    retyped = set(view["added"]) & set(view["removed"])
     effect_groups: dict[str, list[str]] = defaultdict(list)
     for effect in view["effects"]:
-        effect_groups[effects[effect["action"]]].append(effect["job"])
+        # a retyped stop is shown with the new job of its name that takes its place (DL-559)
+        text = (
+            "would be replaced by a new job of the same name"
+            if effect["action"] == "remove" and effect["job"] in retyped
+            else effects[effect["action"]]
+        )
+        effect_groups[text].append(effect["job"])
     for item in view["non_idempotent"]:
         footer.append(
             f"marked non-idempotent: {one_line(item['job'])} ({one_line(item['reason'])})"
@@ -418,7 +442,7 @@ def prepare_reread(answer: Mapping[str, Any], apply_command: str) -> ReloadView:
         ]
         if any(reason in reported for reason in details["blocked"]):
             footer.append("update would refuse: blocking findings are reported on stderr")
-    else:
+    elif not refusal:
         footer.append("apply with: " + apply_command)
     footer.append("forecast at reread time; update rereads before applying")
     if (
@@ -451,7 +475,7 @@ def prepare_reread(answer: Mapping[str, Any], apply_command: str) -> ReloadView:
 
 
 def reread_lines(answer: Mapping[str, Any], style: OutputStyle, apply_command: str) -> list[str]:
-    view = prepare_reread(answer, apply_command)
+    view = prepare_reread(answer, apply_command, style)
     lines = [view.header, "", view.summary]
     if style is OutputStyle.neutral:
         lines += ["  " + row for row in view.rows]
@@ -491,10 +515,7 @@ def application_lines(application: Any, style: OutputStyle) -> list[str]:
         "complete": "its own result stands",
         "rerun": "stopped, rerun under the new definition",
         "hold": "stopped, now ON_HOLD (automatic rerun withheld)",
-        "none": (
-            "stopped, no follow-up of its own (in a restarted box, a marked member kept without"
-            " retyping is ON_HOLD; other members follow the box if allowed to run)"
-        ),
+        "none": ("stopped, no follow-up of its own"),
     }
     rows: dict[str, list[str]] = defaultdict(list)
     for kind in ("changed", "added", "removed"):

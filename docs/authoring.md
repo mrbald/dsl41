@@ -678,11 +678,11 @@ The operator owns engine restarts and host settings.
 Reread only reports current inputs and findings. Update rereads and applies them through
 the same engine socket, using -S or DSL41_SOCKET (DL-463). No token or consent is required.
 Ordinary stopped jobs rerun as the same run or hold under the existing interruption rule.
-A restarted box opens a new run; normal successors see the old run's end. Before its
-FORCE_STARTJOB, every marked member whose row is not INACTIVE is put ON_HOLD, including
-members that finished earlier. After a mid-restart crash, do that hold step before
-operator force-start; automatic completion of the box restart is not promised (DL-463).
-Outside a restarted box, unchanged jobs keep running.
+An update never restarts a box (DL-559). An update that adds, removes, moves or retypes a
+box or a box member is applied only when it stops nothing and every job of the touched box
+trees is quiet: not queued, starting or running, and with no process left. Otherwise it is
+refused `tree_active` and names the jobs in the way; `reread` says so beforehand. Plan
+structural changes to a busy tree as stop, update, start. Unchanged jobs keep running.
 An edit to `estate.timezone`, `estate.timezone_map`, `[estate.semantics]` or
 `insert_xinst` records marks every job changed and can stop every running job.
 Affected jobs wait while the engine stops their attempts and applies the plan.
