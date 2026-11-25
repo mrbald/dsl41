@@ -32,6 +32,7 @@ from dsl41.ir import (
     CycleIR,
     ExecSpec,
     FwSpec,
+    IRVersionError,
     JobIR,
     LoweringError,
     MachineIR,
@@ -628,14 +629,33 @@ def test_sem24_status_is_case_insensitive_and_unquoted() -> None:
     assert catalog.jobs["j"].sem.initial_status == "ON_ICE"
 
 
-def test_sem24_run_state_status_is_refused() -> None:
-    """SEM-24: run states would interact with the SEM-01 latch -- refused,
-    never guessed."""
+_SEM24_JOBS = {
+    "CMD": "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\nstatus: {status}\n",
+    "FW": "insert_job: j\njob_type: f\nwatch_file: /tmp/f\nmachine: m1\nstatus: {status}\n",
+    "BOX": "insert_job: j\njob_type: b\nstatus: {status}\n",
+}
+
+
+@pytest.mark.parametrize("job_type", sorted(_SEM24_JOBS))
+@pytest.mark.parametrize(
+    "status",
+    ["FAILURE", "INACTIVE", "ON_HOLD", "ON_ICE", "ON_NOEXEC", "SUCCESS", "TERMINATED"],
+)
+def test_sem24_every_vendor_status_lowers_on_every_job_type(job_type: str, status: str) -> None:
+    """SEM-24 (DL-561): the line takes the vendor's seven values on CMD, FW and BOX."""
+    catalog = lower_source(_SEM24_JOBS[job_type].format(status=status.lower()))
+    assert catalog.jobs["j"].job_type == job_type
+    assert catalog.jobs["j"].sem.initial_status == status
+
+
+@pytest.mark.parametrize("status", ["RUNNING", "QUE_WAIT", "STARTING", "ACTIVATED", "BOGUS"])
+def test_sem24_a_status_outside_the_vendor_set_is_refused(status: str) -> None:
+    """SEM-24 (DL-561): a value outside the vendor's seven is refused by name."""
     with pytest.raises(LoweringError) as exc_info:
-        lower_source("insert_job: j\njob_type: c\ncommand: x\nmachine: m1\nstatus: SUCCESS\n")
+        lower_source(f"insert_job: j\njob_type: c\ncommand: x\nmachine: m1\nstatus: {status}\n")
     message = str(exc_info.value)
     assert "SEM-24" in message
-    assert "SUCCESS" in message
+    assert repr(status) in message
 
 
 def test_alarm_if_terminated_is_an_annotation() -> None:
@@ -1162,7 +1182,58 @@ def test_load_dump_round_trips_the_full_corpus_catalog() -> None:
 
 def test_dump_contains_ir_version_field() -> None:
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
-    assert '"ir_version": "0.3"' in dump_catalog(catalog)
+    assert '"ir_version": "0.4"' in dump_catalog(catalog)
+
+
+@pytest.mark.parametrize(
+    ("version", "entry"), [("0.1", "DL-73"), ("0.2", "DL-253"), ("0.3", "DL-561")]
+)
+def test_dl561_a_retired_ir_version_is_refused_by_name(version: str, entry: str) -> None:
+    """protocol-evolution ss6, DL-561: a retired IR-F version is refused by name with the entry
+    that retired it, before validation."""
+    payload = json.loads(dump_catalog(lower_source("insert_job: j\njob_type: b\n")))
+    payload["ir_version"] = version
+    with pytest.raises(IRVersionError) as exc_info:
+        load_catalog(json.dumps(payload))
+    assert str(exc_info.value) == (
+        f"catalog: IR-F version {version} is retired ({entry}); this build reads IR-F 0.4 only."
+        " Lower the catalog again from its JIL with this build"
+    )
+
+
+def test_dl561_an_unknown_ir_field_is_ignored_at_the_current_version() -> None:
+    """protocol-evolution ss7 case 3: the IR-F row ignores an unknown field."""
+    catalog = lower_source("insert_job: j\njob_type: b\n")
+    payload = json.loads(dump_catalog(catalog))
+    payload["future"] = 1
+    payload["jobs"]["j"]["future"] = 2
+    assert load_catalog(json.dumps(payload)) == catalog
+
+
+@pytest.mark.parametrize("version", ["0.5", "9", 3, None])
+def test_dl561_an_unknown_ir_version_is_refused_as_unknown(version: object) -> None:
+    """protocol-evolution ss6: a value that was never current is unknown, not a tombstone."""
+    payload = json.loads(dump_catalog(lower_source("insert_job: j\njob_type: b\n")))
+    payload["ir_version"] = version
+    with pytest.raises(IRVersionError) as exc_info:
+        load_catalog(json.dumps(payload))
+    assert str(exc_info.value) == (
+        f"catalog: unknown IR-F version {version!r}; this build reads IR-F 0.4 only."
+        " Lower the catalog again from its JIL with this build"
+    )
+
+
+def test_dl561_a_catalog_that_is_no_object_is_malformed_not_of_another_version() -> None:
+    """protocol-evolution ss6: the malformed case keeps its own error."""
+    with pytest.raises(ValidationError):
+        load_catalog("[]")
+
+
+def test_dl561_an_absent_ir_version_is_refused_as_unknown() -> None:
+    payload = json.loads(dump_catalog(lower_source("insert_job: j\njob_type: b\n")))
+    del payload["ir_version"]
+    with pytest.raises(IRVersionError, match="unknown IR-F version None"):
+        load_catalog(json.dumps(payload))
 
 
 def test_dump_top_level_keys_are_sorted() -> None:

@@ -1529,6 +1529,68 @@ def test_l022_corpus_fixture_trigger_and_non_triggers() -> None:
     assert violation.detail == "l22_prod"
 
 
+_RUN_STATE_SEEDS = ["SUCCESS", "FAILURE", "TERMINATED"]
+
+
+@pytest.mark.parametrize("seed", _RUN_STATE_SEEDS)
+def test_sem24_l020_reads_a_run_state_seed_as_a_live_job(seed: str) -> None:
+    """SEM-24 (DL-561): a job seeded in a run state runs on both sides, so it is no Skip. Beside
+    an iced predecessor it converges and L020 stays quiet; as the consumer of skipped
+    predecessors it still draws the finding."""
+    quiet = lower_source(
+        "insert_job: icy\njob_type: c\ncommand: x\nmachine: m1\nstatus: ON_ICE\n\n"
+        f"insert_job: seeded\njob_type: c\ncommand: y\nmachine: m1\nstatus: {seed}\n\n"
+        "insert_job: downstream\njob_type: c\ncommand: z\nmachine: m1\n"
+        "condition: s(icy) & d(seeded)\n"
+    )
+    assert rule_l020(quiet) == []
+    fires = lower_source(
+        "insert_job: icy\njob_type: c\ncommand: x\nmachine: m1\nstatus: ON_ICE\n\n"
+        "insert_job: downstream\njob_type: c\ncommand: z\nmachine: m1\n"
+        f"status: {seed}\ncondition: s(icy)\n"
+    )
+    (violation,) = rule_l020(fires)
+    assert violation.jobs == ["downstream"]
+
+
+@pytest.mark.parametrize("seed", _RUN_STATE_SEEDS)
+def test_sem24_l021_keeps_its_findings_for_a_run_state_seed(seed: str) -> None:
+    """SEM-24 (DL-561): a consumer or a producer seeded in a run state can still fire more than
+    once per cycle; a qualified latch stays quiet."""
+    template = (
+        "insert_job: mf_a\njob_type: c\ncommand: x\nmachine: m1\nstatus: {a}\n\n"
+        "insert_job: mf_b\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: mf_daily\njob_type: c\ncommand: x\nmachine: m1\nstatus: {c}\n"
+        "condition: {cond}\n"
+    )
+    for a, c in ((seed, "INACTIVE"), ("INACTIVE", seed)):
+        fires = lower_source(template.format(a=a, c=c, cond="s(mf_a) & s(mf_b)"))
+        (violation,) = rule_l021(fires, derive_graph(fires))
+        assert violation.jobs == ["mf_daily"]
+        quiet = lower_source(template.format(a=a, c=c, cond="s(mf_a, 0) & s(mf_b, 0)"))
+        assert rule_l021(quiet, derive_graph(quiet)) == []
+
+
+@pytest.mark.parametrize("seed", _RUN_STATE_SEEDS)
+def test_sem24_l022_keeps_its_findings_for_a_run_state_seed(seed: str) -> None:
+    """SEM-24 (DL-561): a producer seeded in a run state can fail on its next run, so an unread
+    failure still strands the tail; a read failure stays quiet. A seeded tail is checked too."""
+    template = (
+        "insert_job: st_prod\njob_type: c\ncommand: x\nmachine: m1\nstatus: {p}\n\n"
+        "insert_job: st_tail\njob_type: c\ncommand: x\nmachine: m1\nstatus: {t}\n"
+        "condition: s(st_prod)\n"
+    )
+    watcher = (
+        "\ninsert_job: st_alert\njob_type: c\ncommand: x\nmachine: m1\ncondition: f(st_prod)\n"
+    )
+    for p, t in ((seed, "INACTIVE"), ("INACTIVE", seed)):
+        fires = lower_source(template.format(p=p, t=t))
+        (violation,) = rule_l022(fires, derive_graph(fires))
+        assert (violation.jobs, violation.detail) == (["st_tail"], "st_prod")
+        quiet = lower_source(template.format(p=p, t=t) + watcher)
+        assert rule_l022(quiet, derive_graph(quiet)) == []
+
+
 # --------------------------------------------------------- 11. lint_catalog integration
 
 

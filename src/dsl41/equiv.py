@@ -19,8 +19,10 @@ Contracts:
 - Status and last exit code vary independently (SEM-09 couples them only for completion by
   code), so extra unreachable states can only give a false inequivalence or a missed L006/L007
   warn, never a false claim of equivalence.
-- NEVER_RAN is a job with no status timestamp (a NOTRUNNING atom is true there, lookback
-  bypassed). INACTIVE is a job with a timestamp whose status is none of RUNNING/SUCCESS/
+- NEVER_RAN is an INACTIVE job with no status timestamp (a NOTRUNNING atom is true there,
+  lookback bypassed). A row a `status:` line made in SUCCESS, FAILURE or TERMINATED has no
+  timestamp either; it is that status beyond every window, not zero-fresh, with no exit code,
+  so its n() takes the lookback check (SEM-24, DL-561). INACTIVE is a job with a timestamp whose status is none of RUNNING/SUCCESS/
   FAILURE/TERMINATED (operator CHANGE_STATUS, or ON_NOEXEC settling a job, DL-243). NOTRUNNING
   is true on both, d(x) excludes INACTIVE, and only a finite lookback tells them apart: a
   window reads INACTIVE's `status_at` age, the zero-lookback anchor reads `last_end_at`, which

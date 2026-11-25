@@ -3679,6 +3679,286 @@ def test_sem24b_initial_on_ice_satisfies_downstream_and_never_starts() -> None:
     assert transitions(o, "iced24") == []  # iced at definition: never starts
 
 
+_SEM24_RUN_STATES = ["SUCCESS", "FAILURE", "TERMINATED"]
+_SEM24_TYPES = {
+    "CMD": "job_type: c\ncommand: x\nmachine: m1\n",
+    "FW": "job_type: f\nwatch_file: /tmp/f\nmachine: m1\n",
+    "BOX": "job_type: b\n",
+}
+#: every minute of the hour: the tick that starts the self-restarting job (SEM-32)
+_EVERY_MINUTE = ",".join(str(minute) for minute in range(60))
+
+
+@pytest.mark.parametrize("job_type", sorted(_SEM24_TYPES))
+@pytest.mark.parametrize("status", _SEM24_RUN_STATES)
+def test_sem24_a_run_state_seed_makes_the_row_with_no_run_and_no_trace(
+    job_type: str, status: str
+) -> None:
+    """SEM-24 (DL-561): the row is made in the status, with no run, no exit code and no times,
+    and the seed writes no trace entry."""
+    o = oracle(f"insert_job: seeded\n{_SEM24_TYPES[job_type]}status: {status}\n")
+    row = o.store.job["seeded"]
+    assert (row.status, row.run_number, row.exit_code) == (status, 0, None)
+    assert (row.status_at, row.last_end_at, row.started_by) == (None, None, None)
+    assert (row.on_ice, row.on_hold, row.on_noexec, row.armed) == (False, False, False, False)
+    assert o.trace() == []
+
+
+@pytest.mark.parametrize("status", _SEM24_RUN_STATES)
+def test_sem24_the_seed_wakes_no_tickless_consumer(status: str) -> None:
+    """SEM-24 (DL-561): the seed is definition state, not a transition, so a consumer whose
+    condition it satisfies waits for an event that wakes it; an unrelated input wakes nothing."""
+    text = (
+        f"insert_job: a24\njob_type: c\ncommand: x\nmachine: m1\nstatus: {status}\n\n"
+        "insert_job: c24\njob_type: c\ncommand: y\nmachine: m1\ncondition: d(a24)\n\n"
+        "insert_job: other24\njob_type: c\ncommand: z\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STATUS", 1, job="other24", status="SUCCESS"))
+    o.feed(ev("SET_GLOBAL", 2, name="G24", value="1"))
+    assert transitions(o, "c24") == []
+    assert o.store.job["c24"].status == "INACTIVE"
+
+
+def test_sem24_a_consumer_of_a_seed_and_a_live_job_starts_when_the_live_job_succeeds() -> None:
+    """SEM-24 (DL-561): a condition that names the seeded job reads the seeded status at its
+    next evaluation, which the other job's success causes."""
+    text = (
+        "insert_job: a24s\njob_type: c\ncommand: x\nmachine: m1\nstatus: SUCCESS\n\n"
+        "insert_job: b24s\njob_type: c\ncommand: y\nmachine: m1\n\n"
+        "insert_job: c24s\njob_type: c\ncommand: z\nmachine: m1\ncondition: s(a24s) & s(b24s)\n"
+    )
+    o = oracle(text)
+    assert transitions(o, "c24s") == []
+    o.feed(ev("STATUS", 1, job="b24s", status="SUCCESS"))
+    assert transitions(o, "c24s") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+    assert transitions(o, "a24s") == []  # the seeded row never moved
+
+
+def test_sem24_a_scheduled_consumer_of_a_seed_starts_at_its_tick() -> None:
+    """SEM-24/SEM-32 (DL-561): a scheduled consumer's tick finds the seeded status and starts."""
+    text = (
+        "insert_job: a24t\njob_type: c\ncommand: x\nmachine: m1\nstatus: SUCCESS\n\n"
+        "insert_job: c24t\njob_type: c\ncommand: y\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\ncondition: s(a24t)\n'
+    )
+    o = oracle(text)
+    assert transitions(o, "c24t") == []
+    o.feed(ev("STARTJOB", 1, job="c24t"))
+    assert transitions(o, "c24t") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+
+def test_sem24_the_self_restarting_job_runs_after_success_and_stays_down_after_an_end() -> None:
+    """SEM-24/SEM-32 (DL-561), the self-restarting job: `status: SUCCESS`, an every-minute
+    `start_mins` and `condition: s(self)`. The first tick starts it; after a success the next
+    tick starts it again; after a FAILURE or a KILLJOB the ticks only arm it; FORCE_STARTJOB
+    runs it, consumes the arm, and its success lets the next tick start it."""
+    text = (
+        "insert_job: selfr\njob_type: c\ncommand: x\nmachine: m1\nstatus: SUCCESS\n"
+        f'date_conditions: 1\ndays_of_week: all\nstart_mins: "{_EVERY_MINUTE}"\n'
+        "condition: s(selfr)\n"
+    )
+    start = ["STARTING->RUNNING"]
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="selfr"))  # the first tick
+    assert transitions(o, "selfr") == ["SUCCESS->STARTING", *start]
+    o.feed(ev("STATUS", 0.5, job="selfr", status="SUCCESS"))
+    assert transitions(o, "selfr")[-1] == "RUNNING->SUCCESS"  # its own success starts nothing
+    o.feed(ev("STARTJOB", 1, job="selfr"))
+    assert transitions(o, "selfr")[-2:] == ["SUCCESS->STARTING", *start]
+    o.feed(ev("STATUS", 1.5, job="selfr", status="FAILURE"))
+    o.feed(ev("STARTJOB", 2, job="selfr"))
+    o.feed(ev("STARTJOB", 3, job="selfr"))
+    assert transitions(o, "selfr")[-2:] == ["RUNNING->FAILURE", "SCHED_ARM"]
+    assert o.store.job["selfr"].status == "FAILURE"
+    o.feed(ev("FORCE_STARTJOB", 3.5, job="selfr"))
+    o.feed(ev("STATUS", 3.75, job="selfr", status="SUCCESS"))
+    assert transitions(o, "selfr")[-3:] == ["FAILURE->STARTING", *start, "RUNNING->SUCCESS"]
+    o.feed(ev("STARTJOB", 4, job="selfr"))
+    assert transitions(o, "selfr")[-2:] == ["SUCCESS->STARTING", *start]
+    o.feed(ev("KILLJOB", 4.5, job="selfr"))
+    o.feed(ev("STARTJOB", 5, job="selfr"))
+    o.feed(ev("STARTJOB", 6, job="selfr"))
+    assert transitions(o, "selfr")[-2:] == ["RUNNING->TERMINATED", "SCHED_ARM"]
+    o.feed(ev("FORCE_STARTJOB", 6.5, job="selfr"))
+    o.feed(ev("STATUS", 6.75, job="selfr", status="SUCCESS"))
+    o.feed(ev("STARTJOB", 7, job="selfr"))
+    assert transitions(o, "selfr")[-2:] == ["SUCCESS->STARTING", *start]
+    assert o.store.job["selfr"].run_number == 6
+
+
+def _sem24_lookback_consumer(cond: str, status: str = "SUCCESS") -> Oracle | EngineHarness:
+    """A tickless consumer of a seeded `a24l` gated also on `g24l`, whose success evaluates it."""
+    return oracle(
+        f"insert_job: a24l\njob_type: c\ncommand: x\nmachine: m1\nstatus: {status}\n\n"
+        "insert_job: g24l\njob_type: c\ncommand: y\nmachine: m1\n\n"
+        f"insert_job: c24l\njob_type: c\ncommand: z\nmachine: m1\ncondition: ({cond}) & s(g24l)\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("cond", "starts"),
+    [
+        ("s(a24l)", True),
+        ("s(a24l, 9999)", True),
+        ("d(a24l, 9999)", True),
+        ("n(a24l)", True),
+        ("s(a24l, 1.00)", False),
+        ("s(a24l, 9998.59)", False),
+        ("s(a24l, 0)", False),
+        ("d(a24l, 0)", False),
+        ("n(a24l, 1.00)", False),
+        ("n(a24l, 0)", False),
+        ("s(a24l) & n(a24l, 1.00)", False),
+        ("e(a24l) = 0", False),
+        ("e(a24l) != 0", False),
+        ("exitcode(a24l, 9999) >= 0", False),
+    ],
+)
+def test_sem24_lookback_and_exit_code_atoms_on_a_seeded_row(cond: str, starts: bool) -> None:
+    """SEM-24/SEM-04 (DL-561): the seeded row has no status time and no end time. A bare atom
+    and a `9999` lookback read the status; a finite or zero lookback reads false, as for a job
+    that never ended, and so does n() with one; an exit-code atom reads false."""
+    o = _sem24_lookback_consumer(cond)
+    o.feed(ev("STATUS", 1, job="g24l", status="SUCCESS"))
+    expected = ["INACTIVE->STARTING", "STARTING->RUNNING"] if starts else []
+    assert transitions(o, "c24l") == expected
+
+
+def test_sem24_a_window_and_its_notrunning_spelling_agree_on_a_seeded_row() -> None:
+    """SEM-24 (DL-561): `s(A,1.00)` and `s(A) & n(A,1.00)` agree on a row with no status time,
+    as the equivalence checker reads them; the untimed n() pass is a never-run INACTIVE row's."""
+    for cond in ("s(a24l, 1.00)", "s(a24l) & n(a24l, 1.00)"):
+        o = _sem24_lookback_consumer(cond)
+        o.feed(ev("STATUS", 1, job="g24l", status="SUCCESS"))
+        assert transitions(o, "c24l") == [], cond
+    o = _sem24_lookback_consumer("n(a24l, 1.00)", status="INACTIVE")
+    o.feed(ev("STATUS", 1, job="g24l", status="SUCCESS"))
+    assert transitions(o, "c24l") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+
+def test_sem24_a_seeded_status_reads_in_a_window_once_the_job_ends_again() -> None:
+    """SEM-24 (DL-561): the job's first end stamps both times, and a window reads them."""
+    o = _sem24_lookback_consumer("s(a24l, 1.00)")
+    o.feed(ev("FORCE_STARTJOB", 1, job="a24l"))
+    o.feed(ev("STATUS", 2, job="a24l", status="SUCCESS"))
+    o.feed(ev("STATUS", 3, job="g24l", status="SUCCESS"))
+    assert transitions(o, "c24l") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+
+@pytest.mark.parametrize("status", _SEM24_RUN_STATES)
+def test_sem24_a_box_start_clears_a_members_seed(status: str) -> None:
+    """SEM-24/SEM-10 (DL-561): a box start resets a member's seeded status like any status left
+    from an earlier run (DL-242), and the member then runs in the box's run."""
+    text = (
+        "insert_job: bx24\njob_type: b\n\n"
+        f"insert_job: mem24\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bx24\nstatus: {status}\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 1, job="bx24"))
+    assert transitions(o, "mem24") == [
+        f"{status}->INACTIVE",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+    ]
+    o.feed(ev("STATUS", 2, job="mem24", status="SUCCESS"))
+    assert o.store.job["bx24"].status == "SUCCESS"
+
+
+@pytest.mark.parametrize("status", _SEM24_RUN_STATES)
+def test_sem24_a_box_born_in_a_run_state_satisfies_its_consumers_and_starts(status: str) -> None:
+    """SEM-24 (DL-561): a box may be born in a run state. A consumer reads it at its next
+    evaluation, and the box starts as a box that ended earlier does."""
+    atom = {"SUCCESS": "s", "FAILURE": "f", "TERMINATED": "t"}[status]
+    text = (
+        f"insert_job: bx24b\njob_type: b\nstatus: {status}\n\n"
+        "insert_job: mem24b\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bx24b\n\n"
+        "insert_job: g24b\njob_type: c\ncommand: y\nmachine: m1\n\n"
+        f"insert_job: c24b\njob_type: c\ncommand: z\nmachine: m1\ncondition: {atom}(bx24b) & s(g24b)\n"
+    )
+    o = oracle(text)
+    assert o.store.job["bx24b"].status == status
+    o.feed(ev("STATUS", 1, job="g24b", status="SUCCESS"))
+    assert transitions(o, "c24b") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+    o.feed(ev("STARTJOB", 2, job="bx24b"))
+    assert transitions(o, "bx24b") == [f"{status}->STARTING", "STARTING->RUNNING"]
+    o.feed(ev("STATUS", 3, job="mem24b", status="SUCCESS"))
+    assert transitions(o, "bx24b")[-1] == "RUNNING->SUCCESS"
+
+
+def _sem07_named_like_remote(seed: str, atom: str) -> Oracle | EngineHarness:
+    """A local job named like the remote key `P^PRD`, seeded `seed`, and a consumer of the
+    cross-instance atom gated also on `g07`."""
+    return oracle(
+        "insert_xinst: PRD\nxtype: a\nxmachine: h.example.com\nxport: 9000\n\n"
+        f"insert_job: P^PRD\njob_type: c\ncommand: x\nmachine: m1\nstatus: {seed}\n\n"
+        "insert_job: g07\njob_type: c\ncommand: y\nmachine: m1\n\n"
+        f"insert_job: c07\njob_type: c\ncommand: z\nmachine: m1\ncondition: {atom}(P^PRD) & s(g07)\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("seed", "atom"), [("SUCCESS", "s"), ("FAILURE", "f"), ("TERMINATED", "d")]
+)
+def test_sem24_a_cross_instance_atom_never_reads_a_seeded_run_state(seed: str, atom: str) -> None:
+    """SEM-07, SEM-24 (DL-561): a seed is no remote observation. A row in a run state with no
+    status time is a `status:` seed, so a cross-instance atom on its key reads false and the
+    consumer waits."""
+    o = _sem07_named_like_remote(seed, atom)
+    o.feed(ev("STATUS", 1, job="g07", status="SUCCESS"))
+    assert transitions(o, "c07") == []
+
+
+def test_sem24_an_injected_remote_status_on_a_seeded_key_reads_as_without_the_seed() -> None:
+    """SEM-07 (DL-561): an injected status stamps the row's time, so the atom reads it as it
+    does on a row no seed made."""
+    o = _sem07_named_like_remote("SUCCESS", "s")
+    o.feed(ev("STATUS", 1, job="g07", status="SUCCESS"))
+    o.feed(ev("STATUS", 2, job="P^PRD", status="SUCCESS"))
+    assert transitions(o, "c07") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+
+@pytest.mark.parametrize(("seed", "atom"), [("INACTIVE", "n"), ("ON_ICE", "s"), ("ON_HOLD", "n")])
+def test_sem07_a_cross_instance_atom_on_an_unseeded_or_flagged_key_reads_the_row(
+    seed: str, atom: str
+) -> None:
+    """SEM-07: a row no run-state seed made reads as it always has (BUG-118 holds the shared key)."""
+    o = _sem07_named_like_remote(seed, atom)
+    o.feed(ev("STATUS", 1, job="g07", status="SUCCESS"))
+    assert transitions(o, "c07") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+
+def test_sem07_an_injected_remote_status_satisfies_the_atom() -> None:
+    """SEM-07: with no local job of that name, an injected status of `name^INST` is the remote
+    observation the atom reads; a local run of a same-named job reads the same row."""
+    o = oracle(
+        "insert_xinst: PRD\nxtype: a\nxmachine: h.example.com\nxport: 9000\n\n"
+        "insert_job: c07r\njob_type: c\ncommand: z\nmachine: m1\ncondition: s(Q^PRD)\n"
+    )
+    o.feed(ev("STATUS", 1, job="Q^PRD", status="SUCCESS"))
+    assert transitions(o, "c07r") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+    r = _sem07_named_like_remote("INACTIVE", "s")
+    r.feed(ev("STATUS", 1, job="g07", status="SUCCESS"))
+    r.feed(ev("STATUS", 2, job="P^PRD", status="SUCCESS"))
+    assert transitions(r, "c07") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+
+def test_sem24_an_iced_seed_and_a_failure_seed_each_read_their_own_row() -> None:
+    """SEM-24/SEM-20 (DL-561): an ON_ICE seed is an iced INACTIVE row and reads the iced table;
+    a FAILURE seed is a FAILURE row and reads its status."""
+    text = (
+        "insert_job: i24\njob_type: c\ncommand: x\nmachine: m1\nstatus: ON_ICE\n\n"
+        "insert_job: f24\njob_type: c\ncommand: x\nmachine: m1\nstatus: FAILURE\n\n"
+        "insert_job: g24i\njob_type: c\ncommand: y\nmachine: m1\n\n"
+        "insert_job: c24i\njob_type: c\ncommand: z\nmachine: m1\n"
+        "condition: s(i24) & f(f24) & s(g24i)\n"
+    )
+    o = oracle(text)
+    assert (o.store.job["i24"].status, o.store.job["i24"].on_ice) == ("INACTIVE", True)
+    o.feed(ev("STATUS", 1, job="g24i", status="SUCCESS"))
+    assert transitions(o, "c24i") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+
 # -------------------------------------------------------------------- 15. SEM-22 ON_NOEXEC
 
 

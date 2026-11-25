@@ -276,8 +276,8 @@ class Semantics(BaseModel):  # attributes with control-flow teeth (§5 of dossie
     box_success: CondAttr | None  # box jobs only; SEM-12
     box_failure: CondAttr | None
     auto_hold: bool = False
-    initial_status: InitialStatus | None  # SEM-24 [A]/DL-18: `status:` on insert, limited
-    #   to INACTIVE/ON_HOLD/ON_ICE/ON_NOEXEC
+    initial_status: InitialStatus | None  # SEM-24, DL-18, DL-561: `status:` on insert, one
+    #   of FAILURE/INACTIVE/ON_HOLD/ON_ICE/ON_NOEXEC/SUCCESS/TERMINATED
 
 
 class JobIR(BaseModel):
@@ -295,7 +295,7 @@ class JobIR(BaseModel):
 
 
 class CatalogIR(BaseModel):  # the compilation unit
-    ir_version: Literal["0.3"]  # §8
+    ir_version: Literal["0.4"]  # §8
     jobs: dict[str, JobIR]
     globals_declared: dict[str, str]  # insert_global
     external_instances: dict[str, XinstIR]  # xtype typed; plumbing attrs opaque (DL-28)
@@ -530,10 +530,18 @@ in `oracle.py` imports them and `oracle_state.py` imports nothing from it (DL-91
 ## 8. Serialization & identity
 
 - IR-F serializes as JSON: `json.dumps(catalog.model_dump(mode="json"), sort_keys=True,
-  indent=2)` plus a trailing newline, with an explicit version field `ir_version: "0.3"`. One
+  indent=2)` plus a trailing newline, with an explicit version field `ir_version: "0.4"`. One
   catalog is one file. The output is deterministic (diff-able in git). A change to the IR-F
   shape bumps the version; `scripts/arch_check.py` pins the schema hash to it. An absolute
-  must time is a `MustTime`, whose hour runs to 71 (DL-253).
+  must time is a `MustTime`, whose hour runs to 71 (DL-253). `InitialStatus` holds the
+  vendor's seven values (DL-561).
+- Every reader of a stored or emitted IR-F checks `ir_version` before it validates the
+  payload (`ir.check_ir_version`): a stored configuration row, the reread worker's copy of the
+  engine's catalog and `ir.load_catalog`. A retired version is refused by name with the entry
+  that retired it; 0.3 is retired by DL-561. Any other value, or none, is refused as unknown.
+  For the step from 0.3 to 0.4 this build keeps no reader for 0.3: a run root that stores it is
+  drained on the build that wrote it, and this build starts on a fresh root. That is the
+  owner's ruling for now; a later version follows protocol-evolution §2's four steps.
 - `ir.dump_catalog` / `ir.load_catalog` are the REFERENCE SPELLING of that sentence, and the
   round-trip test in `tests/test_ir.py` holds them to it (DL-193). No CLI verb reads or
   writes an IR-F file: `dsl41 run` consumes JIL bytes only,

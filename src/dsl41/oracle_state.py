@@ -119,6 +119,13 @@ LIVE_OR_QUEUED: frozenset[JobStatus] = LIVE | {"QUE_WAIT"}
 #: A job that may start: INACTIVE or terminal.
 IDLE: frozenset[JobStatus] = frozenset({"INACTIVE", "SUCCESS", "FAILURE", "TERMINATED"})
 
+
+def seeded_status(initial: str | None) -> JobStatus:
+    """The status a `status:` line makes a row in (SEM-24, DL-561): a run state is the row's
+    status; every other value, and none, makes an INACTIVE row."""
+    return next((status for status in TERMINAL if status == initial), "INACTIVE")
+
+
 EventKind = Literal[
     "STATUS",
     "STARTJOB",
@@ -1066,11 +1073,18 @@ class RuntimeState:
         self._replace(job, **{field: value})
 
     def seed_job(
-        self, job: str, *, on_ice: bool = False, on_hold: bool = False, on_noexec: bool = False
+        self,
+        job: str,
+        *,
+        status: JobStatus = "INACTIVE",
+        on_ice: bool = False,
+        on_hold: bool = False,
+        on_noexec: bool = False,
     ) -> None:
-        """Install a row's definition-time flags (SEM-24) for the Oracle's genesis seed; not a
-        move, so no machine is taken."""
-        self._replace(job, on_ice=on_ice, on_hold=on_hold, on_noexec=on_noexec)
+        """Install a row's definition-time status and flags (SEM-24) for the Oracle's genesis
+        seed; not a move, so no machine is taken. A seeded run status has no run and no times
+        (DL-561)."""
+        self._replace(job, status=status, on_ice=on_ice, on_hold=on_hold, on_noexec=on_noexec)
 
     def require_between_inputs(self, verb: str) -> None:
         """Raise unless no input is open: an update applies between inputs (spec-reload)."""
@@ -1100,12 +1114,19 @@ class RuntimeState:
         return tombstone
 
     def admit_job(
-        self, job: str, *, on_ice: bool = False, on_hold: bool = False, on_noexec: bool = False
+        self,
+        job: str,
+        *,
+        status: JobStatus = "INACTIVE",
+        on_ice: bool = False,
+        on_hold: bool = False,
+        on_noexec: bool = False,
     ) -> None:
-        """An update added `job` (spec-reload): a new INACTIVE row with these flags. A tombstone
-        of the name gives the row its run number, so a run number is never reused, and its
-        revision plus one, so an `expect` read before the removal fails (concurrency-model
-        ss3); the tombstone is dropped. Not an input. The caller rebuilds the instances."""
+        """An update added `job` (spec-reload): a new row in `status` with these flags, and no
+        times (SEM-24, DL-561). A tombstone of the name gives the row its run number, so a run
+        number is never reused, and its revision plus one, so an `expect` read before the
+        removal fails (concurrency-model ss3); the tombstone is dropped. Not an input. The
+        caller rebuilds the instances."""
         self.require_between_inputs(f"admit_job({job!r})")
         if job in self._jobs:
             raise OracleError(f"admit_job({job!r}): the job already has a row")
@@ -1114,7 +1135,13 @@ class RuntimeState:
         if tombstone is not None:
             carried["state_rev"] = tombstone.state_rev + 1
         self._jobs[job] = JobRuntime.model_validate(
-            {**carried, "on_ice": on_ice, "on_hold": on_hold, "on_noexec": on_noexec}
+            {
+                **carried,
+                "status": status,
+                "on_ice": on_ice,
+                "on_hold": on_hold,
+                "on_noexec": on_noexec,
+            }
         )
 
     def set_global(self, name: str, value: str) -> None:

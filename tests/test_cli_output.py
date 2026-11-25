@@ -931,6 +931,13 @@ SEED_ROW = (
     "initial_status: (unset) -> ON_HOLD; the status: edit itself sets no flag on a job that"
     " stays (DL-533); hold or release it with sendevent"
 )
+#: DL-561: a line that changes to or from a run state is a status, not a flag
+SEED_STATUS_ROW = (
+    "initial_status: (unset) -> {status}; the status: line is a seed, and the update leaves the"
+    " live job as it is (DL-533, DL-561); a flag is changed with its own sendevent event and a"
+    " status with sendevent CHANGE_STATUS; either acts on the job as it is now and can start it"
+    " or the jobs that wait on it, so look at the job's current state first"
+)
 _SEED_JOBS = "".join(
     f"insert_job: {name}\njob_type: c\ncommand: true\nmachine: localhost\n\n"
     for name in ("edited", "other", "seeded", "twin")
@@ -1012,6 +1019,90 @@ def test_a_seed_only_reread_and_update_name_the_seed_once_in_each_layout(tmp_pat
         "  changed 0 jobs, added 0, removed 0, status line only 2",
         *rows,
     ]
+
+
+@pytest.mark.parametrize("status", ["SUCCESS", "FAILURE", "TERMINATED"])
+def test_sem24_a_run_state_seed_only_edit_is_shown_and_stops_nothing(tmp_path, style, status):
+    """SEM-24, DL-533 (DL-561): a kept job's run-state `status:` line alone is seed-only, as a
+    flag value is: shown once, counted on its own, and nothing is stopped."""
+    from dsl41.cli_output import application_lines, reread_lines
+
+    answer, application = _seed_forms(tmp_path, mixed=False, status=status)
+    assert answer["preview"]["seed_only"] == [
+        {"name": "seeded", "before": "(unset)", "after": status},
+        {"name": "twin", "before": "(unset)", "after": status},
+    ]
+    assert answer["preview"]["changed"] == [] and answer["preview"]["stop"] == []
+    row = SEED_STATUS_ROW.format(status=status)
+    lines = reread_lines(answer, style, "dsl41 update")
+    assert "changed 0 jobs, added 0, removed 0, status line only 2, unchanged 2" in lines
+    assert "if applied now: no running job is stopped" in lines
+    assert any(row in line for line in lines)
+    assert application is not None and application.changed == ()
+    assert application.seed_only == (("seeded", None, status), ("twin", None, status))
+    assert any(row in line for line in application_lines(application, style))
+
+
+_FLAG_NOTE = (
+    "the status: edit itself sets no flag on a job that stays (DL-533); hold or release it with"
+    " sendevent"
+)
+_RUN_NOTE = (
+    "the status: line is a seed, and the update leaves the live job as it is (DL-533, DL-561);"
+    " a flag is changed with its own sendevent event and a status with sendevent CHANGE_STATUS;"
+    " either acts on the job as it is now and can start it or the jobs that wait on it, so look"
+    " at the job's current state first"
+)
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "note"),
+    [
+        # among the flags, INACTIVE and none: DL-533's wording
+        ("ON_HOLD", "ON_ICE", _FLAG_NOTE),
+        (None, "ON_NOEXEC", _FLAG_NOTE),
+        ("ON_ICE", "INACTIVE", _FLAG_NOTE),
+        ("INACTIVE", None, _FLAG_NOTE),
+        # to or from a run state: the seed note, with no sequence of events
+        (None, "SUCCESS", _RUN_NOTE),
+        ("FAILURE", None, _RUN_NOTE),
+        ("TERMINATED", "INACTIVE", _RUN_NOTE),
+        ("SUCCESS", "ON_HOLD", _RUN_NOTE),
+        ("ON_ICE", "FAILURE", _RUN_NOTE),
+        ("ON_NOEXEC", "TERMINATED", _RUN_NOTE),
+        ("FAILURE", "SUCCESS", _RUN_NOTE),
+    ],
+)
+def test_dl561_the_seed_note_for_each_kind_of_edit(before, after, note):
+    """DL-533, DL-561: an edit among the flags, INACTIVE and none keeps DL-533's wording; an edit
+    to or from a run state says the line is a seed, names the events and prescribes no order."""
+    from dsl41.cli_output import seed_text
+
+    shown = ["(unset)" if value is None else value for value in (before, after)]
+    assert seed_text(before, after) == f"initial_status: {shown[0]} -> {shown[1]}; {note}"
+    for word in ("first,", "then ", "nothing starts"):
+        assert word not in note
+
+
+def test_dl561_a_status_change_can_start_the_job_the_note_warns_of():
+    """DL-561: the note's warning holds. An idle job seeded SUCCESS with `condition: n(P)` starts
+    when CHANGE_STATUS sets it INACTIVE, through its own condition."""
+    from datetime import datetime
+
+    from dsl41.ir import lower_source
+    from dsl41.oracle import Oracle
+    from dsl41.oracle_state import Event
+
+    oracle = Oracle(
+        lower_source(
+            "insert_job: P\njob_type: c\ncommand: x\nmachine: m1\nstatus: SUCCESS\n"
+            "condition: n(P)\n"
+        )
+    )
+    at = datetime(2026, 7, 1, 8, 0)
+    oracle.feed(Event(at=at, kind="STATUS", payload={"job": "P", "status": "INACTIVE"}))
+    row = oracle.store.job["P"]
+    assert (row.status, row.run_number) == ("RUNNING", 1)
 
 
 def test_a_mixed_reread_and_update_count_the_seed_on_its_own(tmp_path, style):

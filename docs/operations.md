@@ -29,10 +29,10 @@ questions.
   or it forecasts a `tree_active` refusal). A finding that would refuse the update at its
   preparation, such as a host-setting edit, is printed and does not change the exit status.
 - **New jobs.** Live at once, or held in the JIL with `status: ON_HOLD` and released by
-  a named person? A `status:` line seeds the hold, ice or noexec flag when the job's
-  row is made: on a root's first start and on a job an update adds. It is never
-  applied to a job an update keeps, so a hold an operator released stays released
-  (SEM-24, DL-531). To hold or release a job that exists, use `sendevent`
+  a named person? A `status:` line seeds the hold, ice or noexec flag, or a SUCCESS,
+  FAILURE or TERMINATED status with no run, when the job's row is made: on a root's
+  first start and on a job an update adds. It is never applied to a job an update
+  keeps, so a hold an operator released stays released (SEM-24, DL-531, DL-561). To hold or release a job that exists, use `sendevent`
   ([send the intervention](incident-triage.md#send-the-intervention)).
 - **State outside the files.** Holds, ice, noexec flags, globals and statuses set by
   hand live in the run root ([the fresh-root list](deploy.md#upgrade-the-engine)).
@@ -48,13 +48,17 @@ questions.
 
 An edit of only the `status:` line of a job that stays in the estate is not a reason to
 stop it (DL-533). The update records the new line, stops nothing for it and sets no flag
-for it, so a running job runs on. `reread` and `update` show the line
+or status for it, so a running job runs on. `reread` and `update` show the line
 with that note and count such jobs on their own, as `status line only`. A box whose
 own edit is its `status:` line and whose members change is the exception: `reread`
 counts it as changed (membership) and `update` counts it under `status line only`, and
 each command's counts add up to its jobs. The line takes
 effect when the job's row is made again: on a fresh root, or when a later update adds
-the job back. To hold or release the job now, use `sendevent`. Such a job inside a box
+the job back. To hold or release the job now, use `sendevent`. For a line to or from
+SUCCESS, FAILURE or TERMINATED the row says that the line is a seed and the update leaves
+the live job as it is. A flag is changed with its own `sendevent` event and a status with
+`sendevent CHANGE_STATUS`. Either acts on the job as it is now and can start it or the jobs
+that wait on it, so look at the job's current state first (DL-561). Such a job inside a box
 whose members the update changes counts as any member of that box: if it runs, the update
 is refused (DL-559) ([reload a changed estate](deploy.md#reload-a-changed-estate)).
 

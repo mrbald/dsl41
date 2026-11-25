@@ -1039,6 +1039,48 @@ def test_tier_c_inactive_window_scenario_matches_oracle_for_both_pairs() -> None
     assert not any(e.job == "consumer" and e.transition == "INACTIVE->STARTING" for e in and_trace)
 
 
+def _seeded_consumer(condition: str) -> CatalogIR:
+    """A producer `p` made in SUCCESS by its `status:` line, and a consumer gated also on `g`."""
+    return lower_source(
+        "insert_job: p\njob_type: c\ncommand: x\nmachine: m1\nstatus: SUCCESS\n\n"
+        "insert_job: g\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        f"insert_job: consumer\njob_type: c\ncommand: y\nmachine: m1\ncondition: ({condition}) & s(g)\n"
+    )
+
+
+def test_sem24_a_window_and_its_notrunning_spelling_are_equal_on_a_seeded_row() -> None:
+    """SEM-24 (DL-561): tier b calls `s(p,1.00)` and `s(p) & n(p,1.00)` equal. A seeded row has no
+    status time, and its n() takes the lookback check, so the oracle agrees: neither form starts
+    the consumer."""
+    window, spelled = "s(p, 1.00)", "s(p) & n(p, 1.00)"
+    verdict = conds_equivalent(parse_condition(window), parse_condition(spelled))
+    assert verdict.verdict == "equivalent"
+    script = [
+        Event(
+            at=datetime(2026, 1, 1, 8, 0), kind="STATUS", payload={"job": "g", "status": "SUCCESS"}
+        )
+    ]
+    result = equivalent_tier_c(_seeded_consumer(window), _seeded_consumer(spelled), [script])
+    assert result.equivalent
+    for condition in (window, spelled):
+        trace = Oracle(_seeded_consumer(condition)).run_script(script)
+        assert not any(entry.job == "consumer" for entry in trace)
+
+
+def test_sem24_a_bare_atom_and_a_window_are_unequal_and_a_seeded_row_shows_it() -> None:
+    """SEM-24 (DL-561): tier b calls `s(p)` and `s(p,1.00)` unequal, and a seeded row is a witness:
+    the bare atom reads the status, and the window reads false with no status time."""
+    verdict = conds_equivalent(parse_condition("s(p)"), parse_condition("s(p, 1.00)"))
+    assert verdict.verdict == "divergent"
+    script = [
+        Event(
+            at=datetime(2026, 1, 1, 8, 0), kind="STATUS", payload={"job": "g", "status": "SUCCESS"}
+        )
+    ]
+    result = equivalent_tier_c(_seeded_consumer("s(p)"), _seeded_consumer("s(p, 1.00)"), [script])
+    assert not result.equivalent
+
+
 def test_tier_c_inactive_short_window_scenario_matches_oracle() -> None:
     """Same shape, one window: the distributed n()|d()|n(w) form starts its
     consumer on bare n() alone (true for any notrunning job), while the

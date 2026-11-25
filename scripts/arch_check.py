@@ -108,10 +108,11 @@ NEAR_MISS_MIN_STATEMENTS = 5
 #: the schema as `description`, so correcting prose moves the hash while the
 #: shape stands still. The DL-151 `ResourceRef` docstring was re-pinned for
 #: exactly that at ir_version 0.2. DL-253 moved ir_version to 0.3: an
-#: absolute must time is a `MustTime`, whose hour runs to 71.
+#: absolute must time is a `MustTime`, whose hour runs to 71. DL-561 moved it
+#: to 0.4: `InitialStatus` holds SUCCESS, FAILURE and TERMINATED.
 IR_SCHEMA_PIN = {
-    "ir_version": "0.3",
-    "sha256": "e75c4d4914f142e21065f3230e7d2e93378bbcbff33cab55188ffeaa551a02cc",
+    "ir_version": "0.4",
+    "sha256": "1ef43e3c3261b9492acda2ae46751c795a2fb5e4695e790d4bcc2dee62fa54fe",
 }
 
 

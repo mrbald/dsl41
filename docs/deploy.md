@@ -1271,8 +1271,13 @@ A kept job whose only edit is its `status:` line is counted apart, as
 `status line only N`, in both commands. A box whose own edit is its `status:`
 line and whose members change is counted as changed (membership) by `reread`
 and under `status line only` by `update`; each command's counts add up. Its row shows the line's old and new value and says the
-edit itself sets no flag. Update stops nothing and changes no flag for that
-edit; use `sendevent` to hold or release the job. Such a job inside a box whose
+edit itself sets no flag. Update stops nothing and changes no flag or status for
+that edit; use `sendevent` to hold or release the job. For a line to or from
+SUCCESS, FAILURE or TERMINATED the row says that the line is a seed and the
+update leaves the live job as it is. A flag is changed with its own `sendevent`
+event and a status with `sendevent CHANGE_STATUS`. Either acts on the job as it
+is now and can start it or the jobs that wait on it, so look at the job's
+current state first (DL-561). Such a job inside a box whose
 members the update changes counts as any member of that box (DL-533, DL-559).
 
 Status in the CLI and TUI annotates changed and removed jobs with this forecast.
@@ -1371,6 +1376,16 @@ store keeps, or moves them to `expired_dir` when it is set. It keeps what
 is always kept: open runs, each job's last run, and plans while an update
 is prepared or stops. Set `expired_dir` before that start to keep the
 files; the archive holds neither attempt records nor job output.
+
+A release with DL-561 needs a fresh run root. It reads IR-F 0.4 only, and a
+root an earlier release wrote stores its configuration at IR-F 0.3. Its first
+start on such a root refuses, root unchanged, with `IR-F version 0.3 is retired
+(DL-561)` and the remedy. `history`, `runs` and the other readers of that root
+refuse the same way. Drain the root on the release that wrote it, keep that
+release to read the old root's history, and start the new release on a fresh
+run root with the [fresh-root steps](#upgrade-the-engine) below. Record the
+held and iced jobs first: a fresh root does not know them. The owner ruled
+this for now; it may change.
 
 For one package that replaces the engine at the unit's fixed executable path,
 use the following variant (DL-474). It also covers a package that carries estate

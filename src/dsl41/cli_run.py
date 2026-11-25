@@ -45,9 +45,10 @@ from dsl41.status_hook import HookSettings, StatusHooks, notify_once
 
 if TYPE_CHECKING:
     import asyncio
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from datetime import datetime
 
+    from dsl41.ir import JobIR
     from dsl41.lint import Violation
     from dsl41.oracle_state import Event, TraceEntry
     from dsl41.rehearse_check import CadencePolicy
@@ -1270,13 +1271,22 @@ def _scenario_adapter(scenario: Path | None) -> "tuple[FakeAdapter, list[Event]]
     return FakeAdapter(script, default=default, park=park), events
 
 
-def _rollup(trace: "list[TraceEntry]", catalog_jobs: Iterable[str]) -> dict[str, dict[str, Any]]:
+def _rollup(
+    trace: "list[TraceEntry]", catalog_jobs: "Mapping[str, JobIR]"
+) -> dict[str, dict[str, Any]]:
     """The per-job rollup rows: a run is a transition INTO STARTING and the final status is the
     last transition's target (out-of-band markers carry no "->" and count for neither).
-    Never-started catalog jobs appear with runs=0. The count stays STARTING-based (DL-184); the
-    cadence check reads run_number deltas from the store."""
+    Never-started catalog jobs appear with runs=0; one a `status:` line made in a run state shows
+    that status until a transition moves it (SEM-24, DL-561). The count stays STARTING-based
+    (DL-184); the cadence check reads run_number deltas from the store."""
+    from dsl41.oracle_state import seeded_status
+
     run_counts: dict[str, int] = {}
-    final_status: dict[str, str] = {}
+    final_status: dict[str, str] = {
+        name: seeded
+        for name, job in catalog_jobs.items()
+        if (seeded := seeded_status(job.sem.initial_status)) != "INACTIVE"
+    }
     for t in trace:
         _, arrow, new_status = t.transition.partition("->")
         if not arrow:
@@ -1291,7 +1301,9 @@ def _rollup(trace: "list[TraceEntry]", catalog_jobs: Iterable[str]) -> dict[str,
     }
 
 
-def _rehearsal_doc(trace: "list[TraceEntry]", catalog_jobs: Iterable[str]) -> dict[str, Any]:
+def _rehearsal_doc(
+    trace: "list[TraceEntry]", catalog_jobs: "Mapping[str, JobIR]"
+) -> dict[str, Any]:
     """The --format json document: the full trace plus the rollup rows, built only on the json
     path."""
     return {
@@ -1328,7 +1340,7 @@ def _emit_schedule_refusals(trace: list[TraceEntry]) -> None:
 
 
 def _emit_rehearsal(
-    trace: list[TraceEntry], catalog_jobs: Iterable[str], *, fmt: RehearseFormat
+    trace: list[TraceEntry], catalog_jobs: "Mapping[str, JobIR]", *, fmt: RehearseFormat
 ) -> None:
     """The rehearse report: the trace, and the per-job rollup ("which job fired how often",
     DL-180)."""

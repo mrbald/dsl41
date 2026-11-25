@@ -622,6 +622,54 @@ def test_cli_restart_rejects_invalid_capture_before_effects(
     assert k_root_bytes(root) == before
 
 
+@pytest.mark.parametrize("found", ["0.3", "0.9"])
+def test_dl561_a_run_root_at_another_ir_version_is_refused_by_name_before_effects(
+    short_root, monkeypatch, found
+):
+    """DL-561: a stored configuration at a retired IR-F version is refused at start by name, with
+    the remedy and no validation dump; another version is refused as unknown. Nothing is
+    written."""
+    import hashlib
+    import json
+    import sqlite3
+
+    from dsl41.canon import canonical_bytes
+    import dsl41.runner_procid
+
+    path = estate_file(short_root)
+    root, _ = k_seed(path)
+    payload = json.loads(read_config_row(root, 1))
+    payload["catalog"]["ir_version"] = found
+    data = canonical_bytes(payload)
+    with closing(sqlite3.connect(root / "engine.db", isolation_level=None)) as db:
+        db.execute(
+            "UPDATE configs SET data = ?, digest = ? WHERE rev = 1",
+            (data, "sha256:" + hashlib.sha256(data).hexdigest()),
+        )
+    (root / "leader.lock").unlink()
+    before = k_root_bytes(root)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("runtime effect before the IR version refusal")
+
+    monkeypatch.setattr(runner_startup, "Engine", forbidden)
+    monkeypatch.setattr(runner_startup, "_first_reading", forbidden)
+    monkeypatch.setattr(dsl41.runner_procid, "signal_ours", forbidden)
+    result = CliRunner().invoke(app, ["run", "--config", str(path)])
+    assert result.exit_code == 2, result.output
+    output = " ".join(result.output.split())
+    if found == "0.3":
+        assert "IR-F version 0.3 is retired (DL-561); this build reads IR-F 0.4 only" in output
+    else:
+        assert "unknown IR-F version '0.9'; this build reads IR-F 0.4 only" in output
+    assert (
+        "Root unchanged. Drain this run root on the build that wrote it, then start this build"
+        " on a fresh run root" in output
+    )
+    assert "validation error" not in output
+    assert k_root_bytes(root) == before
+
+
 @pytest.mark.usefixtures("k_bourne_account")
 @pytest.mark.parametrize("old_runtime_shape", [False, True])
 def test_interrupted_update_survives_distribution_version_change(

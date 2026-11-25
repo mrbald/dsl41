@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from dsl41.ir import CatalogIR
+from dsl41.ir import CatalogIR, check_ir_version
 from dsl41.lint import lint_summary_lines
 from dsl41.main_config import fingerprint, policy_report, prepare
 from dsl41.reload_diff import (
@@ -295,8 +295,19 @@ def preview(
     return result
 
 
+#: The engine and this worker are different builds when their IR-F versions differ: the package
+#: was replaced under a running engine. The installed build refuses that engine's root, so the
+#: remedy is the engine's own build or a fresh root (DL-561).
+_WORKER_REMEDY = (
+    "The engine runs another build than this worker: reread with the worker of the build the"
+    " engine runs, or drain that engine and start the installed build on a fresh run root"
+)
+
+
 def run(request: dict[str, Any]) -> dict[str, Any]:
     raw = request["live"]
+    # the engine's catalog is read as a stored one is (DL-561)
+    check_ir_version(raw["catalog"], where="reread: the engine's catalog", remedy=_WORKER_REMEDY)
     live = Live(**{**raw, "catalog": CatalogIR.model_validate(raw["catalog"])})
     path = Path(request["source"])
     candidate = prepare(path)

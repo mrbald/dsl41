@@ -182,6 +182,7 @@ relitigate an entry; append a new one.
   catalogs, which is the correct polarity (divergence surfaces, silent
   agreement never fabricated). (5) dsl -- resource() builder + status=
   kwarg emission keep the corpus-wide decompile round-trip property.
+  SUPERSEDED IN PART BY DL-561: `status:` also takes SUCCESS, FAILURE and TERMINATED.
 - DL-19 `~{$NAME}~` placeholder resolver as a NON-CORE preprocessor
   (placeholders.py + `dsl41 resolve`, 2026-07-09). Estate JIL is templated
   by an external properties mechanism BEFORE `jil` sees it; we reproduce
@@ -16291,6 +16292,7 @@ relitigate an entry; append a new one.
   (DL-50), E6, E10's fold=0 half (DL-45, DL-155), the four-value SEM-24
   model, the required `job_type`, and the WEKR reading (Q11). Each waits
   for a separate decision.
+  SUPERSEDED IN PART BY DL-561: `status:` also takes SUCCESS, FAILURE and TERMINATED.
 - DL-251 Escaped-colon time values accepted; must_*_times above 23:59
   stays a refusal, now named (2026-10-03; ir.py, minify_rules.py,
   autosys-semantics.md SEM-32/SEM-34, jil-statement-syntax.md rule 2)
@@ -28227,3 +28229,43 @@ relitigate an entry; append a new one.
   from `config intent` to `config applied` remains only for an update that stops jobs and for
   a resumed intent.
   OPEN. Until it exits, an engine whose loop raised after a swap answers from memory (BUG-117).
+- DL-561 `status:` takes SUCCESS, FAILURE and TERMINATED; IR-F moves to 0.4
+  (2026-11-25; FEAT-55; owner rulings on run roots; src/dsl41/ir.py, oracle_state.py,
+  oracle_reads.py, oracle.py, rehearse_check.py, equiv.py, cli_run.py, cli_output.py,
+  runner_config.py, reread_worker.py, simulation_register_rows.py,
+  scripts/arch_check.py; docs: autosys-semantics, authoring, ir-design, protocol-evolution,
+  deploy, operations, live-instance-runbook, citation-index)
+  THE RULE. (1) Lowering accepts SUCCESS, FAILURE and TERMINATED on CMD, FW and BOX. (2) The
+  row is made in that status at a root's first start and for a job an update adds; a carried
+  row and a kept job are untouched, and a line-only edit stays seed-only (DL-531, DL-533).
+  (3) The seed wakes nothing and writes no trace entry; a condition reads it at its next
+  evaluation. (4) No run, attempt, history opening or exit code; a new name starts at run 0, a
+  re-added one keeps its tombstone's run counter, revision step and flags, and a kept ON_ICE
+  reads first. (5) No times: a bare atom and `9999` read the status; a finite or zero
+  lookback, `n()` with one too, and an exit-code atom read false; only a never-run INACTIVE
+  row passes `n()` untimed. (6) A box start clears a member's seed; a box may be born seeded.
+  (7) The rehearsal's genesis truth reads the seed, and its could-fire credit starts from the
+  declared globals, so a legitimate first start is no `multi_fire`; its summaries show an
+  untouched seed's status with zero runs. (8) A cross-instance atom never reads a seeded run
+  state, a row in SUCCESS, FAILURE or TERMINATED with no status time; an injected status stamps
+  the time and reads as before. (9) A seed-only row to or from a run state says the line is a
+  seed and names a flag's own event and CHANGE_STATUS, in no order: each acts on the live job.
+  (10) IR_VERSION moves from 0.3 to 0.4. Every IR-F reader checks the version first
+  (`ir.check_ir_version`) and refuses 0.1, 0.2 and 0.3 by name, any other value as unknown,
+  each with its reader's remedy. A root at 0.3 is refused at start, unchanged: drain it on its
+  build, start this one on a fresh root.
+  THE CONTRACT. protocol-evolution gains the IR-F row and registry. The drain and fresh-root
+  rule covers the IR-F step from 0.3 to 0.4 only, the owner's ruling for now (§1 to §4); a
+  later IR-F version keeps the four steps. §3: a root under the rule belongs to its build.
+  THE REASON. The vendor allows the seven values, and a run-state seed lets "the downstream jobs
+  ... start when other jobs complete" (SEM-24). A job that runs again after each success needs
+  `status: SUCCESS` (authoring §1.2). No end time is invented: lookback reads end times, and a
+  newly inserted job has none (§9 Q18). The globals of (7) were a defect before this entry,
+  for an iced or never-run row; a run-state seed made it visible.
+  COST. Every catalog hash moves. This build cannot read a root an earlier one wrote, history
+  included.
+  UNCHANGED. The ON_HOLD, ON_ICE and ON_NOEXEC seeds; no wake at any seed; the state-machine
+  version, journal, snapshot and configuration format.
+  OPEN. Q18: what end time the vendor gives a job inserted in a run state. BUG-118: a local
+  job named like a cross-instance key shares its row. BUG-119: once retention drops a re-added
+  name's last run, the history fold shows that run with the seeded status.

@@ -722,24 +722,45 @@ scheduler runs with the variable unset can diverge here: an operator's force on 
 starts a second run there, and dsl41 refuses it.
 
 ### SEM-24 · `status:` at definition time **[V]**
-JIL can carry `status: ON_HOLD` on `insert_job`, box jobs included. The job is then created
-already in an out-of-band state, as an insert followed at once by a sendevent of the state. Source: "status Attribute — Set an Initial Status for a Job During Insertion"
-(TechDocs 12.0.01; AutoSys 24.2). The page states that the attribute cannot be used with
-update_job/override_job. The 24.2 page gives the full value set: "The valid values are FAILURE,
-INACTIVE, ON_HOLD, ON_ICE, ON_NOEXEC, SUCCESS, or TERMINATED." The default is INACTIVE. For an
-initial FAILURE, SUCCESS or TERMINATED it adds that "the downstream jobs can start when other
-jobs complete and utilize this job as a dependency."
-- Support limit: dsl41 models `INACTIVE` (the implicit default) and the SEM-20/21/22 states
-  `ON_HOLD` / `ON_ICE` / `ON_NOEXEC`. Lowering refuses `SUCCESS`, `FAILURE` and `TERMINATED`
-  loudly. Each would seed a SEM-01 latch at definition time, which is not modeled. Supporting
-  them is a separate decision.
-- Lowering: `Semantics.initial_status` (DL-18).
-- Oracle: seeds the SEM-20/21/22 flags before the first event. No trace entry (definition
-  state, not a transition).
+JIL can carry `status:` on `insert_job`, box jobs included. The job is created already in that
+status. Source: "status Attribute — Set an Initial Status for a Job During Insertion" (TechDocs
+12.0.01 and 12.1; AutoSys 24.2). The page states that the attribute cannot be used with
+update_job/override_job. The 24.2 page gives the value set: "The valid values are FAILURE,
+INACTIVE, ON_HOLD, ON_ICE, ON_NOEXEC, SUCCESS, or TERMINATED." The default is INACTIVE. The
+same page, in 12.1 and 24.2: "When you set the initial status of a job using the status
+attribute, downstream dependent jobs do not run. However, if you set the initial status to
+FAILURE, SUCCESS, or TERMINATED, the downstream jobs can start when other jobs complete and
+utilize this job as a dependency."
+- Lowering: `Semantics.initial_status` takes the seven values on CMD, FW and BOX jobs. Any other
+  value is refused (DL-18, DL-561).
+- Oracle: ON_HOLD, ON_ICE and ON_NOEXEC seed the SEM-20/21/22 flag on an INACTIVE row.
+  SUCCESS, FAILURE and TERMINATED make the row in that status with no run: no attempt, no
+  history opening, no exit code, no status time and no end time. A new name starts at run 0.
+  The seed writes no trace entry and wakes nothing: it is definition state, not a transition.
+  A condition that names the job reads the seeded status at its next evaluation, which another
+  job's status change, a tick or an operator's event causes (DL-561). A seed is no remote
+  observation: a cross-instance atom on the same key reads false until an injected status
+  stamps the row (SEM-07, DL-561).
+- Lookback on a seeded row (DL-561): a bare atom and a `9999` lookback read the status. A
+  finite or zero lookback reads false, as for a job that never ended, and so does `n()` with
+  one; only a never-run INACTIVE row passes `n()` untimed. An exit-code atom reads false. The
+  vendor defines lookback by end time: "The last run is defined as the ending time of the last
+  successful run of the job" ("condition Attribute -- Define Starting Conditions for a Job",
+  AutoSys 24.2). A vendor staff answer in Broadcom community thread 760251 states: "When a new
+  job is inserted it has no initial/previous end time." What end time a seeded job carries on
+  the vendor's product is open (§9 Q18).
+- Boxes: a box start clears a member's seed like any status left from an earlier run (SEM-10,
+  DL-242). A box may itself be born in a run state; it starts as a box that ended earlier does.
 - Update: the line seeds a row only when the row is made, on a root's first start and for a
   job an update adds. An update never applies it to a job it keeps, so a hold an operator
   released stays released (DL-531). An edit of only this line on a kept job is seed-only:
   the update names and stops nothing for it, and `reread` and `update` show it apart (DL-533).
+  A name an update adds back keeps what its tombstone kept: the run counter, so its next start
+  takes the next number, the revision step and the flags. A kept ON_ICE reads before the seeded
+  status (SEM-05, SEM-20).
+- Use: `status: SUCCESS` with an every-minute `start_mins` and `condition: s(self)` makes a job
+  that runs again after each success and stays down after a failure or a kill
+  ([authoring §1.2](authoring.md#12-run-a-job-again-after-each-success)).
 
 ---
 ## 4. Date/time scheduling
@@ -1404,7 +1425,7 @@ the materialization horizon does not exist for it. Only cycle-bound calendars tr
 | `n_retrys` | auto-restart on FAILURE only, for application failures (the vendor's examples: "cannot find a file or a command, permissions are not properly set"). A TERMINATED job "does not restart". "It does not apply to system or network failures" (TechDocs 12.0.01 n_retrys); those restart under the scheduler's `MaxRestartTrys` config parameter instead (12.1 MaxRestartTrys page: "governs retries due to system or network problems ... different from the n_retrys job definition attribute") **[V]** (Q4, DL-53). Live CMD jobs retry inside their live run (DL-485); play and rehearse do not retry; positive BOX/FW counts warn |
 | `auto_hold` | box member enters ON_HOLD automatically when box starts **[C/?]** |
 | `auto_delete` | definition lifecycle, not runtime; carried in IR-F `JobIR.passthrough`; real execution refuses it at preflight |
-| `status` (on insert) | definition-time out-of-band state (SEM-24) **[V]**. Support limit: the vendor allows seven values; dsl41 models INACTIVE, ON_HOLD, ON_ICE and ON_NOEXEC, and lowering refuses SUCCESS, FAILURE and TERMINATED |
+| `status` (on insert) | definition-time state (SEM-24) **[V]**: the vendor's seven values. ON_HOLD, ON_ICE and ON_NOEXEC seed a flag; SUCCESS, FAILURE and TERMINATED seed the row's status with no run and no times (DL-561) |
 | `job_type` | selects the modeled job kind: CMD, BOX or FW (SEM-10); lowering refuses every other type. Support limit: the vendor default is CMD ("job_type Attribute", AutoSys 24.2: "If you do not specify the job_type attribute in your job definition, the job type is set to CMD (the default)"), but lowering requires the attribute and refuses its absence. That an exported definition always carries it is expected, not measured |
 | `job_load`/`priority`/`machine_method`/QUE_WAIT, `machine` lists | the pre-11.3 load-balancing model; the IR carries these in `passthrough` and reads `job_load` and `priority` from there. The oracle honors `job_load` vs machine `max_load` as a capacity bucket and `priority` as QUE_WAIT waiter ordering, lower number first (DL-50). **[V]** TechDocs 24.2 (DL-247): only a positive priority checks machine load. The priority page: "If you do not set the priority attribute or the priority is set to 0, the job is not queued behind other jobs and runs immediately on a machine if resource dependencies permit ... The scheduler ignores any load unit values defined for the job or machine when the job has a priority value of zero." The queueing page: "even when jobs have a priority of 0, AutoSys Workload Automation tracks job loads on each machine so that jobs with non-zero priorities can be queued." So an unset or zero priority skips the load check but its load still counts against the machine for every other job; its `resources:` still gate it. The job_load page: a forced job "runs even if its load exceeds the machine's max_load value"; a FORCE_STARTJOB likewise skips the check, holds its load, and is gated by named resources. The queueing page: "A job in the QUE_WAIT state for one machine attribute value automatically blocks all the lower priority jobs that specify the same machine attribute value. It does not automatically block higher or equal priority jobs that specify the same machine attribute value or a job that specifies a different machine attribute value." The oracle applies that to a fresh start and to the readmission scan, for a waiter whose own load does not fit. A blocked job needs a positive priority on that machine, with or without a `job_load`. The readmission scan admits no blocked job past the waiter that blocks it. By default a job leaving QUE_WAIT does not re-check its starting conditions, which is the vendor's EvaluateQueuedJobStarts 0; the vendor's default is 1. dsl41's default is 0, and the `queued-recheck` semantic switch selects 1 or 2 (Qr6, DL-50, DL-257). Named-resource blocking, the RESWAIT-after-load corner and a forced job's reuse of the units it holds are in the `resources` row (DL-255, DL-256). Open: unset-priority order among resource waiters (Qr2), pools (Qr3); pool `machine:` lines are typed `MachineMember` rows (DL-49) and preflight resolves their locality; `machine_method`, member selection/routing and per-member `factor`/`max_load` are opaque placement |
 | `std_in_file`, `envvars` | CMD exec cluster (DL-32): stdin redirect (may reference a blob) + NAME=value environment list; typed carry on ExecSpec, `$$VAR` sites indexed (SEM-08); real execution refuses `envvars` at preflight outright, and refuses a `$$NAME` site in either field, since global substitution is not implemented (DL-240). Support limit: lowering refuses a repeated `envvars` line as a duplicate attribute. The vendor allows several ("envvars Attribute", AutoSys 24.2: "You can use multiple entries of envvars to define different sets of environment variables"). The workaround is one `envvars` line with a comma-separated list |
@@ -1598,7 +1619,23 @@ FORCE_STARTJOB on a non-live ON_ICE/ON_HOLD job clears the flag and runs, DL-243
 `test_sem23_after_force_clears_ice_a_later_plain_start_needs_no_off_event`,
 `test_sem23_force_start_clears_ice_even_when_run_window_then_refuses`) ·
 T24a initial ON_HOLD blocks then OFF_HOLD releases, T24b initial ON_ICE satisfies downstream
-(SEM-24) · T04 zero-lookback since-last-end anchor pinned both directions + Q2b first-run
+(SEM-24) · T24c a run-state seed: the row with no run, no times and no trace on CMD, FW and BOX,
+no wake at the seed, a consumer that reads it at its next evaluation or its tick, the
+self-restarting job, lookback and exit-code atoms, a box start that clears a member's seed and
+a box born in a run state (SEM-24, DL-561:
+`test_sem24_a_run_state_seed_makes_the_row_with_no_run_and_no_trace`,
+`test_sem24_the_seed_wakes_no_tickless_consumer`,
+`test_sem24_a_consumer_of_a_seed_and_a_live_job_starts_when_the_live_job_succeeds`,
+`test_sem24_a_scheduled_consumer_of_a_seed_starts_at_its_tick`,
+`test_sem24_the_self_restarting_job_runs_after_success_and_stays_down_after_an_end`,
+`test_sem24_lookback_and_exit_code_atoms_on_a_seeded_row`,
+`test_sem24_a_window_and_its_notrunning_spelling_agree_on_a_seeded_row`,
+`test_sem24_a_seeded_status_reads_in_a_window_once_the_job_ends_again`,
+`test_sem24_a_box_start_clears_a_members_seed`,
+`test_sem24_a_box_born_in_a_run_state_satisfies_its_consumers_and_starts`,
+`test_sem24_an_iced_seed_and_a_failure_seed_each_read_their_own_row`; outside the oracle
+suite, the IR, equivalence, rehearsal, lint, DSL, update, journal and view suites'
+`test_sem24_*`) · T04 zero-lookback since-last-end anchor pinned both directions + Q2b first-run
 corner, both cited (SEM-04, DL-54/DL-58: `test_sem04_zero_lookback_*`) · T32 arm-and-wait:
 tick arms, edge starts, start consumes (SEM-32, DL-54/DL-58: `test_sem32_*`), and start times
 across a DST change under both `dst-start-times` values (SEM-32, DL-260: `test_sem32_dst_*`) ·
@@ -1833,6 +1870,20 @@ each open question.
   and then FAILURE votes FAILURE. And an ON_ICE on a member that has not run in the box's run but
   ended FAILURE takes it out of the run and drops its vote, where a member that ran keeps its
   vote through the ice. The runbook's Q17 protocol settles all three.
+- Q18 (SEM-24, SEM-04, DL-561): open, pinned default. What end time a job inserted with
+  `status: SUCCESS`, FAILURE or TERMINATED carries on the vendor's product. Known: the "status
+  Attribute" page (AutoSys 12.1 and 24.2) lets the downstream jobs "start when other jobs
+  complete and utilize this job as a dependency" **[V]**, and "condition Attribute" (AutoSys
+  24.2) defines lookback by "the ending time of the last successful run of the job" **[V]**. A
+  vendor staff answer in Broadcom community thread 760251 states that a newly inserted job "has
+  no initial/previous end time", and that an event changing its status to FAILURE or SUCCESS
+  gives it one **[V]**. No sentence says whether the `status:` line counts as such an event.
+  The default: the seeded row has no status time and no end time, so a finite or zero lookback
+  on it reads false and its `n()` with one too, while a bare atom and a `9999` lookback read the
+  status. It is the safe side: a consumer that asks for a recent run waits for one, where an
+  invented time would start it on a run that never happened. No switch and no code marker: the
+  default follows the vendor's own statement about a newly inserted job. The runbook's Q18
+  protocol settles it.
 
 ## Sources
 Primary: Broadcom TechDocs, AutoSys Workload Automation 12.0/12.0.01/12.1/12.1.01 (Basic Box

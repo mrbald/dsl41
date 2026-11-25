@@ -211,7 +211,7 @@ nothing.
 | job_attr:shell | refused | runtime_policy.job_policy | - |  |  |  | generic | explicit JIL shell refuses; engine.job_shell is the configuration interface |
 | job_attr:start_mins | supported | SEM-32 | - |  |  |  | generic | the minutes past each hour a schedule tick fires at on an eligible day |
 | job_attr:start_times | supported | SEM-32 | - |  |  |  | generic | the wall-clock times a schedule tick fires at on an eligible day |
-| job_attr:status | supported | SEM-24 | - |  |  |  | generic | the definition-time status: only the out-of-band states are modelled, run states refuse |
+| job_attr:status | supported | SEM-24, DL-561 | - |  |  |  | generic | the definition-time status: the vendor's seven values; an out-of-band state seeds a flag, a run state seeds the status with no run |
 | job_attr:std_err_file | supported | runner_environment.resolve_streams, DL-447 | - |  |  |  | generic | explicit stderr uses the configured default mode (DL-492); > truncates before each launch, >> appends (DL-460); inert on a BOX (SEM-10); $VAR and ${VAR} resolve once before profile execution |
 | job_attr:std_in_file | supported | runner_adapters._build_run_spec | - |  |  |  | generic | the child reads stdin from here instead of /dev/null; inert on a BOX (SEM-10); $VAR and ${VAR} resolve once before profile execution (DL-447) |
 | job_attr:std_out_file | supported | runner_environment.resolve_streams, DL-447 | - |  |  |  | generic | explicit stdout uses the configured default mode (DL-492); > truncates before each launch, >> appends (DL-460); inert on a BOX (SEM-10); $VAR and ${VAR} resolve once before profile execution |
@@ -335,10 +335,13 @@ nothing.
 
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| initial_status:INACTIVE | supported | SEM-24 | - |  |  |  | generic | INACTIVE at definition time is modelled; run states are refused, never guessed |
-| initial_status:ON_HOLD | supported | SEM-24 | - |  |  |  | generic | ON_HOLD at definition time is modelled; run states are refused, never guessed |
-| initial_status:ON_ICE | supported | SEM-24 | - |  |  |  | generic | ON_ICE at definition time is modelled; run states are refused, never guessed |
-| initial_status:ON_NOEXEC | supported | SEM-24 | - |  |  |  | generic | ON_NOEXEC at definition time is modelled; run states are refused, never guessed |
+| initial_status:FAILURE | supported | SEM-24, DL-561 | - |  |  |  | generic | FAILURE at definition time makes the row in that status with no run and no times; the seed wakes nothing |
+| initial_status:INACTIVE | supported | SEM-24 | - |  |  |  | generic | INACTIVE at definition time is modelled: an INACTIVE row, flagged for an out-of-band value |
+| initial_status:ON_HOLD | supported | SEM-24 | - |  |  |  | generic | ON_HOLD at definition time is modelled: an INACTIVE row, flagged for an out-of-band value |
+| initial_status:ON_ICE | supported | SEM-24 | - |  |  |  | generic | ON_ICE at definition time is modelled: an INACTIVE row, flagged for an out-of-band value |
+| initial_status:ON_NOEXEC | supported | SEM-24 | - |  |  |  | generic | ON_NOEXEC at definition time is modelled: an INACTIVE row, flagged for an out-of-band value |
+| initial_status:SUCCESS | supported | SEM-24, DL-561 | - |  |  |  | generic | SUCCESS at definition time makes the row in that status with no run and no times; the seed wakes nothing |
+| initial_status:TERMINATED | supported | SEM-24, DL-561 | - |  |  |  | generic | TERMINATED at definition time makes the row in that status with no run and no times; the seed wakes nothing |
 
 ### machine_type
 
@@ -773,7 +776,7 @@ nothing.
 | literal_alt:And.kind=and | supported | SEM-03, ir-design ss3 | - |  |  |  | generic | the discriminator that makes an AND node readable back from JSON |
 | literal_alt:CalendarIR.kind=extended | supported | SEM-36, DL-36 | - |  |  |  | generic | a calendar of rules; `compile_calendar` reads it and refuses a standard one |
 | literal_alt:CalendarIR.kind=standard | supported | SEM-36, DL-36 | - |  |  |  | generic | a calendar of date rows; `standard_days` reads it and `holcal` requires it |
-| literal_alt:CatalogIR.ir_version=0.3 | supported | ir-design ss4 | - |  |  |  | generic | the IR version stamped on every catalog; a reader that meets another refuses |
+| literal_alt:CatalogIR.ir_version=0.4 | supported | ir-design ss4 | - |  |  |  | generic | the IR version stamped on every catalog; a reader that meets another refuses |
 | literal_alt:ExecSpec.kind=cmd | supported | SEM-10, ir-design ss4 | - |  |  |  | generic | the discriminator that selects the command exec spec |
 | literal_alt:ExitCodeAtom.kind=exitcode | supported | SEM-02, ir-design ss3 | - |  |  |  | generic | the discriminator of an exit-code atom |
 | literal_alt:FwSpec.kind=fw | supported | SEM-10, ir-design ss4 | - |  |  |  | generic | the discriminator that selects the file-watcher exec spec |

@@ -56,7 +56,9 @@ Interpreter decisions (each has a trace test; PENDING items keep switches):
   predecessor's last end (last_end_at) is at or after the evaluating job's last end (Q2a
   resolved by citation, DL-54). Both sides are end times, so an n() predecessor bounced to
   INACTIVE is not a fresh run; box overrides anchor on the box itself. Q2b resolved by citation
-  (DL-58): a never-ended evaluator has no anchor and the atom is satisfied.
+  (DL-58): a never-ended evaluator has no anchor and the atom is satisfied. A predecessor with
+  no status time, a seeded run status, fails a finite or zero lookback, and its n() takes the
+  check; only a never-run INACTIVE row passes n() untimed (SEM-24, DL-561).
 - ON_ICE (SEM-05/SEM-20, DL-243) splits by whether the atom carries a lookback qualifier. An
   atom with one, the zero form included, keeps the blanket pin: every status/exitcode atom on an
   iced predecessor evaluates TRUE, f()/t()/e() included, lookback ignored (DL-13, Q6-adjacent;
@@ -92,8 +94,10 @@ Interpreter decisions (each has a trace test; PENDING items keep switches):
   hold or the queue retries its start. On a box it is CHANGE_STATUS INACTIVE for the box (the
   SEM-18 cascade), and every contained job at every level takes the flag; OFF_NOEXEC on a box
   clears them all (DL-254).
-- initial_status (SEM-24, DL-18): definition-time ON_HOLD/ON_ICE/ON_NOEXEC seeds the flag before
-  the first event, with no trace entry. INACTIVE is the default.
+- initial_status (SEM-24, DL-18, DL-561): definition-time ON_HOLD/ON_ICE/ON_NOEXEC seeds the
+  flag before the first event, and SUCCESS/FAILURE/TERMINATED makes the row in that status with
+  no run, no exit code and no times. The seed has no trace entry and wakes nothing; a condition
+  that names the job reads it at its next evaluation. INACTIVE is the default.
 - Boxes:
   SEM-10: members start when the box is RUNNING and their own condition holds, at most once per
   box run; a box start resets every contained job that is not live to INACTIVE (DL-242).
@@ -266,6 +270,7 @@ from dsl41.oracle_state import (
     JobRuntime,
     OracleError,
     TraceEntry,
+    seeded_status,
 )
 from dsl41.oracle_writers import OracleWriters
 from dsl41.scan_chart import IDLE as SCAN_IDLE
@@ -498,8 +503,8 @@ class Oracle(OracleWriters):
         is checked before the first write: each removed job has a row, and each added job has
         none, so a refused swap changes nothing. A removed job's row ends into a
         tombstone (`RuntimeState.retire_job`), its units settled under the pool of the
-        definition it ran under. An added job gets an INACTIVE row with the flags its
-        `initial_status` seeds (SEM-24), plus any flag a tombstone of the name kept. Globals,
+        definition it ran under. An added job gets a row in the status and with the flags its
+        `initial_status` seeds (SEM-24, DL-561), plus any flag a tombstone of the name kept. Globals,
         `consumed`, the clock, the trace and the timers of kept jobs are untouched. The indexes,
         the item cap and the job instances are rebuilt from the new catalog. Between inputs only.
         """
@@ -537,6 +542,7 @@ class Oracle(OracleWriters):
             kept = self.store.tombstones.get(job)
             self.store.admit_job(
                 job,
+                status=seeded_status(initial),
                 on_hold=initial == "ON_HOLD" or (kept is not None and kept.on_hold),
                 on_ice=initial == "ON_ICE" or (kept is not None and kept.on_ice),
                 on_noexec=initial == "ON_NOEXEC" or (kept is not None and kept.on_noexec),

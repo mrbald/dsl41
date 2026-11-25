@@ -1428,3 +1428,31 @@ def test_query_history_refuses_by_name_what_it_does_not_take(
     result, sent = _query(monkeypatch, *arguments)
     assert result.exit_code == 2 and error in result.output
     assert sent == []
+
+
+@pytest.mark.parametrize("seed", ["SUCCESS", "FAILURE", "TERMINATED"])
+def test_sem24_a_seeded_row_shows_its_status_with_no_time_and_no_run(
+    tmp_path: Path, seed: str
+) -> None:
+    """SEM-24 (DL-561): `status` shows a row a `status:` line made in a run state with no status
+    time, run 0, no exit code and no start; `history` lists no run of it, and the trace holds no
+    entry for it."""
+    root = tmp_path / "run"
+    text = _JIL + f"\ninsert_job: s\njob_type: c\ncommand: y\nstatus: {seed}\n"
+
+    async def scenario() -> tuple[Any, Any, list[TraceEntry]]:
+        engine = _start_engine(root, text)
+        await engine.run_until_quiescent(_at(1))
+        server = _server(engine, root)
+        status = await server._respond({"cmd": "status"})
+        found = await server._respond({"cmd": "history", "job": "s"})
+        trace = engine.oracle.trace()
+        await _close(engine)
+        return status, found, trace
+
+    status, found, trace = asyncio.run(scenario())
+    row = status["jobs"]["s"]
+    assert (row["status"], row["status_at"], row["run_number"]) == (seed, None, 0)
+    assert (row["exit_code"], row["started_by"]) == (None, None)
+    assert found["ok"] is True and found["runs"] == []
+    assert not [entry for entry in trace if entry.job == "s"]

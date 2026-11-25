@@ -20,9 +20,9 @@ Rules, each pinned by a test:
   (DL-18), and the autocal_asc statements calendar, cycle and extended_calendar, carried
   opaquely (DL-36). update_, delete_ and override_ forms are lowering errors: merging them is
   semantics, and guessing it would be silent loss.
-- SEM-24 [A] (DL-18): `status:` on insert_job lowers to Semantics.initial_status, limited to
-  INACTIVE, ON_HOLD, ON_ICE and ON_NOEXEC. Run states would interact with the SEM-01 latch and
-  are refused.
+- SEM-24 (DL-18, DL-561): `status:` on insert_job lowers to Semantics.initial_status, one of
+  the vendor's seven values: INACTIVE, ON_HOLD, ON_ICE, ON_NOEXEC, SUCCESS, FAILURE and
+  TERMINATED. Any other value is refused.
 - DL-21: the `resources:` attribute lowers to typed JobIR.resources (name, QUANTITY, FREE per
   group, AND separator); malformed groups are errors. QUANTITY is required. An absent FREE
   stays None, because the engine default is not guessed.
@@ -120,10 +120,12 @@ TIME_CLUSTER = frozenset(
 
 _JOB_TYPE_MAP = {"c": "CMD", "cmd": "CMD", "b": "BOX", "box": "BOX", "f": "FW", "fw": "FW"}
 
-#: SEM-24 [A]: `status:` at definition time. Only the implicit default and the
-#: SEM-20/21/22 out-of-band states are modeled; run states (SUCCESS, ...) would
-#: interact with the SEM-01 latch and are refused, never guessed.
-InitialStatus = Literal["INACTIVE", "ON_HOLD", "ON_ICE", "ON_NOEXEC"]
+#: SEM-24 (DL-561): `status:` at definition time takes the vendor's seven values: the implicit
+#: default, the SEM-20/21/22 out-of-band states and the three run states, whose row is made in
+#: that status with no run.
+InitialStatus = Literal[
+    "INACTIVE", "ON_HOLD", "ON_ICE", "ON_NOEXEC", "SUCCESS", "FAILURE", "TERMINATED"
+]
 _INITIAL_STATUSES: frozenset[str] = frozenset(get_args(InitialStatus))
 _TRUTHY = frozenset({"1", "y", "yes", "true"})
 _FALSY = frozenset({"0", "n", "no", "false"})
@@ -149,8 +151,45 @@ _REL_OFFSET_RE = re.compile(r"\+[0-9]+")
 #: the range (DL-251, DL-253).
 _HHMM_RE = re.compile(r"(\d{1,2}):(\d{2})")
 
-#: SlaSpec.times holds MustTime, whose hour runs to 71 (DL-253).
-IR_VERSION: Literal["0.3"] = "0.3"
+#: SlaSpec.times holds MustTime, whose hour runs to 71 (DL-253); `InitialStatus` holds the run
+#: states (DL-561).
+IR_VERSION: Literal["0.4"] = "0.4"
+
+#: The IR-F versions a reader refuses by name, with the entry that retired each
+#: (protocol-evolution ss6). This build keeps no reader for them (DL-561).
+RETIRED_IR_VERSIONS: dict[str, str] = {"0.1": "DL-73", "0.2": "DL-253", "0.3": "DL-561"}
+
+
+class IRVersionError(ValueError):
+    """A stored or emitted IR-F is at a version this build does not read (DL-561)."""
+
+
+def check_ir_version(payload: object, *, where: str, remedy: str) -> None:
+    """Refuse an IR-F payload whose `ir_version` is not this build's, before it is validated.
+
+    A retired version is refused by name with its entry; any other value, or none, is refused as
+    unknown (protocol-evolution ss6, DL-561). Both refusals end with the caller's `remedy`, what
+    the reader of that payload does next. A payload that is no object is malformed, not of
+    another version: validation refuses it with its own error."""
+    if not isinstance(payload, dict):
+        return
+    found = payload.get("ir_version")
+    if found == IR_VERSION:
+        return
+    if isinstance(found, str) and found in RETIRED_IR_VERSIONS:
+        raise IRVersionError(
+            f"{where}: IR-F version {found} is retired ({RETIRED_IR_VERSIONS[found]});"
+            f" this build reads IR-F {IR_VERSION} only. {remedy}"
+        )
+    raise IRVersionError(
+        f"{where}: unknown IR-F version {found!r}; this build reads IR-F {IR_VERSION} only."
+        f" {remedy}"
+    )
+
+
+#: What a reader of a saved catalog does at another IR-F version: no build converts one, so the
+#: catalog is lowered again from its JIL (DL-561).
+SAVED_CATALOG_REMEDY = "Lower the catalog again from its JIL with this build"
 
 
 def jil_boolean_value(text: str) -> bool | None:
@@ -378,7 +417,7 @@ class Semantics(BaseModel):
     box_success: CondAttr | None = None  # box jobs only; SEM-12
     box_failure: CondAttr | None = None
     auto_hold: bool = False
-    initial_status: InitialStatus | None = None  # SEM-24 [A]: `status:` on insert
+    initial_status: InitialStatus | None = None  # SEM-24, DL-561: `status:` on insert
 
     def exit_is_success(self, exit_code: int) -> bool:
         """SEM-09 verdict with this job's configured boundary (DL-33)."""
@@ -670,7 +709,7 @@ class CatalogIR(BaseModel):
 
     model_config = ConfigDict(validate_assignment=True)
 
-    ir_version: Literal["0.3"] = IR_VERSION
+    ir_version: Literal["0.4"] = IR_VERSION
     jobs: dict[str, JobIR] = {}
     globals_declared: dict[str, str] = {}  # insert_global
     external_instances: dict[str, XinstIR] = {}  # insert_xinst (SEM-07), plumbing opaque (DL-28)
@@ -697,7 +736,10 @@ def dump_catalog(catalog: CatalogIR) -> str:
 
 
 def load_catalog(text: str) -> CatalogIR:
-    return CatalogIR.model_validate(json.loads(text))
+    """A catalog `dump_catalog` wrote, refused by `check_ir_version` at another IR version."""
+    payload = json.loads(text)
+    check_ir_version(payload, where="catalog", remedy=SAVED_CATALOG_REMEDY)
+    return CatalogIR.model_validate(payload)
 
 
 def tool_version() -> str:
@@ -1250,9 +1292,9 @@ class _Lowerer:
                 sem.initial_status = cast(InitialStatus, value)
             else:
                 self.err(
-                    f"status: {attr.raw_value.strip()!r} is not a modeled definition-time"
-                    " status (SEM-24 models INACTIVE/ON_HOLD/ON_ICE/ON_NOEXEC; run states"
-                    " would interact with the SEM-01 latch -- refusing to guess)",
+                    f"status: {attr.raw_value.strip()!r} is not a definition-time status"
+                    " (SEM-24: FAILURE, INACTIVE, ON_HOLD, ON_ICE, ON_NOEXEC, SUCCESS or"
+                    " TERMINATED)",
                     attr.span,
                 )
         return sem

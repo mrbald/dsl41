@@ -28,6 +28,34 @@ from test_main_config import JOB, PYTHON, T0, config_file, estate_file
 from update_legacy import legacy_admission, separate_writes
 
 
+@pytest.mark.parametrize(
+    ("found", "message"),
+    [
+        ("0.3", "IR-F version 0.3 is retired (DL-561); this build reads IR-F 0.4 only"),
+        ("7", "unknown IR-F version '7'; this build reads IR-F 0.4 only"),
+    ],
+)
+def test_dl561_the_reread_worker_refuses_an_engine_catalog_at_another_ir_version(
+    tmp_path, found, message
+):
+    """DL-561: the worker reads the engine's catalog as a stored one is read, before it builds the
+    live record."""
+    from dsl41.ir import IRVersionError
+    from dsl41.reread_worker import run
+
+    path = estate_file(tmp_path)
+    catalog = main.prepare(path).catalog.model_dump(mode="json")
+    catalog["ir_version"] = found
+    request = {"source": str(path), "run_root": str(tmp_path), "update": False}
+    with pytest.raises(IRVersionError) as caught:
+        run({**request, "live": {"catalog": catalog}})
+    assert str(caught.value) == (
+        f"reread: the engine's catalog: {message}. The engine runs another build than this"
+        " worker: reread with the worker of the build the engine runs, or drain that engine and"
+        " start the installed build on a fresh run root"
+    )
+
+
 @pytest.mark.usefixtures("cli_env")
 @pytest.mark.parametrize("wait", [False, True])
 @pytest.mark.parametrize("cleanup", ["ok", "missing", "permission"])

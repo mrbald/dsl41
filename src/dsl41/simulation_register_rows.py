@@ -1048,9 +1048,9 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             surface="job_attr",
             member="status",
             klass=SUPPORTED,
-            cite="SEM-24",
-            effect="the definition-time status: only the out-of-band states are modelled,"
-            " run states refuse",
+            cite="SEM-24, DL-561",
+            effect="the definition-time status: the vendor's seven values; an out-of-band"
+            " state seeds a flag, a run state seeds the status with no run",
             trigger=_job(
                 "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", status="ON_HOLD"
             ),
@@ -1774,7 +1774,17 @@ VALUE_ROWS: tuple[Row, ...] = (
         ("INACTIVE", "ON_HOLD", "ON_ICE", "ON_NOEXEC"),
         klass=SUPPORTED,
         cite="SEM-24",
-        effect="{member} at definition time is modelled; run states are refused, never guessed",
+        effect="{member} at definition time is modelled: an INACTIVE row, flagged for an"
+        " out-of-band value",
+        trigger=lambda m: _job(status=m),
+    )
+    + _rows(
+        "initial_status",
+        ("SUCCESS", "FAILURE", "TERMINATED"),
+        klass=SUPPORTED,
+        cite="SEM-24, DL-561",
+        effect="{member} at definition time makes the row in that status with no run and no"
+        " times; the seed wakes nothing",
         trigger=lambda m: _job(status=m),
     )
     + tuple(
@@ -4408,7 +4418,7 @@ LITERAL_ALT_ROWS: tuple[Row, ...] = (
     ),
     _row(
         surface="literal_alt",
-        member="CatalogIR.ir_version=0.3",
+        member="CatalogIR.ir_version=0.4",
         klass=SUPPORTED,
         cite="ir-design ss4",
         effect="the IR version stamped on every catalog; a reader that meets another refuses",

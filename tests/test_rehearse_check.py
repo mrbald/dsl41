@@ -26,7 +26,7 @@ from typer.testing import CliRunner
 
 from dsl41 import runner_procid, runner_stops
 from dsl41.cli import app
-from dsl41.conditions import StatusAtom, iter_atoms
+from dsl41.conditions import GlobalAtom, StatusAtom, iter_atoms
 from dsl41.derive import derive_graph
 from dsl41.equiv import global_regions
 from dsl41.ir import lower_source
@@ -1374,6 +1374,10 @@ def test_cli_rehearsal_schedule_refusal_lists(
                 assert heading not in result.output
 
 
+#: the one-job catalog whose jobs the report rows are built over
+_CATALOG_A = lower_source("insert_job: a\njob_type: c\ncommand: x\nmachine: m1\n")
+
+
 @pytest.mark.parametrize(
     "at, legacy_at",
     [
@@ -1389,7 +1393,7 @@ def test_rehearsal_trace_without_facts_preserves_legacy_json_bytes(at: str, lega
     entry = TraceEntry(
         at=datetime.fromisoformat(at), job="a", transition="START_REFUSED", cause="opaque"
     )
-    [actual] = _rehearsal_doc([entry], ["a"])["trace"]
+    [actual] = _rehearsal_doc([entry], _CATALOG_A.jobs)["trace"]
     expected = {"at": legacy_at, "job": "a", "transition": "START_REFUSED", "cause": "opaque"}
     assert json.dumps(actual).encode() == json.dumps(expected).encode()
     assert list(actual) == ["at", "job", "transition", "cause"]
@@ -1416,7 +1420,7 @@ def test_rehearsal_report_excludes_operator_and_non_live_scheduler_refusals() ->
                 update={"start_source": None, "run_number": None, "refused_status": None}
             ),
         ],
-        ["a"],
+        _CATALOG_A.jobs,
     )
     assert doc["schedule_fired_while_running"] == doc["schedule_fired_while_queued"] == {}
     assert set(doc["trace"][-1]) == {"at", "job", "transition", "cause"}
@@ -1906,7 +1910,54 @@ def test_flag_sweep_genesis_true_atoms_earn_the_at_start_credit() -> None:
         if isinstance(a, StatusAtom)
     }
     assert truth(atoms["NOTRUNNING"]) is True  # never-run partner is notrunning
-    assert truth(atoms["SUCCESS"]) is False  # SEM-24 cannot seed a terminal
+    assert truth(atoms["SUCCESS"]) is False  # an unseeded job is INACTIVE at genesis
+
+
+@pytest.mark.parametrize("status", ["SUCCESS", "FAILURE", "TERMINATED"])
+def test_sem24_the_flag_sweep_credits_a_first_start_a_run_state_seed_allows(status: str) -> None:
+    """SEM-24 (DL-561): an at-start set of the flag finds the seeded status true, so the consumer's
+    one start is in bound and no `multi_fire` is reported."""
+    atom = {"SUCCESS": "s", "FAILURE": "f", "TERMINATED": "t"}[status]
+    text = (
+        f"insert_job: seeded\njob_type: c\ncommand: x\nmachine: m1\nstatus: {status}\n\n"
+        "insert_job: gated\njob_type: c\ncommand: y\nmachine: m1\n"
+        f"condition: {atom}(seeded) & v(F24) = 1\n"
+    )
+    catalog = lower_source(text)
+    graph = derive_graph(catalog)
+    ticks = scheduled_ticks(catalog, start=START, horizon=HORIZON)
+    adapter, parked_fw, no_success = check_adapter(catalog, FakeAdapter({}, default=(0.0, 0)))
+    fcases, findings, uncovered = run_flag_sweep(
+        catalog,
+        graph,
+        ticks,
+        adapter,
+        [],
+        start=START,
+        horizon=HORIZON,
+        parked=parked_fw,
+        no_success_exit=no_success,
+    )
+    assert uncovered == []
+    assert fcases and all(case.checked == 1 for case in fcases)
+    assert findings == []
+
+
+def test_sem24_genesis_truth_reads_a_run_state_seed_with_no_times() -> None:
+    """SEM-24 (DL-561): a seeded row's status meets bare and `9999` atoms; a finite or zero
+    lookback reads false, n() included; an exit-code atom reads false."""
+    text = (
+        "insert_job: a\njob_type: c\ncommand: x\nmachine: m1\nstatus: SUCCESS\n\n"
+        "insert_job: p\njob_type: c\ncommand: y\nmachine: m1\n"
+        "condition: s(a) | s(a, 9999) | d(a) | n(a) | f(a) | s(a, 1.00) | s(a, 0) | n(a, 1.00)"
+        " | e(a) = 0\n"
+    )
+    catalog = lower_source(text)
+    cond = catalog.jobs["p"].sem.condition
+    assert cond is not None
+    truth = genesis_truth(catalog)
+    read = [truth(atom) for atom in iter_atoms(cond.cond) if not isinstance(atom, GlobalAtom)]
+    assert read == [True, True, True, True, False, False, False, False, False]
 
 
 def test_flag_case_checked_counts_only_wake_dependent_global_consumers() -> None:
@@ -1981,6 +2032,45 @@ def test_run_flag_sweep_base_scenario_set_global_joins_the_scripted_set() -> Non
     # base H first: F unset, condition false, no credit; F=1 makes it true
     # (+1); the second H=2 re-wakes while still true (+1)
     assert bounds["cons"].expected == 2
+
+
+_SEEDED_FLAG_JIL = (
+    "insert_global: B\nvalue: 1\n\n"
+    "insert_job: P\njob_type: c\ncommand: x\nmachine: m1\nstatus: SUCCESS\n\n"
+    "insert_job: C\njob_type: c\ncommand: y\nmachine: m1\n"
+    "condition: (s(P) & v(B)=1) | v(A)=1\n"
+)
+
+
+def test_sem24_the_flag_sweep_credits_a_set_against_the_declared_globals(tmp_path: Path) -> None:
+    """SEM-24, DL-184 (DL-561): the could-fire credit starts from the declared globals, as the
+    oracle's genesis does. Clearing A while the declared B is 1 and the seeded P is SUCCESS starts
+    C once, legitimately, so the sweep reports no `multi_fire` and the rehearsal exits 0."""
+    jil = tmp_path / "flags.jil"
+    jil.write_text(_SEEDED_FLAG_JIL)
+    args = ["--start", "2026-09-01T00:00:00", "--hours", "24", "--check-cadence"]
+    result = cli_runner.invoke(app, ["rehearse", str(jil), *args, "--sweep", "flags"])
+    assert result.exit_code == 0, result.output
+    assert "multi_fire" not in result.output
+
+
+@pytest.mark.parametrize("status", ["SUCCESS", "FAILURE", "TERMINATED"])
+def test_sem24_the_rehearsal_summaries_show_an_untouched_seed(tmp_path: Path, status: str) -> None:
+    """SEM-24 (DL-561): a job a `status:` line made in a run state, which nothing moves, shows
+    that status with zero runs and no trace entry in the JSON and the text summaries."""
+    import json
+
+    jil = tmp_path / "seed.jil"
+    jil.write_text(f"insert_job: S\njob_type: c\ncommand: x\nmachine: m1\nstatus: {status}\n")
+    args = ["rehearse", str(jil), "--start", "2026-09-01T00:00:00", "--hours", "1"]
+    as_json = cli_runner.invoke(app, [*args, "--format", "json"])
+    assert as_json.exit_code == 0, as_json.output
+    doc = json.loads(as_json.output)
+    assert doc["jobs"]["S"] == {"runs": 0, "final_status": status}
+    assert doc["trace"] == []
+    as_text = cli_runner.invoke(app, [*args, "--format", "summary"])
+    assert as_text.exit_code == 0, as_text.output
+    assert f"S runs=0 final={status}" in as_text.output.splitlines()
 
 
 # --------------------------------------------------------------- CLI: --sweep fail

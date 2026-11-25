@@ -1087,6 +1087,89 @@ def test_catalog_order_survives_store_replay_restart_and_reload(tmp_path: Path, 
     asyncio.run(scenario())
 
 
+_SEEDED_JIL = (
+    "insert_job: SEEDED\njob_type: c\ncommand: x\nmachine: m1\nstatus: SUCCESS\n\n"
+    "insert_job: GATE\njob_type: c\ncommand: x\nmachine: m1\n\n"
+    "insert_job: CONSUMER\njob_type: c\ncommand: x\nmachine: m1\n"
+    "condition: s(SEEDED) & s(GATE)\n\n"
+)
+_ADDED_JIL = "insert_job: ADDED\njob_type: c\ncommand: x\nmachine: m1\nstatus: TERMINATED\n\n"
+
+
+@pytest.mark.parametrize("route", ["genesis", "update"])
+def test_sem24_seeded_rows_are_the_same_from_a_snapshot_a_replay_and_a_restart(
+    tmp_path: Path, route: str
+) -> None:
+    """SEM-24 (DL-561): a row a `status:` line seeds, at genesis or for a job an update adds, is
+    the same row in the live engine, in a snapshot, in a full replay of the store and after a
+    restart; a consumer reads it at its next evaluation."""
+
+    async def scenario() -> None:
+        root = tmp_path / "run"
+        clock = VirtualClock(start=T0)
+        adapter = FakeAdapter(default=None)
+        estate = tmp_path / "estate"
+        estate.mkdir()
+        write_config(estate, engine='machine_policy = "local-eligible"\nas_machine = ["m1"]\n')
+        (estate / "jobs.jil").write_text(_SEEDED_JIL)
+        initial = prepare_estate(estate)
+        engine = start_run(
+            initial.catalog,
+            root,
+            source_capture=main.encoded_parts(initial),
+            launched=main.profile_of(initial),
+            clock=clock,
+            adapters={"CMD": adapter},
+        )
+        try:
+            if route == "update":
+                (estate / "jobs.jil").write_text(_SEEDED_JIL + _ADDED_JIL)
+                candidate = prepare_estate(estate)
+                plan = reread(engine.update.live(), root / "plans", candidate=candidate, start=T0)
+                pending = engine.request_update(
+                    UpdateRequest(plan.token, 1, engine.baseline_id, "seed-update")
+                )
+                await engine.run_until_quiescent(T0)
+                assert pending.result().applied is not None
+                row = engine.oracle.store.job["ADDED"]
+                assert (row.status, row.run_number, row.status_at) == ("TERMINATED", 0, None)
+            seeded = engine.oracle.store.job["SEEDED"]
+            assert (seeded.status, seeded.run_number, seeded.status_at) == ("SUCCESS", 0, None)
+            engine.inject(ev("STARTJOB", job="GATE"))
+            engine.inject(ev("STATUS", 1, job="GATE", status="SUCCESS"))
+            await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+            assert engine.oracle.store.job["CONSUMER"].status == "RUNNING"
+            assert not [entry for entry in engine.oracle.trace() if entry.job == "SEEDED"]
+            live = dict(engine.oracle.store.job)
+            seq = engine.take_snapshot()
+            assert engine.journal is not None
+            store = engine.journal.store
+            stored = store.latest_snapshot()
+            assert stored is not None and stored.seq == seq
+            snapshot = decode_snapshot(stored.seq, stored.data, where="seeded")
+            assert dict(snapshot.rows.jobs) == live
+            replayed = replay_store(store, where="seeded")
+            assert replayed.anchor is None  # nothing pruned: a full replay from genesis
+            assert replayed.oracle.store.job == live
+            await engine.shutdown()
+            engine.journal.close()
+            engine = await resume_run(
+                active_configuration(root).catalog,
+                root,
+                clock=clock,
+                adapters={"CMD": adapter},
+                stored_sources=True,
+            )
+            await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+            assert engine.oracle.store.job == live
+        finally:
+            await engine.shutdown()
+            assert engine.journal is not None
+            engine.journal.close()
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize(
     ("plan", "count", "message"),
     [

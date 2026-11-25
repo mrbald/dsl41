@@ -48,7 +48,7 @@ from dsl41.conditions import (
 )
 from dsl41.derive import DerivedGraph, cycles, local_producer, start_gates
 from dsl41.ir import CatalogIR, JobIR
-from dsl41.oracle_state import Event
+from dsl41.oracle_state import Event, seeded_status
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import EngineError, VirtualClock, ZeroDelayCycleError
@@ -474,20 +474,29 @@ def _cond_could_fire(
 def genesis_truth(catalog: CatalogIR) -> Callable[[StatusAtom | ExitCodeAtom], bool]:
     """Job-atom truth at a fresh genesis (the at-start wake-credit side of the flag sweep).
 
-    SEM-24 can seed only INACTIVE/ON_HOLD/ON_ICE/ON_NOEXEC, never a terminal, so s/f/d/t and
-    exit-code atoms are FALSE at genesis. Two exceptions: bare or qualified n() is TRUE (a
-    never-run partner is notrunning, the oracle's reading), and an atom naming an ON_ICE seed
-    reads the iced row (`iced_atom_truth`, SEM-05/SEM-20, DL-243) at the default switch, as a
-    static estimate reads it (DL-252)."""
+    A job's row at genesis is INACTIVE unless a `status:` line seeds it, so s/f/d/t and
+    exit-code atoms are FALSE and bare or qualified n() is TRUE (a never-run partner is
+    notrunning, the oracle's reading). An atom naming an ON_ICE seed reads the iced row
+    (`iced_atom_truth`, SEM-05/SEM-20, DL-243) at the default switch, as a static estimate reads
+    it (DL-252). An atom naming a SUCCESS, FAILURE or TERMINATED seed reads that status, so a
+    first start it allows is credited; the row has no times, so a finite or zero lookback reads
+    false, n() included, and an exit-code atom reads false (SEM-24, DL-561)."""
 
     def truth(atom: StatusAtom | ExitCodeAtom) -> bool:
+        status: str = "INACTIVE"
         if atom.job.instance is None:
             job = catalog.jobs.get(atom.job.name)
             if job is not None and job.sem.initial_status == "ON_ICE":
                 return iced_atom_truth(atom, DEFAULTS.ice_lookback)
+            if job is not None:
+                status = seeded_status(job.sem.initial_status)
         if isinstance(atom, ExitCodeAtom):
             return False
-        return atom.status == "NOTRUNNING"
+        if status == "INACTIVE":
+            return atom.status == "NOTRUNNING"
+        timed = atom.lookback is not None and atom.lookback.kind != "indefinite"
+        hit = atom.status in ("NOTRUNNING", "DONE") or atom.status == status
+        return hit and not timed
 
     return truth
 
@@ -809,10 +818,12 @@ def expected_bounds(
       whole condition, with globals at their values so far (unset -> False for every operator,
       the oracle's reading) and job atoms at their genesis truth for at-start sets, or
       optimistic-TRUE for mid-window sets (latches can be true by then; over-credit is the safe
-      direction). At genesis bare/qualified n() is TRUE; an ON_ICE seed satisfies a
+      direction). At genesis job atoms read `genesis_truth`: an unseeded job's bare/qualified
+      n() is TRUE and its s/f/d/t and exit codes false; an ON_ICE seed satisfies a
       lookback-qualified atom on that job (SEM-05) but an ordinary one only for
-      success/done/notrunning, never failure/terminated/exitcode (SEM-20, DL-243); s/f/d/t and
-      exit codes are otherwise false, since SEM-24 cannot seed a terminal. A set whose whole
+      success/done/notrunning, never failure/terminated/exitcode (SEM-20, DL-243); a run-state
+      seed satisfies the atoms its status meets without a finite or zero lookback (SEM-24,
+      DL-561). A set whose whole
       condition cannot then be true buys no headroom: a flat +1 would let the DL-180 stale-latch
       multi-fire slide under the bound. Accepted corner: a tick at exactly --start completing
       instantly can interleave with an at-start set and fire a latch once legitimately, a rare
@@ -863,8 +874,9 @@ def expected_bounds(
         # could-fire wake credit, in event order with at-start sets first: a set on a referenced
         # global buys one wake exactly when the whole condition can then be true. Job atoms read
         # their genesis truth for at-start sets (bare n() is true there; an ON_ICE seed reads the
-        # iced row) and are optimistic-true for mid-window sets (latches can be true by then)
-        values: dict[str, str] = {}
+        # iced row) and are optimistic-true for mid-window sets (latches can be true by then).
+        # Globals start at their declared values, as the oracle's genesis seeds them (DL-87)
+        values: dict[str, str] = dict(catalog.globals_declared)
         credit = 0
         for target_at_start in (True, False):
             truth = at_start_truth if target_at_start else _optimistic_truth

@@ -2,7 +2,7 @@
 
 Status: **normative (DL-138).** Entries that rule parts of it include
 DL-144, DL-146, DL-147, DL-150, DL-151, DL-157, DL-158, DL-168, DL-170,
-DL-217, DL-227, DL-252, DL-263, DL-401, DL-438, DL-498 and DL-499. A change to what this document
+DL-217, DL-227, DL-252, DL-263, DL-401, DL-438, DL-498, DL-499 and DL-561. A change to what this document
 fixes requires a decision-log entry. Each entry is cited where it applies.
 
 For the architect: this page fixes format tolerance, version entry and
@@ -58,6 +58,7 @@ a row.
 | Perimeter journal | Access perimeter → audit; sequence recovery reads `access_seq` | `rec`; no version | Ignored | Not applicable; no engine decision dispatches it (DL-147) | Retained root |
 | Access role map | Operator → `runner_access` loader | `format_version` | Refused | Unsupported or absent refuses | Operator's retained map |
 | Stored configurations | Startup/update → `Configuration.from_bytes` | `configuration_format_version`, 1, 2 or 3 | Refused for all three | Unsupported refuses; absent selects supported version 1 (DL-437, DL-438) | Retained `configs` rows |
+| IR-F catalogs | Lowering → `Configuration.from_bytes`, the reread worker, `ir.load_catalog` | `ir_version = "0.4"` | Ignored | 0.1, 0.2 and 0.3 refuse by name as retired; any other value, and an absent one, refuses as unknown. No dual-read for the step from 0.3 to 0.4 only: drain and fresh root, the owner's ruling for now (DL-561) | Retained `configs` rows; one reread request |
 | Reload plans | update preparation → `read_plan` and update | `plan_format_version = 2`; `artifact_format_version` (PR-08d) | Ignored | Version 1 and an absent plan version refuse as retired (DL-486); other unsupported versions refuse; malformed plans return no plan. Unsupported artifact version makes `read_plan` return no plan; absent artifact version passes | Retained plan; an interrupted update requires it |
 | Main-config input mapping | `main_config.prepare` → `from_parts` | `format_version = 1` in `main-inputs.json` | Ignored | Unsupported or absent refuses (DL-437) | Retained plan or stored capture |
 | Main config | Site → `load_config` | `format_version = 1` | Refused; a restart refuses unknown names in `[engine]` only (DL-556) | Unsupported or absent refuses (DL-437) | Site's config file |
@@ -69,6 +70,15 @@ schema and engine state are distinct gates: a schema-compatible store can
 still carry state this executable cannot interpret. One executable handles
 one state version (DL-424); drain with the old binary before changing that
 version, then use a fresh root. No snapshot migration is provided.
+
+The step of the IR-F version from 0.3 to 0.4 follows the same rule (DL-561). It is the
+owner's ruling for now, and it may change; any later IR-F version enters and leaves by the
+four steps of §2. This build reads IR-F 0.4 only. A stored configuration at 0.3 is refused at
+start by name, before any write, with the remedy: drain the root on the build that wrote it,
+then start this build on a fresh root. Every reader of the root refuses the same way, as each
+refuses a foreign state version. The step keeps the state version, the journal, the snapshot
+and the configuration format; the catalog hash covers `ir_version`, so every catalog hashes
+differently at 0.4.
 
 State version 28 requires dispatch environments and resolved stream paths
 (DL-447). Every other state version is foreign and refuses under the
@@ -340,8 +350,16 @@ retention one. It can be answered in one release when the clients ship with
 the server. It cannot be answered when they do not, so the four steps stay
 the default for wire rows too.
 
-The reset clause (§5) is the only way to bypass this lifecycle, and only
-under its stated condition.
+The reset clause (§5) and the drain and fresh-root rule (§1) are the only
+ways to bypass this lifecycle, each only where it applies. The reset clause
+applies under its stated condition. The drain and fresh-root rule applies
+only to the engine state version (DL-424) and to the one step of the IR-F
+version from 0.3 to 0.4 (DL-561). That step is the owner's ruling for now;
+any later IR-F version follows the four steps above. Under the rule, a root
+written by the earlier build is never this build's root: the earlier build
+drains it, and this build starts on a fresh one. That root's instances are
+therefore outside the set this build retains (§3), and the refusal by name
+is the tombstone that meets the root if this build is started on it (§6).
 
 ## 3. Retiring
 
@@ -365,6 +383,13 @@ a colleague's laptop, a root restored from a backup years later. Waiting for
 such copies would mean never retiring anything. §6 covers them: the gate
 covers the retained set, and the tombstone covers everything else.
 
+**Under the drain and fresh-root rule (§1), a root belongs to the build that
+wrote it.** A root the earlier build drains is kept for that build, not for
+this one, so its instances do not hold this build's gate. This applies only
+to the engine state version (DL-424) and to the IR-F step from 0.3 to 0.4,
+the owner's ruling for now (DL-561); a later IR-F version keeps §2's
+lifecycle and this gate.
+
 Retirement is implemented as **refusal by name**, never by deleting the
 reader alone. §6 says how.
 
@@ -376,7 +401,9 @@ neither.
 A transformation needs its own decision-log entry and verification proof.
 No in-place rewrite of immutable digest-bound evidence is permitted.
 Engine state-version changes use the drain and fresh-root rule in §1
-(DL-424), not a snapshot migration.
+(DL-424), not a migration. So does the IR-F step from 0.3 to 0.4, by the
+owner's ruling for now (DL-561); a later IR-F version change follows §2's
+four steps.
 
 ## 5. The reset clause
 
@@ -441,6 +468,12 @@ The control-version registry lives beside the shared refusal function in
 (DL-498). Both socket and envelope doors use that function. Only integer
 versions select a tombstone; strings, booleans and absent values remain unknown.
 Both cases use `unsupported_version` and leave the connection open.
+
+The IR-F registry, `ir.RETIRED_IR_VERSIONS`, lives beside `ir.check_ir_version`,
+which every IR-F reader calls before it validates the payload. It records 0.1
+(DL-73), 0.2 (DL-253) and 0.3 (DL-561). A retired version is refused as
+`IR-F version 0.3 is retired (DL-561)`; any other value, and an absent one, as
+`unknown IR-F version`.
 
 Reload plan version 1, including an absent `plan_format_version`, is retired
 (DL-486). Its reader refuses with `reload plan version 1 is retired (DL-486)`.

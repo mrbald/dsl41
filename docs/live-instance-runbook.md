@@ -46,8 +46,8 @@ Ground rules (corpus hygiene per [CLAUDE.md](../CLAUDE.md) and
 - A resolution retires the item's `# PENDING:` marker, if it has one
   (DL-06). One provisional row of the coverage register claims each
   marker site (DL-209). The items with a marker are Q3c, Q3d, Q8b, Q8c,
-  Q8d, Q15, Q16 and E8. Q6, Q12, Q13, Q14, Q17, the SEM-20 box clause and rule 5 carry
-  none.
+  Q8d, Q15, Q16 and E8. Q6, Q12, Q13, Q14, Q17, Q18, the SEM-20 box clause and rule 5
+  carry none.
 - A semantic switch stays selectable after its question is settled
   (DL-252). The answer sets the switch's `autosys` value in the registry
   ([src/dsl41/semantics.py](../src/dsl41/semantics.py)). The default follows
@@ -816,6 +816,95 @@ FAILURE. Then run two more passes on `_q17` alone, each from a fresh
 Capture the scheduler log lines. Cleanup: run
 `jil <<< "delete_box: dsl41_q17"`, `jil <<< "delete_box: dsl41_q17p"`
 and `jil <<< "delete_job: dsl41_q17_never"`.
+
+### Q18 — the end time of a job inserted in a run state (~4 minutes, runs five short jobs)
+
+The "status Attribute" page lets a job inserted with `status: SUCCESS` satisfy its
+dependents. dsl41 gives such a job no status time and no end time (dossier SEM-24,
+§9 Q18): a bare `s()` reads SUCCESS, and a finite or zero lookback on it reads false,
+whatever the dependent's own history. `_seed` is inserted SUCCESS and never runs.
+Four consumers read it, and each also waits on `_gate`, whose success evaluates them
+all at one moment:
+
+- `_bare`: a bare atom.
+- `_win`: a five-minute window.
+- `_zr`: a zero lookback, from a consumer that ended once before `_seed` was inserted.
+- `_zero`: a zero lookback, from a consumer that never ended (SEM-04, Q2b).
+
+Timing to keep: `_zr` ends at least one minute before `_seed` is inserted, and `_gate`
+ends less than four minutes after `_seed` is inserted, so that an end time given at
+insertion is inside `_win`'s window. If either is missed, delete all six jobs and repeat
+from the start.
+
+```
+jil <<'EOF'
+insert_job: dsl41_q18_zr
+job_type: c
+machine: <M>
+command: /bin/true
+EOF
+sendevent -E STARTJOB -J dsl41_q18_zr
+sleep 75; autorep -J dsl41_q18_zr -d    # SUCCESS; record its Last End
+date                                     # record the insertion time
+jil <<'EOF'
+insert_job: dsl41_q18_seed
+job_type: c
+machine: <M>
+command: /bin/true
+status: SUCCESS
+insert_job: dsl41_q18_gate
+job_type: c
+machine: <M>
+command: /bin/true
+insert_job: dsl41_q18_bare
+job_type: c
+machine: <M>
+command: /bin/true
+condition: s(dsl41_q18_seed) & s(dsl41_q18_gate)
+insert_job: dsl41_q18_win
+job_type: c
+machine: <M>
+command: /bin/true
+condition: s(dsl41_q18_seed, 00.05) & s(dsl41_q18_gate)
+insert_job: dsl41_q18_zero
+job_type: c
+machine: <M>
+command: /bin/true
+condition: s(dsl41_q18_seed, 0) & s(dsl41_q18_gate)
+update_job: dsl41_q18_zr
+condition: s(dsl41_q18_seed, 0) & s(dsl41_q18_gate)
+EOF
+autorep -J dsl41_q18_seed -d    # record the Last End column as shown
+sendevent -E STARTJOB -J dsl41_q18_gate
+sleep 60; autorep -J dsl41_q18% -d    # check _gate's Last End against the timing above
+```
+
+Readings, once `_gate` has ended within the timing. Each row reads one observation and
+says only what that observation shows. The cause of a divergence is not inferred from
+the consumers: an end time at insertion, another end time and a vendor rule for a job
+with no end time can each make a lookback consumer run.
+
+| Observation | What it shows |
+| --- | --- |
+| `_seed`'s Last End is blank | The vendor displays no end for the seed, as dsl41 holds none. |
+| `_seed`'s Last End holds a time | The vendor displays an end for the seed, at insertion or at another time; dsl41 holds none. Record the time as shown. |
+| `_bare` ran | The bare atom reads the seeded SUCCESS, as dsl41 does. |
+| `_bare` did not run | dsl41 diverges on the bare atom: record it. |
+| `_win` did not run | A window that covers the insertion reads false, as dsl41 does. |
+| `_win` ran | The vendor's window reads the seed true at `_gate`'s end; dsl41 reads it false. |
+| `_zr` did not run | A zero lookback from a consumer that has ended reads false, as dsl41 does. |
+| `_zr` ran | The vendor's zero lookback from a consumer that has ended reads the seed true; dsl41 reads it false. |
+| `_zero` did not run | A zero lookback from a consumer that never ended reads false, as dsl41 does. |
+| `_zero` ran | The vendor's zero lookback from a consumer that never ended reads true; dsl41 reads it false. |
+
+Q18 closes as pinned only when every observation agrees with dsl41's unset-time model:
+`_seed`'s Last End is blank, `_bare` ran, and `_win`, `_zr` and `_zero` did not. A Last End
+that holds a time goes to the owner whatever the consumers did. Any other outcome is a
+divergence for an owner's decision on the seed's end time. Record every observation above
+with the insertion time, `_zr`'s end and `_gate`'s end.
+
+Capture the scheduler log lines. Cleanup: run `jil <<< "delete_job: dsl41_q18_seed"`
+and the same for `_gate`, `_bare`, `_win`, `_zero` and `_zr`.
 
 ### Q3c — does a member's latched tick survive into the next box run
 

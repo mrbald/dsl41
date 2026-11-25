@@ -169,6 +169,38 @@ The command needs dsl41 and your handler's module installed in that Python envir
 The helper adds no timer and no rearm.
 How the jobs run again is your choice: [the contract's activation ruling](../examples/file_processing/CONTRACT.md#activation-is-external-owner) lists the options and the zero-lookback edge.
 
+### 1.2. Run a job again after each success
+
+Three lines, beside `date_conditions: 1` and `days_of_week: all`, make a job that runs again after each success and stays down after a failure or a kill:
+
+```text
+insert_job: POLL_C
+job_type: c
+command: /opt/site/bin/poll
+machine: prod1
+date_conditions: 1
+days_of_week: all
+start_mins: "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59"
+condition: s(POLL_C)
+status: SUCCESS
+```
+
+- `start_mins` with every minute gives the job a tick each minute. A tick starts the job when its condition holds.
+- `condition: s(POLL_C)` holds while the job's last end is a success.
+- `status: SUCCESS` makes the job's row in SUCCESS, so the condition holds before the first run.
+
+What the job does:
+
+- After a success, the next minute's tick starts it again. Its own end starts nothing.
+- A tick while it runs does nothing, so after a run longer than a minute the first tick after its end starts it.
+- After a failure, or a kill that ends it TERMINATED, the condition is false. Each tick only arms the job, and it stays down.
+- `dsl41 sendevent FORCE_STARTJOB --job POLL_C --socket RUN_ROOT/control.sock` runs it again, and after that run succeeds the next tick starts it.
+- `dsl41 sendevent CHANGE_STATUS --job POLL_C --status SUCCESS --socket RUN_ROOT/control.sock` makes the condition hold again. A tick that armed the job after the failure starts it at once; otherwise the next tick does.
+
+The `status:` line takes effect only when the job's row is made: on a fresh run root, or when an update adds the job.
+An update that adds the line to a job that exists changes nothing for that job (SEM-24, DL-533, DL-561).
+The seeded row has no end time. A bare atom such as `s(POLL_C)` and a `9999` lookback read its status. A finite or zero lookback, such as `s(POLL_C, 01.00)` or `s(POLL_C, 0)`, reads false until the job's first end.
+
 ## 2. Check which constructs dsl41 accepts
 
 Use the [simulation coverage register](simulation-coverage.md) to check a construct's class, effect and refusing site.
@@ -187,7 +219,7 @@ Reread refuses that source until its value is corrected.
 Lowering refuses an `n_retrys` that is not a whole number; preflight refuses a value outside 0 through 20 (DL-469).
 Lowering refuses `std_in_file` and `envvars` on an FW job (DL-32).
 Repeated `ulimit` lines on one job are joined with a comma, not refused as duplicates.
-At definition time, `status:` accepts only INACTIVE, ON_HOLD, ON_ICE and ON_NOEXEC.
+At definition time, `status:` accepts the vendor's seven values: INACTIVE, ON_HOLD, ON_ICE, ON_NOEXEC, SUCCESS, FAILURE and TERMINATED (SEM-24, DL-561).
 Lowering refuses resource groups using `QUANTITY=ALL` or `VALUEOP`/`VALUE`.
 Write whole job definitions rather than `update_job`, `delete_job` or `override_job`.
 Hand over changed definitions through [§6](#6-hand-over-for-rollout).

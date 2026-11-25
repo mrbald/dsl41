@@ -259,10 +259,24 @@ SEED_NOTE = (
 )
 
 
+#: What a kept job's `status:` edit to or from a run state does by itself: the line is a seed and
+#: the live job stays as it is (SEM-24, DL-561). No order of events is safe for every edit and
+#: every live state, so the note names the events and gives no sequence.
+SEED_STATUS_NOTE = (
+    "the status: line is a seed, and the update leaves the live job as it is (DL-533, DL-561);"
+    " a flag is changed with its own sendevent event and a status with sendevent CHANGE_STATUS;"
+    " either acts on the job as it is now and can start it or the jobs that wait on it, so look"
+    " at the job's current state first"
+)
+_RUN_STATES = frozenset({"SUCCESS", "FAILURE", "TERMINATED"})
+
+
 def seed_text(before: str | None, after: str | None) -> str:
-    """The one row text of a seed-only job (DL-533)."""
+    """The one row text of a seed-only job (DL-533): the seed note for an edit to or from a run
+    state (DL-561), the flag advice otherwise."""
     shown = [one_line("(unset)" if value is None else value) for value in (before, after)]
-    return f"initial_status: {shown[0]} -> {shown[1]}; {SEED_NOTE}"
+    note = SEED_STATUS_NOTE if {before, after} & _RUN_STATES else SEED_NOTE
+    return f"initial_status: {shown[0]} -> {shown[1]}; {note}"
 
 
 def seed_count(count: int) -> str:

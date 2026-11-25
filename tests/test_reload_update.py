@@ -27,6 +27,7 @@ import statechart_completeness as sc
 
 from dsl41.cli_reload import UpdateReply, reread_command, update_command
 from dsl41.engine_charts import UPDATE_STOP, Intent
+from dsl41.conditions import parse_condition
 from dsl41.ir import CatalogIR, ExecSpec, lower_source
 from dsl41.oracle import Oracle
 from dsl41.canon import canonical_bytes, decode
@@ -742,7 +743,9 @@ def _seed(world: World, job: str, status: str) -> None:
     )
 
 
-@pytest.mark.parametrize("status", ["ON_HOLD", "ON_ICE", "ON_NOEXEC"])
+@pytest.mark.parametrize(
+    "status", ["ON_HOLD", "ON_ICE", "ON_NOEXEC", "SUCCESS", "FAILURE", "TERMINATED"]
+)
 def test_a_running_jobs_status_only_edit_applies_with_no_stop_and_keeps_the_row(
     tmp_path: Path, status: str
 ) -> None:
@@ -806,6 +809,79 @@ def test_a_seed_only_job_removed_and_re_added_takes_the_new_seed_and_its_tombsto
     assert tier.application.restored == (("OPS_FAIL_ALERT_C", ("ON_ICE",)),)
     row = world.row("OPS_FAIL_ALERT_C")
     assert (row.status, row.on_hold, row.on_ice) == ("INACTIVE", True, True)
+
+
+_ADDED_JOB = (
+    "\ninsert_job: ZZ_SEEDED_C\njob_type: c\ncommand: true\nmachine: ops_util\n"
+    "owner: ~{$OWNER}~\nstatus: {status}\n"
+)
+
+
+@pytest.mark.parametrize("status", ["SUCCESS", "FAILURE", "TERMINATED"])
+def test_sem24_an_update_adds_a_job_in_its_seeded_status_and_wakes_nothing(
+    tmp_path: Path, status: str
+) -> None:
+    """SEM-24 (DL-561): a job an update adds is made in the seeded status with no run and no
+    times; the seed writes no trace entry, and a consumer the same update adds waits."""
+    world = _world(tmp_path)
+    with (world.estate / "global.jil").open("a") as handle:
+        handle.write(_ADDED_JOB.replace("{status}", status))
+        handle.write(
+            "\ninsert_job: ZZ_CONSUMER_C\njob_type: c\ncommand: true\nmachine: ops_util\n"
+            "owner: ~{$OWNER}~\ncondition: d(ZZ_SEEDED_C)\n"
+        )
+    result, document, candidate = world.reread()
+    assert result.plan.added == ("ZZ_CONSUMER_C", "ZZ_SEEDED_C")
+    tier, _ = world.update(document, candidate)
+    assert tier.state == "APPLIED"
+    row = world.row("ZZ_SEEDED_C")
+    assert (row.status, row.run_number, row.exit_code) == (status, 0, None)
+    assert (row.status_at, row.last_end_at) == (None, None)
+    world.feed("SET_GLOBAL", name="RECON_APAC", value="CLEAN")
+    assert world.row("ZZ_CONSUMER_C").status == "INACTIVE"
+    assert not [e for e in world.oracle.trace() if e.job in ("ZZ_SEEDED_C", "ZZ_CONSUMER_C")]
+
+
+def test_sem24_a_re_added_name_keeps_its_run_counter_and_flags_under_a_run_state_seed(
+    tmp_path: Path,
+) -> None:
+    """SEM-24 (DL-561): a name an update adds back takes the seeded status and keeps what its
+    tombstone kept: the run counter, the revision step and the flags. The kept ON_ICE reads
+    before the seeded status, and the next start takes the next run number."""
+    world = _world(tmp_path)
+    world.feed("FORCE_STARTJOB", job="OPS_FAIL_ALERT_C")
+    world.feed("STATUS", job="OPS_FAIL_ALERT_C", exit_code=0)
+    world.feed("ON_ICE", job="OPS_FAIL_ALERT_C")
+    gone = world.row("OPS_FAIL_ALERT_C")
+    assert (gone.status, gone.run_number, gone.on_ice) == ("SUCCESS", 1, True)
+    text = world.remove("global.jil", "OPS_FAIL_ALERT_C")
+    _, document, candidate = world.reread()
+    tier, _ = world.update(document, candidate)
+    assert tier.application is not None and tier.application.removed == ("OPS_FAIL_ALERT_C",)
+    tombstone = world.oracle.store.tombstones["OPS_FAIL_ALERT_C"]
+    seeded = text.replace("job_type: c\n", "job_type: c\nstatus: FAILURE\n", 1)
+    with (world.estate / "global.jil").open("a") as handle:
+        handle.write("\n" + seeded)
+    result, document, candidate = world.reread()
+    assert result.plan.added == ("OPS_FAIL_ALERT_C",)
+    tier, _ = world.update(document, candidate)
+    assert tier.application is not None
+    assert tier.application.restored == (("OPS_FAIL_ALERT_C", ("ON_ICE",)),)
+    row = world.row("OPS_FAIL_ALERT_C")
+    assert (row.status, row.run_number, row.on_ice, row.exit_code) == ("FAILURE", 1, True, None)
+    assert (row.status_at, row.last_end_at) == (None, None)
+    assert row.state_rev == tombstone.state_rev + 1
+    assert (
+        world.oracle._atom_true(  # the kept ice reads first (SEM-20)
+            parse_condition("f(OPS_FAIL_ALERT_C)"), "OPS_SPOOL_C"
+        )
+        is False
+    )
+    world.feed("FORCE_STARTJOB", job="OPS_FAIL_ALERT_C")
+    assert (world.row("OPS_FAIL_ALERT_C").status, world.row("OPS_FAIL_ALERT_C").run_number) == (
+        "RUNNING",
+        2,
+    )
 
 
 def _in_running_box(tmp_path: Path, *, seed: bool) -> tuple[World, Any, dict[str, Any]]:

@@ -31,7 +31,7 @@ from typing import Annotated, Any, Final, Literal, TypedDict
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from dsl41.canon import CanonError, canonical_bytes, decode, hash_over
-from dsl41.ir import CatalogIR
+from dsl41.ir import CatalogIR, IRVersionError, check_ir_version
 from dsl41.reload_diff import catalog_hash_v2, catalog_payload
 from dsl41.runner_clock import EngineError
 from dsl41.runtime_policy import JobEnvironment, RuntimePolicySettings, policy_values
@@ -216,6 +216,15 @@ def with_host_settings(
 # ------------------------------------------------------------ configuration row
 
 
+#: What an operator does with a run root whose stored IR-F this build does not read: the root is
+#: drained on its own build and this build starts on a fresh root; no reader converts it
+#: (protocol-evolution ss4, DL-561).
+IR_VERSION_REMEDY: Final[str] = (
+    "Root unchanged. Drain this run root on the build that wrote it, then start this build on a"
+    " fresh run root"
+)
+
+
 class CapturedLoweringError(EngineError):
     """A v2 capture cannot establish its stored catalog and job order."""
 
@@ -281,6 +290,10 @@ class Configuration(BaseModel):
                 raise EngineError(
                     f"{where}: unknown configuration fields {sorted(set(raw) - allowed)}"
                 )
+            try:
+                check_ir_version(raw["catalog"], where=where, remedy=IR_VERSION_REMEDY)
+            except IRVersionError as exc:
+                raise EngineError(str(exc)) from exc
             catalog = CatalogIR.model_validate(raw["catalog"])
             order = list(catalog.jobs)
             if version == 3:

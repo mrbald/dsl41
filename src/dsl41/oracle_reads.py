@@ -47,6 +47,7 @@ from dsl41.oracle_state import (
     RuntimeState,
     StatusObservation,
     TraceEntry,
+    seeded_status,
 )
 from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES
 from dsl41.semantics import SemanticSwitches, iced_atom_truth
@@ -89,10 +90,12 @@ class OracleReads:
         for name, job_ir in catalog.jobs.items():
             if carried is not None and name in carried.jobs:
                 continue  # ss7 phase 3 step 4: a carried row keeps its C1 flags
-            # SEM-24: definition-time state seeds the SEM-20/21/22 flags
+            # SEM-24: definition-time state seeds the SEM-20/21/22 flags, or a run status with
+            # no run and no times, which wakes nothing (DL-561)
             initial = job_ir.sem.initial_status
             self.store.seed_job(
                 name,
+                status=seeded_status(initial),
                 on_hold=initial == "ON_HOLD",
                 on_ice=initial == "ON_ICE",
                 on_noexec=initial == "ON_NOEXEC",
@@ -390,6 +393,10 @@ class OracleReads:
             # STATUS can make an iced row live. The row and its open Q10 split live in
             # `iced_atom_truth`; the oracle passes its switch (DL-252).
             return iced_atom_truth(atom, self.semantics.ice_lookback)
+        if atom.job.instance is not None and rt.status in TERMINAL and rt.status_at is None:
+            # SEM-07, SEM-24: a run state with no status time is a `status:` seed, never a remote
+            # observation; an injected status stamps the time (DL-561)
+            return False
         if isinstance(atom, ExitCodeAtom):
             if rt.exit_code is None or not self._lookback_ok(rt, atom.lookback, evaluator):
                 return False
@@ -404,17 +411,17 @@ class OracleReads:
             hit = actual == wanted
         if not hit:
             return False
-        if wanted == "NOTRUNNING" and rt.status_at is None:
-            return True  # never-run jobs are notrunning with no timestamp
+        if wanted == "NOTRUNNING" and actual == "INACTIVE" and rt.status_at is None:
+            return True  # a never-run INACTIVE job is notrunning with no timestamp
         return self._lookback_ok(rt, atom.lookback, evaluator)
 
     def _lookback_ok(self, rt: JobRuntime, lookback: Lookback | None, evaluator: str) -> bool:
         if lookback is None or lookback.kind == "indefinite":
             return True
-        if rt.status_at is None:  # pragma: no cover -- see below
-            # Unreachable: `store.transition` stamps status_at on every status write. A row never
-            # written is INACTIVE with no exit code, which no status atom matches except n(),
-            # answered above, and an exit-code atom needs an exit code.
+        if rt.status_at is None:
+            # A row with no status time was made in its status by a `status:` line and never
+            # ended: a finite or zero lookback reads false, as for a job that never ended (SEM-24,
+            # DL-561). `store.transition` stamps the time on every status write.
             return False
         assert self._now is not None
         if lookback.kind == "zero":

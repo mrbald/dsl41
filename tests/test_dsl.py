@@ -16,7 +16,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 from typer.testing import CliRunner
 
-from dsl41.ast_jil import parse, parse_file
+from dsl41.ast_jil import parse, parse_file, render
 from dsl41.cli import app
 from dsl41.conditions import Cond, GlobalAtom, JobRef, Lookback, StatusAtom, parse_condition
 from dsl41.dsl import FOLDS, CatalogBuilder, DslError, cond_to_source, decompile
@@ -193,6 +193,30 @@ def test_decompile_roundtrips_an_opaque_members_attribute() -> None:
     rebuilt = roundtrip(catalog)
     assert rebuilt.machines["m"].attrs == {"members": "opaque"}
     assert catalog_hash(rebuilt) == catalog_hash(catalog)
+
+
+_SEM24_STATUSES = ["FAILURE", "INACTIVE", "ON_HOLD", "ON_ICE", "ON_NOEXEC", "SUCCESS", "TERMINATED"]
+_SEM24_TYPES = {
+    "CMD": "job_type: c\ncommand: x\nmachine: m1\n",
+    "FW": "job_type: f\nwatch_file: /tmp/f\nmachine: m1\n",
+    "BOX": "job_type: b\n",
+}
+
+
+@pytest.mark.parametrize("job_type", sorted(_SEM24_TYPES))
+@pytest.mark.parametrize("status", _SEM24_STATUSES)
+def test_sem24_the_status_line_survives_rendering_and_the_dsl_round_trip(
+    job_type: str, status: str
+) -> None:
+    """SEM-24 (DL-561), F1 and DL-17: preserve-mode rendering returns the line byte for byte, and
+    the decompiled DSL rebuilds the job with the same `initial_status`."""
+    text = f"insert_job: j\n{_SEM24_TYPES[job_type]}status: {status}\n"
+    assert render(parse(text)) == text
+    catalog = lower_source(text)
+    rebuilt = roundtrip(catalog)
+    assert rebuilt.jobs["j"].sem.initial_status == status
+    assert catalog_hash(rebuilt) == catalog_hash(catalog)
+    assert f"status={status!r}" in decompile(catalog).replace('"', "'")
 
 
 def test_builder_four_combinators_end_to_end() -> None:

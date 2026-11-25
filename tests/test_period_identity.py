@@ -97,7 +97,7 @@ def _golden_catalog() -> CatalogIR:
 
 GOLDEN_CATALOG_BYTES = (
     b'{"calendars":{},"cycles":{},"external_instances":{},"globals_declared":{},'
-    b'"ir_version":"0.3","jobs":{"j1":{"annotations":{},"box":{"box_name":null,'
+    b'"ir_version":"0.4","jobs":{"j1":{"annotations":{},"box":{"box_name":null,'
     b'"box_terminator":false,"job_terminator":false},"exec_":{"command":"echo hi",'
     b'"envvars":null,"kind":"cmd","machine":"m1","owner":null,"profile":null,'
     b'"std_err_file":null,"std_in_file":null,"std_out_file":null},"job_type":"CMD",'
@@ -109,7 +109,7 @@ GOLDEN_CATALOG_BYTES = (
     b'"line_start":1},"var_sites":[]}},"machines":{},'
     b'"meta":{"source_files":["estate.jil"]},"resources":{}}'
 )
-GOLDEN_CATALOG_HASH = "sha256:d461eff80c08b65bdcac7e5002026ac48825f701be65db1b79e01989288c143f"
+GOLDEN_CATALOG_HASH = "sha256:19c897d19d9b89711a923e024401d50befdd7a9cb85e5b9d2693996eb99f1f97"
 
 
 def test_pr08a_catalog_hash_v2_golden_vector() -> None:
@@ -338,6 +338,8 @@ def test_the_configuration_row_round_trips_and_names_its_hashes() -> None:
     assert back.runtime_hash == GOLDEN_RUNTIME_HASH
     assert row.digest() == "sha256:" + hashlib.sha256(row.to_bytes()).hexdigest()
     with pytest.raises(EngineError, match="here: unreadable configuration row"):
+        Configuration.from_bytes(b'{"catalog": {"ir_version": "0.4"}}', where="here")
+    with pytest.raises(EngineError, match="here: unknown IR-F version None"):
         Configuration.from_bytes(b'{"catalog": {}}', where="here")
 
 
