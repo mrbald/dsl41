@@ -689,8 +689,8 @@ STEP_AWAITS = {
     "_settle": [("asyncio.sleep(0)", None)],  # virtual only, between steps
     "_control": [("self._update_step(pending)", None)],
     "_update_step": [
-        ("self._admit_and_apply(_Pending(at=ev.at, request_id=None, ev=ev))", None),
         ("self._admit_and_apply(_Pending(at=self.now_admitted(), request_id=None))", None),
+        ("self._admit_and_apply(_Pending(at=ev.at, request_id=None, ev=ev))", None),
         ("self._admit_and_apply(_Pending(at=ev.at, request_id=None, ev=ev))", None),
     ],
     "_admit_and_apply": [("self.clock.wait_until(pending.at)", "self.clock.virtual")],

@@ -142,15 +142,16 @@ ENDED = SPAWNING + engine_died
 
 ## update
 
-Shown: 4. Folded: 2 (internal 2). Rows in the chart: 6.
+Shown: 5. Folded: 2 (internal 2). Rows in the chart: 7.
 
 ### phase
 
 ```text
 IDLE <- initial
 STOPPING = {WAITING, ENDING_BOXES}
-STOPPING = IDLE + update_admitted [admitted]
+STOPPING = IDLE + update_admitted [some_to_stop]
 ENDING_BOXES = WAITING + look [none_open]
-APPLIED = ENDING_BOXES + boxes_ended
+APPLIED = IDLE + update_admitted [none_to_stop]
+       || ENDING_BOXES + boxes_ended
 REFUSED = IDLE + update_admitted [refused]
 ```

@@ -363,6 +363,10 @@ def _transitions_store_module() -> ModuleType:
     return sys.modules[name]
 
 
+#: the keywords of `Store.append` an earlier build did not know, at the values that say nothing
+DEFAULTS = {("produced_by", 0), ("config", None)}
+
+
 class _TransitionsBuild(EarlierPrune):
     """The build before this one over a root: its store code, which commits transitions rows
     and no index rows, under this build's engine."""
@@ -370,8 +374,19 @@ class _TransitionsBuild(EarlierPrune):
     def __init__(self, store: Any) -> None:
         self._store = store
 
-    def append(self, *records: Record, transitions: Any = (), **index: Any) -> int:
-        return int(self._store.append(*records, transitions=transitions))
+    def append(
+        self,
+        *records: Record,
+        transitions: Any = (),
+        openings: Any = (),
+        owners: Any = (),
+        **rows: Any,
+    ) -> int:
+        """The index rows that build never wrote are left out. Every other keyword this build
+        passes goes through unless it holds its default, so a configuration row or a mark on a
+        later record is refused by that build's store, never dropped (DL-560)."""
+        unknown = {k: v for k, v in rows.items() if (k, v) not in DEFAULTS}
+        return int(self._store.append(*records, transitions=transitions, **unknown))
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._store, name)

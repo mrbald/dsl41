@@ -1593,62 +1593,132 @@ def test_a_client_that_gave_up_on_the_decision_leaves_the_loop_running(tmp_path:
     assert order[applied + 1] == ("input", None, None)  # the time advance it owes
 
 
+@pytest.mark.parametrize("fault", ["full", "commit"])
+@pytest.mark.parametrize("stops", [True, False], ids=["stops", "nothing_to_stop"])
 def test_an_exact_update_retry_after_a_failed_applied_write_has_only_its_admission(
-    short_root: Path, monkeypatch: pytest.MonkeyPatch
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, stops: bool, fault: str
 ) -> None:
-    """An exact retry can read its intent after the loop fails, before socket teardown.
-    A waiting retry is hung up by teardown without an application (DL-491).
+    """The write of the application fails after the swap: as the file meets a page limit
+    (`full`, SQLITE_FULL from SQLite itself; for an update that stops jobs this is its
+    configuration row, the first write after the swap) or at its COMMIT (`commit`, a statement
+    in progress). The store rolls it back, and the loop fails. The store reopens at the old
+    revision: with the intent of an update that stops jobs, and with no trace of one that had
+    nothing to stop (DL-560). An exact retry before the teardown is answered from the intent
+    the store holds, and a waiting one is hung up by the teardown without an application
+    (DL-491). With nothing to stop the store holds no request: the retry joins its own
+    request's preparation, whose decision never comes.
     """
     import inspect
+    import sqlite3
 
     from dsl41.runner_control import ControlServer
     from dsl41.runner_store import Record
     from test_runner_control import _control_call
 
-    estate = Estate(short_root, _jil({"a": "true"}))
+    # a captured source bigger than SQLite's largest page, so the configuration row must
+    # allocate pages whatever the page size, and the page limit meets it
+    padding = f"/* {'x' * (2 * 65536)} */\n" if fault == "full" else ""
+    estate = Estate(short_root, _jil({"a": "sleep 30" if stops else "true"}) + padding)
     run_root = short_root / "run"
+    append, put_config = SqliteStore.append, SqliteStore.put_config
+    failed: list[Record] = []
+    rows_failed: list[str] = []
+    statements: list[str] = []
+    armed = False
+
+    def limited(store: SqliteStore, write: Callable[[], int]) -> int:
+        # a real limit: the file may not grow by a page, so SQLite meets SQLITE_FULL
+        (pages,) = store._db.execute("PRAGMA page_count").fetchone()
+        store._db.execute(f"PRAGMA max_page_count = {pages}")
+        try:
+            return write()
+        finally:
+            store._db.execute("PRAGMA max_page_count = 1073741823")
+
+    def fail_row(store: SqliteStore, data: bytes, digest: str) -> int:
+        if not armed or fault != "full":
+            return put_config(store, data, digest)
+        rows_failed.append(digest)
+        return limited(store, lambda: put_config(store, data, digest))
+
+    def fail_applied(store: SqliteStore, *records: Record, **rows: Any) -> int:
+        if not any(r.kind == "config" and r.payload.get("event") == "applied" for r in records):
+            return append(store, *records, **rows)
+        failed.extend(records)
+        if fault == "full":
+            return limited(store, lambda: append(store, *records, **rows))
+        blob = store._db.blobopen("journal", "payload", 1, readonly=False)
+        store._db.set_trace_callback(statements.append)
+        try:
+            return append(store, *records, **rows)
+        finally:
+            store._db.set_trace_callback(None)
+            with contextlib.suppress(sqlite3.Error):
+                blob.close()
 
     async def scenario() -> None:
+        nonlocal armed
         engine = _start(run_root, estate)
         engine.reread_source = str(estate.dir / "dsl41.toml")
         engine.launch_settings = dict(prepare_estate(estate.dir).metadata["launch"])
         assert engine.journal is not None
         server = ControlServer(engine, run_root / "control.sock")
+        server.DECISION_TIMEOUT_S = 0.1  # type: ignore[misc]
         await server.start()
         loop = asyncio.create_task(engine.run_until_quiescent(datetime.max))
-        append = SqliteStore.append
-        failed = []
-
-        def fail_applied(store: SqliteStore, *records: Record, **rows: Any) -> int:
-            if any(r.kind == "config" and r.payload.get("event") == "applied" for r in records):
-                failed.extend(records)
-                raise OSError("synthetic applied write failure")
-            return append(store, *records, **rows)
-
-        writer = None
+        writer: asyncio.StreamWriter | None = None
         try:
-            estate.write(_jil({"a": "false"}))
+            if stops:
+                _start_jobs(engine, "a")
+                await _running(engine, "a")
+            estate.write(_jil({"a": "sleep 31" if stops else "false"}) + padding)
             request = {"cmd": "update", "request_id": "r1", "baseline_id": engine.baseline_id}
-            with monkeypatch.context() as fault:
-                fault.setattr(SqliteStore, "append", fail_applied)
+            with monkeypatch.context() as patch:
+                patch.setattr(SqliteStore, "append", fail_applied)
+                patch.setattr(SqliteStore, "put_config", fail_row)
+                armed = True
                 async with asyncio.timeout(TIMEOUT_S):
                     admission = await _control_call(server.path, request)
-                    with pytest.raises(OSError, match="synthetic applied write failure"):
+                    with pytest.raises(sqlite3.OperationalError):
                         await loop
-            assert len(failed) == 1 and loop.done() and not engine.update.stopping
+            events = [r.payload["event"] for r in failed if r.kind == "config"]
+            separate = stops and fault == "full"  # the row's own write failed first
+            assert events == ([] if separate else ["applied"] if stops else ["intent", "applied"])
+            assert len(rows_failed) == (1 if separate else 0)
+            error = loop.exception()
+            assert isinstance(error, sqlite3.OperationalError)
+            if fault == "full":
+                assert error.sqlite_errorcode == sqlite3.SQLITE_FULL
+            else:
+                # the write reached its COMMIT, which SQLite refused, and was rolled back
+                assert "statements in progress" in str(error)
+                assert [
+                    s for s in statements if s in ("BEGIN IMMEDIATE", "COMMIT", "ROLLBACK")
+                ] == [
+                    "BEGIN IMMEDIATE",
+                    "COMMIT",
+                    "ROLLBACK",
+                ]
+            if stops:
+                assert admission["ok"] and admission["stop"] == ["a"]
+            else:
+                assert admission["code"] == "decision_timeout"
             # The socket handlers outlive the failed loop until serve tears them down (DL-491).
             async with asyncio.timeout(TIMEOUT_S):
                 answer = await _control_call(server.path, {**request, "retry_only": True})
-            assert answer == admission
-            assert answer["ok"] and answer["decision"] == "admitted"
-            assert answer["stop"] == [] and answer["application"] is None
-            assert [c["event"] for c in _configs(run_root)] == ["applied", "intent"]
+            assert engine.journal is not None
+            if stops:
+                assert answer == admission and answer["application"] is None
+            else:
+                assert answer["code"] == "decision_timeout"
+                assert engine.journal.store.find_request("r1") is None
             # the CONFIG mark of a `config applied` that was never recorded is not traced (DL-536)
             async with asyncio.timeout(TIMEOUT_S):
                 traced = await _control_call(server.path, {"cmd": "trace"})
             assert traced["ok"]
             assert [e for e in traced["entries"] if e["transition"] == "CONFIG"] == []
-
+            if not stops:
+                return
             reader, writer = await asyncio.open_unix_connection(str(server.path))
             writer.write(json.dumps({**request, "v": 5, "wait": True}).encode() + b"\n")
             await writer.drain()
@@ -1668,8 +1738,6 @@ def test_an_exact_update_retry_after_a_failed_applied_write_has_only_its_admissi
             await server.close()
             async with asyncio.timeout(TIMEOUT_S):
                 assert await reader.readline() == b""
-            assert loop.done() and isinstance(loop.exception(), OSError)
-            assert [c["event"] for c in _configs(run_root)] == ["applied", "intent"]
         finally:
             if writer is not None:
                 writer.close()
@@ -1678,9 +1746,18 @@ def test_an_exact_update_retry_after_a_failed_applied_write_has_only_its_admissi
             loop.cancel()
             await asyncio.gather(loop, return_exceptions=True)
             await engine.shutdown()
+            assert engine.journal is not None
             engine.journal.close()
 
     asyncio.run(scenario())
+    assert [c["event"] for c in _configs(run_root)] == (
+        ["applied", "intent"] if stops else ["applied"]
+    )
+    with contextlib.closing(SqliteStore(run_root / "engine.db")) as store:
+        # an update that stops jobs wrote its row apart, before the application; a resume keeps
+        # it (DL-438). The applied revision is the old one either way
+        assert store.current_config_rev() == (2 if stops and fault == "commit" else 1)
+        assert (store.find_request("r1") is not None) == stops
 
 
 def test_a_plan_whose_catalog_hash_is_not_the_engines_is_refused(tmp_path: Path) -> None:

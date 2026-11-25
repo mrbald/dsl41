@@ -3,7 +3,9 @@ application (spec-reload "`dsl41 update`").
 
 An update applies the captured candidate prepared for that request (DL-463).
 It is durable, so it is a declared machine (DL-424): a crash between the journaled intent and the
-application resumes it.
+application resumes it. An admission with nothing to stop goes from IDLE to APPLIED at once, and
+its intent, its configuration row and its application commit in one store transaction, so a crash
+leaves no intent alone to resume (DL-560).
 
 STOPPING contains WAITING for the stop set and ENDING_BOXES for the committed box KILLJOBs
 (DL-487). The generated lifecycle is in docs/chart-lifecycles.md; the diagram and rows are in
@@ -13,7 +15,8 @@ starts and finish. The tier hands its remaining intents to the update step after
 (DL-488).
 
 The admission runs before the event is posted, in the engine's single writer, and its answer is
-the event's payload: `Admitted` or `Refused`. The guards read only which one it is. The spec's
+the event's payload: `Admitted` or `Refused`. The admission guards read which one it is and,
+for `Admitted`, whether its stop set is empty (DL-560). The spec's
 `plan.live_rev != catalog.rev` is the `stale_plan` refusal. The chart does no I/O and reads no
 clock; `UpdateTier` posts its events and performs its intents through `UpdateIntents`, which the
 engine binds to the store and to the attempt chart (`stop` with cause `update_stop`).
@@ -88,6 +91,9 @@ END_BOXES: Final = "end_boxes"
 APPLY: Final = "apply"
 #: Journal the application. The detail is the token.
 JOURNAL_APPLIED: Final = "journal_applied"
+#: Journal the intent, the configuration row and the application in one store transaction
+#: (DL-560). The detail is the token.
+JOURNAL_UPDATE: Final = "journal_update"
 #: Advance time after the application so its owed queue scan runs first (DL-488).
 ADVANCE_TIME: Final = "advance_time"
 #: Hold the marked non-INACTIVE box members before starting the boxes (DL-488).
@@ -202,8 +208,16 @@ class UpdateRecord:
     refusal: Refused | None = None
 
 
-def _admitted(ctx: Context) -> bool:
-    return isinstance(ctx.event.payload, Admitted)
+def _some_to_stop(ctx: Context) -> bool:
+    """An admission with a job to stop."""
+    payload = ctx.event.payload
+    return isinstance(payload, Admitted) and bool(payload.stop_set)
+
+
+def _none_to_stop(ctx: Context) -> bool:
+    """An admission with nothing to stop (DL-560)."""
+    payload = ctx.event.payload
+    return isinstance(payload, Admitted) and not payload.stop_set
 
 
 def _refused(ctx: Context) -> bool:
@@ -264,6 +278,20 @@ def _apply(ctx: Context) -> Effects:
     )
 
 
+def _apply_at_once(ctx: Context) -> Effects:
+    """Keep the token; apply, journal the intent with the application in one transaction,
+    advance time, then finish. A new admission restarts no box, so nothing is held or started
+    for one (DL-559, DL-560)."""
+    record: UpdateRecord = ctx.data
+    admitted: Admitted = ctx.event.payload
+    record.token = admitted.token
+    return Effects(
+        intents=tuple(
+            Intent(name, admitted.token) for name in (APPLY, JOURNAL_UPDATE, ADVANCE_TIME, FINISH)
+        )
+    )
+
+
 #: One update request, from its admission to its application or its refusal.
 UPDATE: Final = Statechart(
     name="update",
@@ -293,7 +321,7 @@ UPDATE: Final = Statechart(
             "IDLE",
             UPDATE_ADMITTED,
             "STOPPING",
-            guard="admitted",
+            guard="some_to_stop",
             action="begin_stopping",
         ),
         Row("update.02", "IDLE", UPDATE_ADMITTED, "REFUSED", guard="refused", action="refuse"),
@@ -301,9 +329,18 @@ UPDATE: Final = Statechart(
         Row("update.04", "WAITING", EXIT_RECORDED, kind="internal", action="one_down"),
         Row("update.05", "WAITING", LOOK, "ENDING_BOXES", guard="none_open", action="end_boxes"),
         Row("update.06", "WAITING", LOOK, kind="internal", guard="some_open"),
+        Row(
+            "update.07",
+            "IDLE",
+            UPDATE_ADMITTED,
+            "APPLIED",
+            guard="none_to_stop",
+            action="apply_at_once",
+        ),
     ),
     guards={
-        "admitted": _admitted,
+        "some_to_stop": _some_to_stop,
+        "none_to_stop": _none_to_stop,
         "refused": _refused,
         "none_open": _none_open,
         "some_open": _some_open,
@@ -314,6 +351,7 @@ UPDATE: Final = Statechart(
         "one_down": _one_down,
         "end_boxes": _end_boxes,
         "apply": _apply,
+        "apply_at_once": _apply_at_once,
     },
     clock="logical",
     exclusions=(
@@ -486,6 +524,8 @@ class UpdateIntents(Protocol):
 
     def journal_applied(self, application: Application) -> Application: ...
 
+    def journal_update(self, application: Application) -> Application: ...
+
 
 class UpdateTier:
     """One update request on its own executor: it posts the chart's events and performs the
@@ -493,14 +533,18 @@ class UpdateTier:
 
     `prepare` computes the application from the admitted decision when the chart reaches
     APPLIED, so it reads the oracle as it is after the stops. `exit_recorded` takes the end of
-    any attempt and posts only for a job still in the open set. The engine posts one `look`
-    after each update step, awaits the returned box KILLJOBs, then posts `boxes_ended` (DL-487).
-    After applying and journaling, the tier returns the row's remaining intents for that step
-    to perform in order (DL-488).
+    any attempt and posts only for a job still in the open set. An admission with nothing to stop
+    applies and journals in its own post, and `admit` returns the time advance and the finish;
+    that step posts no `look` (DL-560). After any other update step the engine posts one `look`,
+    awaits the returned box KILLJOBs, then posts `boxes_ended` (DL-487). After applying and
+    journaling, the tier returns the row's remaining intents for that step to perform in order
+    (DL-488).
 
     A raise from `prepare` or from an intent propagates out of the call that posted the event.
-    It is a crash, not a state: the engine dies, and startup step 4 resumes the update from its
-    journaled intent (`resume`), so the chart's APPLIED after such a raise is never read.
+    It is a crash, not a state: the engine dies, and replay installs what the store holds. After
+    a journaled intent alone, startup step 4 resumes the update from it (`resume`); an admission
+    with nothing to stop leaves either nothing of itself or its whole application (DL-560). The
+    chart's APPLIED after such a raise is never read.
     """
 
     def __init__(self, intents: UpdateIntents, prepare: Callable[[Admitted], Application]) -> None:
@@ -539,19 +583,19 @@ class UpdateTier:
         (`filter_of`, DL-527); none otherwise."""
         return self._filter if self.state == "STOPPING" else frozenset()
 
-    def admit(self, decision: Admitted | Refused) -> Admitted | Refused:
-        """Post the admission's answer and answer it. A tier that already took one answers
+    def admit(self, decision: Admitted | Refused) -> tuple[Admitted | Refused, tuple[Intent, ...]]:
+        """Post the admission's answer; answer it with the intents its row hands back to the
+        update step: those after the journal of an admission with nothing to stop, which applies
+        at once (DL-560), and none otherwise. A tier that already took one answers
         `update_in_progress` naming its own token instead, and changes nothing. The dispatch
         filter is installed once the chart is in STOPPING, before any stop is performed."""
         if self.state != "IDLE":
-            return Refused(decision.token, UPDATE_IN_PROGRESS, (str(self._record.token),))
+            return Refused(decision.token, UPDATE_IN_PROGRESS, (str(self._record.token),)), ()
         outcomes = self._executor.dispatch(UPDATE_KEY, Event(UPDATE_ADMITTED, decision))
         if isinstance(decision, Admitted):
             self._admitted = decision
             self._filter = decision.dispatch_filter
-        pending = self._perform_all(outcomes)
-        assert not pending, "admit cannot hand back intents"
-        return decision
+        return decision, self._perform_all(outcomes)
 
     def resume(self, admitted: Admitted, still_open: Collection[str]) -> None:
         """Restore an update whose intent is journaled and whose application is not (spec-crash
@@ -610,6 +654,9 @@ class UpdateTier:
             assert self._admitted is not None  # APPLIED is reached from an admission only
             self._application = self._prepare(self._admitted)
             self._intents.apply(self._application)
+        elif intent.name == JOURNAL_UPDATE:  # follows APPLY in one outcome (DL-560)
+            assert self._application is not None
+            self._application = self._intents.journal_update(self._application)
         else:  # JOURNAL_APPLIED, which follows APPLY in one outcome
             assert intent.name == JOURNAL_APPLIED and self._application is not None
             self._application = self._intents.journal_applied(self._application)
@@ -625,6 +672,7 @@ __all__ = [
     "HOLD_MARKED",
     "JOURNAL_APPLIED",
     "JOURNAL_INTENT",
+    "JOURNAL_UPDATE",
     "LOOK",
     "STALE_PLAN",
     "TREE_ACTIVE",

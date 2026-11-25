@@ -73,7 +73,15 @@ from dsl41.runner_clock import EngineError
 from dsl41.runner_codes import STORED_CODES
 from dsl41.runner_config import Configuration, oracle_reading
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, Proof
-from dsl41.runner_store import Record, RecordOwner, RunOpening, SqliteStore, Store, StoreError
+from dsl41.runner_store import (
+    ConfigRow,
+    Record,
+    RecordOwner,
+    RunOpening,
+    SqliteStore,
+    Store,
+    StoreError,
+)
 from dsl41.state_machine import (
     Context,
     Effects,
@@ -1216,14 +1224,20 @@ class Journal:
             self._lock.check()
 
     def append(
-        self, *records: Record, transitions: Sequence[TraceEntry] = (), rev: int | None = None
+        self,
+        *records: Record,
+        transitions: Sequence[TraceEntry] = (),
+        rev: int | None = None,
+        produced_by: int = 0,
+        config: ConfigRow | None = None,
     ) -> int:
         """Append `records` in one transaction; answer the last seq. A record this binary does
         not know is refused before anything is written (`check_record`). `transitions` are the
-        trace entries the first record produced, committed with it (DL-536). The history index's
-        rows commit with them too, a run's opening under `rev`, the configuration rev in force
-        (`index_rows`, DL-539). A journal not yet `writable` refuses before anything is
-        written (DL-553)."""
+        trace entries the record at offset `produced_by` produced, the first by default,
+        committed with it (DL-536). The history index's rows commit with them too, a run's
+        opening under `rev`, the configuration rev in force (`index_rows`, DL-539). `config`
+        is the next configuration row, committed in the same transaction (DL-560). A journal
+        not yet `writable` refuses before anything is written (DL-553)."""
         if not self.writable:
             raise StoreError(
                 "the journal takes no record before this start has passed every refusal and"
@@ -1244,6 +1258,8 @@ class Journal:
             transitions=[entry.model_dump() for entry in transitions],
             openings=openings,
             owners=owners,
+            produced_by=produced_by,
+            config=config,
         )
         first = last - len(records) + 1
         self.last_seq = last

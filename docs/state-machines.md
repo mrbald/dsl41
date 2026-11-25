@@ -860,20 +860,22 @@ stateDiagram-v2
         s0 --> [*]
         s3 --> [*]
     }
-    s2 --> s4 : update.01 update_admitted [admitted] / begin_stopping
+    s2 --> s4 : update.01 update_admitted [some_to_stop] / begin_stopping
     s2 --> s3 : update.02 update_admitted [refused] / refuse
     s1 --> s0 : update.03 boxes_ended / apply
     s5 --> s1 : update.05 look [none_open] / end_boxes
+    s2 --> s0 : update.07 update_admitted [none_to_stop] / apply_at_once
 ```
 
 | Id | Source | Event | Guard | Action | Target | Kind | Cite |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| update.01 | IDLE | update_admitted | admitted | begin_stopping | STOPPING | external |  |
+| update.01 | IDLE | update_admitted | some_to_stop | begin_stopping | STOPPING | external |  |
 | update.02 | IDLE | update_admitted | refused | refuse | REFUSED | external |  |
 | update.03 | ENDING_BOXES | boxes_ended |  | apply | APPLIED | external |  |
 | update.04 | WAITING | exit_recorded |  | one_down |  | internal |  |
 | update.05 | WAITING | look | none_open | end_boxes | ENDING_BOXES | external |  |
 | update.06 | WAITING | look | some_open |  |  | internal |  |
+| update.07 | IDLE | update_admitted | none_to_stop | apply_at_once | APPLIED | external |  |
 
 | State | In | Entry | Exit | Defers | Waits |
 | --- | --- | --- | --- | --- | --- |
@@ -887,7 +889,8 @@ stateDiagram-v2
 
 | Name | Kind | Prose |
 | --- | --- | --- |
-| admitted | guard |  |
+| some_to_stop | guard | An admission with a job to stop. |
+| none_to_stop | guard | An admission with nothing to stop (DL-560). |
 | refused | guard |  |
 | none_open | guard |  |
 | some_open | guard |  |
@@ -896,3 +899,4 @@ stateDiagram-v2
 | one_down | action | One job of the stop set ended: it leaves the open set. |
 | end_boxes | action | End each old box run, boxes first, before applying the plan (DL-487). |
 | apply | action | Apply, journal, advance time, hold marked members, start boxes, then finish (DL-488). |
+| apply_at_once | action | Keep the token, apply, journal the intent with the application in one transaction, advance time, then finish. A new admission restarts no box, so nothing is held or started for one (DL-559, DL-560). |

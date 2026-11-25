@@ -19,7 +19,8 @@ Rules both stores keep:
 - `request_id` is unique in the journal. `prune_step` deletes rows, and a deleted row's
   `request_id` is free again, so the retry window is the retention window.
 - Configs are an append-only history. Every `put_config` is a new rev, and the same digest may
-  stand under several revs; `find_config` returns the latest.
+  stand under several revs; `find_config` returns the latest. An `append` may carry the next rev
+  in its records' transaction (DL-560).
 - `read_from` is live: an open iterator sees records appended after it started.
 - The `transitions` rows are the trace entries a record produced, committed in the record's
   own transaction and keyed by its seq and the entry's ordinal in it (DL-536). Coverage names
@@ -124,6 +125,16 @@ class RunOpening:
     job: str
     run_number: int
     rev: int
+
+
+@dataclass(frozen=True, slots=True)
+class ConfigRow:
+    """A configuration row an append stores with its records, as the next rev `rev`: the
+    application of an update with nothing to stop commits with its records (DL-560)."""
+
+    rev: int
+    data: bytes
+    digest: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,18 +297,25 @@ class Store(Protocol):
         transitions: Sequence[TransitionEntry] = (),
         openings: Sequence[RunOpening] = (),
         owners: Sequence[RecordOwner] = (),
+        produced_by: int = 0,
+        config: ConfigRow | None = None,
     ) -> int:
         """Write `records` in one transaction and return the last seq. A payload canon refuses
         raises `CanonError`, and so does an empty `kind`, or a `kind`, `actor` or `request_id` that
         is not a string of Unicode scalar values (`actor` and `request_id` may be None). A reused
         `request_id` raises `StoreError`. Nothing is written then.
 
-        `transitions` are the trace entries the first record produced, stored in the same
-        transaction under its seq, and coverage extends over the records (DL-536). An entry canon
-        refuses raises `CanonError`, and rows with no record raise `StoreError`.
+        `transitions` are the trace entries the record at offset `produced_by` produced, the
+        first by default, stored in the same transaction under its seq, and coverage extends over
+        the records (DL-536, DL-560). An entry canon refuses raises `CanonError`; rows with no
+        record, or an offset outside the records, raise `StoreError`.
 
         `openings` and `owners` are the history index's rows, stored in the same transaction, and
-        the history coverage extends over the records (DL-539)."""
+        the history coverage extends over the records (DL-539). An opening is keyed as the
+        `transitions` row it names.
+
+        `config` is stored in the same transaction as the next rev; a row whose `rev` is not the
+        next one raises `StoreError` (DL-560)."""
         ...
 
     def first_seq(self) -> int:
@@ -541,6 +559,20 @@ def _encode_transition(entry: TransitionEntry) -> _Transition:
     return _Transition(entry["job"], entry["transition"], _encode_payload(entry))
 
 
+def _check_rows(records: int, rows: bool, produced_by: int, config: ConfigRow | None) -> None:
+    """Refuse an append's rows or configuration row with no record to commit with, and entries
+    bound to an offset outside its records (DL-536, DL-560)."""
+    if records == 0:
+        if rows or config is not None:
+            raise StoreError("rows are stored with the records that produced them")
+    elif not 0 <= produced_by < records:
+        raise StoreError(f"transitions bound to offset {produced_by} of {records} records")
+
+
+def _not_next(config: ConfigRow, current: int) -> StoreError:
+    return StoreError(f"configuration rev {config.rev} is not the next rev after {current}")
+
+
 def _advanced(coverage: list[Interval], first: int, last: int) -> list[Interval]:
     """`coverage` once records `first` to `last` were appended with their rows: the covered
     interval that ends at `first - 1` grows, or a new one starts (DL-536)."""
@@ -780,11 +812,16 @@ class MemoryStore:
         transitions: Sequence[TransitionEntry] = (),
         openings: Sequence[RunOpening] = (),
         owners: Sequence[RecordOwner] = (),
+        produced_by: int = 0,
+        config: ConfigRow | None = None,
     ) -> int:
         encoded = [_encode(record) for record in records]
         rows = [_encode_transition(entry) for entry in transitions]
-        if (rows or openings or owners) and not encoded:
-            raise StoreError("rows are stored with the records that produced them")
+        _check_rows(len(encoded), bool(rows or openings or owners), produced_by, config)
+        if config is not None and config.rev != len(self._configs) + 1:
+            raise _not_next(config, len(self._configs))
+        # the row's bytes before anything is published, so a failure leaves nothing (DL-560)
+        configured = None if config is None else (bytes(config.data), config.digest)
         seen: set[str] = set()
         for row in encoded:
             if row.request_id is None:
@@ -795,9 +832,10 @@ class MemoryStore:
         if encoded:
             first = self._next_seq
             last = first + len(encoded) - 1
-            self._transitions.extend((first, n, row) for n, row in enumerate(rows))
+            produced = first + produced_by
+            self._transitions.extend((produced, n, row) for n, row in enumerate(rows))
             self._coverage = _advanced(self._coverage, first, last)
-            self._job_runs.extend((first, o.n, o.job, o.run_number, o.rev) for o in openings)
+            self._job_runs.extend((produced, o.n, o.job, o.run_number, o.rev) for o in openings)
             self._job_records.extend((first + o.offset, o.job, o.run_number) for o in owners)
             self._history_coverage = _advanced(self._history_coverage, first, last)
         for row in encoded:
@@ -806,6 +844,8 @@ class MemoryStore:
             self._rows.append(entry)
             if row.request_id is not None:
                 self._requests[row.request_id] = entry
+        if configured is not None:
+            self._configs.append(configured)
         return self.last_seq()
 
     def read_from(self, seq: int) -> Iterator[tuple[int, Record]]:
@@ -1253,7 +1293,7 @@ class SqliteStore:
                         *sorted(identity.items()),
                     ],
                 )
-            self._db.execute("COMMIT")
+            _commit(self._db)
         except BaseException:
             _end(self._db, "ROLLBACK")
             raise
@@ -1293,16 +1333,21 @@ class SqliteStore:
         transitions: Sequence[TransitionEntry] = (),
         openings: Sequence[RunOpening] = (),
         owners: Sequence[RecordOwner] = (),
+        produced_by: int = 0,
+        config: ConfigRow | None = None,
     ) -> int:
         encoded = [_encode(record) for record in records]
         rows = [_encode_transition(entry) for entry in transitions]
+        _check_rows(len(encoded), bool(rows or openings or owners), produced_by, config)
         if not encoded:
-            if rows or openings or owners:
-                raise StoreError("rows are stored with the records that produced them")
             return self.last_seq()
         with self._transaction():
+            if config is not None and config.rev != (current := self.current_config_rev()) + 1:
+                raise _not_next(config, current)  # before any insert (DL-560)
             try:
-                for row in encoded:
+                for offset, row in enumerate(encoded):
+                    if config is not None and offset == produced_by:
+                        self._record_config(config)
                     self._db.execute(
                         "INSERT INTO journal(at_utc, kind, actor, request_id, payload)"
                         " VALUES (?, ?, ?, ?, ?)",
@@ -1312,16 +1357,27 @@ class SqliteStore:
                 raise StoreError(f"journal: {exc}") from exc
             last = self.last_seq()
             first = last - len(encoded) + 1
-            self._record_transitions(first, last, rows)
-            self._record_history(first, last, openings, owners)
+            self._record_transitions(first, last, rows, first + produced_by)
+            self._record_history(first, last, openings, owners, first + produced_by)
             return last
 
-    def _record_transitions(self, first: int, last: int, rows: list[_Transition]) -> None:
-        """The rows of record `first` and the coverage over `first` to `last`, inside the
+    def _record_config(self, config: ConfigRow) -> None:
+        """`config` as the next rev, inside the append's transaction, just before the record
+        whose trace entries the append commits, so its `at_utc` is the newest record's before
+        it: an update's row keeps its intent's stamp (DL-560)."""
+        self._db.execute(
+            "INSERT INTO configs(rev, at_utc, digest, data) VALUES (?, ?, ?, ?)",
+            (config.rev, self._journal_time(), config.digest, bytes(config.data)),
+        )
+
+    def _record_transitions(
+        self, first: int, last: int, rows: list[_Transition], produced: int
+    ) -> None:
+        """The rows of record `produced` and the coverage over `first` to `last`, inside the
         append's transaction: a failure here rolls the records back too (DL-536)."""
         self._db.executemany(
             "INSERT INTO transitions(seq, n, job, transition, entry) VALUES (?, ?, ?, ?, ?)",
-            [(first, n, row.job, row.transition, row.entry) for n, row in enumerate(rows)],
+            [(produced, n, row.job, row.transition, row.entry) for n, row in enumerate(rows)],
         )
         self._advance("transitions_coverage", first, last)
 
@@ -1331,12 +1387,14 @@ class SqliteStore:
         last: int,
         openings: Sequence[RunOpening],
         owners: Sequence[RecordOwner],
+        produced: int,
     ) -> None:
         """The history index's rows of records `first` to `last` and its coverage over them,
-        inside the append's transaction (DL-539)."""
+        inside the append's transaction; an opening is keyed as the transitions row of record
+        `produced` (DL-539)."""
         self._db.executemany(
             "INSERT INTO job_runs(seq, n, job, run_number, rev) VALUES (?, ?, ?, ?, ?)",
-            [(first, o.n, o.job, o.run_number, o.rev) for o in openings],
+            [(produced, o.n, o.job, o.run_number, o.rev) for o in openings],
         )
         self._db.executemany(
             "INSERT INTO job_records(seq, job, run_number) VALUES (?, ?, ?)",
@@ -1935,7 +1993,7 @@ class SqliteStore:
 
 
 class _Transaction:
-    """`BEGIN IMMEDIATE` ... `COMMIT`, or `ROLLBACK` when the block raises."""
+    """`BEGIN IMMEDIATE` ... `COMMIT`, or `ROLLBACK` when the block or the COMMIT raises."""
 
     def __init__(self, db: sqlite3.Connection) -> None:
         self._db = db
@@ -1945,9 +2003,20 @@ class _Transaction:
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         if exc_type is None:
-            self._db.execute("COMMIT")
+            _commit(self._db)
         else:
             _end(self._db, "ROLLBACK")
+
+
+def _commit(db: sqlite3.Connection) -> None:
+    """COMMIT the open transaction. A COMMIT that fails (statements in progress, a full disk)
+    leaves the transaction open, and the connection would read its rows as its own: roll it
+    back and raise, so the writer reads only what is durable (DL-560)."""
+    try:
+        db.execute("COMMIT")
+    except BaseException:
+        _end(db, "ROLLBACK")
+        raise
 
 
 def _end(db: sqlite3.Connection, statement: str) -> None:

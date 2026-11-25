@@ -122,7 +122,7 @@ from pathlib import Path
 import os
 from typing import Any, Final, Literal
 
-from dsl41.engine_charts import QUARANTINED, UPDATE_STOP, AttemptOutcome, DrainRequest
+from dsl41.engine_charts import QUARANTINED, UPDATE_STOP, AttemptOutcome, DrainRequest, Intent
 from dsl41.ir import CatalogIR, FwSpec, JobIR
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, EventSource, JobRuntime, StatusObservation
@@ -845,13 +845,16 @@ class Engine:
     async def _update_step(self, pending: _Pending) -> None:
         """Take one queued update step; an application it reaches is finished inside it: one
         time advance is fed, so the queue scan the swap owes runs first (DL-427), then the
-        outcomes kept back are committed and the held starts released."""
+        outcomes kept back are committed and the held starts released. An admission with
+        nothing to stop applies and commits inside `admit`, before its answer is set and
+        before anything here yields (DL-560)."""
         update = self.update
         update.direct = True
+        handed: tuple[Intent, ...] = ()
         try:
             if pending.control == "update":
                 assert isinstance(pending.update, UpdateRequest) and pending.answer is not None
-                answer = update.admit(pending.update)
+                answer, handed = update.admit(pending.update)
                 # a client that gave up on the decision cancelled its future; the step runs in
                 # full all the same, and a retry under the request id is answered from the store
                 if not pending.answer.done():
@@ -861,7 +864,7 @@ class Engine:
                 update.ended(pending.update)
         finally:
             update.direct = False
-        if update.tier is not None:
+        if update.tier is not None and not handed:
             box_ends = update.tier.look()
             if box_ends is not None:
                 # Box KILLJOBs commit inside STOPPING before application (DL-487).
@@ -874,33 +877,30 @@ class Engine:
                         source="reconcile",
                     )
                     await self._admit_and_apply(_Pending(at=ev.at, request_id=None, ev=ev))
-                from dsl41.reload_update import ADVANCE_TIME, FINISH, HOLD_MARKED, START_BOXES
+                handed = update.tier.boxes_ended()
+        from dsl41.reload_update import ADVANCE_TIME, FINISH, HOLD_MARKED, START_BOXES
 
-                for intent in update.tier.boxes_ended():
-                    if intent.name == ADVANCE_TIME:
-                        await self._admit_and_apply(
-                            _Pending(at=self.now_admitted(), request_id=None)
+        for intent in handed:
+            if intent.name == ADVANCE_TIME:
+                await self._admit_and_apply(_Pending(at=self.now_admitted(), request_id=None))
+                # DL-488: select holds and starts once, after the time advance.
+                box_starts = update.box_starts()
+            elif intent.name in (HOLD_MARKED, START_BOXES):
+                kind: Literal["ON_HOLD", "FORCE_STARTJOB"] = (
+                    "ON_HOLD" if intent.name == HOLD_MARKED else "FORCE_STARTJOB"
+                )
+                for event_kind, job in box_starts:
+                    if event_kind == kind:
+                        ev = Event(
+                            at=self.now_admitted(),
+                            kind=kind,
+                            payload={"job": job},
+                            source="reconcile",
                         )
-                        # DL-488: select holds and starts once, after the time advance.
-                        box_starts = update.box_starts()
-                    elif intent.name in (HOLD_MARKED, START_BOXES):
-                        kind: Literal["ON_HOLD", "FORCE_STARTJOB"] = (
-                            "ON_HOLD" if intent.name == HOLD_MARKED else "FORCE_STARTJOB"
-                        )
-                        for event_kind, job in box_starts:
-                            if event_kind == kind:
-                                ev = Event(
-                                    at=self.now_admitted(),
-                                    kind=kind,
-                                    payload={"job": job},
-                                    source="reconcile",
-                                )
-                                await self._admit_and_apply(
-                                    _Pending(at=ev.at, request_id=None, ev=ev)
-                                )
-                    else:
-                        assert intent.name == FINISH
-                        update.finish()
+                        await self._admit_and_apply(_Pending(at=ev.at, request_id=None, ev=ev))
+            else:
+                assert intent.name == FINISH
+                update.finish()
 
     def refit_adapters(self) -> None:
         """Refit future FW launches to the applied profile, then check its switches

@@ -42,6 +42,7 @@ from dsl41.reload_update import (
     HOLD_MARKED,
     JOURNAL_APPLIED,
     JOURNAL_INTENT,
+    JOURNAL_UPDATE,
     LOOK,
     STOP_ATTEMPT,
     START_BOXES,
@@ -96,29 +97,34 @@ STALE = Refused(TOKEN, STALE_PLAN)
 # ---- the chart
 
 
-def test_the_chart_is_well_formed_has_six_rows_and_no_warning() -> None:
+def test_the_chart_is_well_formed_has_seven_rows_and_no_warning() -> None:
     assert well_formed(UPDATE) == []
     assert chart_warnings(UPDATE) == []
     rows = [(r.id, r.source, r.event, r.target, r.kind, r.guard) for r in UPDATE.rows]
     assert rows == [
-        ("update.01", "IDLE", UPDATE_ADMITTED, "STOPPING", "external", "admitted"),
+        ("update.01", "IDLE", UPDATE_ADMITTED, "STOPPING", "external", "some_to_stop"),
         ("update.02", "IDLE", UPDATE_ADMITTED, "REFUSED", "external", "refused"),
         ("update.03", "ENDING_BOXES", BOXES_ENDED, "APPLIED", "external", ""),
         ("update.04", "WAITING", EXIT_RECORDED, "", "internal", ""),
         ("update.05", "WAITING", LOOK, "ENDING_BOXES", "external", "none_open"),
         ("update.06", "WAITING", LOOK, "", "internal", "some_open"),
+        ("update.07", "IDLE", UPDATE_ADMITTED, "APPLIED", "external", "none_to_stop"),
     ]
     assert UPDATE_STATES == ("IDLE", "STOPPING", "APPLIED", "REFUSED")
     assert alphabet(UPDATE) == sorted([UPDATE_ADMITTED, LOOK, BOXES_ENDED, EXIT_RECORDED])
 
 
 def _executor(state: str) -> Executor:
+    """A witness of `state`: WAITING_EMPTY is WAITING once every stop ended; APPLIED is reached
+    the long way, through the stops and the box stop."""
     executor = Executor()
     executor.start("u", UPDATE, UpdateRecord())
     executor.run()
     if state in ("STOPPING", "WAITING", "WAITING_EMPTY", "ENDING_BOXES", "APPLIED"):
-        admitted = ADMITTED if state in ("STOPPING", "WAITING") else NONE_TO_STOP
-        executor.dispatch("u", ChartEvent(UPDATE_ADMITTED, admitted))
+        executor.dispatch("u", ChartEvent(UPDATE_ADMITTED, ADMITTED))
+    if state in ("WAITING_EMPTY", "ENDING_BOXES", "APPLIED"):
+        for job in ADMITTED.stop_set:
+            executor.dispatch("u", ChartEvent(EXIT_RECORDED, job))
     if state in ("ENDING_BOXES", "APPLIED"):
         executor.dispatch("u", ChartEvent(LOOK))
     if state == "APPLIED":
@@ -137,7 +143,9 @@ ABSTRACTION = sc.Abstraction(
         state: _witness(state)
         for state in ("IDLE", "WAITING", "WAITING_EMPTY", "ENDING_BOXES", "APPLIED", "REFUSED")
     },
-    partitions={UPDATE_ADMITTED: {"admitted": ADMITTED, "refused": STALE}},
+    partitions={
+        UPDATE_ADMITTED: {"admitted": ADMITTED, "none_to_stop": NONE_TO_STOP, "refused": STALE}
+    },
 )
 
 
@@ -148,6 +156,7 @@ def test_the_completeness_table_is_the_specs_design() -> None:
         for state in ("APPLIED", "REFUSED")
         for event, label in [
             (UPDATE_ADMITTED, "admitted"),
+            (UPDATE_ADMITTED, "none_to_stop"),
             (UPDATE_ADMITTED, "refused"),
             (LOOK, "any"),
             (BOXES_ENDED, "any"),
@@ -156,6 +165,7 @@ def test_the_completeness_table_is_the_specs_design() -> None:
     }
     assert table == {
         ("IDLE", UPDATE_ADMITTED, "admitted"): "update.01",
+        ("IDLE", UPDATE_ADMITTED, "none_to_stop"): "update.07",
         ("IDLE", UPDATE_ADMITTED, "refused"): "update.02",
         ("WAITING", LOOK, "any"): "update.06",
         ("WAITING_EMPTY", LOOK, "any"): "update.05",
@@ -197,6 +207,10 @@ class Effects:
 
     def journal_applied(self, application: Application) -> Application:
         self.log.append((JOURNAL_APPLIED, application.rev, application.digest))
+        return application
+
+    def journal_update(self, application: Application) -> Application:
+        self.log.append((JOURNAL_UPDATE, application.rev, application.digest))
         return application
 
 
@@ -242,6 +256,9 @@ def test_every_coverage_item_of_the_chart_is_hit(
     refused = UpdateTier(Effects(), _prepare)
     refused.admit(STALE)
     _look(refused)
+    at_once = UpdateTier(Effects(), _prepare)
+    at_once.admit(NONE_TO_STOP)
+    _look(at_once)
     for state in ("APPLIED", "REFUSED"):
         executor = _executor(state)
         for event in alphabet(UPDATE):
@@ -285,13 +302,18 @@ def test_an_admission_journals_the_intent_then_stops_each_job_and_applies_after_
     assert effects.log[3:] == [(APPLY, TOKEN), (JOURNAL_APPLIED, 8, application.digest)]
 
 
-def test_an_admission_with_nothing_to_stop_applies_on_its_look() -> None:
+def test_an_admission_with_nothing_to_stop_applies_in_its_admission() -> None:
+    """DL-560: the admission goes from IDLE to APPLIED, applies, journals its intent with its
+    application in one transaction, and hands back the time advance and the finish; it holds
+    no box member and starts no box. A later look moves nothing."""
     effects = Effects()
     tier = UpdateTier(effects, _prepare)
-    tier.admit(NONE_TO_STOP)
-    _look(tier)
-    assert tier.state == "APPLIED"
-    assert [entry[0] for entry in effects.log] == [JOURNAL_INTENT, APPLY, JOURNAL_APPLIED]
+    decision, handed = tier.admit(NONE_TO_STOP)
+    assert decision == NONE_TO_STOP and tier.state == "APPLIED"
+    assert tier.dispatch_filter == frozenset() and tier.application == _application()
+    assert [entry[0] for entry in effects.log] == [APPLY, JOURNAL_UPDATE]
+    assert handed == (Intent(ADVANCE_TIME, TOKEN), Intent(FINISH, TOKEN))
+    assert tier.look() is None and effects.log[2:] == []
 
 
 def test_a_refusal_ends_the_update_with_no_effect() -> None:
@@ -348,7 +370,9 @@ def test_box_kills_keep_the_filter_until_the_callers_reply(
     if restored:
         tier.resume(NONE_TO_STOP, ())
     else:
-        tier.admit(NONE_TO_STOP)
+        # an admission with nothing to stop applies at once (DL-560): this one's stop ends
+        tier.admit(Admitted(TOKEN, ("A",), frozenset({"C"})))
+        tier.exit_recorded("A")
     assert tier._executor.active("update") == {"update", "STOPPING", "WAITING"}
     assert reads == [] and tier.application is None
     assert tier.look() == (Intent("KILLJOB", "BX"), Intent("KILLJOB", "member"))
@@ -740,8 +764,8 @@ def test_a_running_jobs_status_only_edit_applies_with_no_stop_and_keeps_the_row(
     assert [change.name for change in result.plan.seed_only] == ["OPS_HEARTBEAT_C"]
     tier, effects = world.update(document, candidate)
     assert tier.state == "APPLIED"
-    assert effects.log[0] == (JOURNAL_INTENT, document["token"], ())
-    assert not [entry for entry in effects.log if entry[0] == STOP_ATTEMPT]
+    # nothing to stop: the intent is journaled with the application (DL-560)
+    assert [entry[0] for entry in effects.log] == [APPLY, JOURNAL_UPDATE]
     assert tier.application is not None
     assert (tier.application.changed, tier.application.added, tier.application.removed) == (
         (),
@@ -1013,8 +1037,9 @@ def test_one_update_is_in_flight_at_a_time(tmp_path: Path) -> None:
     assert other.refusal == Refused(second_doc["token"], UPDATE_IN_PROGRESS, (first_doc["token"],))
     assert effects.log == []
     # the open tier answers a second admission the same way and keeps its filter
-    again = tier.admit(Admitted(second_doc["token"], (), frozenset({"OPS_SPOOL_C"})))
+    again, handed = tier.admit(Admitted(second_doc["token"], (), frozenset({"OPS_SPOOL_C"})))
     assert again == Refused(second_doc["token"], UPDATE_IN_PROGRESS, (first_doc["token"],))
+    assert handed == ()
     assert tier.state == "STOPPING" and tier.dispatch_filter == {"OPS_HEARTBEAT_C"}
 
 
@@ -1050,13 +1075,19 @@ def test_a_raise_while_applying_propagates_and_resume_applies(tmp_path: Path) ->
     def broken(admitted: Admitted) -> Application:
         raise RuntimeError("disk full")
 
-    crashed = UpdateTier(Effects(), broken)
+    # an admission with stops journals its intent first, so a raise at its application leaves
+    # an intent for the restart to resume; one with nothing to stop leaves none (DL-560)
+    journaled = Effects()
+    crashed = UpdateTier(journaled, broken)
+    crashed.admit(ADMITTED)
+    for job in ADMITTED.stop_set:
+        crashed.exit_recorded(job)
     with pytest.raises(RuntimeError, match="disk full"):
-        crashed.admit(NONE_TO_STOP)
         _look(crashed)
+    assert [entry[0] for entry in journaled.log] == [JOURNAL_INTENT, STOP_ATTEMPT, STOP_ATTEMPT]
     effects = Effects()
     restarted = UpdateTier(effects, _prepare)
-    restarted.resume(NONE_TO_STOP, ())
+    restarted.resume(ADMITTED, ())
     _look(restarted)
     assert restarted.state == "APPLIED"
     assert [entry[0] for entry in effects.log] == [APPLY, JOURNAL_APPLIED]

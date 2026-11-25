@@ -266,11 +266,11 @@ def test_a_failed_row_insert_leaves_neither_the_records_nor_any_row(
         store.append(_record(0), transitions=[_entry(0)])
         real = store._record_transitions
 
-        def fails(first: int, last: int, rows: list[Any]) -> None:
+        def fails(*args: Any) -> None:
             assert store._db.in_transaction
             (written,) = store._db.execute("SELECT COUNT(*) FROM journal").fetchone()
             assert written == 3  # the two records of this append are in the transaction
-            real(first, last, rows)
+            real(*args)
             raise OSError("disk full")
 
         monkeypatch.setattr(store, "_record_transitions", fails)
@@ -517,8 +517,21 @@ class _PreviousBuild(EarlierPrune):
     def __init__(self, store: Any) -> None:
         self._store = store
 
-    def append(self, *records: Record, **rows: Any) -> int:
-        return int(self._store.append(*records))
+    def append(
+        self,
+        *records: Record,
+        transitions: Any = (),
+        openings: Any = (),
+        owners: Any = (),
+        **rows: Any,
+    ) -> int:
+        """The rows that build never wrote are left out. Every other keyword this build passes
+        goes through unless it holds its default, so a configuration row or a mark on a later
+        record is refused by that build's store, never dropped (DL-560)."""
+        unknown = {
+            k: v for k, v in rows.items() if (k, v) not in {("produced_by", 0), ("config", None)}
+        }
+        return int(self._store.append(*records, **unknown))
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._store, name)

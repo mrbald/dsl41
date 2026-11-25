@@ -25,7 +25,7 @@ from dsl41.runner_startup import active_configuration, resume_run, start_run
 from dsl41.runner_store import MemoryStore, Record, SqliteStore
 from dsl41.runner_update import UpdateRequest
 from test_main_config import JOB, PYTHON, T0, config_file, estate_file
-from update_legacy import legacy_admission
+from update_legacy import legacy_admission, separate_writes
 
 
 @pytest.mark.usefixtures("cli_env")
@@ -533,7 +533,10 @@ def test_bug57_unchanged_update_respects_refusals(tmp_path, monkeypatch, busy):
                 engine.update.admit(UpdateRequest(changed.token, 1, engine.baseline_id, "open"))
                 assert engine.update.stopping
             before = list(engine.journal.store.read_from(0))
-            answer = engine.update.admit(UpdateRequest(plan.token, 1, engine.baseline_id, "equal"))
+            answer, handed = engine.update.admit(
+                UpdateRequest(plan.token, 1, engine.baseline_id, "equal")
+            )
+            assert handed == ()
             assert answer.unchanged is None
             if busy == "drain":
                 assert answer.code == "engine_draining"
@@ -966,6 +969,8 @@ def test_older_build_crash_after_config_row_resumes_without_another_row(
                 return append(*records, **rows)
 
             with monkeypatch.context() as old:
+                # the older build wrote the intent, the row and the application apart (DL-560)
+                separate_writes(old)
                 old.setattr(runner_update, "store_config", old_writer)
                 old.setattr(engine.journal, "append", crash_before_applied)
                 engine.request_update(UpdateRequest(plan.token, 1, engine.baseline_id, "old-build"))

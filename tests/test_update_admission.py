@@ -57,7 +57,8 @@ def _busy(engine, monkeypatch):
     plan = reread(engine.update.live(), engine.run_root / "plans", candidate=prepare_estate(estate))
     monkeypatch.setattr(engine.update, "stop_attempt", lambda job, cause: None)
     request = UpdateRequest(plan.token, 1, engine.baseline_id, "open")
-    answer = engine.update.admit(request)
+    answer, handed = engine.update.admit(request)
+    assert handed == ()
     assert answer.decision == Admitted(plan.token, ("a",), frozenset({"a"}), (("a", 1),))
     assert engine.update.view() == {"token": plan.token, "stopping": ["a"]}
     return request, answer
@@ -79,7 +80,8 @@ def _without_writes(engine, request, monkeypatch):
     with monkeypatch.context() as guard:
         for method in ("append", "put_config", "put_snapshot"):
             guard.setattr(store, method, write)
-        answer = engine.update.admit(request)
+        answer, handed = engine.update.admit(request)
+    assert handed == ()
     assert (
         list(store.read_from(0)),
         engine.config_rev,

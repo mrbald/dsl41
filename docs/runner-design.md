@@ -1250,6 +1250,17 @@ it, with all their descendants in either catalog. Otherwise the update is refuse
 `reread` forecasts that refusal with the same function (`reload_plan.tree_active`) from
 the same inputs. An admitted one records `restart_boxes: []` and applies in its admission
 step. A job outside every box that is no BOX in either catalog is updated as any other.
+Any admission with nothing to stop goes from IDLE to APPLIED in its own step (update.07).
+It swaps the catalog, then commits its `config intent`, its configuration row and its
+`config applied`, with the discharged records and the CONFIG mark, in one transaction,
+with no yield, answer or snapshot between the swap and the commit. After a crash the
+store holds the old revision and no trace of the request, or the whole application, so
+no restart resumes such an update; a failure between the swap and the commit is a crash
+(DL-560): the engine dies and replay installs what the store holds. The lock is proved
+before the swap, and a COMMIT that fails is rolled back. The intent stays first, keeps
+its shape and still answers a retry by its id.
+An update that stops jobs, and an intent an earlier build stored, keep the separate
+intent, the stops in STOPPING, and the application after them.
 An intent an earlier build stored can name box roots in `restart_boxes`; recovery
 completes it as that build did: it stops the roots' members, commits KILLJOBs before the
 application to prevent old-run replacement, then holds every marked non-INACTIVE member

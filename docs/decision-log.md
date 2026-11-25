@@ -26445,6 +26445,7 @@ relitigate an entry; append a new one.
   member's is BUG-67.
   NARROWED BY DL-559: only an older build's resumed intent ends box runs: one that names roots,
   or one without the key, whose roots are recomputed and can end a live box.
+  NARROWED BY DL-560: an admission with nothing to stop goes from IDLE to APPLIED at once.
 
 - DL-488 The UPDATE chart's apply row names the whole sequence after the box stop
   (2026-11-11; operator ruling on the FEAT-10 chart review; reload_update.py, runner.py,
@@ -26468,6 +26469,7 @@ relitigate an entry; append a new one.
   yields there in production, and nothing reuses an engine
   after such a cancel.
   NARROWED BY DL-559: the holds and box starts act only for an older build's resumed intent.
+  NARROWED BY DL-560: update.07 applies an admission with nothing to stop in one transaction.
 
 - DL-489 An update's intent records its box roots, and recovery restarts those boxes
   (2026-11-11; owner ruling on the FEAT-10 chart review, X1; fixes BUG-67;
@@ -28185,3 +28187,43 @@ relitigate an entry; append a new one.
   code and the preview key are additive within dialect 5.
   OPEN. A crash between the intent and the application of an update with nothing to stop
   (BUG-19); a changed job in an open box is not evaluated again (BUG-116).
+- DL-560 An update with nothing to stop commits its intent and its application in one transaction
+  (2026-11-25; follows the owner ruling of DL-559; src/dsl41/runner_store.py,
+  src/dsl41/runner_journal.py, src/dsl41/reload_update.py, src/dsl41/runner_update.py,
+  src/dsl41/runner.py, docs/runner-design.md, docs/blocks/update.md,
+  tests/test_update_one_transaction.py; closes BUG-19, which DL-559 left open)
+  THE RULE. (1) A new admission whose stop set is empty writes its `config intent`, its
+  configuration row and its `config applied`, with the discharged records and the CONFIG mark,
+  in one store transaction. After a crash the store holds the old revision and no trace of the
+  request, or the whole application. (2) The intent stays first in sequence and keeps its
+  shape, so a retry finds the request by its id and recovery folds intent then applied. The
+  mark stays bound to the applied record (DL-536). (3) The swap and the commit happen in the
+  admission's step with no yield, answer or snapshot between them. A failure after one of them
+  is a crash: the engine dies and replay installs what the store holds. The lock is proved
+  before the swap, and a failed COMMIT rolls back. (4) The UPDATE chart's update.07 goes from
+  IDLE to APPLIED on `update_admitted [none_to_stop]` and names apply, journal the intent with
+  the application, advance time and finish. update.01 takes `[some_to_stop]`; an admission
+  with stops keeps its path in full. (5) A resumed intent
+  keeps its path in full: one with roots, one with `[]`, one without the key, and an older
+  build's intent with an empty stop list and no applied record, which applies at the first
+  look after the catch-up. (6) No record's shape, the configuration row, the state version or
+  what `subscribe`, history and replay read changes. Recovery keeps its order (DL-432,
+  DL-433). A store's `append` takes the next configuration row and the offset of the record
+  whose trace entries it commits; a row at any other rev refuses the whole append.
+  THE REASON. The intent, the row and the application were three transactions. A death
+  between them left an intent with an empty stop list. The restart applied it only at the
+  first look, after the catch-up's recovered outcomes, owed plans and pending starts. A box
+  whose members the update changes could open a run there, and the application then replaced
+  its members under the open run. DL-559 closed every such sequence on a running engine; this
+  window was the last.
+  UNCHANGED. An update that stops jobs, every refusal, `reread`, the box-restart completion
+  of an older build's intent (FEAT-54) and BUG-116. A resumed update still keeps an equal row
+  already at its rev (DL-438, DL-468). The state-machine version stays 28.
+  WHAT IT NARROWS. DL-432: an admission with nothing to stop no longer journals its intent
+  and enters STOPPING; it applies in its own step, and only an update that stops jobs or an
+  earlier build's intent reaches the restart's STOPPING. DL-487: such an admission never
+  enters STOPPING, so the look and the box stop concern an update that stops jobs or a
+  resumed intent. DL-488: update.03 is no longer the one apply row, and the recovery window
+  from `config intent` to `config applied` remains only for an update that stops jobs and for
+  a resumed intent.
+  OPEN. Until it exits, an engine whose loop raised after a swap answers from memory (BUG-117).

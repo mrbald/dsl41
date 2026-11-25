@@ -34,6 +34,10 @@ and the profile; one `config applied` record and a configuration row carry the n
 engine then feeds one time advance, so the queue scan the swap owes runs before anything else
 (DL-427), commits the outcomes it kept back, and releases what the dispatch filter held.
 
+An admission with nothing to stop applies in its own step, before its answer: the swap, then its
+`config intent`, its configuration row and its `config applied` in one store transaction, with no
+yield between them, so no restart finds its intent alone (DL-560).
+
 A restart that finds a `config intent` with no `config applied` resumes the update in STOPPING
 (spec-restart §2): the catch-up observes the attempts it stops like any open one, and it applies
 as a step of the loop once its stops are finished. The recovered outcomes of jobs outside its
@@ -60,7 +64,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from dsl41.canon import digest
-from dsl41.engine_charts import UPDATE_STOP, AttemptOutcome
+from dsl41.engine_charts import UPDATE_STOP, AttemptOutcome, Intent
 from dsl41.idempotence import Exceptions
 from dsl41.ir import CatalogIR
 from dsl41.oracle_reads import marker
@@ -106,7 +110,7 @@ from dsl41.runner_journal import (
     update_box_roots,
 )
 from dsl41.runner_ledger import STATE_MACHINE_VERSION
-from dsl41.runner_store import Record, Store
+from dsl41.runner_store import ConfigRow, Record, Store
 from dsl41.runtime_policy import policy_values
 
 if TYPE_CHECKING:  # annotation only: the engine imports this module
@@ -383,9 +387,12 @@ class EngineUpdate:
 
     # ---- the request (one single-writer step)
 
-    def admit(self, request: UpdateRequest) -> UpdateAnswer:
-        """Admit or refuse one update request (module docstring). The answer's `applied` future
-        resolves once the update applied, at once when nothing was to stop."""
+    def admit(self, request: UpdateRequest) -> tuple[UpdateAnswer, tuple[Intent, ...]]:
+        """Admit or refuse one update request (module docstring); answer it with the intents
+        the admission's chart row hands back to the update step. An admission with nothing to
+        stop applies in this call, its intent, configuration row and application in one store
+        transaction, and hands back the time advance and the finish (DL-560); any other answer
+        hands back none. The answer's `applied` future resolves once the update applied."""
         engine = self.engine
         # ControlServer admits updates only on stored start_run/resume_run engines (DL-427).
         assert engine.run_root is not None and engine.journal is not None
@@ -393,26 +400,26 @@ class EngineUpdate:
         # new update is refused while the engine drains
         prior = self._prior(request, engine.journal)
         if prior is not None:
-            return prior
+            return prior, ()
         if engine.draining:
             return UpdateAnswer(
                 code="engine_draining",
                 error="the engine is draining: it takes no update until it restarts",
-            )
+            ), ()
         open_token = self.token
         if open_token is not None:
-            return self._decide(Refused(request.token, UPDATE_IN_PROGRESS, (open_token,)))
+            return self._decide(Refused(request.token, UPDATE_IN_PROGRESS, (open_token,))), ()
         try:
             opened = open_plan(engine.run_root, request.token)
         except PlanUnreadable as exc:
-            return UpdateAnswer(code="invalid_argument", error=str(exc))
+            return UpdateAnswer(code="invalid_argument", error=str(exc)), ()
         if not isinstance(opened.plan.get("estate_dir"), str):
             # a version 2 plan always names its estate directory; one without it is damaged
             # and refused before any write (DL-486)
             return UpdateAnswer(
                 code="stale_plan",
                 error=f"plan {request.token} predates this engine: run update again",
-            )
+            ), ()
         if (
             request.expect != engine.config_rev
             or opened.plan.get("live_rev") != engine.config_rev
@@ -421,7 +428,7 @@ class EngineUpdate:
             # the precondition names the rev the caller read; the plan names the rev and the
             # catalog reread saw, checked before anything is written, so the application's own
             # check of them never meets a mismatch after the intent
-            return self._decide(Refused(request.token, STALE_PLAN))
+            return self._decide(Refused(request.token, STALE_PLAN)), ()
         from dsl41.runner_preflight import runtime_variable_preflight
 
         candidate = configuration_of(opened, engine.profile or RuntimeProfile())
@@ -432,7 +439,7 @@ class EngineUpdate:
             return UpdateAnswer(
                 code="invalid_argument",
                 error=f"preflight ERROR [runtime-variable]: {problems[0].message}",
-            )
+            ), ()
         applied = Configuration.from_bytes(
             engine.journal.store.get_config(engine.config_rev),
             where=f"configuration rev {engine.config_rev}",
@@ -444,7 +451,7 @@ class EngineUpdate:
             return UpdateAnswer(
                 Admitted(request.token, (), frozenset()),
                 unchanged={"rev": engine.config_rev, "catalog_hash": applied.catalog_hash},
-            )
+            ), ()
         live = self.live()
         decision = admission_data(opened.plan, live=live)
         # an update that changes box membership applies only with nothing to stop and the
@@ -453,12 +460,12 @@ class EngineUpdate:
             live.catalog, opened.estate.catalog, live.status, live.owned, decision.stop_set
         )
         if names:
-            return self._decide(Refused(request.token, TREE_ACTIVE, names))
+            return self._decide(Refused(request.token, TREE_ACTIVE, names)), ()
         self._begin(request, opened, decision)
         answer = self._answer = UpdateAnswer(decision)
         answer.applied = asyncio.get_running_loop().create_future()
-        self._post(lambda tier: tier.admit(decision))
-        return answer
+        _, handed = self._post(lambda tier: tier.admit(decision))
+        return answer, handed
 
     def _decide(self, refusal: Refused) -> UpdateAnswer:
         """A refusal, through a fresh instance of the chart (its REFUSED row)."""
@@ -497,11 +504,11 @@ class EngineUpdate:
         self._cleaning = cleaning
         self.tier = UpdateTier(self, self._prepare)
 
-    def _post(self, post: Callable[[UpdateTier], object]) -> None:
+    def _post[T](self, post: Callable[[UpdateTier], T]) -> T:
         assert self.tier is not None
         direct, self.direct = self.direct, True
         try:
-            post(self.tier)
+            return post(self.tier)
         finally:
             self.direct = direct
 
@@ -646,16 +653,21 @@ class EngineUpdate:
 
     def journal_intent(self, token: str, stop_set: tuple[str, ...]) -> None:
         engine = self.engine
+        assert engine.journal is not None  # `admit` and `resume` refuse an engine with none
+        engine.journal.append(self._intent_record(token, stop_set, engine.config_rev))
+
+    def _intent_record(self, token: str, stop_set: tuple[str, ...], live_rev: int) -> Record:
+        """The `config intent` record of the update in flight, admitted at `live_rev`."""
+        engine = self.engine
         request = self._request
         assert request is not None and self.tier is not None
-        assert engine.journal is not None  # `admit` and `resume` refuse an engine with none
         at = engine.now_admitted()
         runs = dict(self._runs())
         body = {
             "event": "intent",
             "at": at.isoformat(),
             "token": token,
-            "live_rev": engine.config_rev,
+            "live_rev": live_rev,
             # the cause of a stop an attempt already takes is its first; the update's own stop
             # is the first only for an attempt that takes none yet
             "stop": [
@@ -674,8 +686,7 @@ class EngineUpdate:
             "request_id": request.request_id,
             "fingerprint": request.fingerprint,
         }
-        record = Record(at, "config", request.claimed_actor, request.request_id, body)
-        engine.journal.append(record)
+        return Record(at, "config", request.claimed_actor, request.request_id, body)
 
     def _runs(self) -> tuple[tuple[str, int], ...]:
         return () if self._admitted is None else self._admitted.stop_runs
@@ -741,9 +752,11 @@ class EngineUpdate:
         return plan_application(self.engine.oracle, opened.estate.catalog, plan)
 
     def apply(self, application: Application) -> None:
-        """Swap the catalog, the settings, the plans, the marked set and the profile."""
+        """Swap the catalog, the settings, the plans, the marked set and the profile, once the
+        run root's lock is proved: an engine that lost the root swaps nothing (S6b, DL-560)."""
         engine = self.engine
-        assert self._opened is not None
+        assert self._opened is not None and engine.journal is not None
+        engine.journal.prove()
         apply_application(engine.oracle, application, revision=engine.config_rev)
         at = engine.now_admitted(remember=False)
         if engine.scheduler is not None:
@@ -763,13 +776,33 @@ class EngineUpdate:
         engine.config_rev = application.rev
 
     def journal_applied(self, application: Application) -> Application:
-        """The new configuration row and its `config applied` record."""
-        engine = self.engine
+        """The new configuration row, then its `config applied` record: an update that stopped
+        jobs, or a resumed one, whose row may already stand (`store_config`)."""
+        configuration = self._configuration()
+        assert self.engine.journal is not None  # `admit` and `resume` refuse an engine with none
+        store_config(self.engine.journal.store, configuration, application.rev)
+        return self._journal_application(application, configuration, None)
+
+    def journal_update(self, application: Application) -> Application:
+        """An admission with nothing to stop: its `config intent`, its configuration row and its
+        `config applied` with the discharged records, in one store transaction. The intent stays
+        first and keeps its shape, and the CONFIG mark is the applied record's (DL-536, DL-560).
+        The swap came first, in the same step, with no yield between it and this commit."""
+        intent = self._intent_record(application.token, (), application.rev - 1)
+        return self._journal_application(application, self._configuration(), intent)
+
+    def _configuration(self) -> Configuration:
         assert self._opened is not None
+        return configuration_of(self._opened, self.engine.profile or RuntimeProfile())
+
+    def _journal_application(
+        self, application: Application, configuration: Configuration, intent: Record | None
+    ) -> Application:
+        """The `config applied` record, after `intent` in its transaction with the
+        configuration row when there is one (DL-560)."""
+        engine = self.engine
         journal = engine.journal
         assert journal is not None  # `admit` and `resume` refuse an engine with none
-        configuration = configuration_of(self._opened, engine.profile or RuntimeProfile())
-        store_config(journal.store, configuration, application.rev)
         engine.source_capture = dict(configuration.source_capture)
         engine.reread_marks = {}
         application = replace(application, stopped=self._choose_follow_ups())
@@ -797,11 +830,15 @@ class EngineUpdate:
                 for job in application.removed
             ]
         )
-        journal.append(
-            Record(at, "config", None, None, body),
-            *(discharged_record(seq, at) for seq in retired),
-            transitions=[mark],
-        )
+        applied = Record(at, "config", None, None, body)
+        discharged = [discharged_record(seq, at) for seq in retired]
+        if intent is None:
+            journal.append(applied, *discharged, transitions=[mark])
+        else:
+            row = ConfigRow(application.rev, configuration.to_bytes(), configuration.digest())
+            journal.append(
+                intent, applied, *discharged, transitions=[mark], produced_by=1, config=row
+            )
         engine.unqueue(retired)
         engine.oracle.add_mark(mark)
         self._body = body
