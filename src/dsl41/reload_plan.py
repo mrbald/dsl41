@@ -40,7 +40,7 @@ from dsl41.canon import ARTIFACT_FORMAT_VERSION, CanonError, canonical_bytes, de
 from dsl41.ir import CatalogIR, job_name_from_subject
 from dsl41.minify_rules import JOB_SUBCOMMANDS
 from dsl41.oracle_state import LIVE_OR_QUEUED
-from dsl41.reload_diff import Plan, catalog_hash_v2, diff, plan_token, running_boxes
+from dsl41.reload_diff import Plan, catalog_hash_v2, diff, plan_token
 from dsl41.runner_preflight import PreflightItem, preflight
 from dsl41.runner_config import MachinePolicy
 from dsl41.runtime_policy import policy_values
@@ -259,7 +259,7 @@ def spec_texts(parsed: Sequence[JilFile], catalog: CatalogIR) -> dict[str, str]:
 
 
 def box_members(catalog: CatalogIR, boxes: Sequence[str]) -> set[str]:
-    """All descendants of the named boxes (DL-463)."""
+    """All descendants of the named boxes: the touched trees of `tree_active` (DL-559)."""
     members = set(boxes)
     while True:
         more = {name for name, job in catalog.jobs.items() if job.box.box_name in members}
@@ -324,66 +324,6 @@ def tree_active(
     trees = tops | box_members(old, sorted(tops)) | box_members(new, sorted(tops))
     busy = {name for name in trees if status.get(name) in LIVE_OR_QUEUED or name in owned}
     return tuple(sorted(busy | set(stops)))
-
-
-def restart_boxes(plan: Plan, live: Live, candidate: CatalogIR) -> tuple[str, ...]:
-    """The outermost structurally edited running boxes: the roots a resumed intent without
-    `restart_boxes` restarts (DL-463, DL-489). A new admission has none (DL-559)."""
-    boxes = set(running_boxes(plan, candidate, live.status))
-    nested = set().union(*(box_members(live.catalog, (box,)) for box in boxes))
-    return tuple(sorted(boxes - nested))
-
-
-@dataclass(frozen=True)
-class BoxScope:
-    """The admitted roots and descendants from both catalogs (DL-463, DL-489). Only a resumed
-    intent has roots; a new admission's scope is `NO_SCOPE` (DL-559)."""
-
-    roots: tuple[str, ...]
-    members: frozenset[str]
-
-
-#: The scope of every new admission: no root, no member (DL-559).
-NO_SCOPE = BoxScope((), frozenset())
-
-
-def box_scope(
-    plan: Plan, live: Live, candidate: CatalogIR, roots: tuple[str, ...] | None = None
-) -> BoxScope:
-    """A resumed intent's scope: its recorded roots when supplied, an empty tuple included, and
-    the roots recomputed for an intent without the key (DL-489)."""
-    roots = restart_boxes(plan, live, candidate) if roots is None else roots
-    return BoxScope(
-        roots, frozenset(box_members(live.catalog, roots) | box_members(candidate, roots))
-    )
-
-
-def ends_with_roots(scope: BoxScope, candidate: CatalogIR) -> frozenset[str]:
-    """Scope jobs that are roots, candidate descendants or removed (DL-490)."""
-    inside = box_members(candidate, scope.roots)
-    return frozenset(
-        name
-        for name in set(scope.roots) | scope.members
-        if name in scope.roots or name in inside or name not in candidate.jobs
-    )
-
-
-def marked_holds(scope: BoxScope, marked: Collection[str], status: Mapping[str, str]) -> list[str]:
-    """Hold marked non-INACTIVE rows before starting any root (DL-463)."""
-    return sorted(
-        name
-        for name in (scope.members | set(scope.roots)) & set(marked)
-        if status.get(name) not in (None, "INACTIVE")
-    )
-
-
-def root_starts(scope: BoxScope, catalog: CatalogIR, marked: Collection[str]) -> list[str]:
-    """Start retained unmarked BOX roots in admission order (DL-463)."""
-    return [
-        name
-        for name in scope.roots
-        if name in catalog.jobs and catalog.jobs[name].job_type == "BOX" and name not in marked
-    ]
 
 
 def stop_set(plan: Plan, live: Live) -> tuple[str, ...]:
@@ -523,7 +463,6 @@ def read_plan(plans_dir: Path, token: str) -> dict[str, Any] | None:
 
 
 __all__ = [
-    "NO_SCOPE",
     "PLAN_JSON",
     "STOPPABLE",
     "Estate",

@@ -352,7 +352,7 @@ def test_an_attempt_already_stopping_keeps_its_first_cause_through_intent_and_sn
 
     asyncio.run(scenario())
     [intent] = [c for c in _kinds(tmp_path, "config") if c["event"] == "intent"]
-    assert intent["restart_boxes"] == []  # DL-489: the writer records empty scope too.
+    assert intent["restart_boxes"] == []  # DL-562: an update restarts no box
     assert [entry["cause"] for entry in intent["stop"]] == ["wrapper_lost"]
     assert seen == ["wrapper_lost", "wrapper_lost"]
 
@@ -1341,7 +1341,6 @@ def test_live_update_selects_the_attempt_of_each_admitted_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from dsl41.runner_update import open_plan
-    from dsl41.reload_plan import NO_SCOPE
 
     async def scenario() -> None:
         engine = _engine(tmp_path, _jil({"a": "x", "b": "x"}))
@@ -1364,7 +1363,6 @@ def test_live_update_selects_the_attempt_of_each_admitted_run(
                 admitted,
             )
             assert selected == [("a", 3), ("b", 5)]
-            assert update._box_scope == NO_SCOPE  # a new admission restarts no box (DL-559)
             assert update._attempts == {"a": "a-attempt", "b": None}
             assert update._cleaning == {} and update._moved == {"b"}
             assert update._held == {"a", "b"} and update._admitted == admitted

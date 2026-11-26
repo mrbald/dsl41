@@ -646,7 +646,7 @@ The registry contains eight charts (`machines.MACHINES`):
 | `subscription` | `runner_journal.py` (DL-329) | One per feed on the engine executor, join to end. |
 | `engine_lifecycle` | `engine_charts.py` (DL-426) | One per engine start, including restart catch-up (DL-433). |
 | `attempt` | `engine_charts.py` (DL-426) | One per command attempt; settlement includes plan completion and cleanup (DL-429, DL-431). |
-| `update` | `reload_update.py` (DL-432) | One on the update tier's executor. STOPPING holds WAITING and ENDING_BOXES; an unfinished intent restores STOPPING at WAITING (DL-487). The apply row names the steps after the box stop (DL-488). |
+| `update` | `reload_update.py` (DL-432) | One on the update tier's executor. An unfinished intent restores STOPPING; the look that finds no stop open applies (DL-487, DL-562). Each apply row names the steps after the swap (DL-488). |
 
 The declarations' generated references are in
 [state-machines.md](state-machines.md) and

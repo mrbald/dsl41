@@ -25900,6 +25900,7 @@ relitigate an entry; append a new one.
   NARROWED BY DL-521: a reread stores its forecast only for the revision still applied.
   NARROWED BY DL-527: while the update waits, no member of a box it restarts is launched.
   SUPERSEDED IN PART BY DL-559: THE BOX CASE stands only for an older build's resumed intent.
+  SUPERSEDED IN PART BY DL-562: THE BOX CASE is removed; an intent with box roots is refused.
 - DL-465 Five-day dependency cooldown (2026-11-04; owner ruling; README Release)
   uv excludes registry artifacts younger than five days through
   `[tool.uv] exclude-newer = "5 days"`. Both Dependabot ecosystems, uv and
@@ -26448,6 +26449,7 @@ relitigate an entry; append a new one.
   NARROWED BY DL-559: only an older build's resumed intent ends box runs: one that names roots,
   or one without the key, whose roots are recomputed and can end a live box.
   NARROWED BY DL-560: an admission with nothing to stop goes from IDLE to APPLIED at once.
+  SUPERSEDED IN PART BY DL-562: ENDING_BOXES, update.03, update.05 and `boxes_ended` retire.
 
 - DL-488 The UPDATE chart's apply row names the whole sequence after the box stop
   (2026-11-11; operator ruling on the FEAT-10 chart review; reload_update.py, runner.py,
@@ -26472,6 +26474,8 @@ relitigate an entry; append a new one.
   after such a cancel.
   NARROWED BY DL-559: the holds and box starts act only for an older build's resumed intent.
   NARROWED BY DL-560: update.07 applies an admission with nothing to stop in one transaction.
+  SUPERSEDED IN PART BY DL-562: update.08 applies after the stops; no hold, no box start; THE
+  LIMIT stands but for its stopped boxes.
 
 - DL-489 An update's intent records its box roots, and recovery restarts those boxes
   (2026-11-11; owner ruling on the FEAT-10 chart review, X1; fixes BUG-67;
@@ -26503,6 +26507,7 @@ relitigate an entry; append a new one.
   A new record kind an older build refuses: it needs no snapshots while an update stops.
   A durable box restart after `config applied` (X2): not now.
   NARROWED BY DL-559: a new admission records `[]`; only an older intent names roots.
+  SUPERSEDED BY DL-562, but for the malformed refusal: an intent that names roots is refused.
 - DL-490 The reread forecast labels a box restart as the update carries it out
   (2026-11-12; owner; fixes BUG-68, closes FEAT-9; reload_plan.py, reread_worker.py,
   runner_update.py, cli_output.py, control-protocol)
@@ -26539,6 +26544,7 @@ relitigate an entry; append a new one.
   record to mend a wording. Ending the moved-out sub-box to match the old forecast: a
   job that leaves a box keeps its run (DL-463).
   NARROWED BY DL-559: no label is `restart_box` or `restart`; the update restarts no box.
+  SUPERSEDED IN PART BY DL-562: the selector is removed; only a client still reads the labels.
 - DL-491 Behavior is read from charts and pure functions; a case can occur only from
   validated input (2026-11-12; owner; agent-workflow.md, agents/coordination.md,
   agents/review.md)
@@ -27409,6 +27415,7 @@ relitigate an entry; append a new one.
   does harm that its end by the cascade does not already do.
   NARROWED BY DL-559: a new admission's filter names only the plan's jobs; a restart holds any
   intent's filter exactly as recorded, an older and narrower one included.
+  SUPERSEDED IN PART BY DL-562: the filter is the plan's added, changed and removed jobs.
 - DL-528 The job row's `held` field says nothing about a start that waits
   (2026-11-20; owner approval; docs/control-protocol.md, docs/runner-design.md,
   src/dsl41/runner_control.py; corrects the reason DL-94's field carried in the two
@@ -28269,3 +28276,40 @@ relitigate an entry; append a new one.
   OPEN. Q18: what end time the vendor gives a job inserted in a run state. BUG-118: a local
   job named like a cross-instance key shares its row. BUG-119: once retention drops a re-added
   name's last run, the history fold shows that run with the seeded status.
+- DL-562 An update restarts no box at all; a stored intent that names box roots is refused
+  (2026-11-25; FEAT-54; follows DL-559 and DL-561; src/dsl41/reload_plan.py, reload_update.py,
+  runner_update.py, runner.py, runner_journal.py, runner_startup.py; docs:
+  blocks/update.md, runner-design, control-protocol, protocol-evolution, deploy,
+  incident-triage, statechart-engine; supersedes in part DL-463, DL-487 to DL-490 and DL-527)
+  THE RULE. (1) The completion of a box restart is removed: the roots recomputed for an intent
+  without `restart_boxes`, the box scope, the KILLJOBs that end old box runs, the holds of
+  marked members and the forced starts of boxes. (2) The UPDATE chart's STOPPING has no child
+  state. update.03 and update.05 retire; update.08 goes from STOPPING to APPLIED on
+  `look [none_open]` and names apply, journal the application, advance time and finish. The
+  event `boxes_ended` and the intents `end_boxes`, `hold_marked` and `start_boxes` retire.
+  (3) The dispatch filter is the plan's added, changed and removed jobs. (4) A new intent still
+  writes `restart_boxes: []`. Every record and snapshot reader takes `[]` or an absent key as
+  no root. A value that names roots, a sorted list of unique names, is refused by name as
+  retired, citing this entry; any other value keeps DL-489's malformed refusal. A restart that
+  meets either refuses before any write or signal and completes nothing; a root whose newest
+  configuration is at another IR-F meets DL-561's refusal first. (5) The forecast's labels
+  are `rerun`, `hold` and `remove`.
+  THE REASON. Since DL-559 a new admission has no roots, and since DL-561 this build opens no
+  root an older build wrote, so the removed code had no reachable caller. The refusal is the
+  tombstone protocol-evolution §3 and §6 ask for.
+  THE CONTRACT. Writing `[]` keeps the field's shape: a build from DL-559 on reads it as no
+  root, where without the key it would recompute the roots. That is the field alone; a build
+  before DL-561 refuses this build's root by its IR-F. The client keeps `restart_box` and
+  `restart` readable, so a `reread` from an older engine of dialect 5 still prints.
+  THE VERSION. `STATE_MACHINE_VERSION` stays 28. Nothing stored names a state, event or row of
+  the UPDATE chart: a snapshot carries the intent body, the transition rows carry the oracle's
+  trace, and the restore names STOPPING in code. Every root this build opens holds `[]`.
+  UNCHANGED. An update that stops jobs applies at the first look that finds none open, with
+  the same intents in the same order; update.07; a resumed intent with `[]` or no key;
+  `tree_active`; the one-transaction write; `reread`'s forecast of a refusal; DL-469's
+  `job_terminated` on a box KILLJOB; the journal, golden traces and the wire.
+  WHAT IT SUPERSEDES. DL-463's BOX CASE and the box restart of its LIMITS; DL-487's
+  ENDING_BOXES and `boxes_ended`; DL-488's holds and box starts, and in its LIMIT only the
+  boxes left stopped: a cancel in the time advance still leaves the application committed and
+  the waiter unanswered, on both apply rows; DL-489 but its malformed refusal; DL-490's
+  selector; DL-527's box roots and members.

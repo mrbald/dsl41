@@ -406,10 +406,11 @@ to the application. `SPEC DRIFT: estate files changed on disk` and
 The pending-count line prints only when N is above zero (DL-483).
 To adopt the sources, [review an update](deploy.md#reload-a-changed-estate).
 
-An update never restarts a box (DL-559). Only an update an older build left open with a
-box restart restarts one; a crash after its application can leave that box stopped (DL-463,
-DL-489). Before force-start, put all its marked non-INACTIVE members on hold, including
-previously finished ones.
+An update never restarts a box (DL-559). A root an older build wrote is refused at start by
+its IR-F version (DL-561). A start that refuses with
+`config intent restart_boxes [...]: an update that restarts a box is retired (DL-562)` found
+such an update in a root of this build's IR-F, which no build writes: the root is unchanged,
+and this build completes no such update. Escalate it as a dsl41 fault.
 
 Evidence can contain credentials or private estate data. Check every file
 before sharing. Preserve the original run root; do not delete or edit its

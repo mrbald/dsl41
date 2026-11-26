@@ -111,25 +111,12 @@ class _Client:
         return answer
 
 
-#: Runs `dsl41 run` after `update_legacy.install`: the engine admits as before DL-559.
-_LEGACY_RUN = (
-    "import runpy, sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); "
-    "import update_legacy; update_legacy.install(Path(sys.argv[2])); "
-    "sys.argv = ['dsl41', 'run', '--config', sys.argv[3]]; "
-    "runpy.run_module('dsl41', run_name='__main__')"
-)
-
-
 @asynccontextmanager
-async def _cli(path, *, legacy=False):
-    """A real CLI engine; tests kill its process at a journaled crash boundary. With `legacy`,
-    the engine admits an update as the build before DL-559 did (`update_legacy`)."""
+async def _cli(path):
+    """A real CLI engine; tests kill its process at a journaled crash boundary."""
     root = Path(main.load_host(path).run_root)
     log_path = root.parent / "live-engine.log"
     command = [sys.executable, "-m", "dsl41", "run", "--config", str(path)]
-    if legacy:
-        tests = str(Path(__file__).resolve().parent)
-        command = [sys.executable, "-c", _LEGACY_RUN, tests, str(root), str(path)]
     with log_path.open("w") as log:
         child = subprocess.Popen(command, stdout=log, stderr=log)
         client = _Client(root)
@@ -313,63 +300,6 @@ def test_drain_prunes_every_decision_and_frees_its_request_id(tmp_path):
             await _close(engine)
 
     asyncio.run(scenario())
-
-
-@linux_only
-def test_restart_resumes_the_box_roots_of_a_stopping_update(short_root):
-    """t2 4: a real crash leaves an admitted restart_boxes intent. Only a build before DL-559
-    wrote one: the first engine admits as that build did (`update_legacy`), and the restarted
-    engine, this build unpatched, resumes the intent to its end."""
-    childfile = short_root / "child"
-    command = _script(short_root, "box-member", _stubborn(childfile) + "wait\n")
-    text = "insert_job: BX\njob_type: b\n" + _job(command, "box_name: BX\n")
-    path = _config(short_root, text)
-    root = short_root / "run"
-
-    async def scenario():
-        async with _cli(path, legacy=True) as (client, engine):
-            await client.event("STARTJOB", "BX")
-            first_child = await _written(childfile)
-            (short_root / "jobs.jil").write_text(text + _job("true", "box_name: BX\n", "new"))
-            admitted = await client.update()
-            assert admitted["application"] is None
-            [intent] = [b for b in _records(root, "config") if b["event"] == "intent"]
-            assert intent["restart_boxes"] == ["BX"]
-            await _until(lambda: (root / "runs/j.1/1/status.json").exists())
-            assert not any(
-                b["event"] == "applied" and b["rev"] == 2 for b in _records(root, "config")
-            )
-            await _kill_engine(engine)
-        async with _cli(path) as (client, _):
-            retry = await client.update()
-            assert retry["decision"] == admitted["decision"] == "admitted"
-            assert retry["stop"] == admitted["stop"]
-            assert retry["application"] is None
-            waiting = asyncio.create_task(client.update(wait=True))
-            with pytest.raises(TimeoutError):
-                await asyncio.wait_for(asyncio.shield(waiting), timeout=0.2)
-            assert not waiting.done()
-            _release_child(childfile)
-            await _until(
-                lambda: any(
-                    b["event"] == "applied" and b["rev"] == 2 for b in _records(root, "config")
-                )
-            )
-            applied = await asyncio.wait_for(waiting, timeout=10)
-            assert applied["stop"] == admitted["stop"]
-            assert applied["application"]["rev"] == 2
-            status = await client.ask("status")
-            assert status["config_rev"] == 2 and status["jobs"]["BX"]["run_number"] == 2
-            await _until(lambda: (root / "runs/new.1/1/spawn.json").exists())
-            await _until(lambda: (root / "runs/j.2/1/spawn.json").exists())
-            second_child = await _next_child(childfile, first_child)
-            _release_child(childfile)
-            await _until(lambda: not _live(second_child))
-
-    try:
-        asyncio.run(scenario())
-    finally:
-        _kill(childfile)
 
 
 @linux_only

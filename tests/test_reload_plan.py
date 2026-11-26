@@ -167,9 +167,10 @@ def test_a_member_added_to_an_idle_box_is_planned(tmp_path: Path) -> None:
     assert _reread(estate, live, tmp_path / "plans").plan.added == ("M2",)
 
 
-def test_box_scope_keeps_both_catalogs_and_admitted_roots(tmp_path: Path) -> None:
+def test_the_stop_set_of_a_membership_change_is_the_rows_alone(tmp_path: Path) -> None:
+    """DL-559: a member moved out of the running box BX, one removed and one added. The stop set
+    is the rows' alone: no box and no unchanged member joins it, and nothing is changed."""
     from copy import deepcopy
-    from dataclasses import replace
     from dsl41.reload_diff import diff
 
     old = _BOX + _member("MOVED") + _member("REMOVED")
@@ -184,45 +185,8 @@ def test_box_scope_keeps_both_catalogs_and_admitted_roots(tmp_path: Path) -> Non
     candidate = prepare_estate(estate).catalog
     plan = diff(live.catalog, candidate, live.settings, live.settings)
     before = deepcopy((plan, live, candidate))
-    scope = reload_plan.box_scope(plan, live, candidate)
-    assert scope == reload_plan.BoxScope(("BX",), frozenset({"MOVED", "REMOVED", "ADDED"}))
-    assert reload_plan.ends_with_roots(scope, candidate) == frozenset({"BX", "ADDED", "REMOVED"})
-    assert (
-        reload_plan.ends_with_roots(reload_plan.BoxScope((), frozenset()), candidate) == frozenset()
-    )
-    # the stop set is the rows' alone: a scope adds no member to it (DL-559)
     assert reload_plan.stop_set(plan, live) == ("MOVED", "REMOVED")
-    ended = replace(live, status={"BX": "TERMINATED"})
-    assert reload_plan.box_scope(plan, ended, candidate, roots=scope.roots) == scope
-    assert reload_plan.box_scope(plan, ended, candidate).roots == ()
-    assert reload_plan.box_scope(plan, live, candidate, roots=()) == reload_plan.BoxScope(
-        (), frozenset()
-    )
     assert (plan, live, candidate) == before
-
-
-def test_box_selectors_filter_missing_inactive_retyped_and_marked_names(tmp_path: Path) -> None:
-    from copy import deepcopy
-
-    estate = _tiny(tmp_path, _BOX + _BOX.replace("BX", "MARKED") + _member("RETYPED"))
-    catalog = prepare_estate(estate).catalog
-    scope = reload_plan.BoxScope(
-        ("BX", "MARKED", "REMOVED", "RETYPED"),
-        frozenset({"RUNNING", "FINISHED", "INACTIVE", "MISSING"}),
-    )
-    marked = {"MARKED", "RUNNING", "FINISHED", "INACTIVE", "MISSING", "OUTSIDE"}
-    status = {
-        "MARKED": "TERMINATED",
-        "RUNNING": "RUNNING",
-        "FINISHED": "SUCCESS",
-        "INACTIVE": "INACTIVE",
-        "OUTSIDE": "RUNNING",
-    }
-    before = deepcopy((scope, catalog, marked, status))
-    for _ in range(2):
-        assert reload_plan.marked_holds(scope, marked, status) == ["FINISHED", "MARKED", "RUNNING"]
-        assert reload_plan.root_starts(scope, catalog, marked) == ["BX"]
-    assert (scope, catalog, marked, status) == before
 
 
 def test_a_changed_running_box_with_the_same_members_stops_nothing(tmp_path: Path) -> None:
@@ -595,10 +559,7 @@ def test_a_running_seed_only_job_is_not_stopped_or_filtered(tmp_path: Path, stat
     assert "OPS_SPOOL_C" in document["unchanged"]
     plan = plan_of(document, live.catalog)
     assert plan == result.plan
-    candidate = prepare_estate(estate).catalog
-    scope = reload_plan.box_scope(plan, live, candidate)
-    assert scope == reload_plan.BoxScope((), frozenset())
-    assert "OPS_SPOOL_C" not in filter_of(plan, scope)
+    assert "OPS_SPOOL_C" not in filter_of(plan)
 
 
 def test_a_plan_without_a_seed_only_edit_still_carries_the_empty_key(tmp_path: Path) -> None:

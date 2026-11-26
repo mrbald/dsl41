@@ -30,6 +30,7 @@ from dsl41.oracle_state import Event
 from dsl41.runner_adapters import LocalCommandAdapter, read_watch_log
 from dsl41.runner_clock import RealClock
 from dsl41.runner_config import EngineSettings
+from dsl41.runner_control import ControlServer, roundtrip
 from dsl41.runner_startup import resume_run
 from dsl41.runner_update import UpdateRequest
 from dsl41.runner_wrapper import PAUSE_ENV
@@ -316,6 +317,99 @@ def test_an_exact_update_retry_waits_while_the_restarted_engine_still_stops(shor
     try:
         asyncio.run(scenario())
     finally:
+        _kill(childfile)
+
+
+def test_an_exact_update_retry_with_wait_over_the_restarted_engines_socket_waits_for_the_stop(
+    short_root,
+):
+    """A real engine death leaves an update intent. The restarted engine runs in this process,
+    so the test sees its control server: over the socket an exact retry is answered with the
+    admission, and one with `wait` is parked by the handler on the application while the stop
+    is still open, then answered with the application once the stop ends (DL-463, DL-432)."""
+    childfile = short_root / "child"
+    path = _config(short_root, _job(_leader(short_root)))
+    root = short_root / "run"
+
+    async def scenario():
+        async with _cli(path) as (client, engine):
+            await client.event("STARTJOB")
+            await _written(childfile)
+            await _spawned(root, "j")
+            (short_root / "jobs.jil").write_text(_job("true"))
+            admitted = await client.update()
+            assert admitted["application"] is None
+            await _kill_engine(engine)
+        engine = await resume_run(
+            main.prepare(path).catalog,
+            root,
+            clock=RealClock(),
+            adapters={"CMD": LocalCommandAdapter(grace_seconds=30)},
+            settings=EngineSettings(grace_term_s=30, grace_kill_s=0.5),
+            hold_open=True,
+        )
+        server = ControlServer(engine, root / "control.sock")
+        # the handler's wait point: `_update_answer` reads the application window only just
+        # before it awaits the `applied` future, with no await before it
+        parked = asyncio.Event()
+        answering = False
+        answer, window = server._update_answer, server._application_window
+
+        async def recorded_answer(*args):
+            nonlocal answering
+            answering = True
+            try:
+                return await answer(*args)
+            finally:
+                answering = False
+
+        def recorded_window():
+            if answering:
+                parked.set()
+            return window()
+
+        server._update_answer = recorded_answer  # type: ignore[method-assign]
+        server._application_window = recorded_window  # type: ignore[method-assign]
+        loop = asyncio.create_task(engine.run_until_quiescent(datetime.max))
+        try:
+            await server.start()
+            async with asyncio.timeout(TIMEOUT_S):  # a guard against a hang only
+                await engine.started.wait()
+            request = {
+                "v": 5,
+                "cmd": "update",
+                "baseline_id": engine.baseline_id,
+                "request_id": admitted["request_id"],
+            }
+            socket = root / "control.sock"
+            retry = await asyncio.to_thread(roundtrip, socket, {**request, "wait": False})
+            assert retry["decision"] == admitted["decision"] == "admitted"
+            assert retry["stop"] == admitted["stop"] == ["j"]
+            assert retry["application"] is None and not parked.is_set()
+            waiting = asyncio.ensure_future(
+                asyncio.to_thread(roundtrip, socket, {**request, "wait": True}, timeout=TIMEOUT_S)
+            )
+            async with asyncio.timeout(TIMEOUT_S):  # a guard against a hang only
+                await parked.wait()
+            assert engine.update.stopping and engine.config_rev == 1
+            assert (engine.update.view() or {}).get("stopping") == ["j"]
+            assert not waiting.done()
+            childfile.with_suffix(".exit").touch()
+            applied = await asyncio.wait_for(waiting, timeout=TIMEOUT_S)
+            assert applied["ok"] and applied["decision"] == "admitted"
+            assert applied["stop"] == admitted["stop"]
+            assert applied["application"]["rev"] == 2
+            assert len([b for b in _records(root, "config") if b["event"] == "intent"]) == 1
+            assert engine.config_rev == 2
+        finally:
+            childfile.with_suffix(".exit").touch()
+            await server.close()
+            await _finish(engine, loop)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        childfile.with_suffix(".exit").touch()
         _kill(childfile)
 
 

@@ -25,7 +25,6 @@ from test_engine_stops_cookie import PGID, T0, _Procs
 from test_update_atomic import _Ladders, _update_steps
 from test_update_owned_processes import _crash, _observed, _started, _teardown
 from test_update_settlement import SIGNALED, _close, _jil, _plan, _request
-from update_legacy import legacy_admission
 
 from dsl41 import main_config as main
 from dsl41.oracle_state import Event
@@ -285,102 +284,34 @@ def test_a_held_watch_is_not_launched_across_restarts_and_is_taken_up_once_after
     assert _of(journal, attempts["w"]) == []
 
 
-def _box(tmp_path: Path, *, added: bool) -> str:
-    """Box `b` with the command `c` and the watch `w`; with `added`, also the command `n`."""
-    members = {
-        "c": "job_type: c\ncommand: sleep 30\n",
-        "w": f"job_type: f\nwatch_file: {tmp_path / 'never'}\nwatch_interval: {OLD_S}\n",
-    }
-    if added:
-        members["n"] = "job_type: c\ncommand: true\n"
-    jobs = "".join(f"insert_job: {job}\n{body}box_name: b\n\n" for job, body in members.items())
-    return "insert_job: b\njob_type: b\n\n" + jobs
-
-
-@pytest.mark.parametrize("path", ["live", "restart"])
-def test_an_unchanged_watch_of_a_restarted_box_is_not_launched_while_the_update_waits(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str
+def test_a_watch_only_the_stop_list_names_is_held_after_a_restart_and_taken_up_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """DL-526, DL-463, DL-525: an update that adds a member to the running box `b` restarts it,
-    admitted as the build before DL-559 admitted it (`update_legacy`): only such an intent
-    restarts a box now. It stops `c` and `w`, the members with a process, though the plan leaves both unchanged. It
-    waits for `c`'s stop. On the live path, and after the engine dies and restarts during that
-    wait, `w` neither launches nor polls before the application. After it, the box's restart
-    ends run 1 and opens run 2: run 1 of `w` is closed once with no plan, `config applied` names
-    it `none`, and run 2 is dispatched and launched once under the applied revision.
-
-    On the restart path the test narrows the recorded intent's `filter` by hand to the plan's
-    added, changed and removed jobs, the filter an earlier build wrote (DL-491, DL-527). The
-    stop list still names `w`'s attempt, so the restart holds the watch through it alone."""
+    """DL-526, DL-527: the engine dies while an update that changes `j` and `w` waits for `j`'s
+    stop. The test narrows the recorded intent's `filter` by hand to `j` (DL-491). The stop
+    list still names `w`'s attempt, so the restart holds the watch through it alone: it neither
+    launches nor polls before the application. After it, `w` is taken up once, under its run
+    id and the applied definition."""
     _Procs(monkeypatch)
+    attempts = asyncio.run(_admitted_then_killed(tmp_path, monkeypatch))
+    polls = _polls(tmp_path)
+    [(seq, intent)] = [
+        (seq, body)
+        for seq, kind, body in rows(tmp_path / "run")
+        if (kind, body.get("event")) == ("config", "intent")
+    ]
+    assert "w" in intent["filter"] and "w" in [entry["job"] for entry in intent["stop"]]
+    rewrite(tmp_path / "run", seq, {**intent, "filter": ["j"]})
     launches = _launches(monkeypatch)
     probe = _at_application(monkeypatch, tmp_path)
-    seen: dict[str, Any] = {}
-
-    async def first() -> None:
-        ladders = _Ladders(monkeypatch)
-        ladders.alive.add(PGID)
-        engine = _start(tmp_path, _box(tmp_path, added=False), "stable")
-        legacy_admission(monkeypatch, tmp_path / "run")
-        engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "b"}))
-        await engine.run_until_quiescent(T0)
-        attempt, wrapper = _observed(engine, "c", PGID)
-        assert engine.journal is not None and wrapper is not None
-        [seen["w"]] = [a for a, o in engine.journal.open.attempts.items() if o.job == "w"]
-        seen["c"] = attempt
-        _estate(tmp_path, _box(tmp_path, added=True), "stable")
-        answer = await _request(engine, _plan(engine, tmp_path))
-        decision = answer.decision
-        assert isinstance(decision, Admitted)
-        assert "w" in decision.stop_set
-        await _started(ladders, PGID)
-        seen["polls"] = _polls(tmp_path)
-        del launches[:]
-        if path == "restart":
-            await _crash(engine)
-            return
-        try:
-            engine.attempts.status_recorded(attempt, SIGNALED)
-            wrapper.cancel()
-            await engine.run_until_quiescent(T0)
-            assert engine.update.stopping
-            async with asyncio.timeout(30):  # a guard against a hang only
-                await ladders.end(engine, attempt, PGID)
-            await engine.run_until_quiescent(T0)
-            assert not engine.update.stopping and engine.config_rev == 2
-        finally:
-            _teardown(engine, ladders)
-            await engine.shutdown()
-            _close(engine)
-
-    asyncio.run(first())
-    if path == "restart":
-        [(seq, intent)] = [
-            (seq, body)
-            for seq, kind, body in rows(tmp_path / "run")
-            if (kind, body.get("event")) == ("config", "intent")
-        ]
-        assert "w" in intent["filter"]
-        rewrite(tmp_path / "run", seq, {**intent, "filter": ["n"]})
-        at = T0 + timedelta(minutes=2)
-        restarted = asyncio.run(_restart(tmp_path, monkeypatch, {"j": seen["c"]}, at, apply=True))
-        assert restarted[0] == (True, 1, [])
-        assert restarted[1][:2] == (False, 2)
-    assert probe["polls"] == seen["polls"]
-    watch = seen["w"]
-    [(job, run, run_id, interval)] = [launch for launch in launches if launch[0] == "w"]
-    assert (job, run, interval) == ("w", 2, OLD_S) and run_id != watch
-    journal = _journal(tmp_path)
-    applied, body = _applied(journal)
-    assert ["w", "none"] in body["stopped"]
-    ended = _of(journal, watch)
-    assert [(kind, what) for _i, kind, what in ended] == [
-        ("outcome", "stopped"),
-        ("follow_up", "none"),
-    ]
-    assert all(i > applied for i, _kind, _what in ended)
-    dispatched = _dispatches(journal, "w")
-    assert [d[1:] for d in dispatched] == [(1, 1), (2, 2)] and dispatched[1][0] > applied
+    seen = asyncio.run(
+        _restart(tmp_path, monkeypatch, attempts, T0 + timedelta(minutes=2), apply=True)
+    )
+    assert seen == [(True, 1, []), (False, 2, ["j", "w"])]
+    assert probe["polls"] == polls
+    assert [launch for launch in launches if launch[0] == "w"] == [("w", 1, attempts["w"], NEW_S)]
+    _at, applied = _applied(_journal(tmp_path))
+    assert ["w", "rerun"] in applied["stopped"]
 
 
 class _Died(Exception):

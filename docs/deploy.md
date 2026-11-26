@@ -1312,11 +1312,9 @@ update, then start the box again. One busy job refuses the whole update. A job
 outside every box is added, removed or retyped as before, with its stop.
 
 Upgrade note: an update that restarted a running box in 2.0.0 is now refused.
-An update the older build left stopping with box roots in its intent is
-completed by this build as that build would have done it. A crash after its
-`config applied` can leave such a box stopped: before force-starting it, put
-its marked non-INACTIVE members on hold, including members that finished
-earlier (DL-463, DL-489).
+A run root an older build wrote is refused at start by its IR-F version before
+anything else it holds is read: drain it on that build, then start this one on
+a fresh run root (DL-561).
 
 Preparation runs under the engine account and startup cwd/environment, in a
 separate interpreter. Its deadline is 120 seconds; cancellation terminates,

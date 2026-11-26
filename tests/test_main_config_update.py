@@ -25,7 +25,6 @@ from dsl41.runner_startup import active_configuration, resume_run, start_run
 from dsl41.runner_store import MemoryStore, Record, SqliteStore
 from dsl41.runner_update import UpdateRequest
 from test_main_config import JOB, PYTHON, T0, config_file, estate_file
-from update_legacy import legacy_admission, separate_writes
 
 
 @pytest.mark.parametrize(
@@ -973,12 +972,15 @@ def test_older_build_crash_after_config_row_resumes_without_another_row(
             initial.catalog,
             root,
             clock=clock,
-            adapters={"CMD": FakeAdapter()},
+            adapters={"CMD": FakeAdapter(default=None)},
             launched=profile,
             source_capture=capture,
         )
         assert engine.journal is not None
         try:
+            # the update stops the running A, so its intent is a transaction of its own
+            engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "A"}))
+            await engine.run_until_quiescent(T0)
             (tmp_path / "a.jil").write_text(jobs.replace("true", "echo captured"))
             candidate = main.prepare(path)
             plan = reread(engine.update.live(), root / "plans", candidate=candidate, start=T0)
@@ -997,8 +999,7 @@ def test_older_build_crash_after_config_row_resumes_without_another_row(
                 return append(*records, **rows)
 
             with monkeypatch.context() as old:
-                # the older build wrote the intent, the row and the application apart (DL-560)
-                separate_writes(old)
+                # an older writer stores the row; the engine dies before `config applied`
                 old.setattr(runner_update, "store_config", old_writer)
                 old.setattr(engine.journal, "append", crash_before_applied)
                 engine.request_update(UpdateRequest(plan.token, 1, engine.baseline_id, "old-build"))
@@ -1387,339 +1388,34 @@ def test_socket_reload_preview_update_retry_and_marker(short_root: Path) -> None
     asyncio.run(scenario())
 
 
-def _box_update_records(records):
-    # DL-489: compare durable update effects without sequence numbers or attempt identities.
-    keys = (
-        "event",
-        "rev",
-        "kind",
-        "payload",
-        "source",
-        "job",
-        "run_number",
-        "ordinal",
-        "after",
-        "added",
-        "changed",
-        "removed",
-        "restored",
-        "stopped",
-    )
-    return [
-        (r.kind, {key: r.payload[key] for key in keys if key in r.payload})
-        for _, r in records
-        if r.kind in {"input", "config", "dispatch"}
-    ]
-
-
-@pytest.mark.parametrize(
-    "crash",
-    [
-        None,
-        "before_kill",
-        "after_box_kill",
-        "between_members",
-        "before_apply",
-        "after_apply",
-        "cancel_time",
-        "cancel_hold",
-        "cancel_start",
-    ],
+_RETIRED_ROOTS = r"config intent restart_boxes \['[A-Z]+'\]: .* is retired \(DL-562\)"
+_MALFORMED_ROOTS = r"config intent restart_boxes must be a sorted list of unique names \(DL-489\)"
+_OLDER_IR = (
+    r"IR-F version 0\.3 is retired \(DL-561\); this build reads IR-F 0\.4 only\. Root unchanged\."
+    r" Drain this run root on the build that wrote it"
 )
-@pytest.mark.parametrize("snapshot", [False, True])
-def test_box_restart_commits_kills_and_holds_finished_marked_members(
-    short_root: Path, monkeypatch, crash, snapshot: bool
-) -> None:
-    """Pin crash and virtual-clock cancellation recovery through shutdown and restart.
-
-    The cancellation cases cover restart and operator completion under DL-463.
-    Same-engine reuse after cancellation can leave the update unfinished (DL-488).
-    The update is admitted as the build before DL-559 admitted it (`update_legacy`): only such
-    an intent restarts a box now, and the cut cases resume it.
-    """
-    from dsl41.runner_update import settings_of
-
-    async def scenario(short_root: Path, crash, snapshot: bool):
-        short_root.mkdir(exist_ok=True)
-        path = config_file(short_root, estate='non_idempotent = "non-idempotent.toml"\n')
-        (short_root / "non-idempotent.toml").write_text(
-            '[jobs]\nDONE = "synthetic finished effect"\nHELD = "synthetic running effect"\n'
-        )
-        text = (
-            "insert_job: BX\njob_type: b\n"
-            + JOB.replace("A", "LIVE")
-            + "box_name: BX\n"
-            + JOB.replace("A", "HELD")
-            + "box_name: BX\n"
-            + JOB.replace("A", "DONE")
-            + "box_name: BX\n"
-        )
-        (short_root / "a.jil").write_text(text)
-        initial = main.prepare(path)
-        clock = VirtualClock(start=T0)
-        engine = start_run(
-            initial.catalog,
-            short_root / "run",
-            clock=clock,
-            adapters={"CMD": FakeAdapter(default=None)},
-            launched=main.profile_of(initial),
-            source_capture=main.encoded_parts(initial),
-        )
-        engine.launch_settings = initial.metadata["launch"]
-        legacy_admission(monkeypatch, short_root / "run")
-        try:
-            engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "BX"}))
-            await engine.run_until_quiescent(T0)
-            engine.inject(Event(at=T0, kind="STATUS", payload={"job": "DONE", "status": "SUCCESS"}))
-            await engine.run_until_quiescent(T0)
-            assert engine.oracle.store.job["DONE"].status == "SUCCESS"
-            old_run = engine.oracle.store.job["BX"].run_number
-            (short_root / "a.jil").write_text(text + JOB.replace("A", "NEW") + "box_name: BX\n")
-            candidate = main.prepare(path)
-            plan = reread(
-                engine.update.live(),
-                short_root / "run" / "plans",
-                candidate=candidate,
-                start=T0,
-            )
-            answer = engine.request_update(
-                UpdateRequest(plan.token, engine.config_rev, engine.baseline_id, "box-update")
-            )
-            before_application = crash in {
-                "before_kill",
-                "after_box_kill",
-                "between_members",
-                "before_apply",
-            }
-            if crash:
-                if crash.startswith("cancel_"):
-                    # DL-488: cancellation after APPLIED does not extend DL-463's window.
-                    wait_until = clock.wait_until
-                    waits = 0
-                    cut_at = {"cancel_time": 1, "cancel_hold": 2, "cancel_start": 4}[crash]
-                    listeners = []
-                    engine.update.listeners.append(listeners.append)
-
-                    async def cut_wait(at, interrupt=None):
-                        nonlocal waits
-                        if engine.config_rev == 2:
-                            waits += 1
-                            if waits == cut_at:
-                                raise asyncio.CancelledError
-                        await wait_until(at, interrupt)
-
-                    with monkeypatch.context() as patch:
-                        patch.setattr(clock, "wait_until", cut_wait)
-                        with pytest.raises(asyncio.CancelledError):
-                            await engine.run_until_quiescent(T0)
-                    assert waits == cut_at
-                    assert engine.update.tier.state == "APPLIED" and engine.update.view() is None
-                    assert not answer.result().applied.done() and listeners == []
-                    assert [
-                        record.payload["kind"]
-                        for _, record in engine.journal.store.read_from(0)
-                        if record.kind == "input" and record.payload.get("kind") == "ON_HOLD"
-                    ] == (["ON_HOLD", "ON_HOLD"] if crash == "cancel_start" else [])
-                else:
-
-                    def cut():
-                        raise EngineError("cut during box restart")
-
-                    if crash in {"after_box_kill", "between_members"}:
-                        admit = engine._admit_and_apply
-                        killed = []
-                        cut_after = 1 if crash == "after_box_kill" else 2
-
-                        async def cut_kill(pending):
-                            event = pending.ev
-                            if (
-                                event is not None
-                                and event.kind == "KILLJOB"
-                                and event.source == "reconcile"
-                            ):
-                                if len(killed) == cut_after:
-                                    cut()
-                                killed.append(event.payload["job"])
-                            return await admit(pending)
-
-                        monkeypatch.setattr(engine, "_admit_and_apply", cut_kill)
-                    elif crash == "before_apply":
-                        ends = engine.update.box_ends
-
-                        def cut_boxes_ended():
-                            names = ends()
-                            monkeypatch.setattr(engine.update.tier, "boxes_ended", cut)
-                            return names
-
-                        monkeypatch.setattr(engine.update, "box_ends", cut_boxes_ended)
-                    else:
-                        monkeypatch.setattr(
-                            engine.update,
-                            "box_ends" if crash == "before_kill" else "box_starts",
-                            cut,
-                        )
-                    with pytest.raises(EngineError, match="cut during box restart"):
-                        await engine.run_until_quiescent(T0)
-                assert engine.config_rev == (1 if before_application else 2)
-                assert engine.oracle.store.job["BX"].status == (
-                    "RUNNING" if crash == "before_kill" else "TERMINATED"
-                )
-                assert engine.oracle.store.job["DONE"].on_hold == (crash == "cancel_start")
-                if snapshot:
-                    engine.take_snapshot()
-                await engine.shutdown()
-                engine.journal.close()
-                stored = active_configuration(short_root / "run")
-                engine = await resume_run(
-                    stored.catalog,
-                    short_root / "run",
-                    clock=clock,
-                    adapters={"CMD": FakeAdapter(default=None)},
-                    declared=stored.profile,
-                    stored_sources=True,
-                )
-                await engine.run_until_quiescent(T0)
-                if not before_application:
-                    assert engine.update.tier is None
-                    assert engine.oracle.store.job["BX"].status == "TERMINATED"
-                    # Documented operator completion: hold marked members before force-start.
-                    for name in ("DONE", "HELD"):
-                        engine.inject(Event(at=T0, kind="ON_HOLD", payload={"job": name}))
-                    engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "BX"}))
-                    await engine.run_until_quiescent(T0)
-            else:
-                await engine.run_until_quiescent(T0)
-                assert answer.result().applied.done()
-            assert engine.oracle.store.job["BX"].run_number == old_run + 1
-            assert engine.oracle.store.job["HELD"].on_hold
-            assert engine.oracle.store.job["DONE"].on_hold
-            assert engine.oracle.store.job["DONE"].run_number == 1
-            assert engine.oracle.store.job["LIVE"].run_number == 2
-            records = list(engine.journal.store.read_from(0))
-            [intent] = [
-                r.payload
-                for _, r in records
-                if r.kind == "config" and r.payload.get("event") == "intent"
-            ]
-            assert intent["restart_boxes"] == ["BX"]
-            assert not [
-                record
-                for _, record in records
-                if record.kind == "dispatch"
-                and record.payload.get("job") in {"LIVE", "HELD", "DONE"}
-                and record.payload.get("after") == "update_stop"
-            ]
-            applied_seq = next(
-                seq
-                for seq, record in records
-                if record.kind == "config"
-                and record.payload.get("event") == "applied"
-                and record.payload.get("rev") == 2
-            )
-            killed = [
-                seq
-                for seq, record in records
-                if record.kind == "input" and record.payload.get("kind") == "KILLJOB"
-            ]
-            assert killed and max(killed) < applied_seq
-            assert settings_of(engine.profile, engine.oracle.catalog) == candidate.settings
-            return _box_update_records(records)
-        finally:
-            await engine.shutdown()
-            engine.journal.close()
-
-    actual = asyncio.run(scenario(short_root, crash, snapshot))
-    if crash in {"before_kill", "after_box_kill", "between_members", "before_apply"}:
-        assert actual == asyncio.run(scenario(short_root / "uncut", None, False))
-
-
-@pytest.mark.parametrize("snapshot", [False, True])
-def test_retyped_command_box_scope_recovers_as_the_uncut_update(short_root, monkeypatch, snapshot):
-    """DL-489: an intent of the build before DL-559 (`update_legacy`) can name a running
-    command that the candidate makes a BOX as a root; it recovers as the uncut update. A new
-    admission refuses that update while the command runs (DL-559, BUG-71)."""
-
-    async def scenario(directory: Path, crash: bool):
-        legacy_admission(monkeypatch, directory / "run")
-        path = config_file(directory)
-        (directory / "a.jil").write_text(JOB.replace("A", "BX"))
-        initial = main.prepare(path)
-        clock = VirtualClock(start=T0)
-        root = directory / "run"
-        engine = start_run(
-            initial.catalog,
-            root,
-            clock=clock,
-            adapters={"CMD": FakeAdapter(default=None)},
-            launched=main.profile_of(initial),
-            source_capture=main.encoded_parts(initial),
-        )
-        try:
-            engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "BX"}))
-            await engine.run_until_quiescent(T0)
-            (directory / "a.jil").write_text(
-                "insert_job: BX\njob_type: b\n" + JOB.replace("A", "NEW") + "box_name: BX\n"
-            )
-            plan = reread(
-                engine.update.live(), root / "plans", candidate=main.prepare(path), start=T0
-            )
-            engine.request_update(UpdateRequest(plan.token, 1, engine.baseline_id, "retype-box"))
-            if crash:
-
-                def cut(job, cause):
-                    raise EngineError("cut after intent")
-
-                with monkeypatch.context() as patch:
-                    patch.setattr(engine.update, "stop_attempt", cut)
-                    with pytest.raises(EngineError, match="cut after intent"):
-                        await engine.run_until_quiescent(T0)
-                assert engine.oracle.catalog.jobs["BX"].job_type == "CMD"
-                assert engine.journal.open.update["restart_boxes"] == ["BX"]
-                if snapshot:
-                    engine.take_snapshot()
-                await engine.shutdown()
-                engine.journal.close()
-                stored = active_configuration(root)
-                engine = await resume_run(
-                    stored.catalog,
-                    root,
-                    clock=clock,
-                    adapters={"CMD": FakeAdapter(default=None)},
-                    declared=stored.profile,
-                    stored_sources=True,
-                )
-            await engine.run_until_quiescent(T0)
-            assert engine.oracle.catalog.jobs["BX"].job_type == "BOX"
-            assert engine.oracle.store.job["BX"].status == "RUNNING"
-            assert engine.oracle.store.job["BX"].run_number == 2
-            assert engine.oracle.store.job["NEW"].run_number == 1
-            records = list(engine.journal.store.read_from(0))
-            assert not any(
-                r.kind == "dispatch" and r.payload.get("after") == "update_stop" for _, r in records
-            )
-            return _box_update_records(records)
-        finally:
-            await engine.shutdown()
-            engine.journal.close()
-
-    uncut = asyncio.run(scenario(short_root / "uncut", False))
-    assert asyncio.run(scenario(short_root / "recovered", True)) == uncut
 
 
 @pytest.mark.parametrize("snapshot", [False, True])
 @pytest.mark.parametrize(
-    "roots", ["missing", [], None, "BX", [7], ["A"], ["absent"], ["BX", "BX"], ["Z", "BX"]]
+    "roots",
+    ["missing", [], None, "BX", [7], ["A"], ["BX"], ["BX", "BX"], ["Z", "BX"], "older_ir"],
 )
-def test_box_scope_compatibility_and_refusals(short_root: Path, monkeypatch, snapshot, roots):
-    """DL-489: only absence recomputes; invalid roots refuse before writes or signals. The
-    intent is written as the build before DL-559 wrote it (`update_legacy`)."""
+def test_dl562_a_stored_intent_with_box_roots_is_refused_at_start(
+    short_root: Path, monkeypatch, snapshot, roots
+):
+    """DL-562: an update that stops the running A dies after its intent. A stored
+    `restart_boxes` that names roots is refused at start by name, a malformed one as malformed
+    (DL-489); either refuses before any write or signal, in the journal and in a snapshot. An
+    absent key and `[]` name no root: the restart resumes the intent and applies it after its
+    stop. A root whose configuration is at IR-F 0.3, as an older build wrote it, is refused with
+    DL-561's diagnosis and remedy first, though its journal and snapshot name roots."""
     import sqlite3
-    from dsl41 import reload_plan, runner_procid, runner_startup
+    from dsl41 import runner_procid, runner_startup
     from dsl41.runner_config import EngineSettings
 
     path = config_file(short_root)
-    text = "insert_job: BX\njob_type: b\n" + JOB + "box_name: BX\n"
-    (short_root / "a.jil").write_text(text)
+    (short_root / "a.jil").write_text(JOB)
     initial = main.prepare(path)
     root = short_root / "run"
 
@@ -1733,28 +1429,24 @@ def test_box_scope_compatibility_and_refusals(short_root: Path, monkeypatch, sna
             launched=main.profile_of(initial),
             source_capture=main.encoded_parts(initial),
         )
-        legacy_admission(monkeypatch, root)
         try:
-            engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "BX"}))
+            engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "A"}))
             await engine.run_until_quiescent(T0)
-            (short_root / "a.jil").write_text(text + JOB.replace("A", "NEW") + "box_name: BX\n")
+            (short_root / "a.jil").write_text(JOB.replace("true", "false"))
             plan = reread(
                 engine.update.live(), root / "plans", candidate=main.prepare(path), start=T0
             )
-            engine.request_update(UpdateRequest(plan.token, 1, engine.baseline_id, "box-scope"))
-            admit, killed = engine._admit_and_apply, []
+            engine.request_update(UpdateRequest(plan.token, 1, engine.baseline_id, "roots"))
 
-            async def cut(pending):
-                event = pending.ev
-                if event is not None and event.kind == "KILLJOB" and event.source == "reconcile":
-                    if len(killed) == (0 if roots == [] else 1):
-                        raise EngineError("cut inside box stop")
-                    killed.append(event.payload["job"])
-                return await admit(pending)
+            def cut(job, cause):
+                raise EngineError("cut after intent")
 
-            monkeypatch.setattr(engine, "_admit_and_apply", cut)
-            with pytest.raises(EngineError, match="cut inside box stop"):
-                await engine.run_until_quiescent(T0)
+            with monkeypatch.context() as patch:
+                patch.setattr(engine.update, "stop_attempt", cut)
+                with pytest.raises(EngineError, match="cut after intent"):
+                    await engine.run_until_quiescent(T0)
+            assert engine.journal.open.update["restart_boxes"] == []
+            assert [entry["job"] for entry in engine.journal.open.update["stop"]] == ["A"]
             if snapshot:
                 engine.take_snapshot()
         finally:
@@ -1765,9 +1457,9 @@ def test_box_scope_compatibility_and_refusals(short_root: Path, monkeypatch, sna
             if roots == "missing":
                 intent.pop("restart_boxes")
             else:
-                intent["restart_boxes"] = roots
+                intent["restart_boxes"] = ["BX"] if roots == "older_ir" else roots
 
-        # DL-489: retained bodies may predate the key or carry damaged scope evidence.
+        # DL-491: no build this one can open writes another value; the test writes it by hand
         with closing(sqlite3.connect(root / "engine.db")) as db:
             for seq, data in db.execute(
                 "SELECT seq, payload FROM journal WHERE kind='config'"
@@ -1783,11 +1475,20 @@ def test_box_scope_compatibility_and_refusals(short_root: Path, monkeypatch, sna
                 body = json.loads(data)
                 alter(body["update"])
                 db.execute("UPDATE snapshots SET data=? WHERE seq=?", (canonical_bytes(body), seq))
+            if roots == "older_ir":
+                for rev, data in db.execute("SELECT rev, data FROM configs").fetchall():
+                    body = json.loads(data)
+                    body["catalog"]["ir_version"] = "0.3"
+                    data = canonical_bytes(body)
+                    digest = "sha256:" + hashlib.sha256(data).hexdigest()
+                    db.execute(
+                        "UPDATE configs SET data=?, digest=? WHERE rev=?", (data, digest, rev)
+                    )
             db.commit()
         before = {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
 
         def forbidden(*args, **kwargs):
-            raise AssertionError("recovery effect or scope recomputation before validation")
+            raise AssertionError("a recovery effect before the refusal")
 
         async def restart():
             return await resume_run(
@@ -1800,20 +1501,26 @@ def test_box_scope_compatibility_and_refusals(short_root: Path, monkeypatch, sna
             )
 
         if roots not in ("missing", []):
+            refusal = (
+                _OLDER_IR
+                if roots == "older_ir"
+                else _RETIRED_ROOTS
+                if roots in (["A"], ["BX"])
+                else _MALFORMED_ROOTS
+            )
             with monkeypatch.context() as guarded:
                 guarded.setattr(runner_startup, "_adopt_open_attempts", forbidden)
                 guarded.setattr(runner_procid, "signal_ours", forbidden)
                 guarded.setattr(runner_startup.Journal, "append", forbidden)
-                with pytest.raises(EngineError, match="config intent restart_boxes") as refused:
+                with pytest.raises(EngineError, match=refusal) as refused:
                     await restart()
-                if roots in (["A"], ["absent"]):
-                    assert repr(roots[0]) in str(refused.value)
-                    assert "not a BOX of the applied or candidate catalog" in str(refused.value)
+                if roots == "older_ir":
+                    assert "restart_boxes" not in str(refused.value)
                 elif snapshot:
                     assert str(refused.value).startswith(
                         f"{root / 'engine.db'}: unreadable snapshot at seq {seq}:"
                     )
-                with pytest.raises(EngineError, match="config intent restart_boxes"):
+                with pytest.raises(EngineError, match=refusal):
                     await runner_startup.validate_resume(
                         initial.catalog,
                         root,
@@ -1829,35 +1536,130 @@ def test_box_scope_compatibility_and_refusals(short_root: Path, monkeypatch, sna
                 p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()
             } == before
             return
-        with monkeypatch.context() as guarded:
-            if roots == []:
-                guarded.setattr(reload_plan, "restart_boxes", forbidden)
-            engine = await restart()
-            try:
-                assert engine.update._box_scope.roots == ()
+        engine = await restart()
+        try:
+            await engine.run_until_quiescent(T0)
+            assert engine.config_rev == 2 and not engine.update.stopping
+            assert engine.oracle.catalog.jobs["A"].exec_.command == "false"
+            assert any(
+                r.kind == "dispatch" and r.payload.get("after") == "update_stop"
+                for _, r in engine.journal.store.read_from(0)
+            )
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(scenario())
+    if roots == "older_ir":
+        # every opener of the root meets DL-561 first: the start through the CLI, the
+        # configuration a start reads, and the offline history
+        from typer.testing import CliRunner
+        from dsl41.cli import app
+        from dsl41.runner_history import RunHistoryError, read_run_root
+
+        def files():
+            # a reader's open of the WAL store may make its empty sidecars; they hold no record
+            return {
+                p.relative_to(root): p.read_bytes()
+                for p in root.rglob("*")
+                if p.is_file() and not p.name.endswith(("-shm", "-wal"))
+            }
+
+        before = files()
+        with pytest.raises(EngineError, match=_OLDER_IR):
+            active_configuration(root)
+        with pytest.raises(RunHistoryError, match=_OLDER_IR):
+            read_run_root(root)
+        monkeypatch.setenv("NO_COLOR", "1")
+        monkeypatch.setenv("COLUMNS", "200")
+        result = CliRunner().invoke(app, ["run", "--config", str(path)])
+        output = " ".join(result.output.split())
+        assert result.exit_code == 2, result.output
+        assert "IR-F version 0.3 is retired (DL-561)" in output
+        assert "Drain this run root on the build that wrote it" in output
+        assert "restart_boxes" not in output
+        assert files() == before
+
+
+@pytest.mark.parametrize("row", ["update.08", "update.07"])
+def test_dl488_a_loop_cancelled_in_the_time_advance_leaves_the_update_applied_and_unanswered(
+    tmp_path: Path, row: str
+) -> None:
+    """DL-488 THE LIMIT: on the virtual clock, a cancel of the engine loop during the time
+    advance after APPLIED leaves that update unfinished on the same engine: the tier stays
+    APPLIED, `status` shows no update, the `applied` answer is unset and no listener is called.
+    By update.08 the update applies after the stop of the running A; by update.07 it changes
+    the idle B and applies in its admission, with nothing to stop."""
+    other = "\ninsert_job: B\njob_type: c\ncommand: true\nmachine: localhost\n"
+    path = estate_file(tmp_path)
+    (tmp_path / "a.jil").write_text(JOB + other)
+    initial = main.prepare(path)
+    clock = VirtualClock(start=T0)
+
+    async def scenario() -> None:
+        engine = start_run(
+            initial.catalog,
+            tmp_path / "run",
+            clock=clock,
+            adapters={"CMD": FakeAdapter(default=None)},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        listeners: list[object] = []
+        engine.update.listeners.append(listeners.append)
+        try:
+            engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "A"}))
+            await engine.run_until_quiescent(T0)
+            edited = (
+                JOB.replace("true", "false") + other
+                if row == "update.08"
+                else JOB + other.replace("true", "false")
+            )
+            (tmp_path / "a.jil").write_text(edited)
+            plan = reread(
+                engine.update.live(), tmp_path / "run" / "plans", candidate=main.prepare(path)
+            )
+            answer = engine.request_update(
+                UpdateRequest(plan.token, 1, engine.baseline_id, "cancelled")
+            )
+            wait_until = clock.wait_until
+            waits = 0
+
+            async def cut_wait(at, interrupt=None):
+                nonlocal waits
+                if engine.config_rev == 2:
+                    waits += 1
+                    raise asyncio.CancelledError
+                await wait_until(at, interrupt)
+
+            clock.wait_until = cut_wait  # type: ignore[method-assign]
+            with pytest.raises(asyncio.CancelledError):
                 await engine.run_until_quiescent(T0)
-                assert engine.config_rev == 2 and engine.oracle.store.job["BX"].run_number == 1
-                if roots == "missing":
-                    # DL-489: a keyless interrupted update keeps the legacy BUG-67 outcome.
-                    assert engine.oracle.store.job["BX"].status == "TERMINATED"
-                    assert any(
-                        r.kind == "dispatch" and r.payload.get("after") == "update_stop"
-                        for _, r in engine.journal.store.read_from(0)
-                    )
-            finally:
-                await engine.shutdown()
-                engine.journal.close()
+            clock.wait_until = wait_until  # type: ignore[method-assign]
+            assert waits == 1
+            decision = answer.result()
+            assert decision.decision is not None
+            assert decision.decision.stop_set == (("A",) if row == "update.08" else ())
+            assert engine.config_rev == 2
+            assert engine.update.tier is not None and engine.update.tier.state == "APPLIED"
+            assert engine.update.view() is None
+            assert decision.applied is not None and not decision.applied.done()
+            assert listeners == []
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
 
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("remove", [False, True])
-def test_box_restart_is_outermost_and_removed_boxes_stay_stopped(
-    short_root: Path, monkeypatch, remove
+def test_dl559_a_nested_running_tree_is_forecast_and_refused_with_the_same_names(
+    short_root: Path, remove
 ):
-    """DL-559: the forecast restarts no box; it says the update would be refused by the running
-    tree. DL-463: the update a stored intent of the build before DL-559 carries
-    (`update_legacy`) restarts only the outermost box, and a removed box stays stopped."""
+    """DL-559: members added to the running box BX and its running sub-box INNER, or the whole
+    tree removed. The forecast restarts no box: it labels only the stops and says the update
+    would be refused by the running tree. The update is refused with those names and writes
+    no record."""
     from dsl41.reread_worker import preview
 
     text = (
@@ -1880,10 +1682,10 @@ def test_box_restart_is_outermost_and_removed_boxes_stay_stopped(
             source_capture=main.encoded_parts(initial),
         )
         engine.launch_settings = initial.metadata["launch"]
-        legacy_admission(monkeypatch, short_root / "run")
         try:
             engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "BX"}))
             await engine.run_until_quiescent(T0)
+            before = engine.journal.store.last_seq()
             replacement = (
                 JOB.replace("A", "OUTSIDE")
                 if remove
@@ -1916,19 +1718,17 @@ def test_box_restart_is_outermost_and_removed_boxes_stay_stopped(
                 UpdateRequest(plan.token, 1, engine.baseline_id, "outermost")
             )
             await engine.run_until_quiescent(T0)
-            assert response.result().applied.done()
-            forced = [
-                record.payload["payload"]["job"]
-                for _, record in engine.journal.store.read_from(0)
-                if record.kind == "input" and record.payload.get("kind") == "FORCE_STARTJOB"
+            names = ("BX", "INNER", "MEMBER")
+            assert response.result().decision == Refused(plan.token, "tree_active", names)
+            assert engine.config_rev == 1
+            for name in names:
+                row = engine.oracle.store.job[name]
+                assert row.status == "RUNNING" and row.run_number == 1
+            assert not [
+                record
+                for _, record in engine.journal.store.read_from(before)
+                if record.kind in {"input", "config", "dispatch"}
             ]
-            assert forced == (["BX"] if remove else ["BX", "BX"])
-            if remove:
-                assert set(engine.oracle.catalog.jobs) == {"OUTSIDE"}
-                assert engine.oracle.store.tombstones["BX"].status == "TERMINATED"
-            else:
-                for name in ("BX", "INNER", "MEMBER"):
-                    assert engine.oracle.store.job[name].run_number == 2
         finally:
             await engine.shutdown()
             engine.journal.close()
@@ -2024,85 +1824,6 @@ def test_a_running_tree_refuses_a_retype_or_a_move_over_the_socket(short_root: P
 
 
 _FOUR = ["BX", "INNER", "KEEP", "MEMBER"]
-
-
-@pytest.mark.parametrize("marked", [True, False])
-def test_a_resumed_box_restart_holds_a_marked_mover_on_its_run(short_root, monkeypatch, marked):
-    """DL-463, DL-489, DL-490: an intent of the build before DL-559 (`update_legacy`) moves the
-    running MOVER out of the running box BX and restarts BX. The engine dies after the intent;
-    the restart resumes it. A marked mover stays held on run 1 and is not run again; an
-    unmarked one reruns as run 1 under the new definition. STAY runs again in BX's run 2."""
-
-    async def scenario():
-        estate = 'non_idempotent = "non-idempotent.toml"\n'
-        path = config_file(short_root, estate=estate)
-        (short_root / "non-idempotent.toml").write_text(
-            '[jobs]\nMOVER = "synthetic effect"\n' if marked else "[jobs]\n"
-        )
-        box = "insert_job: BX\njob_type: b\n" + JOB.replace("A", "STAY") + "box_name: BX\n"
-        mover = JOB.replace("A", "MOVER")
-        (short_root / "a.jil").write_text(box + mover + "box_name: BX\n")
-        initial = main.prepare(path)
-        clock = VirtualClock(start=T0)
-        root = short_root / "run"
-        engine = start_run(
-            initial.catalog,
-            root,
-            clock=clock,
-            adapters={"CMD": FakeAdapter(default=None)},
-            launched=main.profile_of(initial),
-            source_capture=main.encoded_parts(initial),
-        )
-        legacy_admission(monkeypatch, root)
-        try:
-            engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "BX"}))
-            await engine.run_until_quiescent(T0)
-            (short_root / "a.jil").write_text(box + mover)
-            plan = reread(
-                engine.update.live(), root / "plans", candidate=main.prepare(path), start=T0
-            )
-            engine.request_update(UpdateRequest(plan.token, 1, engine.baseline_id, "mover"))
-
-            def cut(job, cause):
-                raise EngineError("cut after intent")
-
-            with monkeypatch.context() as patch:
-                patch.setattr(engine.update, "stop_attempt", cut)
-                with pytest.raises(EngineError, match="cut after intent"):
-                    await engine.run_until_quiescent(T0)
-            assert engine.journal.open.update["restart_boxes"] == ["BX"]
-            await engine.shutdown()
-            engine.journal.close()
-            stored = active_configuration(root)
-            engine = await resume_run(
-                stored.catalog,
-                root,
-                clock=clock,
-                adapters={"CMD": FakeAdapter(default=None)},
-                declared=stored.profile,
-                stored_sources=True,
-            )
-            await engine.run_until_quiescent(T0)
-            assert engine.config_rev == 2
-            row = engine.oracle.store.job["MOVER"]
-            assert row.run_number == 1 and row.on_hold == marked
-            assert row.status == ("FAILURE" if marked else "RUNNING")
-            assert engine.oracle.catalog.jobs["MOVER"].box.box_name is None
-            assert engine.oracle.store.job["BX"].run_number == 2
-            assert engine.oracle.store.job["STAY"].run_number == 2
-            mover_dispatches = [
-                record.payload
-                for _, record in engine.journal.store.read_from(0)
-                if record.kind == "dispatch" and record.payload["job"] == "MOVER"
-            ]
-            assert [d.get("after") for d in mover_dispatches] == (
-                [None] if marked else [None, "update_stop"]
-            )
-        finally:
-            await engine.shutdown()
-            engine.journal.close()
-
-    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(
@@ -2203,77 +1924,6 @@ def test_a_membership_change_under_a_running_box_marks_only_its_stops(
             for _, kind, body in rows(short_root / "run")
             if kind == "config" and body.get("event") == "intent"
         ]
-
-
-@pytest.mark.parametrize("nested", [False, True])
-def test_box_restart_holds_before_starts_in_name_order(short_root: Path, monkeypatch, nested: bool):
-    """DL-463, DL-488: the update a stored intent of the build before DL-559 carries
-    (`update_legacy`) holds the marked members, then starts the outermost boxes, in name
-    order."""
-    path = config_file(short_root, estate='non_idempotent = "marked.toml"\n')
-    (short_root / "marked.toml").write_text(
-        '[jobs]\nZ_HELD = "synthetic effect"\nA_HELD = "synthetic effect"\n'
-    )
-    text = (
-        "insert_job: ZB\njob_type: b\ninsert_job: AB\njob_type: b\n"
-        + ("box_name: ZB\n" if nested else "")
-        + JOB.replace("A", "Z_HELD")
-        + "box_name: AB\n"
-        + JOB.replace("A", "A_HELD")
-        + "box_name: ZB\n"
-    )
-    (short_root / "a.jil").write_text(text)
-    initial = main.prepare(path)
-
-    async def scenario():
-        engine = start_run(
-            initial.catalog,
-            short_root / "run",
-            clock=VirtualClock(start=T0),
-            adapters={"CMD": FakeAdapter(default=None)},
-            launched=main.profile_of(initial),
-            source_capture=main.encoded_parts(initial),
-        )
-        legacy_admission(monkeypatch, short_root / "run")
-        try:
-            for name in ["ZB"] if nested else ["ZB", "AB"]:
-                engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": name}))
-            await engine.run_until_quiescent(T0)
-            before = engine.journal.store.last_seq()
-            (short_root / "a.jil").write_text(
-                text
-                + JOB.replace("A", "NEW_INNER")
-                + "box_name: AB\n"
-                + JOB.replace("A", "NEW_OUTER")
-                + "box_name: ZB\n"
-            )
-            plan = reread(
-                engine.update.live(),
-                short_root / "run" / "plans",
-                candidate=main.prepare(path),
-                start=T0,
-            )
-            answer = engine.request_update(
-                UpdateRequest(plan.token, 1, engine.baseline_id, "box-order")
-            )
-            await engine.run_until_quiescent(T0)
-            assert answer.result().applied.done()
-            records = list(engine.journal.store.read_from(before))
-            assert [
-                (record.payload["kind"], record.payload["payload"]["job"])
-                for _, record in records
-                if record.kind == "input"
-                and record.payload.get("kind") in {"ON_HOLD", "FORCE_STARTJOB"}
-            ] == [
-                ("ON_HOLD", "A_HELD"),
-                ("ON_HOLD", "Z_HELD"),
-                *[("FORCE_STARTJOB", name) for name in (["ZB"] if nested else ["AB", "ZB"])],
-            ]
-        finally:
-            await engine.shutdown()
-            engine.journal.close()
-
-    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(
@@ -2638,230 +2288,6 @@ def test_dl559_a_sub_box_moved_out_of_a_running_box_refuses(short_root: Path):
                 for _, record in engine.journal.store.read_from(before)
                 if record.kind in {"input", "config", "dispatch"}
             ]
-        finally:
-            await engine.shutdown()
-            engine.journal.close()
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.parametrize("case", ["in_place_running", "in_place_finished", "move_in"])
-def test_dl490_changed_member_opens_a_new_box_run(short_root: Path, monkeypatch, case):
-    """DL-490: in the box restart a stored intent of the build before DL-559 carries
-    (`update_legacy`), a changed or moved-in member runs in the new box run."""
-    member = JOB.replace("A", "MEMBER")
-    old = (
-        "insert_job: BX\njob_type: b\n"
-        + JOB.replace("A", "KEEP")
-        + "box_name: BX\n"
-        + member
-        + ("" if case == "move_in" else "box_name: BX\n")
-    )
-    path = estate_file(short_root)
-    jil = short_root / "a.jil"
-    jil.write_text(old)
-    initial = main.prepare(path)
-
-    async def scenario():
-        engine = start_run(
-            initial.catalog,
-            short_root / "run",
-            clock=VirtualClock(start=T0),
-            adapters={"CMD": FakeAdapter(default=None)},
-            launched=main.profile_of(initial),
-            source_capture=main.encoded_parts(initial),
-        )
-        legacy_admission(monkeypatch, short_root / "run")
-        try:
-            for name in ["BX", "MEMBER"] if case == "move_in" else ["BX"]:
-                engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": name}))
-            await engine.run_until_quiescent(T0)
-            if case == "in_place_finished":
-                engine.inject(
-                    Event(at=T0, kind="STATUS", payload={"job": "MEMBER", "status": "SUCCESS"})
-                )
-                await engine.run_until_quiescent(T0)
-            row = engine.oracle.store.job["MEMBER"]
-            assert row.status == ("SUCCESS" if case == "in_place_finished" else "RUNNING")
-            assert row.run_number == 1
-            before = engine.journal.store.last_seq()
-            new = (
-                old + "box_name: BX\n"
-                if case == "move_in"
-                else old.replace(member, member.replace("true", "false"))
-                + JOB.replace("A", "NEW")
-                + "box_name: BX\n"
-            )
-            jil.write_text(new)
-            plan = reread(
-                engine.update.live(),
-                short_root / "run" / "plans",
-                candidate=main.prepare(path),
-                start=T0,
-            )
-            answer = engine.request_update(
-                UpdateRequest(plan.token, 1, engine.baseline_id, "changed-member")
-            )
-            await engine.run_until_quiescent(T0)
-            assert answer.result().applied.done() and engine.config_rev == 2
-            row = engine.oracle.store.job["MEMBER"]
-            assert row.status == "RUNNING" and row.run_number == 2
-            assert engine.oracle.store.job["BX"].run_number == 2
-            records = list(engine.journal.store.read_from(before))
-            inputs = [
-                (record.payload.get("kind"), record.payload.get("payload", {}).get("job"))
-                for _, record in records
-                if record.kind == "input"
-            ]
-            assert (("KILLJOB", "MEMBER") in inputs) == (case != "in_place_finished")
-            assert ("FORCE_STARTJOB", "BX") in inputs
-            assert ("FORCE_STARTJOB", "MEMBER") not in inputs
-            dispatches = [
-                record.payload
-                for _, record in records
-                if record.kind == "dispatch" and record.payload["job"] == "MEMBER"
-            ]
-            assert len(dispatches) == 1
-            assert dispatches[0]["run_number"] == 2 and dispatches[0].get("after") is None
-        finally:
-            await engine.shutdown()
-            engine.journal.close()
-
-    asyncio.run(scenario())
-
-
-def test_dl490_box_kills_include_removed_and_queued_members_in_order(short_root: Path, monkeypatch):
-    """DL-487, DL-490: the box restart a stored intent of the build before DL-559 carries
-    (`update_legacy`) ends the boxes first, then removed and queued members, in order."""
-    resource = "resources: (LOCK, QUANTITY=1)\n"
-    removed = JOB.replace("A", "REMOVED") + "box_name: ZB\n"
-    old = (
-        "insert_resource: LOCK\nres_type: R\namount: 1\n"
-        + JOB.replace("A", "HOLDER")
-        + resource
-        + "insert_job: ZB\njob_type: b\ninsert_job: AB\njob_type: b\nbox_name: ZB\n"
-        + JOB.replace("A", "MEMBER")
-        + "box_name: AB\n"
-        + removed
-        + JOB.replace("A", "WAITER")
-        + "box_name: AB\n"
-        + resource
-    )
-    path = estate_file(short_root)
-    jil = short_root / "a.jil"
-    jil.write_text(old)
-    initial = main.prepare(path)
-
-    async def scenario():
-        engine = start_run(
-            initial.catalog,
-            short_root / "run",
-            clock=VirtualClock(start=T0),
-            adapters={"CMD": FakeAdapter(default=None)},
-            launched=main.profile_of(initial),
-            source_capture=main.encoded_parts(initial),
-        )
-        legacy_admission(monkeypatch, short_root / "run")
-        try:
-            for name in ("HOLDER", "ZB"):
-                engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": name}))
-                await engine.run_until_quiescent(T0)
-            assert engine.oracle.store.job["WAITER"].status == "QUE_WAIT"
-            assert engine.oracle.store.job["AB"].status == "RUNNING"
-            before = engine.journal.store.last_seq()
-            jil.write_text(old.replace(removed, ""))
-            plan = reread(
-                engine.update.live(),
-                short_root / "run" / "plans",
-                candidate=main.prepare(path),
-                start=T0,
-            )
-            answer = engine.request_update(
-                UpdateRequest(plan.token, 1, engine.baseline_id, "kill-order")
-            )
-            await engine.run_until_quiescent(T0)
-            assert answer.result().applied.done() and engine.config_rev == 2
-            kills = [
-                record.payload["payload"]["job"]
-                for _, record in engine.journal.store.read_from(before)
-                if record.kind == "input" and record.payload.get("kind") == "KILLJOB"
-            ]
-            assert kills == ["ZB", "AB", "REMOVED", "MEMBER", "WAITER"]
-        finally:
-            await engine.shutdown()
-            engine.journal.close()
-
-    asyncio.run(scenario())
-
-
-def test_box_restart_ends_boxes_before_done_sibling_can_start(short_root: Path, monkeypatch):
-    """DL-463, DL-487: in the box restart a stored intent of the build before DL-559 carries
-    (`update_legacy`), the boxes end before a sibling waiting on `d(A1)` can start."""
-    old = (
-        "insert_job: ZB\njob_type: b\ninsert_job: AB\njob_type: b\nbox_name: ZB\n"
-        + JOB.replace("A", "A1")
-        + "box_name: AB\n"
-        + JOB.replace("A", "B1")
-        + "box_name: AB\ncondition: d(A1)\n"
-    )
-    path = estate_file(short_root)
-    (short_root / "a.jil").write_text(old)
-    initial = main.prepare(path)
-
-    async def scenario():
-        engine = start_run(
-            initial.catalog,
-            short_root / "run",
-            clock=VirtualClock(start=T0),
-            adapters={"CMD": FakeAdapter(default=None)},
-            launched=main.profile_of(initial),
-            source_capture=main.encoded_parts(initial),
-        )
-        legacy_admission(monkeypatch, short_root / "run")
-        try:
-            engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "ZB"}))
-            await engine.run_until_quiescent(T0)
-            assert engine.oracle.store.job["B1"].status == "INACTIVE"
-            (short_root / "a.jil").write_text(old + JOB.replace("A", "NEW") + "box_name: ZB\n")
-            candidate = main.prepare(path)
-            plan = reread(
-                engine.update.live(),
-                short_root / "run" / "plans",
-                candidate=candidate,
-                start=T0,
-            )
-            engine.request_update(UpdateRequest(plan.token, 1, engine.baseline_id, "ordered"))
-            await engine.run_until_quiescent(T0)
-            assert engine.oracle.store.job["B1"].status == "INACTIVE"
-            records = list(engine.journal.store.read_from(0))
-            kills = [
-                record.payload["payload"]["job"]
-                for _, record in records
-                if record.kind == "input" and record.payload.get("kind") == "KILLJOB"
-            ]
-            assert kills[:2] == ["ZB", "AB"]
-            force = max(
-                seq
-                for seq, record in records
-                if record.kind == "input" and record.payload.get("kind") == "FORCE_STARTJOB"
-            )
-            assert not [
-                record
-                for seq, record in records
-                if seq < force and record.kind == "dispatch" and record.payload["job"] == "B1"
-            ]
-            engine.inject(Event(at=T0, kind="STATUS", payload={"job": "A1", "status": "SUCCESS"}))
-            await engine.run_until_quiescent(T0)
-            assert engine.oracle.store.job["ZB"].run_number == 2
-            assert engine.oracle.store.job["AB"].run_number == 2
-            assert engine.oracle.store.job["B1"].status == "RUNNING"
-            assert engine._live["B1"].run_number == 1
-            starts = [
-                seq
-                for seq, record in engine.journal.store.read_from(0)
-                if record.kind == "dispatch" and record.payload["job"] == "B1"
-            ]
-            assert len(starts) == 1 and starts[0] > force
         finally:
             await engine.shutdown()
             engine.journal.close()

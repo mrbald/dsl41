@@ -6,17 +6,16 @@ admission reads the version 2 plan `reread` stored under `plans/<token>/`, loads
 main-config inputs (DL-486), and re-checks the runtime
 preconditions against the engine's state now (`EngineUpdate.admit`). An update that changes
 box membership is refused `tree_active` unless nothing has to stop and the touched trees are
-quiet (`reload_plan.tree_active`): a new admission never restarts a box, and only an intent an
-earlier build stored names box roots (DL-559). A refusal is the reply and writes nothing. An admission appends `config intent` (the token, the stop set with the
-attempt each stop interrupts, the dispatch filter, the admitted box roots (DL-489), and the
+quiet (`reload_plan.tree_active`): an update never restarts a box (DL-559). A refusal is the
+reply and writes nothing. An admission appends `config intent` (the token, the stop set with
+the attempt each stop interrupts, the dispatch filter, `restart_boxes: []` (DL-562), and the
 request's id and fingerprint), then
 stops each attempt of the stop set with cause `update_stop` through the attempt tier. The stop
 set holds every job the plan names with a process the engine owns, whatever its row says,
 under the run of that process, and every named job whose row is STARTING or RUNNING (DL-525). While the
 update stops, no job of its recorded dispatch filter is dispatched: the jobs it names, which are
-the plan's added, changed and removed jobs, the admitted box roots and their descendants in the
-old and in the new catalog (`reload_update.filter_of`, DL-527). A start the oracle decides for one
-is held as `dispatch_pending`. One whose run ends while it waits is discharged with the input
+the plan's added, changed and removed jobs (`reload_update.filter_of`, DL-527). A start the
+oracle decides for one is held as `dispatch_pending`. One whose run ends while it waits is discharged with the input
 that ends it, and one whose job the application removes or retypes with the `config applied`
 record (DL-551). After the application each held start left is released: one whose run is no
 longer wanted is discharged with no launch, any other is launched under the applied definition.
@@ -26,7 +25,7 @@ and its follow-up plan are appended after the application, under the applied cat
 marked set (spec-wiring 2b, the interruption rule's step 1). A task the attempt tier does not run
 (a file watch) is cancelled; after the application it is launched again under its run id while
 its job is in the catalog and its run is live, and closed with no plan otherwise. That is decided
-again at the launch, after the application's time advance and box actions (DL-526).
+again at the launch, after the application's time advance (DL-526).
 
 When the last selected stop is finished, the application swaps the oracle's catalog and settings
 (`reload_update.apply_application`), the scheduler's plans (`Scheduler.replace`), the marked set
@@ -69,18 +68,12 @@ from dsl41.idempotence import Exceptions
 from dsl41.ir import CatalogIR
 from dsl41.oracle_reads import marker
 from dsl41.reload_plan import (
-    NO_SCOPE,
-    BoxScope,
     Estate,
     Live,
     RereadRefused,
     RetiredPlan,
     estate_settings,
     read_plan,
-    box_scope,
-    ends_with_roots,
-    marked_holds,
-    root_starts,
     tree_active,
 )
 from dsl41.reload_diff import catalog_hash_v2, diff
@@ -103,12 +96,7 @@ from dsl41.runner_attempts import UNSETTLED, FollowUp
 from dsl41.runner_clock import EngineError
 from dsl41.runner_codes import Code
 from dsl41.runner_config import Configuration, RuntimeProfile, tz_aliases_of, with_host_settings
-from dsl41.runner_journal import (
-    CONFIG_MARKER,
-    config_marker,
-    discharged_record,
-    update_box_roots,
-)
+from dsl41.runner_journal import CONFIG_MARKER, config_marker, discharged_record
 from dsl41.runner_ledger import STATE_MACHINE_VERSION
 from dsl41.runner_store import ConfigRow, Record, Store
 from dsl41.runtime_policy import policy_values
@@ -296,7 +284,6 @@ class EngineUpdate:
         #: each cancelled task is taken up again, by job (`_choose_follow_ups`)
         self._chosen: dict[str, FollowUp] = {}
         self._takes_up: dict[str, bool] = {}
-        self._box_scope = NO_SCOPE
         #: the jobs the dispatch filter held while the update stopped, released after it
         self._held: frozenset[str] = frozenset()
         #: called with each applied plan once the update applied live (the control server's
@@ -478,10 +465,9 @@ class EngineUpdate:
         raise AssertionError(f"a refused update {admitted.token} reached its application")
 
     def _begin(self, request: UpdateRequest, opened: OpenedPlan, admitted: Admitted) -> None:
-        """Install a new admission: it restarts no box, so its intent records
-        `restart_boxes: []` (DL-559)."""
+        """Install a new admission."""
         attempts = {job: self.engine.attempt_of_run(job, run) for job, run in admitted.stop_runs}
-        self._install(request, opened, admitted, attempts, {}, NO_SCOPE)
+        self._install(request, opened, admitted, attempts, {})
 
     def _install(
         self,
@@ -490,7 +476,6 @@ class EngineUpdate:
         admitted: Admitted,
         attempts: dict[str, str | None],
         cleaning: dict[str, str],
-        scope: BoxScope,
     ) -> None:
         """Install the update and its selected attempts before creating its tier (DL-432)."""
         engine = self.engine
@@ -499,7 +484,6 @@ class EngineUpdate:
         self._moved = frozenset(engine.marked ^ set(opened.marked.names))
         self._held = admitted.dispatch_filter
         self._admitted = admitted
-        self._box_scope = scope
         self._attempts = attempts
         self._cleaning = cleaning
         self.tier = UpdateTier(self, self._prepare)
@@ -580,14 +564,7 @@ class EngineUpdate:
         # an attempt whose outcome is in while its cleanup was cut short is down once the
         # catch-up's cleanup step has finished it (`cleaned`)
         cleaning = {run_id: job for job, run_id in still.items() if table[run_id].closing}
-        live = self.live()
-        scope = box_scope(
-            plan_of(opened.plan, live.catalog),
-            live,
-            opened.estate.catalog,
-            roots=update_box_roots(intent),
-        )
-        self._install(request, opened, admitted, attempts, cleaning, scope)
+        self._install(request, opened, admitted, attempts, cleaning)
         # the request's own answer: a retry under its id while it still stops waits on it
         self._answer = UpdateAnswer(admitted)
         self._answer.applied = asyncio.get_running_loop().create_future()
@@ -681,7 +658,8 @@ class EngineUpdate:
                 for job in stop_set
             ],
             "filter": sorted(self._held),
-            "restart_boxes": list(self._box_scope.roots),
+            # an update restarts no box; the reader refuses any other value (DL-562)
+            "restart_boxes": [],
             "stop_running": True,
             "request_id": request.request_id,
             "fingerprint": request.fingerprint,
@@ -710,38 +688,6 @@ class EngineUpdate:
             self._cancelled.append((job, run, run_id))
         assert self.tier is not None
         self.tier.exit_recorded(job)
-
-    def box_ends(self) -> list[str]:
-        """End old box runs before application can choose replacement attempts (DL-463)."""
-        assert self._opened is not None
-        old = self.engine.oracle.catalog.jobs
-        new = self._opened.estate.catalog
-        names = ends_with_roots(self._box_scope, new)
-
-        def order(name: str) -> tuple[bool, int, str]:
-            depth, parent = 0, old[name].box.box_name
-            while parent is not None:
-                depth += 1
-                parent = old[parent].box.box_name
-            return old[name].job_type != "BOX", depth, name
-
-        return sorted(
-            (
-                name
-                for name in names
-                if name in old
-                and self.engine.oracle.store.job[name].status in {"RUNNING", "STARTING", "QUE_WAIT"}
-            ),
-            key=order,
-        )
-
-    def box_starts(self) -> list[tuple[Any, str]]:
-        """Hold every non-INACTIVE marked member before an outer box starts (DL-463)."""
-        engine = self.engine
-        status = {name: row.status for name, row in engine.oracle.store.job.items()}
-        held = marked_holds(self._box_scope, engine.marked, status)
-        starts = root_starts(self._box_scope, engine.oracle.catalog, engine.marked)
-        return [("ON_HOLD", name) for name in held] + [("FORCE_STARTJOB", box) for box in starts]
 
     def _prepare(self, _admitted: Admitted) -> Application:
         """The application, computed from the oracle as the stops left it, under the settings
@@ -850,8 +796,8 @@ class EngineUpdate:
         step 1): a kept outcome's plan (`complete`, `rerun`, `hold` or `none`), which `finish`
         commits as chosen; `rerun` for a cancelled task taken up again; `none` for a task
         closed, and for a job the update found no attempt of (its held start goes under the new
-        definition). A cancelled task is decided again at its launch, after the time advance
-        and the box actions; the record keeps this choice (DL-526)."""
+        definition). A cancelled task is decided again at its launch, after the time advance; the
+        record keeps this choice (DL-526)."""
         engine = self.engine
         assert self._admitted is not None
         cancelled = {job: run for job, run, _ in self._cancelled}

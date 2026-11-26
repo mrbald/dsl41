@@ -199,7 +199,7 @@ Hook observations skip rows with no catalog job (DL-500).
 | Event | Observation |
 | --- | --- |
 | `job_failure` | Every actual transition from another status into FAILURE at `OracleWriters._write`, including BOX and injected statuses. Carries resolved Boolean `alarm_if_fail`, default true (DL-469). |
-| `job_terminated` | Every actual transition from another status into TERMINATED, including the box kills of a resumed update that restarts boxes (DL-559). Carries resolved Boolean `alarm_if_terminated`, default true; that default is unverified against AutoSys (DL-469). |
+| `job_terminated` | Every actual transition from another status into TERMINATED. Carries resolved Boolean `alarm_if_terminated`, default true; that default is unverified against AutoSys (DL-469). |
 | `alarm` | A SEM-34 timer emits `MUST_START_ALARM` or `MUST_COMPLETE_ALARM`. These deadline alarms are independent of hook flags, notification attributes and runtime thresholds (DL-469). |
 | `job_hold` | A false→true `on_hold` write at `OracleWriters._flag`, including auto-hold and interruption hold. |
 | `job_long_running` | Once per RUNNING interval per engine invocation when admitted time minus its `status_at` reaches its effective per-job or global threshold. Check once per second and recheck the row before enqueueing. Restart may notify again. Scheduling is unchanged. |
@@ -1259,20 +1259,14 @@ no restart resumes such an update; a failure between the swap and the commit is 
 (DL-560): the engine dies and replay installs what the store holds. The lock is proved
 before the swap, and a COMMIT that fails is rolled back. The intent stays first, keeps
 its shape and still answers a retry by its id.
-An update that stops jobs, and an intent an earlier build stored, keep the separate
-intent, the stops in STOPPING, and the application after them.
-An intent an earlier build stored can name box roots in `restart_boxes`; recovery
-completes it as that build did: it stops the roots' members, commits KILLJOBs before the
-application to prevent old-run replacement, then holds every marked non-INACTIVE member
-(including finished members) before a new outermost box run. Recovery derives the
-members from both catalogs, and only a missing key recomputes the roots. Before
-recovery acts, malformed roots or a name that is not a BOX of either the applied or
-candidate catalog refuse by name (DL-489). What a crash after `config applied` leaves, and
-the operator's step then, are in [Reload a changed estate](deploy.md#reload-a-changed-estate).
+An update that stops jobs keeps the separate intent, the stops in STOPPING, and the
+application at the first look that finds none open (update.08, DL-562).
+An intent's `restart_boxes` is `[]`, and an absent key reads the same. Before recovery
+acts, a value that names box roots is refused by name as retired (DL-562), and any other
+value as malformed (DL-489).
 An unfinished stop keeps the update in STOPPING; this path has no cancel verb.
-An update is atomic across the jobs it names: those it adds, changes or removes, and for an
-older build's intent the members of the boxes it restarts, as its recorded stop list and
-dispatch filter name them. Their processes are stopped, none of them is launched while the
+An update is atomic across the jobs it names: those it adds, changes or removes, as its
+recorded stop list and dispatch filter name them. Their processes are stopped, none of them is launched while the
 update waits, and the new definitions are published once, after every stopped process is
 gone (DL-522).
 

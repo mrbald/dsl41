@@ -845,45 +845,36 @@ Clock: logical.
 
 ```mermaid
 stateDiagram-v2
-    state "update" as s6
-    state s6 {
-        [*] --> s2
-        state "IDLE" as s2
-        state "STOPPING" as s4
-        state s4 {
-            [*] --> s5
-            state "WAITING" as s5
-            state "ENDING_BOXES" as s1
-        }
+    state "update" as s4
+    state s4 {
+        [*] --> s1
+        state "IDLE" as s1
+        state "STOPPING" as s3
         state "APPLIED" as s0
-        state "REFUSED" as s3
+        state "REFUSED" as s2
         s0 --> [*]
-        s3 --> [*]
+        s2 --> [*]
     }
-    s2 --> s4 : update.01 update_admitted [some_to_stop] / begin_stopping
-    s2 --> s3 : update.02 update_admitted [refused] / refuse
-    s1 --> s0 : update.03 boxes_ended / apply
-    s5 --> s1 : update.05 look [none_open] / end_boxes
-    s2 --> s0 : update.07 update_admitted [none_to_stop] / apply_at_once
+    s1 --> s3 : update.01 update_admitted [some_to_stop] / begin_stopping
+    s1 --> s2 : update.02 update_admitted [refused] / refuse
+    s1 --> s0 : update.07 update_admitted [none_to_stop] / apply_at_once
+    s3 --> s0 : update.08 look [none_open] / apply
 ```
 
 | Id | Source | Event | Guard | Action | Target | Kind | Cite |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | update.01 | IDLE | update_admitted | some_to_stop | begin_stopping | STOPPING | external |  |
 | update.02 | IDLE | update_admitted | refused | refuse | REFUSED | external |  |
-| update.03 | ENDING_BOXES | boxes_ended |  | apply | APPLIED | external |  |
-| update.04 | WAITING | exit_recorded |  | one_down |  | internal |  |
-| update.05 | WAITING | look | none_open | end_boxes | ENDING_BOXES | external |  |
-| update.06 | WAITING | look | some_open |  |  | internal |  |
+| update.04 | STOPPING | exit_recorded |  | one_down |  | internal |  |
+| update.06 | STOPPING | look | some_open |  |  | internal |  |
 | update.07 | IDLE | update_admitted | none_to_stop | apply_at_once | APPLIED | external |  |
+| update.08 | STOPPING | look | none_open | apply | APPLIED | external |  |
 
 | State | In | Entry | Exit | Defers | Waits |
 | --- | --- | --- | --- | --- | --- |
 | update |  |  |  |  |  |
 | IDLE | update/phase |  |  |  |  |
 | STOPPING | update/phase |  |  |  |  |
-| WAITING | STOPPING/stop |  |  |  |  |
-| ENDING_BOXES | STOPPING/stop |  |  |  |  |
 | APPLIED (final) | update/phase |  |  |  |  |
 | REFUSED (final) | update/phase |  |  |  |  |
 
@@ -897,6 +888,5 @@ stateDiagram-v2
 | begin_stopping | action | Keep the token and the stop set, journal the intent, then stop each job in the set. |
 | refuse | action | Keep the refusal, the reply is the tier's. |
 | one_down | action | One job of the stop set ended: it leaves the open set. |
-| end_boxes | action | End each old box run, boxes first, before applying the plan (DL-487). |
-| apply | action | Apply, journal, advance time, hold marked members, start boxes, then finish (DL-488). |
-| apply_at_once | action | Keep the token, apply, journal the intent with the application in one transaction, advance time, then finish. A new admission restarts no box, so nothing is held or started for one (DL-559, DL-560). |
+| apply | action | Apply, journal, advance time, then finish (DL-488, DL-562). |
+| apply_at_once | action | Keep the token, apply, journal the intent with the application in one transaction, advance time, then finish (DL-560). |

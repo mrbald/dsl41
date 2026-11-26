@@ -275,13 +275,8 @@ and the jobs of those trees that are not quiet. An admitted one stores
 a run. A job outside every box that is no BOX in either catalog is added,
 removed or retyped as any other job, with its stop.
 
-An intent an earlier build stored can name roots in `restart_boxes`; a restart
-completes it as that build did (DL-463, DL-489, DL-490). It stops the roots'
-running members through the TERM ladder, commits the old box runs' KILLJOBs
-before the application, holds the marked non-INACTIVE members, then force-starts
-the retained outermost boxes. Only an absent key recomputes the roots. After
-`config applied`, a crash can leave such a box stopped: before force-starting
-it, hold its marked non-INACTIVE members (DL-463, DL-489).
+An intent that names roots in `restart_boxes` is refused at start by name and
+never completed (DL-562).
 
 An edit only to `job_env` advances the configuration revision without
 changing job-definition hashes or stopping jobs, including while boxes run

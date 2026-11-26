@@ -20,6 +20,7 @@ from reload_fixtures import prepare_estate, write_config
 from contextlib import closing
 
 import asyncio
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -424,13 +425,28 @@ def test_a_snapshot_round_trips_and_a_foreign_one_is_refused_by_name() -> None:
         decode_snapshot(7, b"{}", where="here")
 
 
-@pytest.mark.parametrize("roots", [None, "BX", {}, [7], [["BX"]], ["BX", "BX"], ["Z", "BX"]])
-def test_invalid_update_box_roots_refuse_in_records_and_snapshots(roots) -> None:
-    """DL-489: an optional field is checked in both retained forms before recovery."""
+_MALFORMED = "config intent restart_boxes must be a sorted list"
+_RETIRED = r"an update that restarts a box is retired \(DL-562\)"
+
+
+@pytest.mark.parametrize(
+    "roots,refusal",
+    [
+        *(
+            (roots, _MALFORMED)
+            for roots in (None, "BX", {}, [7], [["BX"]], ["BX", "BX"], ["Z", "BX"])
+        ),
+        (["BX"], _RETIRED),
+        (["AB", "ZB"], _RETIRED),
+    ],
+)
+def test_restart_boxes_other_than_empty_refuse_in_records_and_snapshots(roots, refusal) -> None:
+    """DL-562, DL-489: the optional field is checked in both retained forms before recovery.
+    Box roots are refused by name as retired; any other value that is not `[]` as malformed."""
     store = MemoryStore()
     journal = Journal(store)
     intent = {"event": "intent", "restart_boxes": roots}
-    with pytest.raises(EngineError, match="config intent restart_boxes must be a sorted list"):
+    with pytest.raises(EngineError, match=refusal):
         journal.append(Record(T0, "config", None, None, intent))
     assert store.last_seq() == 0
     table = OpenTable()
@@ -443,17 +459,18 @@ def test_invalid_update_box_roots_refuse_in_records_and_snapshots(roots) -> None
         open_table=table,
     )
     with pytest.raises(
-        EngineError,
-        match=r"run/engine\.db: unreadable snapshot at seq 7: config intent restart_boxes must be a sorted list",
-    ):
+        EngineError, match=r"run/engine\.db: unreadable snapshot at seq 7: "
+    ) as caught:
         decode_snapshot(7, data, where="run/engine.db")
+    assert re.search(refusal, str(caught.value))
 
 
-@pytest.mark.parametrize(
-    "extension", [{}, {"restart_boxes": []}, {"restart_boxes": ["BX"]}, {"future": 7}]
-)
-def test_update_box_roots_do_not_change_replay_or_snapshot_rows(extension) -> None:
-    """DL-489: keyed, keyless and unknown-field bodies have the same log-to-state projection."""
+@pytest.mark.parametrize("extension", [{}, {"restart_boxes": []}, {"future": 7}])
+def test_an_empty_or_absent_restart_boxes_does_not_change_replay_or_snapshot_rows(
+    extension,
+) -> None:
+    """DL-562, DL-489: keyed, keyless and unknown-field bodies have the same log-to-state
+    projection."""
     from dsl41.runner_journal import oracle_rows
     from dsl41.runner_config import RuntimeProfile
     from dsl41.runner_admission import apply_attempt

@@ -25,7 +25,6 @@ from dsl41.runner_update import UpdateRequest, settings_of
 from dsl41.status_hook import HookSettings, StatusHooks, payload
 from test_main_config import JOB, config_file, estate_file
 from test_status_hook import T0, Capture, feed, make_engine
-from update_legacy import legacy_admission
 
 pytestmark = pytest.mark.usefixtures("cli_env")
 
@@ -472,21 +471,17 @@ def test_runtime_limit_rejects_new_sources_but_restores_stored_catalog(tmp_path,
     asyncio.run(scenario())
 
 
-def test_update_box_restart_emits_termination(tmp_path, monkeypatch):
-    """DL-469: the box kill of an update that restarts a box emits `job_terminated` with
-    `alarm_if_terminated` true. Only an intent the build before DL-559 wrote restarts a box
-    (DL-559): the update is admitted as that build did (`update_legacy`), and the kill, the
-    application and the hook run as they do for such an intent."""
+def test_a_box_killjob_emits_termination(tmp_path):
+    """DL-469: the KILLJOB of a running box emits `job_terminated` for the box with
+    `alarm_if_terminated` true."""
     path = estate_file(tmp_path)
-    box = "insert_job: BX\njob_type: b\n"
-    (tmp_path / "a.jil").write_text(box + JOB + "box_name: BX\n")
+    (tmp_path / "a.jil").write_text("insert_job: BX\njob_type: b\n" + JOB + "box_name: BX\n")
     initial = main.prepare(path)
-    root = tmp_path / "run"
 
     async def scenario():
         engine = start_run(
             initial.catalog,
-            root,
+            tmp_path / "run",
             clock=VirtualClock(start=T0),
             adapters={"CMD": FakeAdapter(default=None)},
             launched=main.profile_of(initial),
@@ -494,27 +489,11 @@ def test_update_box_restart_emits_termination(tmp_path, monkeypatch):
         )
         capture = Capture()
         engine.status_hooks = capture
-        legacy_admission(monkeypatch, root)
         try:
             await feed(engine, "FORCE_STARTJOB", job="BX")
-            (tmp_path / "a.jil").write_text(
-                box + JOB + "box_name: BX\n" + JOB.replace("A", "B") + "box_name: BX\n"
-            )
-            plan = reread(
-                engine.update.live(),
-                root / "plans",
-                candidate=main.prepare(path),
-                start=T0,
-            )
-            result = engine.request_update(UpdateRequest(plan.token, 1, engine.baseline_id, "box"))
-            await engine.run_until_quiescent(T0)
-            assert result.result().code is None
-            for _ in range(10):
-                await asyncio.sleep(0)
-                await engine.run_until_quiescent(T0)
-                if result.result().applied.done():
-                    break
-            assert result.result().applied.done()
+            assert engine.oracle.store.job["BX"].status == "RUNNING"
+            await feed(engine, "KILLJOB", job="BX")
+            assert engine.oracle.store.job["BX"].status == "TERMINATED"
             assert any(
                 row.event == "job_terminated"
                 and row.job == "BX"

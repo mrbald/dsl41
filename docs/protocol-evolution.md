@@ -2,7 +2,7 @@
 
 Status: **normative (DL-138).** Entries that rule parts of it include
 DL-144, DL-146, DL-147, DL-150, DL-151, DL-157, DL-158, DL-168, DL-170,
-DL-217, DL-227, DL-252, DL-263, DL-401, DL-438, DL-498, DL-499 and DL-561. A change to what this document
+DL-217, DL-227, DL-252, DL-263, DL-401, DL-438, DL-498, DL-499, DL-561 and DL-562. A change to what this document
 fixes requires a decision-log entry. Each entry is cited where it applies.
 
 For the architect: this page fixes format tolerance, version entry and
@@ -188,20 +188,19 @@ its admission `seq` is not the SQLite row sequence. `check_record` refuses
 unknown store kinds, engine/config events, outcome kinds and plan kinds.
 The input event alphabet is strict too (DL-158).
 
-The `config intent` reader ignores unknown fields. Its optional `restart_boxes`
-is a sorted list of unique names, `[]` included, used as stored; only an absent
-key recomputes the roots. Record and snapshot readers refuse a malformed present
-value, so it also stops history, replay and subscribe backfill. A missing key is
-accepted by every reader. Before recovery acts, each name must be a BOX of the
-applied or candidate catalog, or restart refuses by name (DL-489). Snapshot
-refusals name the store path and snapshot sequence. Snapshots carry the intent
-body unchanged. State version stays 28; replay and history do not use the roots
-to derive state. A state-28 build that does not know the key ignores it and
-recomputes the roots, so a crash during the update can lose a box from its scope.
-Let an open update finish
-(`status.update` absent) before rollback or takeover by a standby on the older
-package (DL-489). From DL-559 on a new admission always writes `[]`: only an intent
-an earlier build stored names roots, and this build completes it as that build did.
+The `config intent` reader ignores unknown fields. Every intent this build writes
+carries `restart_boxes: []`; a missing key reads the same. A present value that
+names box roots, a sorted list of unique names, is retired: record and snapshot
+readers refuse it by name, citing DL-562, and a restart refuses it before any
+write or signal. Any other present value is refused as malformed (DL-489). Either
+refusal also stops history, replay and subscribe backfill, and a snapshot refusal
+names the store path and snapshot sequence. Snapshots carry the intent body
+unchanged. State version stays 28: no reader derives state from the key. The field
+alone is compatible: a build from DL-559 on reads `[]` as no root. The root as a
+whole is not: a build before DL-561 needs IR-F 0.3 and refuses this build's
+catalog. A state-28 build that does not know the key ignores it and recomputes the
+roots, so let an open update finish (`status.update` absent) before rollback or
+takeover by a standby on the older package (DL-489).
 
 **Membership refusal (DL-559).** The `update` refusal code `tree_active` and the `reread`
 field `preview.update_refusal` are additive within dialect 5. A refusal writes nothing, so
@@ -478,6 +477,16 @@ which every IR-F reader calls before it validates the payload. It records 0.1
 Reload plan version 1, including an absent `plan_format_version`, is retired
 (DL-486). Its reader refuses with `reload plan version 1 is retired (DL-486)`.
 An open update holding such a plan refuses restart before writes or signals.
+
+A `config intent` whose `restart_boxes` names box roots is retired (DL-562). Its
+reader, `runner_journal.check_restart_boxes`, refuses it as `config intent
+restart_boxes [...]: an update that restarts a box is retired (DL-562); this build
+restarts no box and completes no such update`; any other value but `[]` or an absent
+key keeps its own malformed refusal (DL-489). Every reader of a stored snapshot
+(`runner_journal.read_snapshot`) checks the IR-F version of the root's newest
+configuration first, and every other reader loads a configuration before it reads
+an intent, so a root an older build wrote meets DL-561's refusal and remedy, never
+this one.
 
 ## 7. What every evolution event owes
 

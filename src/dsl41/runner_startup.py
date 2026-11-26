@@ -100,7 +100,7 @@ from dsl41.runner_journal import (
     OpenAttempt,
     Position,
     ReplayFault,
-    decode_snapshot,
+    read_snapshot,
     discharged_record,
     dispatched_runs,
     first_rev,
@@ -108,7 +108,6 @@ from dsl41.runner_journal import (
     pending_record,
     replay_inputs,
     restore_oracle,
-    update_box_roots,
     wire_record,
 )
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, LeaderLock, acquire_run_root
@@ -699,7 +698,7 @@ async def _resume_under_lock(
         _check_state_version(meta, path)
         _check_root_id(meta, path)
         _check_journaled(store, path)
-        snapshot = _latest_snapshot(store, path)
+        snapshot = read_snapshot(store, where=str(path))
         # the configuration the records open with, and the one the last `config applied` left
         first = snapshot.config_rev if snapshot is not None else first_rev(store)
         after = snapshot.seq if snapshot is not None else 0
@@ -773,18 +772,6 @@ async def _resume_under_lock(
         opened_update = reopen_plan(
             run_root, str(journal.open.update["token"]), configuration=configuration
         )
-    if journal.open.update is not None:
-        assert opened_update is not None
-        for name in update_box_roots(journal.open.update) or ():
-            applied_job = configuration.catalog.jobs.get(name)
-            candidate_job = opened_update.estate.catalog.jobs.get(name)
-            if (applied_job is None or applied_job.job_type != "BOX") and (
-                candidate_job is None or candidate_job.job_type != "BOX"
-            ):
-                raise EngineError(
-                    f"config intent restart_boxes names {name!r}, not a BOX of the applied or"
-                    " candidate catalog (DL-489)"
-                )
     if opened_update is not None:
         from dsl41.runner_update import profile_for
 
@@ -968,7 +955,7 @@ def active_configuration(
             _check_state_version(store.meta(), path)
             _check_root_id(store.meta(), path)
             _check_journaled(store, path)
-            snapshot = _latest_snapshot(store, path)
+            snapshot = read_snapshot(store, where=str(path))
             first = snapshot.config_rev if snapshot is not None else first_rev(store)
             after = snapshot.seq if snapshot is not None else 0
             rev = _applied_rev(list(store.read_from(after)), first)
@@ -1021,19 +1008,6 @@ def _check_clock_domain(meta: Mapping[str, str], clock: Clock) -> None:
             f"clock-domain mismatch: the store is {meta.get('clock_domain')!r},"
             f" the restart clock is {domain!r}"
         )
-
-
-def _latest_snapshot(store: Store, path: Path) -> Any:
-    """Step 3's snapshot, refused when another state version wrote it."""
-    stored = store.latest_snapshot()
-    if stored is None:
-        return None
-    if stored.state_version != STATE_MACHINE_VERSION:
-        raise EngineError(
-            f"{path}: the snapshot at seq {stored.seq} has state version"
-            f" {stored.state_version}, this binary runs {STATE_MACHINE_VERSION} (DL-424)"
-        )
-    return decode_snapshot(stored.seq, stored.data, where=str(path))
 
 
 def _check_configuration(

@@ -120,7 +120,7 @@ from datetime import datetime, timedelta
 from enum import Enum, auto
 from pathlib import Path
 import os
-from typing import Any, Final, Literal
+from typing import Any, Final
 
 from dsl41.engine_charts import QUARANTINED, UPDATE_STOP, AttemptOutcome, DrainRequest, Intent
 from dsl41.ir import CatalogIR, FwSpec, JobIR
@@ -865,39 +865,12 @@ class Engine:
         finally:
             update.direct = False
         if update.tier is not None and not handed:
-            box_ends = update.tier.look()
-            if box_ends is not None:
-                # Box KILLJOBs commit inside STOPPING before application (DL-487).
-                for intent in box_ends:
-                    assert intent.name == "KILLJOB"
-                    ev = Event(
-                        at=self.now_admitted(),
-                        kind="KILLJOB",
-                        payload={"job": intent.detail},
-                        source="reconcile",
-                    )
-                    await self._admit_and_apply(_Pending(at=ev.at, request_id=None, ev=ev))
-                handed = update.tier.boxes_ended()
-        from dsl41.reload_update import ADVANCE_TIME, FINISH, HOLD_MARKED, START_BOXES
+            handed = update.tier.look()
+        from dsl41.reload_update import ADVANCE_TIME, FINISH
 
         for intent in handed:
             if intent.name == ADVANCE_TIME:
                 await self._admit_and_apply(_Pending(at=self.now_admitted(), request_id=None))
-                # DL-488: select holds and starts once, after the time advance.
-                box_starts = update.box_starts()
-            elif intent.name in (HOLD_MARKED, START_BOXES):
-                kind: Literal["ON_HOLD", "FORCE_STARTJOB"] = (
-                    "ON_HOLD" if intent.name == HOLD_MARKED else "FORCE_STARTJOB"
-                )
-                for event_kind, job in box_starts:
-                    if event_kind == kind:
-                        ev = Event(
-                            at=self.now_admitted(),
-                            kind=kind,
-                            payload={"job": job},
-                            source="reconcile",
-                        )
-                        await self._admit_and_apply(_Pending(at=ev.at, request_id=None, ev=ev))
             else:
                 assert intent.name == FINISH
                 update.finish()
@@ -929,8 +902,8 @@ class Engine:
     ) -> None:
         """A task the update cancelled (a file watch): launched again under its run id when the
         application chose to and it still qualifies now, after the application's time advance
-        and box actions (`takes_up`), as a restart takes up a watch; else its attempt is closed
-        once with no plan (DL-526)."""
+        (`takes_up`), as a restart takes up a watch; else its attempt is closed once with no
+        plan (DL-526)."""
         if take_up and self.takes_up(job, run_number):
             job_ir = self.oracle.catalog.jobs[job]
             self._launch(

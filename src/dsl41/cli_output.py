@@ -417,7 +417,7 @@ def prepare_reread(
         "rerun": "would rerun under the new definition",
         "hold": "would be ON_HOLD (marked as not safe to rerun)",
         "remove": "would be removed; no replacement",
-        # an engine that restarts boxes forecasts them with these two labels (DL-490)
+        # an older engine of dialect 5 forecasts its box restarts with these two (DL-490, DL-562)
         "restart_box": "would restart as a new box run",
         "restart": "would restart with its box",
     }

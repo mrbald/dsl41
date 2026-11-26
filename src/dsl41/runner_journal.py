@@ -30,8 +30,8 @@ Record kinds (`Record.kind`) and what each payload holds:
 - `config`: a configuration rev the engine applied (`event: applied`), with, for an update,
   the plan's token and what it added, changed and removed; and an update's `event: intent`
   while it stops: the token, the stop set with each attempt it stops, the dispatch filter,
-  the admitted box roots (`restart_boxes`, DL-489), and the request's id (the store's unique
-  column) and fingerprint (spec-wiring 1b).
+  `restart_boxes: []` (DL-562), and the request's id (the store's unique column) and
+  fingerprint (spec-wiring 1b).
 - `engine`: the engine's own life: `started`, `draining`, `clean_shutdown`, `unclean_shutdown`,
   `shutdown_during_startup`, `drain_interrupted`, `snapshot`.
 
@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import re
 import sys
@@ -71,7 +72,8 @@ from dsl41.runner_admission import (
 )
 from dsl41.runner_clock import EngineError
 from dsl41.runner_codes import STORED_CODES
-from dsl41.runner_config import Configuration, oracle_reading
+from dsl41.ir import IRVersionError, check_ir_version
+from dsl41.runner_config import IR_VERSION_REMEDY, Configuration, oracle_reading
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, Proof
 from dsl41.runner_store import (
     ConfigRow,
@@ -267,20 +269,24 @@ def _check_steps(steps: Any, plan: str | None) -> None:
                 raise EngineError("version-28 replacement env lacks DSL41_SCHEDULED_AT (DL-447)")
 
 
-def update_box_roots(intent: Mapping[str, Any]) -> tuple[str, ...] | None:
-    """The admitted box roots, or None for a keyless intent (DL-489)."""
-    if "restart_boxes" not in intent:
-        return None
-    roots = intent["restart_boxes"]
+def check_restart_boxes(intent: Mapping[str, Any]) -> None:
+    """Refuse a `config intent` whose `restart_boxes` is present and not `[]`. An update restarts
+    no box, so an intent that names box roots, a sorted list of unique names, is retired and
+    refused by name (DL-562); any other value is malformed (DL-489). An absent key names no
+    root."""
+    roots = intent.get("restart_boxes", [])
+    if isinstance(roots, list) and not roots:
+        return
     if (
-        not isinstance(roots, list)
-        or not all(isinstance(name, str) for name in roots)
-        or roots != sorted(set(roots))
+        isinstance(roots, list)
+        and all(isinstance(name, str) for name in roots)
+        and roots == sorted(set(roots))
     ):
         raise EngineError(
-            "config intent restart_boxes must be a sorted list of unique names (DL-489)"
+            f"config intent restart_boxes {roots!r}: an update that restarts a box is retired"
+            " (DL-562); this build restarts no box and completes no such update"
         )
-    return tuple(roots)
+    raise EngineError("config intent restart_boxes must be a sorted list of unique names (DL-489)")
 
 
 def check_record(record: Record) -> None:
@@ -290,7 +296,7 @@ def check_record(record: Record) -> None:
     and every reader before it acts on the record."""
     kind, body = record.kind, record.payload
     if kind == "config" and body.get("event") == "intent":
-        update_box_roots(body)
+        check_restart_boxes(body)
     if kind == "dispatch":
         check_dispatch(body)
     if kind == "follow_up" and body.get("event") == "plan":
@@ -1120,7 +1126,7 @@ def _with_update(table: OpenTable, update: Any) -> OpenTable:
     table.update = dict(update) if isinstance(update, Mapping) else None
     if table.update is not None:
         try:
-            update_box_roots(table.update)
+            check_restart_boxes(table.update)
         except EngineError as exc:
             raise ValueError(str(exc)) from exc
     return table
@@ -1134,6 +1140,36 @@ def _with_revs(runs: dict[str, Any]) -> dict[str, Any]:
             if not is_wire_int(run.get("rev")):
                 raise ValueError(f"retained run {job}.{run.get('run')} records no rev")
     return runs
+
+
+def check_root_ir_version(store: Store, *, where: str) -> None:
+    """Refuse a store whose newest configuration is at an IR-F this build does not read, with
+    DL-561's diagnosis and remedy: such a root belongs to the build that wrote it
+    (protocol-evolution §3), so nothing else it holds is read. Any other fault of the row is
+    left to its load."""
+    with contextlib.suppress(KeyError, CanonError):
+        payload = decode(store.get_config(store.current_config_rev()))
+        catalog = payload.get("catalog") if isinstance(payload, dict) else None
+        try:
+            check_ir_version(catalog, where=where, remedy=IR_VERSION_REMEDY)
+        except IRVersionError as exc:
+            raise EngineError(str(exc)) from exc
+
+
+def read_snapshot(store: Store, *, where: str) -> Snapshot | None:
+    """The store's latest snapshot, or None. Every reader of a stored snapshot comes here, so
+    the root's IR-F is checked before the snapshot is read (`check_root_ir_version`, DL-561); a
+    snapshot another state version wrote is refused by name (DL-424)."""
+    check_root_ir_version(store, where=where)
+    stored = store.latest_snapshot()
+    if stored is None:
+        return None
+    if stored.state_version != STATE_MACHINE_VERSION:
+        raise EngineError(
+            f"{where}: the snapshot at seq {stored.seq} has state version"
+            f" {stored.state_version}, this build runs {STATE_MACHINE_VERSION} (DL-424)"
+        )
+    return decode_snapshot(stored.seq, stored.data, where=where)
 
 
 def decode_snapshot(seq: int, data: bytes, *, where: str) -> Snapshot:
@@ -1671,10 +1707,9 @@ def _index_after_snapshot(store: Store) -> int:
     """The index the next input takes, read from the latest snapshot: on a pruned store with no
     input retained, every input is at or below the snapshot's committed index. A store pruned
     with no snapshot breaks the pruner's rule and is refused."""
-    stored = store.latest_snapshot()
-    if stored is None:
+    snapshot = read_snapshot(store, where="the backfill")
+    if snapshot is None:
         raise EngineError("the store's head is pruned and it holds no snapshot")
-    snapshot = decode_snapshot(stored.seq, stored.data, where="the backfill")
     return snapshot.frontiers.committed_index + 1
 
 
@@ -1955,18 +1990,12 @@ def replay_store(store: Store, *, where: str, fallback: Configuration | None = N
     anchor: Snapshot | None = None
     rev = first_rev(store)
     if first is not None and first[0] > 1:
-        stored = store.latest_snapshot()
-        if stored is None:
+        anchor = read_snapshot(store, where=where)
+        if anchor is None:
             raise EngineError(
                 f"{where}: the store's oldest records are pruned and it holds no snapshot to"
                 " replay from"
             )
-        if stored.state_version != STATE_MACHINE_VERSION:
-            raise EngineError(
-                f"{where}: the snapshot at seq {stored.seq} has state version"
-                f" {stored.state_version}, this build derives {STATE_MACHINE_VERSION} (DL-424)"
-            )
-        anchor = decode_snapshot(stored.seq, stored.data, where=where)
         rev = anchor.config_rev
     if fallback is not None and first is None:
         # a store with no record holds no configuration of its own yet

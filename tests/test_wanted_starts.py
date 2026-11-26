@@ -27,7 +27,6 @@ from test_update_member_holds import _start as _start_estate
 from test_update_owned_processes import _crash, _observed, _started, _teardown
 from test_update_settlement import SIGNALED, _plan, _request
 from test_update_watches import _launches
-from update_legacy import legacy_admission
 from transitions_check import (  # noqa: F401 -- autouse
     rows_equal_their_replay,
     rows_equal_their_replay_once,
@@ -604,10 +603,10 @@ def _job(name: str, body: str) -> str:
     return f"insert_job: {name}\n{body}\n"
 
 
-#: `m` as each candidate leaves it: gone, a box, or a command with a new command line
+#: `m` as each candidate leaves it: gone, a file watch, or a command with a new command line
 _CANDIDATE_M = {
     "removed": "",
-    "retyped": _job("m", "job_type: b\n"),
+    "retyped": _job("m", "job_type: f\nwatch_file: /synthetic/never\n"),
     "edited": _job("m", 'job_type: c\ncommand: sleep 32\ncondition: v(GO) = "go"\n'),
 }
 
@@ -757,25 +756,21 @@ def test_an_input_drops_the_runs_it_ends_from_the_starts_a_restart_owes() -> Non
     assert list(engine.unended) == [("k", 1), ("j", 2)]
 
 
-#: what the update makes of the watch `j`: a command or a box
-_RETYPED_J = {"CMD": "job_type: c\ncommand: sleep 32\n", "BOX": "job_type: b\n"}
-
-
 @pytest.mark.parametrize("status", ["STARTING", "RUNNING"])
-@pytest.mark.parametrize("retype", list(_RETYPED_J))
 def test_an_earlier_build_s_pending_of_a_job_an_update_retyped_is_discharged(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retype: str, status: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str
 ) -> None:
     """A build before DL-551 held the start of the watch `j.1` behind an update, applied the
-    update, which retypes `j`, and died before the release: the pending record stays open. The
-    replayed tail shows the configuration that ended `j`'s row, so the restart discharges it
-    before an operator's `STATUS STARTING` or `RUNNING` is admitted: nothing launches, and the
-    start-up completes. That build also admitted the retype into a BOX while it stopped `c`,
-    which DL-559 refuses now, so it admits as the build before DL-559 (`update_legacy`)."""
+    update, which retypes `j` into a command, and died before the release: the pending record
+    stays open. The replayed tail shows the configuration that ended `j`'s row, so the restart
+    discharges it before an operator's `STATUS STARTING` or `RUNNING` is admitted: nothing
+    launches, and the start-up completes."""
     _Procs(monkeypatch)
     launches = _launches(monkeypatch)
     old = _job("c", "job_type: c\ncommand: sleep 30\n") + _job("j", _fw(tmp_path, 'v(GO) = "go"'))
-    new = _job("c", "job_type: c\ncommand: sleep 31\n") + _job("j", _RETYPED_J[retype])
+    new = _job("c", "job_type: c\ncommand: sleep 31\n") + _job(
+        "j", "job_type: c\ncommand: sleep 32\n"
+    )
     go = Event(at=T0, kind="SET_GLOBAL", payload={"name": "GO", "value": "go"})
 
     def finish(_update: EngineUpdate) -> None:
@@ -786,7 +781,6 @@ def test_an_earlier_build_s_pending_of_a_job_an_update_retyped_is_discharged(
         ladders.alive.add(PGID)
         engine = _start_estate(tmp_path, old, ())
         with monkeypatch.context() as patch:
-            legacy_admission(patch, tmp_path / "run")
             patch.setattr(Engine, "retire", lambda _engine, _ended: [])
             patch.setattr(EngineUpdate, "finish", finish)
             try:
