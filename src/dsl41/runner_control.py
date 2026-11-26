@@ -749,6 +749,9 @@ class ControlServer:
                     raise  # an assertion failure is not a query bug: below
                 except Exception as exc:  # noqa: BLE001 -- a query bug answers ok:false;
                     # an unreplied connection would only look like a timeout (DL-45)
+                    if self.engine.failure.is_set:
+                        # the wire stays silent, so the fault is reported here (DL-563)
+                        best_effort_report(f"dsl41: a request failed after the engine: {exc!r}")
                     response = _failure("internal_error", f"internal error: {exc!r}")
                 await self._send(writer, response)
         except (ConnectionResetError, BrokenPipeError):
@@ -768,7 +771,9 @@ class ControlServer:
 
     def stop_on(self, error: StatechartError) -> None:
         """Hand a handler's `StatechartError` to the run, which stops the engine and reports
-        the first one (statechart-engine ss5)."""
+        the first one (statechart-engine ss5). The engine has failed before anything is
+        cancelled (DL-563)."""
+        self.engine.failure.set(error)
         self.statechart_error = self.statechart_error or error
         if self.on_statechart_error is not None:
             self.on_statechart_error()
@@ -794,8 +799,13 @@ class ControlServer:
         with contextlib.suppress(Exception):
             await writer.wait_closed()
 
-    @staticmethod
-    async def _send(writer: asyncio.StreamWriter, obj: dict[str, Any]) -> None:
+    async def _send(self, writer: asyncio.StreamWriter, obj: dict[str, Any]) -> None:
+        """Write one line: every line the server writes goes through here. A failed engine
+        writes nothing more, because its memory may hold what its store does not; bytes
+        written before the failure drain as before, and the teardown closes the connection
+        (DL-563)."""
+        if self.engine.failure.is_set:
+            return
         writer.write(json.dumps(obj, sort_keys=True).encode("utf-8") + b"\n")
         await writer.drain()
 

@@ -190,6 +190,7 @@ from dsl41.runner_config import (
     switches_of,
 )
 from dsl41.runner_journal import (
+    FailureLatch,
     Journal,
     best_effort_report,
     ladder_done_record,
@@ -522,6 +523,9 @@ class Engine:
         self.clock = clock
         self.adapters = dict(adapters)  # job_type -> adapter; no BOX row
         self.journal = journal
+        #: set once this engine fails, by its store's writer or by the engine itself; the
+        #: control server and the status hook read it and say nothing more (DL-563)
+        self.failure = journal.failure if journal is not None else FailureLatch()
         self.run_root = run_root
         self.control_socket: Path | None = None
         self.status_hooks: StatusHooks | None = None
@@ -629,6 +633,8 @@ class Engine:
         root = journal.root_id if journal is not None else None
         self.root_id: str = root if root is not None else uuid.uuid4().hex
         self._init_tiers(settings or EngineSettings())
+        # a set latch ends the loop at its next turn, wherever it was set (DL-563)
+        self.failure.bind(self._leave_on_failure, self._report_later)
 
     def _init_tiers(self, settings: EngineSettings) -> None:
         """The attempt and engine lifecycle tiers on this engine's executor (spec-wiring 2b,
@@ -678,8 +684,9 @@ class Engine:
         self._leaving: tuple[str, tuple[str, ...]] | None = None
         self.exit_code: int | None = None
         self.shutdown_recorded = False
-        #: what a tier's timer raised outside any task; the loop raises it at its next turn
-        self.fault: Exception | None = None
+        #: whether a loop turn or an admission raised the failure latch's cause to its caller;
+        #: the shutdown reports a cause none raised (DL-563)
+        self._cause_raised = False
         self.stopped = asyncio.Event()
         #: the update tier's engine side (spec-reload): the request in flight and its stops
         self.update = EngineUpdate(self)
@@ -693,10 +700,39 @@ class Engine:
     def attempt_facts(self, attempt: str) -> AttemptFacts:
         return self._facts[attempt]
 
+    @property
+    def fault(self) -> Exception | None:
+        """The engine's failure, the latch's first cause: one record of it (DL-563)."""
+        return self.failure.cause
+
     def fail(self, fault: Exception) -> None:
-        """Keep a fault a tier's timer raised outside any task; the loop raises it next."""
-        self.fault = fault
+        """A fault raised outside any task, by a tier's timer or a done callback: it sets the
+        latch, and the loop raises the latch's cause at its next turn (DL-563)."""
+        self.failure.set(fault)
         self.wake()
+
+    @staticmethod
+    def _report_later(fault: Exception) -> None:
+        """A fault after the first: the latch keeps the first as its cause (DL-563)."""
+        best_effort_report(f"dsl41: a further failure after the first: {fault!r}")
+
+    def _leave_on_failure(self, cause: Exception) -> None:
+        """The latch was set: the loop raises `cause` at its next turn, so a failed engine
+        never runs on (DL-563)."""
+        self.wake()
+
+    async def _latching[**P, T](
+        self, work: Callable[P, Awaitable[T]], *args: P.args, **kwargs: P.kwargs
+    ) -> T:
+        """Run `work`, a step of the engine whose exception ends the engine: the loop, or an
+        adapter task the loop's settle re-raises. The exception sets `failure` where it is
+        first seen, before any other task runs (DL-563); a cancellation does not. `work` is
+        called here, so a task cancelled before its first step leaves no coroutine behind."""
+        try:
+            return await work(*args, **kwargs)
+        except Exception as exc:
+            self.failure.set(exc)
+            raise
 
     def adopt_attempt(
         self,
@@ -1770,19 +1806,32 @@ class Engine:
         The zero-delay-cycle guard: a condition cycle over instant completions generates
         unbounded work at one frozen virtual instant (L010's concern at zero duration). The
         engine raises ZeroDelayCycleError after a catalog-scaled event budget at a single
-        instant; the budget's floor is `INSTANT_BUDGET_FLOOR`."""
+        instant; the budget's floor is `INSTANT_BUDGET_FLOOR`.
+
+        An exception out of the loop sets `failure` before it leaves, and a loop entered with
+        `failure` set raises its cause at once (DL-563)."""
+        return await self._latching(self._loop, horizon)
+
+    async def _loop(self, horizon: datetime) -> list[Event]:
+        """`run_until_quiescent`'s steps."""
         emitted: list[Event] = []
         instant: datetime | None = None
         instant_events = 0
         instant_budget = max(INSTANT_BUDGET_FLOOR, 100 * len(self.oracle.catalog.jobs))
         while True:
-            if self.fault is not None:
-                fault, self.fault = self.fault, None
-                raise fault
+            cause = self.failure.cause
+            if cause is not None:  # every entry and turn, before a stop's last records (DL-563)
+                self._cause_raised = True
+                raise cause
             if self.exit_code is not None and not self._answer_owed():
                 self._finish_leaving()  # the lifecycle reached STOPPED (spec-drain)
                 return emitted
             await self._settle()
+            if (cause := self.failure.cause) is not None:
+                # the settle may yield, and a latch set there ends the loop before it chooses
+                # again, waits or returns (DL-563)
+                self._cause_raised = True
+                raise cause
             now = self.clock.now()
             if now != instant:
                 instant, instant_events = now, 0
@@ -1935,7 +1984,12 @@ class Engine:
         kill AHEAD of the gate that reads the status it kills (5); the gate decides (6); the
         attempt and its result, with the revisions the input moved, are appended in one store
         transaction (4, 7), and only then is what it implies dispatched. Steps 5-7 do not yield.
-        A plan step's done mark rides in the same transaction (spec-wiring 1b)."""
+        A plan step's done mark rides in the same transaction (spec-wiring 1b).
+
+        A failed engine admits nothing: the latch's cause is raised here first (DL-563)."""
+        if (cause := self.failure.cause) is not None:
+            self._cause_raised = True
+            raise cause
         ev = pending.ev
         envelope = pending.envelope
         fp = fingerprint(
@@ -2517,11 +2571,15 @@ class Engine:
                 site_profile=profile.job_profile,
                 std_file_mode=profile.std_file_mode,
             )
-            task = loop.create_task(adapter.observe(job_ir, run_number, ctx, launch))
+            task = loop.create_task(
+                self._latching(adapter.observe, job_ir, run_number, ctx, launch)
+            )
             self._observed_tasks[id(task)] = run_id
         else:
             task = loop.create_task(
-                self._run_adapter(job_ir, run_number, adapter, run_id, spool, dict(env or {}))
+                self._latching(
+                    self._run_adapter, job_ir, run_number, adapter, run_id, spool, dict(env or {})
+                )
             )
         task.add_done_callback(lambda _t: self._activity.set())
         interval = None
@@ -2533,12 +2591,15 @@ class Engine:
 
     async def shutdown(self) -> None:
         """Cancel every live adapter task and collect the cancellations, re-raising anything a
-        task died with OTHER than the cancellation. This is the orderly harness and rehearse
-        teardown; the wrapper records the outcome of a tethered kill (ss6a), and the next start
+        task died with OTHER than the cancellation. An engine that had failed before its shutdown
+        raises nothing: a task's fault goes to the latch, and a cause no loop turn raised is
+        reported on standard error (DL-563). This is the orderly harness and rehearse teardown; the wrapper records the outcome of a tethered kill (ss6a), and the next start
         settles the attempt from that record.
 
         Anyone parked on a decision is told first (S3) that their input never reached admission,
         so nothing in the log refers to it."""
+        # a task's fault is raised as before unless the engine had failed before its teardown
+        failed = self.failure.is_set
         if self.status_hooks is not None:
             await self.status_hooks.close()
         for _, _, pending in self._queue:
@@ -2571,7 +2632,15 @@ class Engine:
             if id(task) in self._corpses_raised:
                 continue  # _settle already raised this failure to a caller
             if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                if failed and isinstance(result, Exception):
+                    # a failed engine's shutdown raises nothing: the latch keeps the first
+                    # cause and the gravest, and reports a later fault (DL-563)
+                    self.failure.set(result)
+                    continue
                 raise result
+        if self.failure.cause is not None and not self._cause_raised:
+            # no loop turn raised it: a cancelled loop, or one that had ended (DL-563)
+            best_effort_report(f"dsl41: the engine failed: {self.failure.cause!r}")
 
     async def _stop_archive(self) -> None:
         """Stop the archive worker and wait for it within `STOP_DEADLINE_S` (DL-545). Every
@@ -2702,14 +2771,16 @@ class Engine:
                 self.config_rev if self.trace_rev is None else self.trace_rev,
             ),
         )
-        journal.store.put_snapshot(seq, STATE_MACHINE_VERSION, data)
+        with journal.writing():  # a failed store write fails the engine (DL-563)
+            journal.store.put_snapshot(seq, STATE_MACHINE_VERSION, data)
         now = self.now_present(wall=wall)
         journal.engine("snapshot", now, seq=seq)
         self._snapshot_at = wall
         self._snapshot_seq = seq
         if self.settings is not None:
             # the cleanup commits on its own, so a step that raises leaves it done (DL-543)
-            journal.store.prune_snapshots()
+            with journal.writing():
+                journal.store.prune_snapshots()
             floor = min(seq, journal.open.floor() or seq)
             cutoff = now - timedelta(days=self.settings.retention_days)
             bound = journal.store.prune_bound(floor, cutoff)
@@ -2732,7 +2803,8 @@ class Engine:
         self.journal.prove()  # an engine that lost the root deletes nothing (S6b)
         store = self.journal.store
         self._prune_owed = None
-        pruned = store.prune_step(bound, PRUNE_STEP)
+        with self.journal.writing():  # a failed store write fails the engine (DL-563)
+            pruned = store.prune_step(bound, PRUNE_STEP)
         if pruned.decision is not None:
             # a pruned request id is free again: retention is the one authority for retry and
             # reuse, before and after a restart (spec-journal). Decisions go in index order, so

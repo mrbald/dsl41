@@ -408,6 +408,9 @@ class EngineStops:
     def ladder_failed(self, attempt: str, error: BaseException) -> None:
         self._stuck(attempt, f"ladder failed: {error}")
 
+    def fail(self, error: Exception) -> None:
+        self.engine.fail(error)
+
     def command_survived(self, attempt: str) -> None:
         pgid, token = self.engine.attempts.cleanup_group(attempt)
         look = self._verdicts.pop((pgid, token), None)

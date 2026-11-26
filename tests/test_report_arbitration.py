@@ -666,7 +666,9 @@ def test_a_step_with_an_awaiting_clock_lets_the_ready_task_run_inside_it(
 #: between steps. A new entry here is a new place a step could suspend: review it against
 #: DL-523 before adding it.
 STEP_AWAITS = {
-    "run_until_quiescent": [
+    # the loop's entry: it sets the failure latch on the way out (DL-563)
+    "run_until_quiescent": [("self._latching(self._loop, horizon)", None)],
+    "_loop": [
         ("self._settle()", None),  # between steps
         # the turn before an owed prune step, where nothing is due, like the idle wait (DL-543)
         ("asyncio.sleep(0)", None),

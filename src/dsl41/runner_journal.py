@@ -49,7 +49,7 @@ import json
 import re
 import sys
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -66,6 +66,7 @@ from dsl41.runner_admission import (
     Attempt,
     DecisionIndex,
     Frontiers,
+    TimeHalfStop,
     apply_attempt,
     describe_input,
     dispatch_plan,
@@ -1204,6 +1205,61 @@ def decode_snapshot(seq: int, data: bytes, *, where: str) -> Snapshot:
 # ---------------------------------------------------------------- the writer
 
 
+class FailureLatch:
+    """Set synchronously when the engine fails, and never cleared (DL-563): a store write that
+    raised, a live `StatechartError`, or an exception out of the engine loop. Memory may then
+    hold what the store does not, so the exits that read memory say nothing more: the control
+    server writes no line and the status hook's long-running check enqueues nothing. A
+    cancellation and a clean stop do not set it.
+
+    `cause` is the first failure, the one the loop raises. `gravest` is the most severe seen,
+    the first cause and every later one: a `StatechartError` over a `TimeHalfStop` over any
+    other; it decides the exit status. A later fault is handed to the reporter the engine binds,
+    once per fault. The engine binds its stop to the first `set`, wherever it happened: a set
+    latch and a running loop cannot coexist past the loop's next turn."""
+
+    def __init__(self) -> None:
+        self.cause: Exception | None = None
+        self.gravest: Exception | None = None
+        self._seen: list[Exception] = []
+        self._on_set: Callable[[Exception], None] | None = None
+        self._report: Callable[[Exception], None] | None = None
+
+    @property
+    def is_set(self) -> bool:
+        return self.cause is not None
+
+    def bind(
+        self, on_set: Callable[[Exception], None], report: Callable[[Exception], None]
+    ) -> None:
+        """Call `on_set` with the cause at the first `set`, and `report` with each later fault.
+        The latch is clear when the engine binds it: a store write that fails before the engine
+        exists fails the start, which then builds no engine."""
+        self._on_set, self._report = on_set, report
+
+    def set(self, cause: Exception) -> None:
+        if any(cause is seen for seen in self._seen):
+            return
+        self._seen.append(cause)
+        if self.gravest is None or _gravity(cause) > _gravity(self.gravest):
+            self.gravest = cause
+        if self.cause is not None:
+            if self._report is not None:
+                self._report(cause)
+            return
+        self.cause = cause
+        if self._on_set is not None:
+            self._on_set(cause)
+
+
+def _gravity(fault: Exception) -> int:
+    """How severe a failure is for the exit status: a statechart error over a time-half stop
+    over any other (DL-563)."""
+    if isinstance(fault, StatechartError):
+        return 2
+    return 1 if isinstance(fault, TimeHalfStop) else 0
+
+
 class Journal:
     """The one writer over an engine's store (module docstring).
 
@@ -1252,6 +1308,18 @@ class Journal:
         #: why the history index serves no read for this run: the start could not settle its
         #: rows (`runner_transitions.settle_history`, DL-539); None when it serves
         self.history_declined: str | None = None
+        #: set where a write to the store raises (`writing`); the engine shares it (DL-563)
+        self.failure = FailureLatch()
+
+    @contextlib.contextmanager
+    def writing(self) -> Iterator[None]:
+        """One write to the store, or a step that ends in one: an exception out of it sets
+        `failure` before it leaves, so no reader of memory answers past it (DL-563)."""
+        try:
+            yield
+        except Exception as exc:
+            self.failure.set(exc)
+            raise
 
     def prove(self) -> None:
         """Re-prove the run root's lock (S6b), when there is one. The engine asks before it
@@ -1273,39 +1341,41 @@ class Journal:
         committed with it (DL-536). The history index's rows commit with them too, a run's
         opening under `rev`, the configuration rev in force (`index_rows`, DL-539). `config`
         is the next configuration row, committed in the same transaction (DL-560). A journal
-        not yet `writable` refuses before anything is written (DL-553)."""
+        not yet `writable` refuses before anything is written (DL-553). Any other exception
+        out of it sets `failure` (DL-563)."""
         if not self.writable:
             raise StoreError(
                 "the journal takes no record before this start has passed every refusal and"
                 " committed its history row (DL-553)"
             )
-        dispatches = dict(self.open.dispatches)
-        for seq, record in enumerate(records, start=self.next_seq()):
-            check_record(record)
-            if record.kind == "dispatch":
-                _check_dispatch_seq(
-                    record.payload, seq, dispatches.get(record.payload["job"]), history=False
-                )
-                dispatches[record.payload["job"]] = dict(record.payload)
-        openings, owners = index_rows(records, transitions, rev)
-        self.prove()
-        last = self.store.append(
-            *records,
-            transitions=[entry.model_dump() for entry in transitions],
-            openings=openings,
-            owners=owners,
-            produced_by=produced_by,
-            config=config,
-        )
-        first = last - len(records) + 1
-        self.last_seq = last
-        for seq, record in enumerate(records, start=first):
-            self.open.note(seq, record)
-            self.position.note(record)
-            wire = wire_record(record)
-            if wire is not None:
-                self._publish(wire, _wire_size(wire))
-        return last
+        with self.writing():
+            dispatches = dict(self.open.dispatches)
+            for seq, record in enumerate(records, start=self.next_seq()):
+                check_record(record)
+                if record.kind == "dispatch":
+                    _check_dispatch_seq(
+                        record.payload, seq, dispatches.get(record.payload["job"]), history=False
+                    )
+                    dispatches[record.payload["job"]] = dict(record.payload)
+            openings, owners = index_rows(records, transitions, rev)
+            self.prove()
+            last = self.store.append(
+                *records,
+                transitions=[entry.model_dump() for entry in transitions],
+                openings=openings,
+                owners=owners,
+                produced_by=produced_by,
+                config=config,
+            )
+            first = last - len(records) + 1
+            self.last_seq = last
+            for seq, record in enumerate(records, start=first):
+                self.open.note(seq, record)
+                self.position.note(record)
+                wire = wire_record(record)
+                if wire is not None:
+                    self._publish(wire, _wire_size(wire))
+            return last
 
     def next_seq(self) -> int:
         """The seq the next appended record takes. One writer holds the store, so a done mark

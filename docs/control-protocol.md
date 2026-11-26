@@ -123,6 +123,15 @@ CLI's job.
   client must never see a bare timeout for a query bug. A statechart error
   is not a query bug: it gets no answer, the connection hangs up, and the
   engine stops with exit 7 (DL-353).
+- **A failed engine writes nothing more** on any connection (DL-563): a
+  store write raised, a statechart error was met, or an exception left its
+  loop. A request it has not answered gets no answer: no line that §§3 to 5
+  name, and no `internal_error` for a handler that raises. A stream gets no
+  further line. Bytes written before the failure drain as at any shutdown (§5),
+  and the connection closes at the teardown, as a killed engine's does. A
+  client whose request had no answer already reads that close as a
+  transport error, and after a write as an unknown outcome (above). An
+  acknowledged subscription reads it as the end of its stream (§6).
 - Consumers must ignore unknown fields (forward compatibility).
 
 **Socket lifecycle.** On start the server probes an existing socket file

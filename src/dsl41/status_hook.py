@@ -337,6 +337,8 @@ class StatusHooks:
         self.monitor = asyncio.create_task(self._monitor())
 
     def check_long_running(self) -> None:
+        if self.engine.failure.is_set:
+            return  # a failed engine's rows may be ahead of its store (DL-563)
         try:
             now = self.engine.now_admitted(remember=False)
             for job, row in self.engine.oracle.store.job.items():

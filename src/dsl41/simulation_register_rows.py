@@ -3678,7 +3678,7 @@ EVENT_SOURCE_ROWS: tuple[Row, ...] = (
         cite="ir-design ss7, DL-68, runner.Engine.run_until_quiescent",
         effect="the start came from a calendar tick, so a journal reader can tell it from"
         " an operator's sendevent",
-        trigger="runner.Engine.run_until_quiescent",
+        trigger="runner.Engine._loop",
         quiet="runner.Engine.submit",
     ),
     _row(

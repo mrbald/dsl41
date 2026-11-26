@@ -585,6 +585,7 @@ class _FakeEngine:
 
     def __init__(self, journal: Journal) -> None:
         self.journal = journal
+        self.failure = journal.failure  # the engine shares its journal's latch (DL-563)
         self.estate = None
         self.machines = Executor()  # the engine's executor, which runs the feeds
         # the server hears of an update's application through these (spec-reload)

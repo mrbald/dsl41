@@ -28313,3 +28313,43 @@ relitigate an entry; append a new one.
   boxes left stopped: a cancel in the time advance still leaves the application committed and
   the waiter unanswered, on both apply rows; DL-489 but its malformed refusal; DL-490's
   selector; DL-527's box roots and members.
+- DL-563 A failed engine says nothing more and leaves: one latch, set where the failure is first
+  seen, that ends the loop, and two gates that read it
+  (2026-11-26; BUG-117, which DL-560 left open; src/dsl41/runner_journal.py, runner.py,
+  runner_attempts.py, runner_stops.py, runner_update.py, runner_control.py, status_hook.py;
+  docs: control-protocol §2, runner-design §4)
+  THE RULE. (1) A failed engine says nothing more: no reply, no refusal, no new code and no
+  contract change. (2) One latch, `FailureLatch`, is set synchronously and never cleared:
+  where a store write raises (`Journal.writing`: every append, the snapshot, its cleanup, a
+  prune step, an update's configuration row), in `ControlServer.stop_on` before the loop is
+  cancelled, where an exception leaves the loop or an adapter task, and in `Engine.fail`, to
+  which the ladder's done callback hands the raise of its closing effects. It is the one
+  record of the failure: `cause` is the first, and `Engine.fault` only reads it; every later
+  fault is reported on standard error by the latch, once. A cancellation and a clean stop set
+  nothing. (3) A set latch means the engine is leaving. The engine binds a wake to it. The
+  loop raises the cause at its entry, at each turn and after its settle, and every input's
+  admission raises it first, so a failed engine admits nothing and the loop cannot run past
+  its next turn. The status is the gravest fault seen, first or later: a statechart error 7,
+  else a time-half stop 6, else 1. A statechart error the control server meets as it closes
+  turns 0 or 1 into 7. A latch set once the loop has ended is reported. (4) Two gates read
+  it. `ControlServer._send`, through which every control line goes, writes nothing more, and a
+  handler's own fault is reported on standard error; bytes written before drain, and the
+  teardown closes the connections, as for a killed engine. The status hook's long-running
+  check enqueues nothing; queued events stay eligible until the teardown. (5) No transport
+  is aborted and no handler is cancelled for it; the journal, the store and what a restart
+  reads do not change. A mutation queued and never admitted gets no answer on the wire, after
+  a failure and, as before, after a clean stop: `dsl41 run` closes the server before the
+  shutdown refuses it `engine_shutting_down`. (6) The latch lives on the journal, the store's
+  one writer, and the engine shares it as `Engine.failure`; neither knows a client.
+  THE REASON. Every input changes memory first and reaches the store after; a control reply
+  and the long-running check read memory. When a store write fails, memory holds what the
+  store does not. A callback's raise is only logged by asyncio, so without (3) such an engine
+  ran on, mute, committing what it never answered. The start's own writes come before the
+  socket binds. A failed read leaves memory and store agreeing, and is outside this entry.
+  NOT BUILT. A reply per verb that says the engine failed. Each verb needs a rule of its own
+  (the access decision first, no exception text, a read header, a stop with no request id, a
+  refusal the handler already knew), and each rule meets another exit that reads memory, so
+  the set never closes. Reading from the store, a new admission order and a crash-only exit.
+  UNCHANGED. Every code and frame, the read header, control-protocol §5's grace, replay and the
+  state-machine version. An in-process future still takes `engine_shutting_down`.
+  OPEN. FEAT-56: the terminal UI marks no row while it is disconnected.

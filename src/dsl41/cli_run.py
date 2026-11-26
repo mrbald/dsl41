@@ -690,29 +690,35 @@ async def _stop_and_judge(
             with contextlib.suppress(Exception):
                 await ui_task
         # how the loop ended, if on its own; a loop the server cancelled ended for the server's
-        # error, read below
+        # error, read below. The gravest failure the engine met decides (DL-563)
         ended = loop_task in done and not loop_task.cancelled()
-        outcome = loop_task.exception() if ended else None
-        if isinstance(outcome, TimeHalfStop):
-            # not a crash: a restart meets the same timers, so its own code keeps the unit down
-            # until a fixed build runs (concurrency-model ss4)
-            typer.echo(f"engine stopped: {outcome}", err=True)
-            code = EXIT_TIME_HALF_STOP
-        elif isinstance(outcome, StatechartError):
-            # an assertion failure, not a crash: every report line goes out under one prefix, and
-            # its own code keeps the unit down until a fixed build runs
-            # (docs/statechart-engine.md ss5)
-            code = statechart_report(outcome)
-        elif server.statechart_error is not None:
-            # the same report and exit for one a control handler met; the handler sent no reply,
-            # hung up and cancelled the loop
-            code = statechart_report(server.statechart_error)
+        raised = loop_task.exception() if ended else None
+        gravest = engine.failure.gravest or raised
+        outcome = engine.failure.cause or raised
+        if isinstance(gravest, StatechartError) and gravest is server.statechart_error:
+            # one a control handler met; the handler sent no reply, hung up and cancelled the
+            # loop
+            code = statechart_report(gravest)
             # never a raw await: a loop that crashed in the same instant must not skip the
             # teardown or the report's precedence
             loop_task.cancel()
             await asyncio.wait({loop_task})
             if not loop_task.cancelled() and loop_task.exception() is not None:
                 typer.echo(f"engine failed: {loop_task.exception()}", err=True)
+        elif isinstance(gravest, StatechartError):
+            # an assertion failure, not a crash: every report line goes out under one prefix, and
+            # its own code keeps the unit down until a fixed build runs
+            # (docs/statechart-engine.md ss5)
+            code = statechart_report(gravest)
+            if outcome is not gravest:  # the first failure, shown beside the gravest
+                typer.echo(f"engine failed: {outcome}", err=True)
+        elif isinstance(gravest, TimeHalfStop):
+            # not a crash: a restart meets the same timers, so its own code keeps the unit down
+            # until a fixed build runs (concurrency-model ss4)
+            typer.echo(f"engine stopped: {gravest}", err=True)
+            code = EXIT_TIME_HALF_STOP
+            if outcome is not gravest:
+                typer.echo(f"engine failed: {outcome}", err=True)
         elif ended and outcome is None and engine.exit_code is not None:
             # the drain reached STOPPED: a signal, `engine stop`, or quitting the attached TUI
             # (ss11: --ui tethers the run to this terminal; `dsl41 ui` attaches viewers that

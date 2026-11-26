@@ -1014,17 +1014,17 @@ def test_a_record_appended_while_the_ack_or_the_backfill_is_in_flight_crosses_th
 
     real_send, real_backfill = ControlServer._send, runner_control.read_backfill
 
-    async def send(writer: asyncio.StreamWriter, record: dict) -> None:
+    async def send(server: ControlServer, writer: asyncio.StreamWriter, record: dict) -> None:
         if during == "ack" and record.get("subscribed") is True:
             append_marker()
-        await real_send(writer, record)
+        await real_send(server, writer, record)
 
     def backfill(*args: object, **kwargs: object) -> object:
         if during == "backfill":
             append_marker()
         return real_backfill(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(ControlServer, "_send", staticmethod(send))
+    monkeypatch.setattr(ControlServer, "_send", send)
     monkeypatch.setattr(runner_control, "read_backfill", backfill)
 
     async def scenario() -> list[dict]:

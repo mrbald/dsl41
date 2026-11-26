@@ -202,7 +202,7 @@ Hook observations skip rows with no catalog job (DL-500).
 | `job_terminated` | Every actual transition from another status into TERMINATED. Carries resolved Boolean `alarm_if_terminated`, default true; that default is unverified against AutoSys (DL-469). |
 | `alarm` | A SEM-34 timer emits `MUST_START_ALARM` or `MUST_COMPLETE_ALARM`. These deadline alarms are independent of hook flags, notification attributes and runtime thresholds (DL-469). |
 | `job_hold` | A false→true `on_hold` write at `OracleWriters._flag`, including auto-hold and interruption hold. |
-| `job_long_running` | Once per RUNNING interval per engine invocation when admitted time minus its `status_at` reaches its effective per-job or global threshold. Check once per second and recheck the row before enqueueing. Restart may notify again. Scheduling is unchanged. |
+| `job_long_running` | Once per RUNNING interval per engine invocation when admitted time minus its `status_at` reaches its effective per-job or global threshold. Check once per second and recheck the row before enqueueing. A failed engine enqueues none, because its rows may be ahead of its store (DL-563). Restart may notify again. Scheduling is unchanged. |
 | `engine_refused` | Startup reaches exit 2 after valid hook settings were obtained; attempt delivery before exit. |
 | `engine_down` | The systemd failure unit activates. It observes unit failure, not every engine crash. |
 

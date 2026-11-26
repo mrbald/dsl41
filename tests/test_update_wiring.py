@@ -1603,17 +1603,15 @@ def test_an_exact_update_retry_after_a_failed_applied_write_has_only_its_admissi
     configuration row, the first write after the swap) or at its COMMIT (`commit`, a statement
     in progress). The store rolls it back, and the loop fails. The store reopens at the old
     revision: with the intent of an update that stops jobs, and with no trace of one that had
-    nothing to stop (DL-560). An exact retry before the teardown is answered from the intent
-    the store holds, and a waiting one is hung up by the teardown without an application
-    (DL-491). With nothing to stop the store holds no request: the retry joins its own
-    request's preparation, whose decision never comes.
+    nothing to stop (DL-560). The engine has failed, so it writes nothing more (DL-563): an
+    exact retry and a read before the teardown get no answer, and a waiting retry is hung up
+    by the teardown without an application (DL-491), as each is.
     """
     import inspect
     import sqlite3
 
     from dsl41.runner_control import ControlServer
     from dsl41.runner_store import Record
-    from test_runner_control import _control_call
 
     # a captured source bigger than SQLite's largest page, so the configuration row must
     # allocate pages whatever the page size, and the page limit meets it
@@ -1656,6 +1654,17 @@ def test_an_exact_update_retry_after_a_failed_applied_write_has_only_its_admissi
             with contextlib.suppress(sqlite3.Error):
                 blob.close()
 
+    real_send = ControlServer._send
+    #: every reply a handler tried to write once the engine had failed (DL-563)
+    tried: list[dict[str, Any]] = []
+
+    async def send(server: ControlServer, writer: Any, obj: dict[str, Any]) -> None:
+        if server.engine.failure.is_set:
+            tried.append(obj)
+        await real_send(server, writer, obj)
+
+    monkeypatch.setattr(ControlServer, "_send", send)
+
     async def scenario() -> None:
         nonlocal armed
         engine = _start(run_root, estate)
@@ -1667,6 +1676,7 @@ def test_an_exact_update_retry_after_a_failed_applied_write_has_only_its_admissi
         await server.start()
         loop = asyncio.create_task(engine.run_until_quiescent(datetime.max))
         writer: asyncio.StreamWriter | None = None
+        unanswered: list[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = []
         try:
             if stops:
                 _start_jobs(engine, "a")
@@ -1678,7 +1688,10 @@ def test_an_exact_update_retry_after_a_failed_applied_write_has_only_its_admissi
                 patch.setattr(SqliteStore, "put_config", fail_row)
                 armed = True
                 async with asyncio.timeout(TIMEOUT_S):
-                    admission = await _control_call(server.path, request)
+                    first, asked = await asyncio.open_unix_connection(str(server.path))
+                    unanswered.append((first, asked))
+                    asked.write(json.dumps({**request, "v": 5}).encode() + b"\n")
+                    await asked.drain()
                     with pytest.raises(sqlite3.OperationalError):
                         await loop
             events = [r.payload["event"] for r in failed if r.kind == "config"]
@@ -1700,24 +1713,31 @@ def test_an_exact_update_retry_after_a_failed_applied_write_has_only_its_admissi
                     "ROLLBACK",
                 ]
             if stops:
+                # answered when it was admitted, before the application failed
+                async with asyncio.timeout(TIMEOUT_S):
+                    admission = json.loads(await first.readline())
                 assert admission["ok"] and admission["stop"] == ["a"]
-            else:
-                assert admission["code"] == "decision_timeout"
-            # The socket handlers outlive the failed loop until serve tears them down (DL-491).
-            async with asyncio.timeout(TIMEOUT_S):
-                answer = await _control_call(server.path, {**request, "retry_only": True})
+            # The socket handlers outlive the failed loop until serve tears them down (DL-491);
+            # a failed engine writes nothing on them (DL-563): an admission with nothing to stop
+            # failed in its own step and is never answered
+            assert engine.failure.is_set
             assert engine.journal is not None
-            if stops:
-                assert answer == admission and answer["application"] is None
-            else:
-                assert answer["code"] == "decision_timeout"
-                assert engine.journal.store.find_request("r1") is None
+            assert (engine.journal.store.find_request("r1") is not None) == stops
+            for asked in ({**request, "retry_only": True}, {"cmd": "trace"}):
+                late, sent = await asyncio.open_unix_connection(str(server.path))
+                sent.write(json.dumps({**asked, "v": 5}).encode() + b"\n")
+                await sent.drain()
+                unanswered.append((late, sent))
             # the CONFIG mark of a `config applied` that was never recorded is not traced (DL-536)
-            async with asyncio.timeout(TIMEOUT_S):
-                traced = await _control_call(server.path, {"cmd": "trace"})
-            assert traced["ok"]
-            assert [e for e in traced["entries"] if e["transition"] == "CONFIG"] == []
+            assert [e for e in engine.oracle.trace() if e.transition == "CONFIG"] == []
             if not stops:
+                # the admission, the retry joined to its preparation and the read each tried
+                # to answer, and wrote nothing
+                await _until(lambda: len(tried) == 3)
+                assert sum(t.get("code") == "decision_timeout" for t in tried) == 2
+                await server.close()
+                async with asyncio.timeout(TIMEOUT_S):
+                    assert [await late.read() for late, _ in unanswered] == [b""] * 3
                 return
             reader, writer = await asyncio.open_unix_connection(str(server.path))
             writer.write(json.dumps({**request, "v": 5, "wait": True}).encode() + b"\n")
@@ -1735,10 +1755,16 @@ def test_an_exact_update_retry_after_a_failed_applied_write_has_only_its_admissi
                 return False
 
             await _until(waiting_for_application)
+            await _until(
+                lambda: len(tried) == 2
+            )  # the retry, answered from the intent, and the read
             await server.close()
             async with asyncio.timeout(TIMEOUT_S):
                 assert await reader.readline() == b""
+                assert [await late.read() for late, _ in unanswered] == [b""] * 3
         finally:
+            for _, sent in unanswered:
+                sent.close()
             if writer is not None:
                 writer.close()
                 await writer.wait_closed()

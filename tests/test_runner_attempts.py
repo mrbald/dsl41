@@ -426,6 +426,9 @@ class World:
     def ladder_failed(self, attempt: str, error: BaseException) -> None:
         self.log.append(("ladder_failed", attempt, str(error)))
 
+    def fail(self, error: Exception) -> None:
+        self.log.append(("fail", str(error)))
+
     def command_survived(self, attempt: str) -> None:
         self.log.append(("command_survived", attempt))
 

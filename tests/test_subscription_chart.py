@@ -426,13 +426,19 @@ def test_the_old_belt_would_have_answered_internal_error(
     class NotAStatechartError(Exception):
         pass
 
+    real_statechart_error = runner_control.StatechartError
+
     async def scenario() -> tuple[list[Any], list[Any], ControlServer]:
         engine, server, loop_task = await _serve(short_root / "run", _JIL)
+        server.on_statechart_error = loop_task.cancel  # as `dsl41 run` wires it
         try:
             monkeypatch.setattr(ControlServer, "_timers", _timers)
-            belt = await _converse(server.path, _query(engine))
+            # the mutant first: the belt's own stop leaves a failed engine that answers
+            # nothing more (DL-563)
             monkeypatch.setattr(runner_control, "StatechartError", NotAStatechartError)
             mutant = await _converse(server.path, _query(engine), until=1)
+            monkeypatch.setattr(runner_control, "StatechartError", real_statechart_error)
+            belt = await _converse(server.path, _query(engine))
         finally:
             await _teardown(engine, server, loop_task)
         return belt, mutant, server

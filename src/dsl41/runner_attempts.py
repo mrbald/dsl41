@@ -423,6 +423,10 @@ class Processes(Protocol):
     def ladder_failed(self, attempt: str, error: BaseException) -> None:
         """Report a ladder that raised. No timer is armed; the attempt stays STOPPING."""
 
+    def fail(self, error: Exception) -> None:
+        """An error raised outside any task, in a callback: the engine stops at its next turn
+        with it (DL-563)."""
+
     def command_survived(self, attempt: str) -> None:
         """Report a command still alive when its record timeout fired; the attempt stays
         STOPPING."""
@@ -974,6 +978,8 @@ class AttemptTier:
                 self.on_ladder_done(attempt)
             if self.on_settled is not None:
                 self.on_settled()
+        except Exception as exc:  # noqa: BLE001 -- a done callback's raise would only be logged
+            self.processes.fail(exc)  # the engine stops at its next turn (DL-563)
         finally:
             owned.taken.set_result(None)  # this callback runs once per task (`_own`)
 

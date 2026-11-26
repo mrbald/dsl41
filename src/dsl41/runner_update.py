@@ -726,7 +726,8 @@ class EngineUpdate:
         jobs, or a resumed one, whose row may already stand (`store_config`)."""
         configuration = self._configuration()
         assert self.engine.journal is not None  # `admit` and `resume` refuse an engine with none
-        store_config(self.engine.journal.store, configuration, application.rev)
+        with self.engine.journal.writing():  # a failed store write fails the engine (DL-563)
+            store_config(self.engine.journal.store, configuration, application.rev)
         return self._journal_application(application, configuration, None)
 
     def journal_update(self, application: Application) -> Application:
