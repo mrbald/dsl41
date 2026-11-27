@@ -34,7 +34,11 @@ from dsl41.runner_clock import EngineError
 #:
 #: Bump it when a change makes this build derive different state from an identical log:
 #: oracle transitions, condition evaluation, timer ordering, the ss3 projection. A change a
-#: replay cannot see does not bump it. It is not `dsl41_version`: refusing to resume a live
+#: replay cannot see does not bump it. Nor does a key that only a newer build writes, when an
+#: older build ignores it in a record or refuses it in a snapshot and this build derives the
+#: same state from every older build's log that it reads; the version then does not guard an
+#: older build that reads the newer build's log, and the change's entry states what that build
+#: does and how to go back (DL-564). It is not `dsl41_version`: refusing to resume a live
 #: estate after a patch release would be an outage made by bookkeeping.
 #: Each version below names the derivation it introduced.
 #: 2 (DL-235): the ss4 stale-completion gate rejects a non-live row.

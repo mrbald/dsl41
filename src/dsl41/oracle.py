@@ -229,7 +229,7 @@ from __future__ import annotations
 
 import sys
 from collections import deque
-from collections.abc import Hashable, Mapping
+from collections.abc import Hashable, Iterable, Mapping
 from datetime import datetime
 from typing import Final, cast
 
@@ -411,6 +411,13 @@ def item_cap(jobs: int) -> int:
 _FLAG_INPUTS: Final = frozenset({ON_ICE, OFF_ICE, ON_HOLD, OFF_HOLD, ON_NOEXEC, OFF_NOEXEC, DISARM})
 
 
+def update_wakes(names: Iterable[str], rev: int) -> dict[str, str]:
+    """Each member an update's application owes one attempt, with the attempt's cause, which
+    names the configuration rev the update applied (DL-564, `Oracle.replace_catalog`)."""
+    cause = f"configuration rev {rev} changed the condition (DL-564)"
+    return {name: cause for name in names}
+
+
 def listed(active: frozenset[str]) -> str:
     return ", ".join(sorted(active))
 
@@ -464,6 +471,9 @@ class Oracle(OracleWriters):
         #: An update swapped the catalog since the last input, so the next one scans the queue
         #: first (`_wake_after_swap`).
         self._wake_owed = carried is not None and carried.wake_owed
+        #: DL-564: the members an update's application owes one attempt after that scan, each
+        #: with its cause; consumed once (`_wake_after_swap`).
+        self._woken: dict[str, str] = {} if carried is None else dict(carried.woken)
         if carried is not None and carried.ghosts:
             # the resources an update dropped while units were held or spent keep their
             # definitions in the pool, as they had before the snapshot (`replace_catalog`)
@@ -477,6 +487,7 @@ class Oracle(OracleWriters):
         twin.store.job_instance = twin._job_instance
         twin._queue = deque(self._queue)
         twin._opening_release = list(self._opening_release)
+        twin._woken = dict(self._woken)
         twin._reached = set()
         return twin
 
@@ -487,11 +498,17 @@ class Oracle(OracleWriters):
         semantics: SemanticSwitches,
         tz_aliases: Mapping[str, str] | None,
         default_tz: str | None,
+        woken: Mapping[str, str] | None = None,
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         """An update's swap (spec-reload): the oracle runs `catalog` under `semantics`, the
         `tz_aliases` table (None: no table, DL-151) and the base zone `default_tz` (DL-155)
         from now on, so the run windows and deadlines of a job with no zone of its own follow
         the update as the scheduler does. Answers the (removed, added) names, each sorted.
+
+        `woken` maps each member the application selected to its attempt's cause (DL-564,
+        `update_wakes`). The caller selects them: the live application by the rule, a replay
+        from the record. The next input gives each one attempt after the queue's scan. A name
+        this swap removes or retypes loses what an earlier swap owed it.
 
         A resource the new catalog drops keeps its old definition in the pool while a run
         holds its units or `consumed` has a bucket of it (a ghost), so a depletable's units
@@ -549,6 +566,9 @@ class Oracle(OracleWriters):
             )
         self.store.restore_instances()
         self._wake_owed = True
+        # a removed or retyped name is another job from here on: no earlier swap owes it (DL-564)
+        owed = {job: cause for job, cause in self._woken.items() if job not in removed}
+        self._woken = {**owed, **(woken or {})}
         return removed, added
 
     def ghost_resources(self) -> dict[str, ResourceIR]:
@@ -563,13 +583,42 @@ class Oracle(OracleWriters):
     def _wake_after_swap(self) -> None:
         """The input after a catalog swap scans the queue first, as a period's opening does
         after it gives a removed holder's units back (DL-256): a retired holder's units, a
-        raised amount or a dropped claim may admit a waiter. Its starts are the input's."""
+        raised amount or a dropped claim may admit a waiter. Its starts are the input's.
+
+        Then each member the update woke that still waits in its box's run (`_waits_in_its_box`)
+        gets one plain attempt, in catalog order, the one a referenced job's move gives it, and
+        the input's owed scan follows them as it follows a move's referencers (DL-564, DL-255).
+        The scan comes first, so no such attempt takes a unit from an older waiter."""
         if not self._wake_owed:
             return
         self._wake_owed = False
         waiters = self._pool.sorted_waiters(self.store.job)
         if waiters:
             self._root_scan(waiters[0], keep_stopped=False)
+        woken, self._woken = self._woken, {}
+        if not woken:
+            return
+        for job in self.catalog.jobs:
+            if job in woken and self._waits_in_its_box(job):
+                self._attempt_root(job, START, woken[job])
+        self._run_owed_scan()
+
+    def _waits_in_its_box(self, job: str) -> bool:
+        """DL-564: an update's member still waits in its box's run when the catalog boxes it with
+        no date conditions, its row is INACTIVE, it has not run in this run of the box, and no
+        verdict resolved it: an operator's INACTIVE or a window skip leaves the mark
+        `window_skipped_members`, and an operator's SUCCESS, FAILURE or TERMINATED a status
+        that is not INACTIVE. The box's own state is the attempt's gate (`start_verdict`)."""
+        job_ir = self.catalog.jobs[job]
+        box = job_ir.box.box_name
+        if box is None or job_ir.schedule is not None:
+            return False
+        box_rt = self._runtime(box)
+        return (
+            self._runtime(job).status == "INACTIVE"
+            and job not in box_rt.ran_members
+            and job not in box_rt.window_skipped_members
+        )
 
     def _job_instance(self, job: str, row: JobRuntime) -> tuple[Statechart, frozenset[str], object]:
         return JOB, row_configuration(row), job_data(self, job)

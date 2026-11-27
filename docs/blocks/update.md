@@ -15,7 +15,7 @@ Its intent and its application are store records. With nothing to stop they comm
 - `dsl41 reread -S SOCK` previews; `dsl41 update -S SOCK [--wait]` prepares and applies current inputs. Both default to DSL41_SOCKET. They use v5 ADM requests (DL-498); there is no token or consent handoff (DL-463).
 - `reload_plan.reread` computes and stores the plan; `runner_update.EngineUpdate.admit` checks it against the engine's state now; `reload_update.admission_data` builds the admitted data; `reload_update.plan_application` and `apply_application` compute and apply the swap.
 - `runner_update.EngineUpdate` binds the update chart's tier to the engine: the admission as one step of the single writer, the stops through the attempt tier, the dispatch filter, the application and its records.
-- The store records `config intent` (the token, the stop set with the attempt each stop interrupts, the dispatch filter, `restart_boxes: []`, the request's id and fingerprint) and `config applied` (the new rev, its segment fields and the job sets). A configuration row holds each rev's catalog, profile and marked set (DL-489).
+- The store records `config intent` (the token, the stop set with the attempt each stop interrupts, the dispatch filter, `restart_boxes: []`, the request's id and fingerprint) and `config applied` (the new rev, its segment fields, the job sets and the members it woke, `woken`). A configuration row holds each rev's catalog, profile and marked set (DL-489).
 - `status` shows `config_rev`, `update_window_s` and, while an update stops, the update and the jobs it waits for; the TUI shows the rev and the update in its subtitle. Once applied, `spec` and `spec_drift` follow the applied plan.
 
 ## States
@@ -39,9 +39,10 @@ The [chart lifecycles](../chart-lifecycles.md) view lists each target state with
 - An interrupted attempt of a job whose `non-idempotent.toml` mark the plan changes keeps its outcome back too, so its plan follows the applied mark; the update neither stops nor waits for it.
 - The intent records each attempt with the cause of its first stop: `update_stop`, or the cause of a stop it already takes, which a restart keeps.
 - The application is one `config applied` record and one configuration row; the oracle swaps its catalog between inputs, the scheduler rebuilds only the changed and added plans and drops the removed ones, and one time advance follows at once so the queue scan the swap owes runs first. The oracle's own timers (run windows, `term_run_time`) are untouched: a changed job's deadline keeps counting across the update.
+- A changed job in a box with no date conditions, whose lowered `condition:` the update changed, is owed one plain attempt: the one a referenced job's move gives it. The time advance makes it after the queue's scan, in catalog order, if the member still waits in its box's run: INACTIVE, not run in this run of the box, and not resolved by an operator's verdict or a window skip. The chart's gates decide the rest. Its cause names the configuration rev. The application selects the names on both apply rows and records them as `woken`; a replay reads them from the record's segment alone, and a snapshot taken before the next input carries them ([DL-564](../decision-log.md)). A changed job outside every box, a changed dated member, a member whose condition did not change and an unchanged job whose condition names a changed one are read at the next event that concerns them.
 - A run's configuration rev is recorded on its run row when it opens: the rev in force where it opened in record order, which a snapshot's retained run history keeps as a required key (state version 26). `dsl41 runs` reads each run under that rev and nothing else: its catalog hash, its job fingerprint, its box and its exit-code verdict. A `dispatch` record's `rev` is that attempt's own (the definition it ran), never read as the run's. The `CONFIG` trace marker places each application between two inputs.
 - `spec` and the `spec_drift` baseline follow the applied plan, each file at its applied capture path (site layers included), never the plan directory's copy.
-- A snapshot carries the tombstones, the owed scan, the ghost resources and the update in STOPPING; replay swaps the configuration where each `segment` stands.
+- A snapshot carries the tombstones, the owed scan, the owed attempts, the ghost resources and the update in STOPPING; replay swaps the configuration where each `segment` stands.
 - A restart runs the store's last applied configuration; the estate it is launched with must equal it, or the open update's candidate, job by job.
 
 ## Failure and recovery
@@ -99,6 +100,15 @@ The [chart lifecycles](../chart-lifecycles.md) view lists each target state with
 - `test_dl559_a_refusal_writes_nothing_and_its_retry_is_decided_on_the_state_then`
 - `test_dl560_a_crash_at_any_write_of_an_update_with_nothing_to_stop_leaves_old_or_whole`
 - `test_bug19_a_box_an_update_gives_a_member_never_runs_a_member_set_it_was_not_given`
+- `test_dl564_bug116_a_member_whose_condition_is_removed_starts_and_its_box_completes`
+- `test_dl564_the_rule_selects_only_boxed_undated_jobs_whose_condition_changed`
+- `test_dl564_a_member_an_operator_resolved_gets_no_attempt`
+- `test_dl564_the_queue_scan_goes_first_so_an_older_waiter_takes_the_freed_unit`
+- `test_dl564_a_snapshot_between_the_swap_and_the_next_input_carries_the_attempt_once`
+- `test_dl564_bug116_the_engine_starts_the_member_in_the_input_after_the_application`
+- `test_dl564_a_config_applied_record_without_the_field_replays_with_no_attempt`
+- `test_dl564_an_update_that_stops_a_member_records_and_makes_the_attempt_at_its_look`
+- `test_dl564_a_death_after_the_application_makes_the_attempt_at_the_first_input_after_restart`
 
 The CLI/TUI status annotation caches the last reread forecast in memory. A new reread replaces it when the revision it read is still the applied one (DL-521); a failed reread, an applied update and a restart clear it. Update never consumes it.
 Forecast labels follow the first-match rule in the [control protocol](../control-protocol.md#2-transport-and-framing-frozen) (DL-559): `hold`, `remove` or `rerun`, each for a stop.

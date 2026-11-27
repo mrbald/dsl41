@@ -108,8 +108,9 @@ if TYPE_CHECKING:  # annotation only: the engine imports this module
 #: The plans directory of a run root.
 PLANS: Final = "plans"
 
-#: The `config applied` fields an update adds to the segment's: what the application did.
-#: `seed_only` is shown only; a record without it has none (DL-533).
+#: The `config applied` fields an update adds to the segment's that its answer shows: what the
+#: application did. `seed_only` is shown only; a record without it has none (DL-533). The
+#: record's `woken` is not shown: the segment carries it to a replay (DL-564).
 APPLICATION_KEYS: Final = (
     "token",
     "added",
@@ -200,6 +201,9 @@ def application_body(application: Application) -> dict[str, Any]:
         "restored": [[name, list(flags)] for name, flags in application.restored],
         "stopped": [[job, choice] for job, choice in application.stopped],
         "seed_only": [[job, before, after] for job, before, after in application.seed_only],
+        # the replay's source of the attempts the swap owes, never inferred from the catalogs
+        # (DL-564); a record without the key owes none
+        "woken": list(application.woken),
     }
 
 

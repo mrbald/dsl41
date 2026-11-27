@@ -28353,3 +28353,42 @@ relitigate an entry; append a new one.
   UNCHANGED. Every code and frame, the read header, control-protocol §5's grace, replay and the
   state-machine version. An in-process future still takes `engine_shutting_down`.
   OPEN. FEAT-56: the terminal UI marks no row while it is disconnected.
+- DL-564 An update gives a changed member that still waits in its box's run one attempt
+  (2026-11-26; owner ruling; closes BUG-116; src/dsl41/oracle.py, oracle_state.py, reload_diff.py,
+  reload_update.py, runner_update.py, runner_journal.py, runner_ledger.py; docs: update block,
+  runner-design, protocol-evolution, control-protocol, deploy)
+  THE RULE. (1) A job is owed one plain attempt, the one a referenced job's move gives it, when
+  the plan lists it as changed (never seed-only, added, removed or retyped), its lowered
+  `condition:` differs with positions ignored, and its new definition boxes it with no date
+  conditions. (2) The first input after the swap makes the attempts in its time half, after the
+  queue's scan, in catalog order; the input's owed scan follows (DL-255). A member gets one only
+  while it waits in its box's run: INACTIVE, not in the box's ran set, no resolution mark (an
+  operator's INACTIVE or a window skip); other operator verdicts leave another status. (3) The
+  chart's gates decide the rest: a box not RUNNING, a hold, ice or a false condition starts
+  nothing; a held member starts at its release (SEM-21), one taken off ice sits the run out under
+  `off-ice-in-running-box=next-run` (SEM-20). (4) Its cause `configuration rev N changed the
+  condition (DL-564)` reaches the trace and `started_by`. (5) The application selects the names on
+  update.07 and update.08 and writes them sorted to `config applied` as `woken`; its `segment`
+  too, when not empty. A replay reads them from the segment alone; an absent key owes none. (6)
+  The oracle holds them with their causes beside the owed scan and consumes them once; a snapshot
+  between carries them as the oracle rows' `woken`, written only while one is owed. A later swap
+  first adds its own; one it removes, retypes, dates or unboxes gets none. (7) After a death
+  between `config applied` and its time advance the restart feeds no input; the first input makes
+  the attempt ahead of its own verb, so an ON_HOLD of the member sent as that input is overtaken.
+  THE DEFECT. The swap left a kept row untouched and scanned the queue only; a member whose edit
+  changed the condition it waited on no longer referenced that job, and nothing woke it. WHY NOT
+  EVERY CHANGED MEMBER. A dated member may hold an arm the edit made stale; a resolved member
+  carries a verdict, and an attempt would run it again from SUCCESS. One whose edit only dropped
+  its date conditions is not covered here. WHAT STAYS. Any other changed job, and an unchanged one
+  whose condition names a changed job, is read at the next event that concerns it. No switch. The
+  `update` answer does not show `woken`. THE CONTRACT. Every record key is additive;
+  an earlier build refuses the snapshot key. `STATE_MACHINE_VERSION` stays 28 (runner_ledger).
+  Guaranteed: this build replays every log of an earlier build that it reads (DL-561) to that
+  build's state, as an absent `woken` owes nothing; and an earlier build started on a drained
+  stop's final snapshot holds this build's state or refuses the snapshot, which carries the key
+  while a debt is owed. Not guarded: an earlier build that replays
+  this build's log past an application with `woken`. It ignores the key, so it may refuse the
+  store or go on with other state (an attempt not made, another `started_by` or run number), and
+  this build may then refuse the store it went on with. THE COST. Go back to an earlier build only
+  from a drained stop; if it refuses that snapshot, a debt is still owed. Its offline history of
+  a store that holds such an attempt can refuse. One catalog pass per owed update.

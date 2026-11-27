@@ -117,6 +117,14 @@ def _job_record(job: JobIR) -> dict[str, Any]:
     return record
 
 
+def condition_changed(old: JobIR, new: JobIR) -> bool:
+    """Whether the lowered `condition:` of two definitions of a job differs, source positions
+    ignored (DL-564)."""
+    before: object = _job_record(old)["sem"].get("condition")
+    after: object = _job_record(new)["sem"].get("condition")
+    return before != after
+
+
 def _split_machines(raw: str | None) -> list[str]:
     return [part.strip() for part in (raw or "").split(",") if part.strip()]
 

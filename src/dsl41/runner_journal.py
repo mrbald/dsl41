@@ -57,7 +57,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from dsl41.canon import CanonError, canonical_bytes, decode, hash_over, is_wire_int, naive_utc
 from dsl41.engine_charts import UPDATE_STOP
-from dsl41.oracle import Oracle
+from dsl41.oracle import Oracle, update_wakes
 from dsl41.oracle_state import CarriedRows, Event, TraceEntry
 from dsl41.runner_admission import (
     RUN_NUMBER_END,
@@ -627,8 +627,13 @@ def wire_record(record: Record) -> dict[str, Any] | None:
     if kind in ("drop", "preflight"):
         return {"rec": kind, **body}
     if kind == "config" and body.get("event") == "applied":
-        # the segment's own keys: an update's application details stay in the store
-        return {"rec": "segment", **{key: body[key] for key in SEGMENT_KEYS if key in body}}
+        # the segment's own keys: an update's application details stay in the store, but for the
+        # attempts it owes, which a replay of the segment makes (DL-564)
+        segment: dict[str, Any] = {"rec": "segment"}
+        segment |= {key: body[key] for key in SEGMENT_KEYS if key in body}
+        if body.get("woken"):
+            segment["woken"] = list(body["woken"])
+        return segment
     return None
 
 
@@ -1064,10 +1069,13 @@ def oracle_rows(oracle: Oracle) -> dict[str, Any]:
         enqueue_counter=store.enqueue_counter,
         tombstones=dict(store.tombstones),
         wake_owed=oracle._wake_owed,
+        woken=dict(oracle._woken),
         ghosts=oracle.ghost_resources(),
         now=oracle._now,
     )
-    dumped = _canon_ready(rows.model_dump())
+    # the owed attempts' key is written only while one is owed, so a snapshot owing none reads
+    # on a build that does not know it (DL-564)
+    dumped = _canon_ready(rows.model_dump(exclude=None if rows.woken else {"woken"}))
     assert isinstance(dumped, dict)
     return dumped
 
@@ -1918,13 +1926,17 @@ def config_marker(rev: int) -> str:
 type Configurations = Callable[[int], Configuration]
 
 
-def apply_configuration(oracle: Oracle, configuration: Configuration) -> tuple[str, ...]:
+def apply_configuration(
+    oracle: Oracle, configuration: Configuration, segment: Mapping[str, Any]
+) -> tuple[str, ...]:
     """Swap `oracle`'s catalog for `configuration`'s, read under its profile, as the live
     update applied it (`Oracle.replace_catalog`): replay meets the swap where the update's
-    `config applied` record stands, between the same two inputs. Answers the jobs it removed,
-    a retyped one included."""
+    `config applied` record stands, between the same two inputs. The attempts the swap owes are
+    the segment's `woken` names, never derived from the catalogs; a segment without the key owes
+    none (DL-564). Answers the jobs it removed, a retyped one included."""
+    woken = update_wakes(segment.get("woken") or (), int(segment["rev"]))
     removed, _added = oracle.replace_catalog(
-        configuration.catalog, **oracle_reading(configuration.profile)
+        configuration.catalog, **oracle_reading(configuration.profile), woken=woken
     )
     return removed
 
@@ -1981,7 +1993,7 @@ def replay_inputs(
                         f"the store applied configuration rev {found} and this replay has no"
                         " configurations to read it from"
                     )
-                removed = apply_configuration(oracle, configs(found))
+                removed = apply_configuration(oracle, configs(found), record)
                 # a removed or retyped job's row ended between the inputs (DL-551)
                 replay.unended = {key: None for key in replay.unended if key[0] not in removed}
                 store = oracle.store

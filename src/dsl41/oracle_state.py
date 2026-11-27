@@ -342,6 +342,9 @@ class CarriedRows(BaseModel):
     #: an update swapped the catalog and no input has run since: the next one scans the queue
     #: first (`Oracle._wake_after_swap`)
     wake_owed: bool = False
+    #: DL-564: the members an update's application owes one attempt at that input, each with
+    #: the attempt's cause (`Oracle._woken`); a snapshot without the key owes none
+    woken: dict[str, str] = {}
     #: the definitions of the resources an update dropped while a run holds their units or
     #: `consumed` has a bucket of them (`Oracle.ghost_resources`): the pool keeps their type
     ghosts: dict[str, ResourceIR] = {}

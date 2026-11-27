@@ -1269,6 +1269,20 @@ An update is atomic across the jobs it names: those it adds, changes or removes,
 recorded stop list and dispatch filter name them. Their processes are stopped, none of them is launched while the
 update waits, and the new definitions are published once, after every stopped process is
 gone (DL-522).
+A swap leaves a kept row untouched, so a member whose edit changed the condition it waited on
+is owed one plain attempt (DL-564). The rule: the plan lists the job as changed, its lowered
+`condition:` differs, and its new definition puts it in a box with no date conditions. The
+application selects the names on update.07 and update.08 and records them in `config
+applied` as `woken`, and the segment carries them. The oracle holds them with the owed scan.
+The first input after the swap makes each attempt after the queue's scan, in catalog order,
+if the member is INACTIVE, not in its box's ran set and not marked resolved; the chart's
+gates decide the rest. The cause names the configuration rev. Replay takes the names from
+the segment alone and a snapshot carries them, so live, replay and restart agree. After a
+death between `config applied` and its time advance, the restart feeds no input, and the
+attempt is made in the time half of the first input, ahead of that input's own verb: an
+operator's ON_HOLD of the member sent as that input is overtaken, as the swap's queue scan
+already is. Other changed jobs, and jobs whose condition names a changed job, wait for the
+next event that concerns them.
 
 Without `engine.db`, genesis is allowed only without surviving runtime
 evidence (DL-443, DL-445). Attempt entries under `runs/`, material under

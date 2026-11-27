@@ -1311,6 +1311,19 @@ such a change to a busy tree, stop the named jobs (or wait for them), run
 update, then start the box again. One busy job refuses the whole update. A job
 outside every box is added, removed or retyped as before, with its stop.
 
+An update looks again at one kind of job: a box member whose
+`condition:` the update changed and that has no date conditions. If its box
+is running and the member is still waiting in that run (not run yet, not set
+by `sendevent CHANGE_STATUS`, not skipped by its run window), the engine
+tries to start it once, at its next input. That input follows the update at
+once; if the engine dies in between, it is the first input after the restart.
+A true condition starts the member, or queues it when a resource is short; a
+held or iced member, or a false condition, does not. Its start names the configuration revision. The
+update looks at no other job again. A changed job outside every box, a
+changed member with date conditions, a member whose condition did not change,
+and a job whose condition names a job the update changed each wait for the
+next event about them (DL-564). To start one now, use `sendevent`.
+
 Upgrade note: an update that restarted a running box in 2.0.0 is now refused.
 A run root an older build wrote is refused at start by its IR-F version before
 anything else it holds is read: drain it on that build, then start this one on

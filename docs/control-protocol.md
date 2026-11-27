@@ -1312,6 +1312,10 @@ above hold over the whole retained store.
 applied (DL-428): `{"rec": "segment", "rev", "at", "catalog_hash",
 "runtime_hash", "state_machine_version", "baseline_id",
 "clock_domain"}`. `rev` is the configuration rev.
+An update's segment may add `woken`, a sorted list of the members its
+application owes one start attempt, present only when the list is not
+empty (DL-564). It is additive: a client that does not read it keeps
+working.
 A segment carries none of the period fields DL-428 retires:
 `segment_no`, `estate_id`, `period_id`, `catalog_hash_version`,
 `source_bundle_hash`, `first_index`, `opens_from_seal`, `reclaimed` and

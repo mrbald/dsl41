@@ -26,6 +26,10 @@ nothing (DL-533); added, an INACTIVE row; removed, the row ends into a tombstone
 run number and flags, and a later update that adds the name back carries them; changed, the
 definition is replaced in place and the row keeps status, ON_HOLD, ON_ICE, ON_NOEXEC, run
 counters, run history and lookback.
+A changed member with no date conditions whose lowered `condition:` changed gets one attempt at
+the next input, after the queue's scan, if it still waits in its box's run (`woken_members`,
+DL-564). The application selects the names and its `config applied` record keeps them as
+`woken`; a replay reads them from there.
 Globals, consumed capacity and the clock are untouched; a resource a changed definition no
 longer names keeps its consumed bucket. The schedule plans follow in `Scheduler.replace`.
 
@@ -44,9 +48,9 @@ from typing import Any, Final, Literal, Protocol
 
 from dsl41.engine_charts import UPDATE_STOP, Intent
 from dsl41.ir import CatalogIR
-from dsl41.oracle import Oracle
+from dsl41.oracle import Oracle, update_wakes
 from dsl41.oracle_state import JobRuntime
-from dsl41.reload_diff import Change, Plan, catalog_hash_v2, retyped_jobs
+from dsl41.reload_diff import Change, Plan, catalog_hash_v2, condition_changed, retyped_jobs
 from dsl41.reload_plan import Live, stop_runs
 from dsl41.semantics import SemanticSwitches
 from dsl41.semantics import resolve as resolve_switches
@@ -354,6 +358,8 @@ class Application:
     #: the candidate's estate settings (`reload_plan.estate_settings`), swapped with the catalog
     settings: Mapping[str, Any] = field(default_factory=dict)
     seed_only: tuple[tuple[str, str | None, str | None], ...] = ()
+    #: the changed members the next input gives one attempt, sorted (`woken_members`, DL-564)
+    woken: tuple[str, ...] = ()
 
     @property
     def timezone(self) -> str | None:
@@ -449,6 +455,24 @@ def plan_application(
             )
             for name in seeds
         ),
+        woken=woken_members(live_state.catalog, candidate, changed),
+    )
+
+
+def woken_members(
+    live: CatalogIR, candidate: CatalogIR, changed: Collection[str]
+) -> tuple[str, ...]:
+    """DL-564: the changed jobs an application gives one attempt, sorted: each sits in a box,
+    has no date conditions in `candidate`, and has a lowered `condition:` that differs from its
+    `live` one. A seed-only, added, removed or retyped job is never changed."""
+    return tuple(
+        sorted(
+            name
+            for name in changed
+            if candidate.jobs[name].box.box_name is not None
+            and candidate.jobs[name].schedule is None
+            and condition_changed(live.jobs[name], candidate.jobs[name])
+        )
     )
 
 
@@ -469,6 +493,7 @@ def apply_application(live_state: Oracle, application: Application, *, revision:
         semantics=application.switches,
         tz_aliases=alias_table(application.tz_aliases),
         default_tz=application.timezone,
+        woken=update_wakes(application.woken, application.rev),
     )
 
 
@@ -643,4 +668,5 @@ __all__ = [
     "live_of",
     "plan_application",
     "plan_of",
+    "woken_members",
 ]

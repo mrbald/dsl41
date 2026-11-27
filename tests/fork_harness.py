@@ -39,6 +39,7 @@ ORACLE_COPIED = frozenset(
         "_opening_release",
         "_scan_owed",
         "_wake_owed",
+        "_woken",
         "_tz_cache",
         "_calendars",
         "_window_starts",
@@ -149,6 +150,7 @@ def state_bytes(oracle: Oracle, since: tuple[int, int] = (0, 0)) -> bytes:
         ],
         "opening_release": list(oracle._opening_release),
         "flags": [oracle._scan_owed, oracle._wake_owed],
+        "woken": dict(oracle._woken),
         "tz_cache": sorted(oracle._tz_cache),
         "calendars": sorted(oracle._calendars),
         "window_starts": (

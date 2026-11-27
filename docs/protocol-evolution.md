@@ -208,6 +208,30 @@ the store, the records, the snapshot and the state version are unchanged. A clie
 does not know the field ignores it; one that does not know the code prints it as any
 refusal.
 
+**Owed attempts (DL-564).** The `config applied` record adds an optional `woken` list: the
+sorted names of the members the application owes one attempt. The wire's `segment` carries
+the same `woken` only when it is not empty, an addition within dialect 5. The snapshot's
+oracle rows add an optional `woken` map from name to cause, written only while an attempt is
+owed. A reader takes an absent key as empty, and a replay reads the names from the segment
+alone. An earlier build ignores the record's key and refuses a snapshot that carries the
+snapshot's key. The state version stays 28 and no format version moves, by the exception
+`runner_ledger` states.
+
+Two things are guaranteed. This build replays every log of an earlier build that it reads
+(an IR-F 0.4 root, DL-561) to that build's state, since an absent `woken` owes nothing. An
+earlier build started on a drained stop's final snapshot either holds this build's state or
+refuses the snapshot: the snapshot carries the key while a debt is owed, from the
+application to the next input. The application's own step feeds that input; after a death
+between the two, the debt waits for the next input this build feeds.
+
+Not guarded: an earlier build that replays this build's log past an application with `woken`.
+It ignores the key. It may refuse the store, or go on with other state: an attempt not made,
+another `started_by` or run number. This build may then refuse the store that build went on
+with: at a restart until a snapshot lies past the difference, and in the offline readers
+(`runs`, history) longer, at the latest until retention prunes past the segment, since
+`replay_store` reads a snapshot only once the oldest records are pruned. So go back to an earlier build only from a
+drained stop; its offline history of a store that holds such an attempt can still refuse.
+
 **Main-config captures and plans (DL-437, DL-438).** New configuration rows use version 3.
 A required `job_order` list names every catalog job exactly once. The catalog
 map is canonical and sorted; readers rebuild it in `job_order` order
