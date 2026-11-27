@@ -25,7 +25,8 @@ and its follow-up plan are appended after the application, under the applied cat
 marked set (spec-wiring 2b, the interruption rule's step 1). A task the attempt tier does not run
 (a file watch) is cancelled; after the application it is launched again under its run id while
 its job is in the catalog and its run is live, and closed with no plan otherwise. That is decided
-again at the launch, after the application's time advance (DL-526).
+again at the launch, after the application's time advance (DL-526). A draining engine launches
+none: the watch is left open for the restart to take up (DL-565).
 
 When the last selected stop is finished, the application swaps the oracle's catalog and settings
 (`reload_update.apply_application`), the scheduler's plans (`Scheduler.replace`), the marked set
@@ -828,7 +829,8 @@ class EngineUpdate:
         """What follows an application, once the time advance is fed or queued: the outcomes
         kept back are committed with their plans under the applied catalog, the cancelled tasks
         are taken up or closed (`Engine.resume_cancelled` decides again on the rows as they are
-        now, DL-526), the held starts are released, and the request is answered."""
+        now, DL-526; a draining engine leaves one to take up to the restart, DL-565), the held
+        starts are released, and the request is answered."""
         engine = self.engine
         kept, self._kept = self._kept, {}
         # in the stop set's order, by job, whatever order the attempts ended in

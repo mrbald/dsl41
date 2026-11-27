@@ -2,12 +2,13 @@
 after a restart, and is taken up after the application only while its run is still live there
 (DL-526, DL-432). A restart classifies a watch's durable evidence first: a complete log is fed,
 a run that ended is closed, a log that does not read as the attempt's is quarantined, and only an
-unfinished watch of a live run is held for the update.
+unfinished watch of a live run is held for the update. An application that finishes while the
+engine drains launches no watch: the restart takes it up (DL-565).
 
 The scenarios run on the virtual clock with `test_engine_stops_cookie`'s process stand-ins. The
 update waits for `j`, a changed command whose stop sequence the test parks and ends
-(`test_update_atomic._Ladders`); `w` is a file watch on a file that never appears. Each
-`Engine._launch` is counted, and each line of `watch.jsonl` is one poll.
+(`test_update_atomic._Ladders`); `w` is a file watch on a file that appears only where a test
+writes it. Each `Engine._launch` is counted, and each line of `watch.jsonl` is one poll.
 """
 
 from __future__ import annotations
@@ -657,3 +658,241 @@ def test_after_the_application_a_cancelled_watch_is_taken_up_only_while_its_run_
         assert seen["row"] == ("RUNNING", 2)
     else:
         assert seen["launches"] == [] and seen["live"] is None
+
+
+# ---------------------------------------------------------------- the application during a drain
+
+#: `k`'s process group: a command the update does not name, whose stop holds the drain open
+OTHER_PGID = PGID + 1
+
+
+async def _drained_update(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    launches: list[tuple[str, int, str | None, Any]],
+) -> dict[str, Any]:
+    """`j`, `k`, `w` and `v` run; an update that changes `j` and changes or removes `w` waits
+    for `j`'s stop, and the engine begins to drain, which stops `k` too. `j`'s stop ends while
+    `k`'s is still pending, so the update applies and finishes while the lifecycle is DRAINING;
+    then `k`'s stop ends and the drain ends. With `deadline`, `w`'s `term_run_time` falls at the
+    instant the update applies. `v` is a watch the update does not name, live when the drain
+    begins. Answers the attempt ids, the lifecycle and `w`'s launches at each decision of
+    `Engine.resume_cancelled`, what holds at each step, and the launches after the drain
+    began."""
+    ladders = _Ladders(monkeypatch)
+    ladders.alive |= {PGID, OTHER_PGID}
+    limit = "term_run_time: 1\n" if case == "deadline" else ""
+    unnamed = _watch(tmp_path, "v")
+    engine = _start(
+        tmp_path,
+        _jil({"j": "sleep 30", "k": "sleep 30"}) + _watch(tmp_path, extra=limit) + unnamed,
+        "stable",
+    )
+    seen: dict[str, Any] = {"decisions": []}
+    resume_cancelled = Engine.resume_cancelled
+
+    def decided(self: Engine, job: str, run: int, run_id: str | None, *, take_up: bool) -> None:
+        state = self.lifecycle.state
+        resume_cancelled(self, job, run, run_id, take_up=take_up)
+        mine = [launch for launch in launches if launch[0] == job]
+        seen["decisions"].append((job, take_up, state, mine))
+
+    monkeypatch.setattr(Engine, "resume_cancelled", decided)
+    try:
+        for job in ("j", "k", "w", "v"):
+            engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": job}))
+        await engine.run_until_quiescent(T0)
+        attempt, wrapper = _observed(engine, "j", PGID)
+        other, other_wrapper = _observed(engine, "k", OTHER_PGID)
+        assert engine.journal is not None and wrapper is not None and other_wrapper is not None
+        seen.update({o.job: a for a, o in engine.journal.open.attempts.items()})
+        new = {
+            "current": _watch(tmp_path, interval=NEW_S),
+            "deadline": _watch(tmp_path, interval=NEW_S, extra=limit),
+            "removed": "",
+        }[case]
+        _estate(tmp_path, _jil({"j": "sleep 31", "k": "sleep 30"}) + new + unnamed, "stable")
+        answer = await _request(engine, _plan(engine, tmp_path))
+        assert isinstance(answer.decision, Admitted) and answer.decision.stop_set == ("j", "w")
+        await _started(ladders, PGID)
+        stop = engine.request_stop()
+        await engine.run_until_quiescent(T0)
+        await _started(ladders, OTHER_PGID)
+        seen["draining"] = (stop.result(), engine.update.stopping, sorted(engine.live_jobs()))
+        del launches[:]
+        if case == "deadline":
+            due = engine.oracle.next_timer_due()
+            assert due is not None and due > T0
+            await engine.clock.wait_until(due)  # the stop ends at the deadline's instant
+            seen["due"] = engine.oracle.store.job["w"].status
+        engine.attempts.status_recorded(attempt, SIGNALED)
+        wrapper.cancel()
+        async with asyncio.timeout(30):  # a guard against a hang only
+            await ladders.end(engine, attempt, PGID)
+        await engine.run_until_quiescent(engine.clock.now())
+        row = engine.oracle.store.job.get("w")
+        seen["applied"] = (
+            engine.lifecycle.state,
+            engine.update.stopping,
+            engine.config_rev,
+            sorted(engine.live_jobs()),
+            None if row is None else (row.status, row.run_number),
+        )
+        engine.attempts.status_recorded(other, SIGNALED)
+        other_wrapper.cancel()
+        # the wrapper's task is collected while the drain still waits for `k`'s stop
+        await engine.run_until_quiescent(engine.clock.now())
+        assert engine.lifecycle.state == "DRAINING" and "k" not in engine.live_jobs()
+        async with asyncio.timeout(30):  # a guard against a hang only
+            await ladders.end(engine, other, OTHER_PGID)
+        await engine.run_until_quiescent(engine.clock.now())
+        seen["stopped"] = (
+            engine.lifecycle.state,
+            engine.leaving_record,
+            engine.config_rev,
+            sorted(engine.live_jobs()),
+        )
+        opened = engine.journal.open.attempts
+        seen["stops"] = {job: o.stop for job in ("v", "w") if (o := opened.get(seen[job]))}
+        seen["launches"] = list(launches)
+    finally:
+        _teardown(engine, ladders)
+        await engine.shutdown()
+        _close(engine)
+    return seen
+
+
+def _shutdown_at(journal: list[tuple[str, dict[str, Any]]]) -> int:
+    """The index of the drain's `clean_shutdown` record."""
+    [found] = [
+        i for i, (k, b) in enumerate(journal) if (k, b.get("event")) == ("engine", "clean_shutdown")
+    ]
+    return found
+
+
+async def _restarted(tmp_path: Path, at: datetime) -> dict[str, Any]:
+    """Restart at `at`; once the restart is up, the watched file appears, and the clock runs
+    until both watches have completed. Answers the rows and live jobs at each point."""
+    engine = await _resume(tmp_path, at, "stable")
+    seen: dict[str, Any] = {}
+    try:
+        await engine.run_until_quiescent(at)
+        store = engine.oracle.store.job
+        seen["up"] = (sorted(engine.live_jobs()), {job: store[job].status for job in ("v", "w")})
+        (tmp_path / "never").write_text("ready\n")
+        later = at
+        while {store[job].status for job in ("v", "w")} != {"SUCCESS"}:
+            later += timedelta(seconds=NEW_S)
+            assert later < at + timedelta(hours=1), "the watches never completed"
+            await engine.run_until_quiescent(later)
+        seen["done"] = {job: (store[job].status, store[job].run_number) for job in ("v", "w")}
+    finally:
+        await engine.shutdown()
+        _close(engine)
+    return seen
+
+
+def test_a_watch_an_update_takes_up_while_the_engine_drains_is_left_to_the_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DL-565, DL-526, DL-429: the update applies and finishes while the lifecycle is DRAINING,
+    `k`'s stop still pending. It chooses `rerun` for `w` and launches nothing, then or once the
+    drain has ended: `w` recovers as `v` does, a watch live when the drain began, with its
+    attempt open, no outcome and one `dispatch`. Only the open attempt's stop differs:
+    `update_stop` for `w`, none for `v`, and a watch's recovery does not read it. The restart
+    takes each up once, `w` under the applied definition and the same run id, and each
+    completes once its file qualifies."""
+    _Procs(monkeypatch)
+    launches = _launches(monkeypatch)
+    seen = asyncio.run(_drained_update(tmp_path, monkeypatch, "current", launches))
+    assert seen["draining"] == ("DRAINING", True, ["j", "k"])
+    assert seen["decisions"] == [("w", True, "DRAINING", [])]
+    assert seen["applied"] == ("DRAINING", False, 2, ["k"], ("RUNNING", 1))
+    assert seen["stopped"] == ("STOPPED", "clean_shutdown", 2, [])
+    assert seen["launches"] == []
+    assert seen["stops"] == {"v": None, "w": "update_stop"}
+    journal = _journal(tmp_path)
+    _at, applied = _applied(journal)
+    assert ["w", "rerun"] in applied["stopped"]
+    for job in ("v", "w"):
+        assert [d[1:] for d in _dispatches(journal, job)] == [(1, 1)]
+        assert _of(journal, seen[job]) == []
+    at = T0 + timedelta(minutes=10)
+    restarted = asyncio.run(_restarted(tmp_path, at))
+    assert restarted["up"] == (["j", "k", "v", "w"], {"v": "RUNNING", "w": "RUNNING"})
+    watches = [launch for launch in launches if launch[0] in ("v", "w")]
+    assert sorted(watches) == [("v", 1, seen["v"], OLD_S), ("w", 1, seen["w"], NEW_S)]
+    assert restarted["done"] == {"v": ("SUCCESS", 1), "w": ("SUCCESS", 1)}
+    journal = _journal(tmp_path)
+    for job in ("v", "w"):
+        assert [d[1:] for d in _dispatches(journal, job)] == [(1, 1)]
+        assert [(kind, what) for _i, kind, what in _of(journal, seen[job])] == [
+            ("outcome", "natural"),
+            ("follow_up", "complete"),
+        ]
+
+
+def test_a_watch_an_update_closes_while_the_engine_drains_is_closed_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DL-565, DL-526: the update removes `w` and applies while the lifecycle is DRAINING. `w`
+    is closed once with no plan, between `config applied` and the shutdown record, and is not
+    launched, by the drain or by the restart; `v` is left open for the restart."""
+    _Procs(monkeypatch)
+    launches = _launches(monkeypatch)
+    seen = asyncio.run(_drained_update(tmp_path, monkeypatch, "removed", launches))
+    assert seen["decisions"] == [("w", False, "DRAINING", [])]
+    assert seen["stopped"] == ("STOPPED", "clean_shutdown", 2, [])
+    assert seen["launches"] == []
+    journal = _journal(tmp_path)
+    applied, body = _applied(journal)
+    assert ["w", "none"] in body["stopped"]
+    ended = _of(journal, seen["w"])
+    assert [(kind, what) for _i, kind, what in ended] == [
+        ("outcome", "stopped"),
+        ("follow_up", "none"),
+    ]
+    shutdown = _shutdown_at(journal)
+    assert all(applied < i < shutdown for i, _kind, _what in ended)
+    assert _of(journal, seen["v"]) == []
+
+    async def restart() -> list[str]:
+        engine = await _resume(tmp_path, T0 + timedelta(minutes=10), "stable")
+        try:
+            await engine.run_until_quiescent(T0 + timedelta(minutes=10))
+            return sorted(engine.live_jobs())
+        finally:
+            await engine.shutdown()
+            _close(engine)
+
+    assert asyncio.run(restart()) == ["j", "k", "v"]
+    assert [launch[:3] for launch in launches if launch[0] in ("v", "w")] == [("v", 1, seen["v"])]
+
+
+def test_a_watch_whose_run_ends_at_an_application_during_a_drain_is_closed_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DL-565, DL-526: `w`'s `term_run_time` deadline falls at the instant the update applies,
+    while the lifecycle is DRAINING. `config applied` chooses `rerun` while `w`'s run is live;
+    the time advance after it ends the run. The decision at the launch then closes the watch
+    once with no plan, between `config applied` and the shutdown record: the drain leaves no
+    open attempt for a run that has ended."""
+    _Procs(monkeypatch)
+    launches = _launches(monkeypatch)
+    seen = asyncio.run(_drained_update(tmp_path, monkeypatch, "deadline", launches))
+    assert seen["due"] == "RUNNING"
+    assert seen["decisions"] == [("w", True, "DRAINING", [])]
+    assert seen["applied"] == ("DRAINING", False, 2, ["k"], ("TERMINATED", 1))
+    assert seen["stopped"] == ("STOPPED", "clean_shutdown", 2, [])
+    assert seen["launches"] == [] and "w" not in seen["stops"]
+    journal = _journal(tmp_path)
+    applied, body = _applied(journal)
+    assert ["w", "rerun"] in body["stopped"]
+    ended = _of(journal, seen["w"])
+    assert [(kind, what) for _i, kind, what in ended] == [
+        ("outcome", "stopped"),
+        ("follow_up", "none"),
+    ]
+    shutdown = _shutdown_at(journal)
+    assert all(applied < i < shutdown for i, _kind, _what in ended)

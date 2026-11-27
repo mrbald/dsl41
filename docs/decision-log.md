@@ -28392,3 +28392,26 @@ relitigate an entry; append a new one.
   this build may then refuse the store it went on with. THE COST. Go back to an earlier build only
   from a drained stop; if it refuses that snapshot, a debt is still owed. Its offline history of
   a store that holds such an attempt can refuse. One catalog pass per owed update.
+- DL-565 A draining engine launches no file watch an update takes up; the restart does
+  (2026-11-27; closes BUG-101, the limit DL-526 named; src/dsl41/runner.py, runner_update.py,
+  tests/test_update_watches.py; docs: fw-observation, runner-design §7, update block)
+  THE RULE. When an update's application finishes while the engine drains, a file watch the
+  update cancelled and takes up is not launched. It keeps its open attempt, its one `dispatch`
+  and its `watch.jsonl`, and the drain ends with no outcome for it. A watch live when the drain
+  began ends the same way, since the drain cancels its task and writes nothing for it
+  (DL-429). The two may differ in the open attempt's `stop` cause, which a watch's recovery
+  does not read, so the restart treats both alike. It takes either up once, as DL-526 states
+  for an unfinished watch of a live run: under the applied definition and the same run id,
+  reading its log. The drain still runs timers, so a `term_run_time` deadline may end either
+  run before the restart; the restart then closes it with no launch, both alike.
+  THE DEFECT. `Engine.resume_cancelled` launched the watch with no look at the drain. The
+  drain had cancelled its watches at its start, so the new task was still live at the
+  shutdown record and its covering snapshot, until the engine's teardown cancelled it. On the
+  real clock it could poll in that window. The restart still took it up once: no second
+  attempt.
+  WHAT STAYS. A watch the update closes (its job removed or retyped, its run ended by the
+  application's time advance) is closed once with no plan, during a drain too: records only,
+  before the shutdown record. The drain check comes after the check that the watch still
+  qualifies, so a run the time advance ended leaves no open attempt.
+  `config applied.stopped` still names `rerun` for a watch left to the restart. No record
+  kind, record field or version constant.

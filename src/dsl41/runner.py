@@ -939,8 +939,11 @@ class Engine:
         """A task the update cancelled (a file watch): launched again under its run id when the
         application chose to and it still qualifies now, after the application's time advance
         (`takes_up`), as a restart takes up a watch; else its attempt is closed once with no
-        plan (DL-526)."""
+        plan (DL-526). A draining engine launches nothing: the watch keeps its open attempt and
+        its log, as one the drain cancelled does, and the restart takes it up (DL-565)."""
         if take_up and self.takes_up(job, run_number):
+            if self.draining:
+                return  # left to the restart, as a watch the drain cancelled (DL-565)
             job_ir = self.oracle.catalog.jobs[job]
             self._launch(
                 job_ir,

@@ -1363,7 +1363,12 @@ interruption rule, including replacement for an idempotent run (DL-428).
 An FW watch with a dispatch record and no directory is relaunched as an
 idempotent read (DL-425), unless an update that is stopping holds its job
 or has selected the watch for a stop: that update takes the watch up or
-closes it after its application (DL-526). A derived start with no dispatch is pending work;
+closes it after its application (DL-526). An application that finishes while the
+engine drains launches no watch it takes up: the watch keeps its open attempt and its
+log, and the next restart takes it up (DL-565). The restart treats it as a watch the
+drain cancelled: a watch's recovery does not read the open attempt's `stop` cause. A
+deadline that ends the run before the restart closes it there with no launch.
+A derived start with no dispatch is pending work;
 reconciliation and overdue deadlines run before launch. A run with neither
 a dispatch record nor a derived start is left as it stands, for the
 operator (DL-425). A start superseded by the current oracle row is not

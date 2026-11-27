@@ -70,6 +70,7 @@ This shows log recovery and polling; it leaves out engine outcome settlement.
 
 - An incomplete legacy wildcard log keeps its scalar prefix, deadline and original poll count, then starts fresh pathname streaks with `sample` lines (DL-461).
 - The engine dies after the `start` line. Resume relaunches an incomplete watch while its oracle run remains live; it rebuilds progress from the log and appends no second `start` line (PR-34a; DL-129, DL-425). While an update that is stopping holds the watch's job or has selected the watch for a stop, the watch is not relaunched; the update takes it up or closes it after its application (DL-526).
+- An update's application finishes while the engine drains. A watch it takes up is not launched. It ends the drain with its open attempt and its log, and the next restart takes it up as above (DL-565). Recovery treats it as it treats a watch the drain cancelled: it does not read the open attempt's `stop` cause.
 - The engine dies after a completing poll and before the STATUS input is durable. `_resume_watch` injects the completion from scalar or sampled evidence without observing the file again (PR-34a, DL-461).
 - A run directory exists with no `start` line. Resume dispatches the watch again under the bound `run_id`. The same update rule applies (DL-526).
 - The run root's lock proof fails. The check raises before the append, so no line lands (PR-03, narrowed by DL-424).
