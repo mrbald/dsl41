@@ -192,6 +192,7 @@ from dsl41.runner_config import (
 from dsl41.runner_journal import (
     FailureLatch,
     Journal,
+    OpenAttempt,
     best_effort_report,
     ladder_done_record,
     outcome_end,
@@ -239,6 +240,10 @@ UNARMED: Final = (
     "the archive is not armed for this engine: it was not started by `dsl41 run`, and pruning"
     " deletes without a copy"
 )
+
+#: How a file watch an update changed since its dispatch ends: stopped by the update, so the
+#: interruption rule replaces it as it replaces a command the update stops (DL-566).
+REPLACED: Final = AttemptOutcome("stopped", cause=UPDATE_STOP)
 
 
 @dataclass
@@ -676,6 +681,10 @@ class Engine:
         self._catch_up = 0
         #: the attempts a restart found open, until they are forgotten
         self._restored: set[str] = set()
+        #: by job, the seq of the latest committed `config applied` whose `changed` names it,
+        #: since the oldest watch this engine may take up was dispatched (`changed_since`,
+        #: DL-566)
+        self.changed_at: dict[str, int] = {}
         #: the journal's last instant at a restart: what startup's feeds are stamped no earlier
         #: than
         self.resume_at: datetime | None = None
@@ -936,29 +945,73 @@ class Engine:
     def resume_cancelled(
         self, job: str, run_number: int, run_id: str | None, *, take_up: bool
     ) -> None:
-        """A task the update cancelled (a file watch): launched again under its run id when the
-        application chose to and it still qualifies now, after the application's time advance
-        (`takes_up`), as a restart takes up a watch; else its attempt is closed once with no
-        plan (DL-526). A draining engine launches nothing: the watch keeps its open attempt and
-        its log, as one the drain cancelled does, and the restart takes it up (DL-565)."""
-        if take_up and self.takes_up(job, run_number):
-            if self.draining:
-                return  # left to the restart, as a watch the drain cancelled (DL-565)
-            job_ir = self.oracle.catalog.jobs[job]
-            self._launch(
-                job_ir,
-                run_number,
-                self.adapters[job_ir.job_type],
-                run_id=run_id,
-                spool=self.spool_of(job_ir, run_number, 1),
-            )
-            return
+        """A task the update cancelled (a file watch): taken up when the application chose to
+        and it still qualifies now, after the application's time advance (`takes_up`), at the
+        one place a restart takes a watch up too (`take_up_watch`, DL-566); else its attempt is
+        closed once with no plan (DL-526)."""
         # the update needs a store, and a cancelled task's attempt has no outcome yet
         assert self.journal is not None and run_id is not None
+        if take_up and self.takes_up(job, run_number):
+            self.take_up_watch(self.journal.open.attempts[run_id])
+            return
         at = self.now_present()
         self.journal.append(
             outcome_record(run_id, job, run_number, "stopped", {}, at, cause=UPDATE_STOP),
             plan_record(run_id, job, run_number, "none", [], at),
+        )
+
+    def note_changed(self, seq: int, changed: Collection[str]) -> None:
+        """A committed `config applied` record at `seq` names `changed` (DL-566)."""
+        for job in changed:
+            self.changed_at[job] = seq
+
+    def changed_since(self, job: str, seq: int) -> bool:
+        """Whether a committed `config applied` record after `seq`, an attempt's dispatch,
+        names `job` changed: what the applications recorded, never a comparison of two
+        definitions (DL-566)."""
+        return self.changed_at.get(job, 0) > seq
+
+    def replaces(self, attempt: OpenAttempt) -> bool:
+        """Whether the open attempt is replaced where it is taken up: it is a file watch's, and
+        an update changed its job since its dispatch (DL-566). Another task the attempt tier
+        does not run (a test stand-in's command) is taken up as before."""
+        job_ir = self.oracle.catalog.jobs[attempt.job]
+        return job_ir.job_type == "FW" and self.changed_since(attempt.job, attempt.seq)
+
+    def take_up_watch(self, attempt: OpenAttempt) -> None:
+        """The one place a file watch's open attempt is taken up: after an update's application
+        (`resume_cancelled`) and at a restart (`runner_startup._resume_watch`). Evidence belongs
+        to an attempt, and an attempt to one definition (DL-566). A watch's attempt whose job an
+        update changed since its dispatch is replaced (`replaces`): closed once as stopped by
+        the update, with the interruption rule's plan in the same transaction, so a new attempt
+        of the run follows under the applied rev, its own spool and an empty log, or the watch is
+        held at the attempt limit. The decision is by job type: any other attempt, and any other
+        task the attempt tier does not run, is resumed under its run id from the spool its
+        dispatch recorded. A draining engine takes nothing up: the open attempt and its log are
+        left to the restart, which decides the same way (DL-565)."""
+        if self.draining:
+            return  # left to the restart, as a watch the drain cancelled (DL-565)
+        if self.replaces(attempt):
+            # a task the attempt tier does not run has no facts until its outcome
+            self._facts[attempt.attempt] = facts_of(attempt)
+            self.record_outcome(attempt.attempt, REPLACED)
+            return
+        job_ir = self.oracle.catalog.jobs[attempt.job]
+        # a store holds a run root, and every watch dispatched under one names its spool
+        assert attempt.spool is not None
+        self._launch(
+            job_ir,
+            attempt.run_number,
+            self.adapters[job_ir.job_type],
+            run_id=attempt.attempt,
+            spool=Path(attempt.spool),
+            ordinal=attempt.ordinal,
+        )
+
+    def replacement_plan(self, attempt: OpenAttempt) -> FollowUp:
+        """The plan `take_up_watch` would commit now for a watch an update changed (DL-566)."""
+        return self._plan(
+            attempt.job, attempt.run_number, attempt.ordinal, attempt.attempt, REPLACED
         )
 
     async def _control(self, pending: _Pending) -> None:
@@ -1088,14 +1141,18 @@ class Engine:
         """The interruption rule's plan for an ended attempt, under the catalog, the marked set
         and the rows as they are now (spec-wiring 2b)."""
         facts = self._facts[attempt]
-        job, run = facts.job, facts.run_number
+        return self._plan(facts.job, facts.run_number, facts.ordinal, attempt, outcome)
+
+    def _plan(
+        self, job: str, run: int, ordinal: int, attempt: str, outcome: AttemptOutcome
+    ) -> FollowUp:
         row = self.oracle.store.job.get(job)
         job_ir = self.oracle.catalog.jobs.get(job)
         return follow_up_plan(
             outcome,
             job=job,
             run_number=run,
-            attempt=facts.ordinal,
+            attempt=ordinal,
             in_catalog=job in self.oracle.catalog.jobs,
             live_run=None if row is None else (row.run_number, row.status),
             marked=job in self.marked,
@@ -2392,12 +2449,14 @@ class Engine:
 
     def spool_of(self, job_ir: JobIR, run_number: int, ordinal: int) -> Path | None:
         """Where an attempt's spool lives: a command attempt has its own directory under its
-        run's, so a replacement never meets the first one's exclusive `mkdir`; a file watch keeps
-        its run directory and `watch.jsonl` as its identity (spec-wiring 2b)."""
+        run's, so a replacement never meets the first one's exclusive `mkdir`. A file watch's
+        first attempt keeps its run directory and `watch.jsonl` as its identity (spec-wiring
+        2b); a later one, which an update made, has its ordinal's directory and its own log
+        (DL-566)."""
         if self.run_root is None:
             return None
         run_dir = self.run_root / "runs" / f"{job_ir.name}.{run_number}"
-        return run_dir if job_ir.job_type == "FW" else run_dir / str(ordinal)
+        return run_dir if job_ir.job_type == "FW" and ordinal == 1 else run_dir / str(ordinal)
 
     def spawn(
         self,
@@ -2538,6 +2597,7 @@ class Engine:
             spool=spool,
             env=invocation,
             observed=observed,
+            ordinal=ordinal,
         )
         return True
 
@@ -2551,11 +2611,13 @@ class Engine:
         spool: Path | None = None,
         env: Mapping[str, str] | None = None,
         observed: bool = False,
+        ordinal: int = 1,
     ) -> None:
         """Create the adapter task, from `spawn` and from a restart's FW re-dispatch, an
         idempotent re-read under the run's recorded `run_id`. None lets the adapter mint its
-        own. `env` is the invocation the process is given. An `observed` attempt's adapter
-        reports to the attempt tier instead of completing the run itself."""
+        own. `env` is the invocation the process is given, `ordinal` the attempt's in its run.
+        An `observed` attempt's adapter reports to the attempt tier instead of completing the
+        run itself."""
         loop = asyncio.get_running_loop()
         if observed:
             assert run_id is not None and isinstance(adapter, ObservedAdapter)
@@ -2581,7 +2643,14 @@ class Engine:
         else:
             task = loop.create_task(
                 self._latching(
-                    self._run_adapter, job_ir, run_number, adapter, run_id, spool, dict(env or {})
+                    self._run_adapter,
+                    job_ir,
+                    run_number,
+                    adapter,
+                    run_id,
+                    spool,
+                    dict(env or {}),
+                    ordinal,
                 )
             )
         task.add_done_callback(lambda _t: self._activity.set())
@@ -2669,6 +2738,7 @@ class Engine:
         run_id: str | None = None,
         spool: Path | None = None,
         env: dict[str, str] | None = None,
+        ordinal: int = 1,
     ) -> None:
         ctx = AdapterContext(
             clock=self.clock,
@@ -2677,6 +2747,7 @@ class Engine:
             fence=self.fence,
             spool=spool,
             env=env or {},
+            ordinal=ordinal,
         )
         result = await adapter.run(job_ir, run_number, ctx)
         # (job, run_number) ride along for the ss4 stale-completion gate
@@ -2970,6 +3041,24 @@ class Engine:
         view["histories"] = None if lineage is None else lineage[0]
         view["last_seq"] = None if lineage is None else lineage[1]
         return view
+
+
+def facts_of(attempt: OpenAttempt) -> AttemptFacts:
+    """The facts of an attempt the open table holds. Its wrapper, if it has one, belonged to
+    an earlier engine or has exited."""
+    # a store holds a run root, and every attempt dispatched under one names its spool
+    assert attempt.spool is not None
+    return AttemptFacts(
+        attempt.attempt,
+        attempt.job,
+        attempt.run_number,
+        attempt.ordinal,
+        Path(attempt.spool),
+        dict(attempt.env),
+        attempt.after,
+        exited=True,
+        closing=attempt.closing,
+    )
 
 
 def _names_tombstone(oracle: Oracle, attempt: Attempt) -> bool:

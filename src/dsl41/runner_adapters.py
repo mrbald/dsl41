@@ -88,6 +88,9 @@ class AdapterContext:
     #: the attempt's spool directory, which the engine names in its `dispatch` record; None
     #: takes the first attempt's (`runs/<job>.<run>/1`, a watch's `runs/<job>.<run>`)
     spool: Path | None = None
+    #: the attempt's ordinal in its run, which its `dispatch` record names: only attempt one of
+    #: a watch may complete on its first poll under `fw-existence=immediate` (DL-566)
+    ordinal: int = 1
     #: the run root's lock proof. The journal re-checks it before every append, and the FW
     #: adapter appends to a spool the journal never sees: an append after the lock was lost is
     #: evidence written by an engine that has lost the root, so this adapter re-proves before
@@ -1123,10 +1126,11 @@ class FileWatcherAdapter:
     watch_file exists with size >= watch_file_min_size (unset -> 0) and the size is stable
     across two consecutive qualifying polls -- `fw-existence=stable`, the default and dsl41's
     own choice (DL-258). Final-component * and ? patterns instead require an unchanged
-    device, inode, size, mtime_ns and ctime_ns per pathname (DL-461). A sampled run keeps
-    five-field stability for exact targets too (DL-467). With no positive minimum size,
+    device, inode, size, mtime_ns and ctime_ns per pathname (DL-461). A sampled attempt keeps
+    five-field stability for exact targets too (DL-467, DL-566). With no positive minimum size,
     `fw-existence=immediate` completes only when
-    the run's FIRST poll finds the file -- the vendor reading; a file that appears later waits
+    the run's FIRST poll, its first attempt's, finds the file -- the vendor reading (DL-566); a
+    file that appears later, or a replacement attempt an update made, waits
     for stability, as under `stable`. A job with a positive minimum size always needs two
     stable observations, whatever the switch says. Completes with exit 0. Clock-driven
     (ctx.clock.sleep_until), so the same code runs in both time domains; polling is an
@@ -1136,9 +1140,10 @@ class FileWatcherAdapter:
     on dispatch is a `start` line in the spool's `watch.jsonl`, then one fsynced line
     per poll, INCLUDING polls that changed nothing. Each line is appended before progress is
     updated or completion is emitted, so an audit sees every observation that moved the watch. A
-    resumed watch reconstructs from the log and appends no second `start`. The run directory is
-    made and its parent fsynced before the `start` line; a crash between the two leaves no
-    `start` line, and resume dispatches the watch again under its bound run_id. Without a
+    resumed watch reconstructs from the log and appends no second `start`. The spool directory
+    is made, and each directory made is fsynced in its parent, before the `start` line (DL-566);
+    a crash between the two leaves no `start` line, and resume dispatches the watch again under
+    its bound run_id. Without a
     run_root there is no spool and the watch is memory-only (the virtual-domain harness)."""
 
     def __init__(
@@ -1161,8 +1166,9 @@ class FileWatcherAdapter:
         # runs"). Once the first poll has passed without qualifying, the general rule applies
         # even under `immediate`: two stable qualifying observations, using size for exact
         # paths or five-field samples for wildcards and sampled runs (DL-461, DL-467).
-        # A positive minimum always needs it.
-        immediate = fw_existence_immediate(job_ir, self.existence)
+        # A positive minimum always needs it. Only attempt one of a run has that first poll: a
+        # replacement an update made always needs the stable observations (DL-566).
+        immediate = fw_existence_immediate(job_ir, self.existence) and ctx.ordinal == 1
         pattern = PatternWatchProgress() if any(c in spec_ir.watch_file for c in "*?") else None
         sample_path = spec_ir.watch_file if pattern is not None else glob.escape(spec_ir.watch_file)
         warned_names: set[str] = set()
@@ -1179,7 +1185,19 @@ class FileWatcherAdapter:
                 else ctx.run_root / "runs" / f"{job_ir.name}.{run_number}"
             )
             run_dir.mkdir(parents=True, exist_ok=True)
-            fsync_dir(run_dir.parent)
+            # the directories a watch's launch can make are known from the run root down:
+            # `runs/`, the run's directory and, for a later attempt, its ordinal's. The parent of
+            # each is synced at every launch, fresh or resumed, the deepest first, before the
+            # log is relied on, whoever made it: a launch cut short before its syncs leaves them
+            # to the next, and a sync of a synced directory changes nothing. They are addressed
+            # from the engine's own run root, never by climbing from the recorded spool's name,
+            # so nothing above the run root is opened. The root itself is synced for its `runs/`
+            # entry, which genesis makes without a sync (DL-566)
+            runs = ctx.run_root / "runs"
+            run_of = runs / f"{job_ir.name}.{run_number}"
+            made = [run_of / str(ctx.ordinal)] if ctx.ordinal > 1 else []
+            for directory in (*made, run_of, runs):
+                fsync_dir(directory.parent)
             log_path = run_dir / WATCH_LOG
             log = read_watch_log(run_dir)
             if log is None:

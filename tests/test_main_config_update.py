@@ -1213,7 +1213,10 @@ def test_kill_signals_update_affects_later_kills_only(
 
 
 def test_fw_wildcard_to_exact_survives_update_and_restart(tmp_path: Path) -> None:
-    """DL-467: update and restart keep one sampled FW run and its pathname streak."""
+    """DL-467 as DL-566 narrows it: sampling holds within an attempt. An update that turns a
+    sampled wildcard watch into an exact one replaces the attempt: the first attempt's log
+    keeps its samples, and the second watches the exact target with size stability from an
+    empty log in its own directory. Its streak survives the restart."""
     from dsl41.runner_adapters import FileWatcherAdapter, read_watch_log
 
     watched = tmp_path / "watched.txt"
@@ -1229,6 +1232,7 @@ def test_fw_wildcard_to_exact_survives_update_and_restart(tmp_path: Path) -> Non
     root = tmp_path / "run"
     run_dir = root / "runs" / "W.1"
     log = run_dir / "watch.jsonl"
+    second = run_dir / "2"
 
     async def scenario() -> None:
         engine = start_run(
@@ -1255,7 +1259,12 @@ def test_fw_wildcard_to_exact_survives_update_and_restart(tmp_path: Path) -> Non
                 assert current.config_rev == 2
                 assert current.oracle.catalog.jobs["W"].exec_.watch_file == exact
                 assert log.read_bytes() == prefix
-                assert read_watch_log(run_dir).pattern.stable == {exact: 1}
+                lines = [
+                    json.loads(line) for line in (second / "watch.jsonl").read_bytes().splitlines()
+                ]
+                assert [line["kind"] for line in lines] == ["start", "poll"]
+                replaced = read_watch_log(second)
+                assert replaced.pattern is None and replaced.stable_polls == 1
 
             source.write_text(definition(exact))
             plan = reread(
@@ -1304,13 +1313,12 @@ def test_fw_wildcard_to_exact_survives_update_and_restart(tmp_path: Path) -> Non
             await engine.shutdown()
             engine.journal.close()
 
-        after = log.read_bytes()
-        assert after.startswith(prefix)
-        lines = [json.loads(line) for line in after.splitlines()]
-        assert [line["kind"] for line in lines] == ["start", "sample", "sample"]
-        assert {line["run_id"] for line in lines} == {before[0]["run_id"]}
-        assert lines[-1]["files"] == [observed]
-        assert read_watch_log(run_dir).pattern.stable == {exact: 2}
+        assert log.read_bytes() == prefix
+        lines = [json.loads(line) for line in (second / "watch.jsonl").read_bytes().splitlines()]
+        assert [line["kind"] for line in lines] == ["start", "poll", "poll"]
+        assert len({line["run_id"] for line in lines} | {before[0]["run_id"]}) == 2
+        assert [line["size"] for line in lines[1:]] == [4, 4]
+        assert read_watch_log(second).stable_polls == 2
         assert sorted(item.name for item in (root / "runs").iterdir()) == ["W.1"]
 
     asyncio.run(scenario())

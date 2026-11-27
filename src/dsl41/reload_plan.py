@@ -89,6 +89,10 @@ class Live:
     #: each job the engine owns a process of, whatever its row says, with the run of that
     #: process (`Engine.owned_runs`, DL-525, DL-559)
     owned: Mapping[str, int] = field(default_factory=dict)
+    #: each file watch's open attempt of its row's run, by ordinal (`runner_update.
+    #: watch_ordinals`): the forecast's interruption rule holds one at the limit, as the
+    #: application does (DL-566)
+    ordinals: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

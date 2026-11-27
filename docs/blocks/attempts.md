@@ -22,7 +22,7 @@ The wiring journals each outcome and its follow-up plan in one transaction, whic
 - `exit_record_from_status` turns one `status.json` into the chart's exit record. `missing_record_verdict` says what a missing `status.json` means.
 - `oracle_input_for` says what an outcome feeds the oracle, through the adapter's own `outcome_from_status`.
 - `follow_up_plan` is the interruption rule: the plan committed with an outcome, as ordered steps.
-- An attempt's identity is the uuid4 `run_id` its `dispatch` record binds ([DL-118](../decision-log.md)). Its ordinal `n` names its spool, `runs/<job>.<run>/<n>/`, its display `<job>.<run>.<n>` and its `DSL41_ATTEMPT`; the run's log files stay one level up.
+- An attempt's identity is the uuid4 `run_id` its `dispatch` record binds ([DL-118](../decision-log.md)). Its ordinal `n` names its spool, `runs/<job>.<run>/<n>/`, its display `<job>.<run>.<n>` and its `DSL41_ATTEMPT`; the run's log files stay one level up. A file watch's attempt one keeps the run's directory itself; a later one has `runs/<job>.<run>/<n>/` (DL-566).
 - The engine is both protocols (`runner_stops.EngineStops`). `LocalCommandAdapter.observe` reports the wrapper's spool to the attempt tier; `stop_ladder` and `selected_signal_ladder` execute its ordinary and selected stops (DL-462).
 - `dsl41 engine stop` (the socket's `engine_stop`, adm tier) and SIGTERM post `stop_requested` as a step of the engine's single writer.
 
@@ -55,7 +55,7 @@ The [chart lifecycles](../chart-lifecycles.md) view lists each target state with
 - `wrapper_gone` is posted only when the command is dead or was never named. A wrapper that died while its command lives gets a stop with cause `wrapper_lost`. `engine_died` is a restart's only. It ends an attempt with no record from SPAWNING, RUNNING or STOPPING as `unobservable`, with the cause of the stop it took first, else `engine_death`. It runs no ladder and arms no timer; what is left of the command is cleanup, as at any record.
 - An attempt is settled only once it ended and the wiring calls `plan_done` for its follow-up plan. The engine tier posts `all_attempts_settled` only in DRAINING, when no attempt is unsettled.
 - An interrupted attempt of an idempotent job reruns the same run under the next ordinal, with a run id the plan names before it can run and the same `DSL41_JOB`, `DSL41_RUN_NUMBER` and `DSL41_SCHEDULED_AT`. While the engine drains, the rerun waits for the restart. One of a job named in `non-idempotent.toml` is one oracle transition: a FAILURE with cause `interrupted` that holds the job before its own start or a dependent's is evaluated, with the evidence. A removed job, or a run the oracle ended, gets nothing ([DL-424](../decision-log.md)).
-- An interrupted attempt numbered at least `MAX_ATTEMPTS_PER_RUN + n_retrys`, 5 plus the applied CMD retry count, is held like a marked job's; its evidence names that limit. A run never exceeds 25 attempts (DL-485).
+- An interrupted attempt numbered at least `MAX_ATTEMPTS_PER_RUN + n_retrys`, 5 plus the applied CMD retry count, is held like a marked job's; its evidence names that limit. A run never exceeds 25 attempts (DL-485). A file watch an update changed since its attempt's `dispatch` takes this rule where it is taken up, after the application or at a restart: it ends `stopped` with cause `update_stop`, and its plan is a command's the update stopped, `rerun`, `hold` at the limit, or `none` (DL-566). A watch cannot be named in `non-idempotent.toml` (lint L025), so a marked job's hold never reaches one.
 
 ## Failure and recovery
 

@@ -2,8 +2,10 @@
 after a restart, and is taken up after the application only while its run is still live there
 (DL-526, DL-432). A restart classifies a watch's durable evidence first: a complete log is fed,
 a run that ended is closed, a log that does not read as the attempt's is quarantined, and only an
-unfinished watch of a live run is held for the update. An application that finishes while the
-engine drains launches no watch: the restart takes it up (DL-565).
+unfinished watch of a live run is held for the update. After the application a watch the update
+changed is replaced: its attempt is closed with plan `rerun` and a new attempt of its run watches
+from an empty log (DL-566). An application that finishes while the engine drains launches no
+watch: the restart dispatches the replacement (DL-565).
 
 The scenarios run on the virtual clock with `test_engine_stops_cookie`'s process stand-ins. The
 update waits for `j`, a changed command whose stop sequence the test parks and ends
@@ -156,6 +158,21 @@ def _dispatches(journal: list[tuple[str, dict[str, Any]]], job: str) -> list[tup
     ]
 
 
+def _replaced(journal: list[tuple[str, dict[str, Any]]], attempt: str) -> str:
+    """DL-566: `attempt` was closed after `config applied`, stopped with plan `rerun`, and one
+    new attempt of run 1 was dispatched under rev 2. Answers its id."""
+    applied, _body = _applied(journal)
+    ended = _of(journal, attempt)
+    assert [(kind, what) for _i, kind, what in ended] == [
+        ("outcome", "stopped"),
+        ("follow_up", "rerun"),
+    ]
+    assert all(i > applied for i, _kind, _what in ended)
+    found = [b for k, b in journal if k == "dispatch" and b["job"] == "w"]
+    assert [(b["run_number"], b["ordinal"], b["rev"]) for b in found] == [(1, 1, 1), (1, 2, 2)]
+    return str(found[1]["attempt"])
+
+
 def _line(at: datetime, run_id: str, *, size: int | None, stable: int) -> dict[str, Any]:
     return {
         "artifact_format_version": ARTIFACT_FORMAT_VERSION,
@@ -260,11 +277,11 @@ async def _restart(
 def test_a_held_watch_is_not_launched_across_restarts_and_is_taken_up_once_after_the_application(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """DL-526, DL-432: the engine dies while an update that changes `j` and `w` waits for `j`'s
-    stop, and restarts twice while it still waits. No restart launches `w` or lets it poll
-    before the application. After it, `w` is taken up once, under the applied definition, with
-    its original run and attempt id and no second `dispatch` record; `config applied` names it
-    `rerun`."""
+    """DL-526, DL-432, DL-566: the engine dies while an update that changes `j` and `w` waits
+    for `j`'s stop, and restarts twice while it still waits. No restart launches `w` or lets it
+    poll before the application. After it, `w` is replaced once: its attempt is closed with plan
+    `rerun`, and one new attempt of its run is launched under the applied definition;
+    `config applied` names it `rerun`."""
     _Procs(monkeypatch)
     attempts = asyncio.run(_admitted_then_killed(tmp_path, monkeypatch))
     polls = _polls(tmp_path)
@@ -277,12 +294,11 @@ def test_a_held_watch_is_not_launched_across_restarts_and_is_taken_up_once_after
     seen += asyncio.run(_restart(tmp_path, monkeypatch, attempts, second, apply=True))
     assert seen == [(True, 1, []), [], (True, 1, []), (False, 2, ["j", "w"])]
     assert probe["polls"] == polls
-    assert [launch for launch in launches if launch[0] == "w"] == [("w", 1, attempts["w"], NEW_S)]
     journal = _journal(tmp_path)
     _at, applied = _applied(journal)
     assert ["w", "rerun"] in applied["stopped"]
-    assert [d[1:] for d in _dispatches(journal, "w")] == [(1, 1)]
-    assert _of(journal, attempts["w"]) == []
+    new = _replaced(journal, attempts["w"])
+    assert [launch for launch in launches if launch[0] == "w"] == [("w", 1, new, NEW_S)]
 
 
 def test_a_watch_only_the_stop_list_names_is_held_after_a_restart_and_taken_up_once(
@@ -291,8 +307,8 @@ def test_a_watch_only_the_stop_list_names_is_held_after_a_restart_and_taken_up_o
     """DL-526, DL-527: the engine dies while an update that changes `j` and `w` waits for `j`'s
     stop. The test narrows the recorded intent's `filter` by hand to `j` (DL-491). The stop
     list still names `w`'s attempt, so the restart holds the watch through it alone: it neither
-    launches nor polls before the application. After it, `w` is taken up once, under its run
-    id and the applied definition."""
+    launches nor polls before the application. After it, `w` is replaced once, under the
+    applied definition (DL-566)."""
     _Procs(monkeypatch)
     attempts = asyncio.run(_admitted_then_killed(tmp_path, monkeypatch))
     polls = _polls(tmp_path)
@@ -310,9 +326,11 @@ def test_a_watch_only_the_stop_list_names_is_held_after_a_restart_and_taken_up_o
     )
     assert seen == [(True, 1, []), (False, 2, ["j", "w"])]
     assert probe["polls"] == polls
-    assert [launch for launch in launches if launch[0] == "w"] == [("w", 1, attempts["w"], NEW_S)]
-    _at, applied = _applied(_journal(tmp_path))
+    journal = _journal(tmp_path)
+    _at, applied = _applied(journal)
     assert ["w", "rerun"] in applied["stopped"]
+    new = _replaced(journal, attempts["w"])
+    assert [launch for launch in launches if launch[0] == "w"] == [("w", 1, new, NEW_S)]
 
 
 class _Died(Exception):
@@ -328,9 +346,9 @@ def test_a_watch_only_the_filter_holds_is_held_after_a_restart_and_taken_up_once
     input: the admission finds `w`'s row TERMINATED and no process of `w`, so its stop list
     names `j` alone while its dispatch filter holds `w`. The RUNNING makes the same run live
     again, and the engine dies before the cancelled task is reaped, so `w`'s attempt is still
-    open. The restart holds `w` while the update waits; after the application `w` is taken up
-    once, under its run id and the applied definition, and `config applied` names no entry for
-    it."""
+    open. The restart holds `w` while the update waits. After the application `w`, which the
+    update changed, is replaced once under the applied definition (DL-566), and `config
+    applied` names no entry for it."""
     from test_update_wiring import TIMEOUT_S
 
     from dsl41.runner_clock import RealClock
@@ -442,13 +460,12 @@ def test_a_watch_only_the_filter_holds_is_held_after_a_restart_and_taken_up_once
     asyncio.run(restart())
     assert seen["looked"] == (True, []) and seen["launches"] == []
     assert probe["polls"] == seen["polls"]
-    assert [launch for launch in launches if launch[0] == "w"] == [("w", 1, seen["w"], NEW_S)]
-    assert seen["live"] == (1, seen["w"])
     journal = _journal(tmp_path)
     _at, body = _applied(journal)
     assert [entry for entry in body["stopped"] if entry[0] == "w"] == []
-    assert [d[1:] for d in _dispatches(journal, "w")] == [(1, 1)]
-    assert _of(journal, seen["w"]) == []
+    new = _replaced(journal, seen["w"])
+    assert [launch for launch in launches if launch[0] == "w"] == [("w", 1, new, NEW_S)]
+    assert seen["live"] == (1, new)
 
 
 @pytest.mark.parametrize(
@@ -630,8 +647,9 @@ def test_a_watch_whose_run_the_applications_time_advance_ends_is_closed_once_and
 def test_after_the_application_a_cancelled_watch_is_taken_up_only_while_its_run_is_current(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
-    """DL-526, DL-432: a changed watch whose run is still current is taken up once, under its
-    run id and the applied definition, with no outcome of its own. A removed or retyped watch is
+    """DL-526, DL-432, DL-566: a changed watch whose run is still current is replaced once: its
+    attempt is closed with plan `rerun`, and a new attempt of its run is launched under the
+    applied definition. A removed or retyped watch is
     closed once with no plan and not launched. A watch killed and started again while the
     update waits is closed, and its newer run is dispatched once, after the application, under
     the applied revision, and keeps its own task."""
@@ -644,8 +662,9 @@ def test_after_the_application_a_cancelled_watch_is_taken_up_only_while_its_run_
     ended = [(kind, what) for _i, kind, what in _of(journal, watch)]
     if case == "current":
         assert ["w", "rerun"] in body["stopped"]
-        assert seen["launches"] == [("w", 1, watch, NEW_S)]
-        assert seen["live"] == (1, watch) and ended == []
+        new = _replaced(journal, watch)
+        assert seen["launches"] == [("w", 1, new, NEW_S)]
+        assert seen["live"] == (1, new)
         return
     assert ["w", "none"] in body["stopped"]
     assert ended == [("outcome", "stopped"), ("follow_up", "none")]
@@ -796,13 +815,14 @@ async def _restarted(tmp_path: Path, at: datetime) -> dict[str, Any]:
 def test_a_watch_an_update_takes_up_while_the_engine_drains_is_left_to_the_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """DL-565, DL-526, DL-429: the update applies and finishes while the lifecycle is DRAINING,
-    `k`'s stop still pending. It chooses `rerun` for `w` and launches nothing, then or once the
-    drain has ended: `w` recovers as `v` does, a watch live when the drain began, with its
-    attempt open, no outcome and one `dispatch`. Only the open attempt's stop differs:
+    """DL-565, DL-526, DL-429, DL-566: the update applies and finishes while the lifecycle is
+    DRAINING, `k`'s stop still pending. It chooses `rerun` for `w` and launches nothing, then or
+    once the drain has ended: `w` recovers as `v` does, a watch live when the drain began, with
+    its attempt open, no outcome and one `dispatch`. Only the open attempt's stop differs:
     `update_stop` for `w`, none for `v`, and a watch's recovery does not read it. The restart
-    takes each up once, `w` under the applied definition and the same run id, and each
-    completes once its file qualifies."""
+    takes `v` up under its run id. It replaces `w`, which the update changed since its
+    dispatch: `w`'s attempt is closed with plan `rerun` and a new attempt of its run watches
+    under the applied definition. Each completes once its file qualifies."""
     _Procs(monkeypatch)
     launches = _launches(monkeypatch)
     seen = asyncio.run(_drained_update(tmp_path, monkeypatch, "current", launches))
@@ -821,13 +841,13 @@ def test_a_watch_an_update_takes_up_while_the_engine_drains_is_left_to_the_resta
     at = T0 + timedelta(minutes=10)
     restarted = asyncio.run(_restarted(tmp_path, at))
     assert restarted["up"] == (["j", "k", "v", "w"], {"v": "RUNNING", "w": "RUNNING"})
-    watches = [launch for launch in launches if launch[0] in ("v", "w")]
-    assert sorted(watches) == [("v", 1, seen["v"], OLD_S), ("w", 1, seen["w"], NEW_S)]
-    assert restarted["done"] == {"v": ("SUCCESS", 1), "w": ("SUCCESS", 1)}
     journal = _journal(tmp_path)
-    for job in ("v", "w"):
-        assert [d[1:] for d in _dispatches(journal, job)] == [(1, 1)]
-        assert [(kind, what) for _i, kind, what in _of(journal, seen[job])] == [
+    new = _replaced(journal, seen["w"])
+    watches = [launch for launch in launches if launch[0] in ("v", "w")]
+    assert sorted(watches) == sorted([("v", 1, seen["v"], OLD_S), ("w", 1, new, NEW_S)])
+    assert restarted["done"] == {"v": ("SUCCESS", 1), "w": ("SUCCESS", 1)}
+    for attempt in (seen["v"], new):
+        assert [(kind, what) for _i, kind, what in _of(journal, attempt)] == [
             ("outcome", "natural"),
             ("follow_up", "complete"),
         ]

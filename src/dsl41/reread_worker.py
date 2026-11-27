@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from dsl41.engine_charts import UPDATE_STOP, AttemptOutcome
 from dsl41.ir import CatalogIR, check_ir_version
 from dsl41.lint import lint_summary_lines
 from dsl41.main_config import fingerprint, policy_report, prepare
@@ -21,6 +22,7 @@ from dsl41.reload_diff import (
     record_difference,
     running_boxes,
 )
+from dsl41.runner_attempts import follow_up_plan
 from dsl41.reload_plan import (
     Live,
     check_reload_candidate,
@@ -166,6 +168,25 @@ def _tree_active(candidate: Any, live: Live, plan: Plan) -> tuple[str, ...]:
     return tree_active(live.catalog, candidate.catalog, live.status, live.owned, stops)
 
 
+def _watch(live: Live, name: str) -> str:
+    """What the application chooses for a kept file watch's stop: the interruption rule it
+    replaces the watch with, read for the attempt that stop selects, its row's run and that
+    run's open attempt's ordinal (`Live.ordinals`): `hold` at the attempt limit, else `rerun`
+    (DL-485, DL-566). A watch is never marked (L025), and a stop of its live row is never
+    `none`."""
+    run = live.runs.get(name, 0)
+    plan = follow_up_plan(
+        AttemptOutcome("stopped", cause=UPDATE_STOP),
+        job=name,
+        run_number=run,
+        attempt=live.ordinals.get(name, 1),
+        in_catalog=True,
+        live_run=(run, str(live.status.get(name))),
+        marked=False,
+    )
+    return plan.kind
+
+
 def preview(
     candidate: Any,
     live: Live,
@@ -196,6 +217,8 @@ def preview(
             if name in marked and name not in plan.removed
             else "remove"
             if name in plan.removed
+            else _watch(live, name)
+            if candidate.catalog.jobs[name].job_type == "FW"
             else "rerun",
         }
         for name in stops

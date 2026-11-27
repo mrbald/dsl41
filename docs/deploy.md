@@ -1311,6 +1311,17 @@ such a change to a busy tree, stop the named jobs (or wait for them), run
 update, then start the box again. One busy job refuses the whole update. A job
 outside every box is added, removed or retyped as before, with its stop.
 
+A file watch the update changes starts watching again. Its run goes on, but what it saw
+before the update no longer counts: it needs its two stable looks at the new definition,
+and under `fw-existence=immediate` a file already there does not complete it at the first
+look. A watch the update does not change goes on with what it has seen (DL-566).
+The first start after an upgrade does the same once for a watch that the earlier build had
+carried over an update that changed it.
+Each such update starts one more attempt of the run, and the attempt limit below holds for a
+watch too: the fifth update that changes one waiting watch holds it instead. `reread` says
+`hold` for it, and the watch is then FAILURE and on hold, so a job that waits on `f()` of the
+watch becomes eligible.
+
 An update looks again at one kind of job: a box member whose
 `condition:` the update changed and that has no date conditions. If its box
 is running and the member is still waiting in that run (not run yet, not set
@@ -1603,7 +1614,9 @@ when the run already ended or the job left the catalog.
 The attempt limit (`MAX_ATTEMPTS_PER_RUN` in
 [runner_attempts.py](../src/dsl41/runner_attempts.py)) is:
 
-5 plus the CMD job's applied `n_retrys` count; never more than 25 attempts per run (DL-485).
+5, plus the applied `n_retrys` count for a CMD job; never more than 25 attempts per run
+(DL-485). It counts every job's attempts, a file watch's that its updates replaced included
+(DL-566).
 
 An interruption at that limit or above holds even an unmarked job.
 Its `interrupted` evidence carries that applied limit, as set by the

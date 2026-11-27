@@ -505,8 +505,11 @@ to persisted watch evidence.
 An exact path needs two consecutive qualifying polls at the same size.
 A final-component `*` or `?` pattern needs any one matching pathname to have
 unchanged device, inode, size, mtime_ns and ctime_ns across two polls (DL-461).
-A run with sampled evidence keeps five-field stability for the rest of that run,
-including after a change to an exact target (DL-467).
+An attempt with sampled evidence keeps five-field stability for the rest of that attempt
+(DL-467). Evidence belongs to one attempt, and an attempt to one definition: a watch an update
+changed since its attempt's dispatch is replaced where it is taken up, by a new attempt of the
+same run with its own spool, `runs/<job>.<run>/<n>/`, and an empty log; attempt one keeps
+`runs/<job>.<run>/` (DL-566).
 Streaks are independent per pathname and file identity. Replacement or disappearance
 resets that pathname's streak. Directory wildcards and recursion are unsupported.
 Bourne hidden-file rules apply: a leading dot must be explicit; `.` and `..` never match.
@@ -514,14 +517,15 @@ A non-UTF-8 match is ignored with one warning per name per watch run.
 The warning is given again after an engine restart resumes the watch.
 
 `fw-existence=stable` is the default (DL-258). With no positive minimum size,
-`fw-existence=immediate` completes if the run's original first poll qualifies.
+`fw-existence=immediate` completes if the run's original first poll qualifies: attempt one's.
+A replacement always needs two stable polls (DL-566).
 A file that arrives later needs two stable polls in either mode.
 A positive minimum size always needs two stable polls. The adapter completes with exit 0.
 
 **Its progress is evidence, not memory** (DL-129; §7). The dispatch spool holds
 an append-only `watch.jsonl`: one `start`, then one line per poll, fsynced,
 including empty and unchanged observations. Exact paths write scalar `poll` lines
-until the run has sampled evidence. Wildcards and previously sampled runs write
+until the attempt has sampled evidence. Wildcards and previously sampled attempts write
 `sample` lines with plain pathname strings and the five metadata fields (DL-467).
 The line lands before progress moves or completion is emitted.
 `next_poll_at` is `start.at` before the first observation, then the last observation's
@@ -1368,6 +1372,12 @@ engine drains launches no watch it takes up: the watch keeps its open attempt an
 log, and the next restart takes it up (DL-565). The restart treats it as a watch the
 drain cancelled: a watch's recovery does not read the open attempt's `stop` cause. A
 deadline that ends the run before the restart closes it there with no launch.
+A watch is taken up in one place, `Engine.take_up_watch`, after an update's application and at
+a restart (DL-566). An open attempt whose job a committed `config applied` after its `dispatch`
+names in `changed` is replaced there, not resumed: it is closed once as `stopped` with cause
+`update_stop` and the interruption rule's plan, and its log is not read for a completion. The
+restart reads those records from the oldest open watch's dispatch on, before the snapshot too.
+A restart alone replaces nothing.
 A derived start with no dispatch is pending work;
 reconciliation and overdue deadlines run before launch. A run with neither
 a dispatch record nor a derived start is left as it stands, for the
@@ -1389,7 +1399,8 @@ A failed scan holds cleanup as `scan failed` and is retried under both leak
 policies. A KILL survivor remains held and is KILLed again per poll.
 An FW restores scalar or per-path sampled progress from `watch.jsonl` without a
 second `start`. A completing observation supplies its completion without re-polling
-(DL-129, DL-461), even if the file has disappeared.
+(DL-129, DL-461), even if the file has disappeared. Only attempt one's first poll can be
+complete under `fw-existence=immediate` (DL-566).
 
 **Process identity.** Every CMD dispatch carries
 `DSL41_COOKIE=<root_id>.<run_id>` (DL-431, DL-433).
@@ -1651,7 +1662,7 @@ its default; only a short allow-list of static callers may.
 | `ice-lookback` | `true`, `ordinary` | `true` | `true` | A condition atom with a lookback qualifier whose predecessor is on ice. `true`: the atom is true, lookback ignored. `ordinary`: the qualifier is dropped and the ordinary on-ice table applies (s, d, n true; f, t, exitcode false). The "condition Attribute" page (AutoSys 24.2) says "If the predecessor job being evaluated for the look-back condition is currently in an ON_ICE status, it always evaluates to true. That is, any look-back evaluation is ignored." `ordinary` extends the Start Conditions on-ice table (SEM-20), which does not separate lookback atoms, to the lookback atom. Q10 is open. |
 | `renewable-free` | `Y`, `A` | `Y` | `Y` | A renewable resource request (`res_type: R` or none) that states no FREE. `Y`: the units are freed only when the run ends SUCCESS; after FAILURE or TERMINATED the job holds them until `RELEASE_RESOURCE` or its next run. `A`: the units are freed on every completion. The "resources Attribute" page (AutoSys 24.2) gives FREE's default: "Default: Y", where "Y -- Frees the units only if the job completes successfully". An explicit FREE is not affected. This row settles Qr1. |
 | `queued-recheck` | `0`, `1`, `2` | `0` | `1` | A job that can queue (it names a resource, or a positive priority makes it check machine load) and leaves QUE_WAIT. The values are the vendor's EvaluateQueuedJobStarts (Administrating > Configure a Scheduler, AutoSys 24.2). `0`: it starts without a recheck. `1`: its `condition`, `run_window` and `exclude_calendar` are checked again, but not `run_calendar`, `days_of_week`, `start_times` or `start_mins`. `2`: `run_calendar` or `days_of_week` is checked for the day too. A job that fails goes INACTIVE without starting, its arm is cleared, and its next start time starts it; a member of a running box that fails its condition waits and keeps the box running, the vendor's ACTIVATED. A `run_window` failure takes DL-246's disposition at that instant (the skip, or one deferral to the opening), and a day failure of a job with no start times of its own is deferred to its next eligible window opening, so no job waits for a tick that never comes. The vendor's default is `1`. dsl41 keeps `0`: a queued job met its conditions when it started. This row settles Qr6 (DL-50, DL-257). The day and window checks use the oracle's zone, which DL-253 aligns with the scheduler's base zone. |
-| `fw-existence` | `stable`, `immediate` | `stable` | `immediate` | What an FW job with no `watch_file_min_size` does once the watched file exists. `stable`: wait for two stable qualifying polls under §6: size for exact paths, five metadata fields per pathname for wildcards and previously sampled runs (DL-467), like a job with a positive minimum size — dsl41's own choice, because a file still being written is not complete. `immediate`: complete only if the original first poll qualifies, `watch_interval` ignored for that poll — the vendor reading. The "watch_interval Attribute" page (AutoSys 24.2) says "If you are monitoring for the existence of a file (not the size) and the file already exists when the job runs, the job completes immediately. The watch_interval attribute is ignored." The "watch_file_min_size Attribute" page says "If you do not specify the watch_file_min_size attribute in your job definition, the job completes if the file exists (the default)." A job with a minimum size is unaffected by this switch either way (§6, E6). |
+| `fw-existence` | `stable`, `immediate` | `stable` | `immediate` | What an FW job with no `watch_file_min_size` does once the watched file exists. `stable`: wait for two stable qualifying polls under §6: size for exact paths, five metadata fields per pathname for wildcards and previously sampled attempts (DL-467), like a job with a positive minimum size — dsl41's own choice, because a file still being written is not complete. `immediate`: complete only if the original first poll qualifies, attempt one's (DL-566), `watch_interval` ignored for that poll — the vendor reading. The "watch_interval Attribute" page (AutoSys 24.2) says "If you are monitoring for the existence of a file (not the size) and the file already exists when the job runs, the job completes immediately. The watch_interval attribute is ignored." The "watch_file_min_size Attribute" page says "If you do not specify the watch_file_min_size attribute in your job definition, the job completes if the file exists (the default)." A job with a minimum size is unaffected by this switch either way (§6, E6). |
 | `wekr-first-week` | `first-full`, `partial` | `first-full` | unknown | Where week 1 of a WEKR token's year starts (SEM-37). A WEKR token selects a week of the year whose weeks start on the anchor day. `first-full`: week 1 starts on the first anchor day on or after January 1, and the days before it are in no week, as in the C library's `%U`/`%W` numbering. `partial`: week 1 runs from January 1 to the day before that anchor day. The vendor text does not say; its example, "consider full weeks as those that start on a Monday", supports `first-full`. Both readings agree when January 1 falls on the anchor day, and both count `Mnn` back from the week that holds December 31. The switch reaches every job whose `run_calendar` or `exclude_calendar` has a WEKR token. This row settles Q11 (DL-259). |
 | `dst-start-times` | `vendor`, `fold0` | `vendor` | `vendor` | `start_times` and `start_mins` on a one-hour DST change at 02:00 local, the shape DL-249 detects. `vendor`: a start time in the repeated 01:00-01:59 runs once, in the second (standard time) pass. `start_mins` run in both passes. A start time in the missing 02:00-02:59 runs in the first minute of 03:00, its minute read as seconds (2:05 at 3:00:05), and only the first such start time runs. `start_mins` ticks in the missing hour do not exist. `fold0`: the PEP 495 fold=0 reading. A repeated time runs once, in the first pass, and each missing time runs past the gap (2:05 at 3:05). "Standard Time Changes" and "Daylight Time Changes" (AutoSys 12.1 and 24.2) document the vendor rules. Other change shapes use fold=0 under both values; that is unverified. The scheduler and the oracle read the same value: the runtime profile reads it back from the scheduler, so a disagreeing scheduler is refused before anything durable is written, and the engine refuses one as a backstop. |
 | `off-ice-in-running-box` | `next-run`, `same-run` | `next-run` | `next-run` | A job inside a box, taken off ice while its box runs and before it ran in that run. `next-run`: it sits the run out. A plain start of it is refused, the box completes without it while it reads INACTIVE (a terminal status given to it votes, DL-360), FORCE_STARTJOB still starts it, and the box waits while that forced start is queued; the box's next run clears the mark. "Start Conditions" (AutoSys 24.2 and 12.0) says "If a job is contained in a running box when it is taken off ice, the scheduler does not restart the job until the following run of the box, even if its starting conditions recur during the existing run of the box." `same-run`: it re-enters the run and may start on its condition's next edge, and the box waits for it; the reading of the AutoSys 24.0 Web UI help. SEM-20. |
@@ -2208,7 +2219,7 @@ its rule, with the entry or section that holds it.
   profile's status (§6, DL-492). Vendor parity remains unverified [?].
 - **E6** — FW steady-size semantics are the `fw-existence` switch (§8a,
   DL-258, DL-461): default `stable`, two stable polls (exact-path size or wildcard
-  five-field samples, retained for the rest of a sampled run under DL-467);
+  five-field samples, retained for the rest of a sampled attempt under DL-467 and DL-566);
   `immediate` applies only to the original first poll of a job
   with no positive `watch_file_min_size`. The default
   `watch_interval` stays open [?]: the "watch_interval Attribute" page

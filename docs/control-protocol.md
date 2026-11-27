@@ -196,8 +196,9 @@ the stops marked non-idempotent with their reasons (`non_idempotent`; DL-463, DL
 source changes, diagnostics, lint findings and per-job effects (`rerun`, `hold`
 or `remove`). An update restarts no box, so every effect is a stop's (DL-559).
 Effects use the first matching rule: `hold` for a marked stop the plan keeps,
-neither removed nor retyped; `remove` for a stop the candidate removes or
-retypes; `rerun` for any other stop.
+neither removed nor retyped, and for a kept file watch whose open attempt of its
+current run is at the attempt limit (DL-485, DL-566); `remove` for a stop the
+candidate removes or retypes; `rerun` for any other stop.
 
 `preview.update_refusal` is the update's own refusal forecast for the state
 reread read (DL-559): `null`, or `{"code": "tree_active", "names": [...]}` when

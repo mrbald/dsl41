@@ -23,10 +23,11 @@ longer wanted is discharged with no launch, any other is launched under the appl
 An attempt of the stop set that ends while the update stops keeps its outcome back: the outcome
 and its follow-up plan are appended after the application, under the applied catalog and
 marked set (spec-wiring 2b, the interruption rule's step 1). A task the attempt tier does not run
-(a file watch) is cancelled; after the application it is launched again under its run id while
-its job is in the catalog and its run is live, and closed with no plan otherwise. That is decided
-again at the launch, after the application's time advance (DL-526). A draining engine launches
-none: the watch is left open for the restart to take up (DL-565).
+(a file watch) is cancelled; after the application it is taken up while its job is in the
+catalog and its run is live, and closed with no plan otherwise. That is decided again at the
+launch, after the application's time advance (DL-526). A watch the update changed is replaced, as
+a command it stops is rerun: closed once, and a new attempt of its run dispatched (DL-566). A
+draining engine takes none up: the watch is left open for the restart to take up (DL-565).
 
 When the last selected stop is finished, the application swaps the oracle's catalog and settings
 (`reload_update.apply_application`), the scheduler's plans (`Scheduler.replace`), the marked set
@@ -55,7 +56,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -104,7 +105,7 @@ from dsl41.runtime_policy import policy_values
 
 if TYPE_CHECKING:  # annotation only: the engine imports this module
     from dsl41.runner import Engine
-    from dsl41.runner_journal import Journal
+    from dsl41.runner_journal import Journal, OpenAttempt
 
 #: The plans directory of a run root.
 PLANS: Final = "plans"
@@ -366,6 +367,8 @@ class EngineUpdate:
             path_environment=path_environment(engine.startup_env),
             owned=engine.owned_runs(),
         )
+        attempts = () if engine.journal is None else engine.journal.open.attempts.values()
+        live = replace(live, ordinals=watch_ordinals(attempts, live))
         if engine.source_capture:
             import base64
             from dsl41.canon import decode
@@ -785,12 +788,14 @@ class EngineUpdate:
         applied = Record(at, "config", None, None, body)
         discharged = [discharged_record(seq, at) for seq in retired]
         if intent is None:
-            journal.append(applied, *discharged, transitions=[mark])
+            last = journal.append(applied, *discharged, transitions=[mark])
         else:
             row = ConfigRow(application.rev, configuration.to_bytes(), configuration.digest())
-            journal.append(
+            last = journal.append(
                 intent, applied, *discharged, transitions=[mark], produced_by=1, config=row
             )
+        # what a watch's take-up reads: the jobs this committed record names changed (DL-566)
+        engine.note_changed(last - len(discharged), application.changed)
         engine.unqueue(retired)
         engine.oracle.add_mark(mark)
         self._body = body
@@ -800,23 +805,29 @@ class EngineUpdate:
         """What follows each stop of the update, chosen once, under the applied catalog and
         marked set, before the record that names them (spec-wiring 2b, the interruption rule's
         step 1): a kept outcome's plan (`complete`, `rerun`, `hold` or `none`), which `finish`
-        commits as chosen; `rerun` for a cancelled task taken up again; `none` for a task
-        closed, and for a job the update found no attempt of (its held start goes under the new
-        definition). A cancelled task is decided again at its launch, after the time advance; the
-        record keeps this choice (DL-526)."""
+        commits as chosen; for a cancelled watch taken up again, the plan its replacement gets
+        (`rerun`, or `hold` at the attempt limit, DL-566), and `rerun` for another cancelled task
+        taken up again; `none` for a task closed, and for a job the update found no attempt of
+        (its held start goes under the new definition). A cancelled task is decided again at its
+        launch, after the time advance; the record keeps this choice (DL-526)."""
         engine = self.engine
-        assert self._admitted is not None
-        cancelled = {job: run for job, run, _ in self._cancelled}
+        assert self._admitted is not None and engine.journal is not None
+        cancelled = {job: (run, run_id) for job, run, run_id in self._cancelled}
         self._chosen = {}
-        self._takes_up = {job: engine.takes_up(job, run) for job, run in cancelled.items()}
+        self._takes_up = {job: engine.takes_up(job, run) for job, (run, _) in cancelled.items()}
         stopped: list[tuple[str, OnStop]] = []
         for job in self._admitted.stop_set:
             attempt = self._attempts.get(job)
             if attempt is not None and attempt in self._kept:
                 plan = self._chosen[attempt] = engine.plan_for(attempt, self._kept[attempt])
                 stopped.append((job, plan.kind))
-            elif job in cancelled:
-                stopped.append((job, "rerun" if self._takes_up[job] else "none"))
+            elif job in cancelled and self._takes_up[job]:
+                # a task the update cancelled is of a job it names, so one it takes up is one
+                # this application changed: `take_up_watch` replaces it if it is a file watch,
+                # once the record is noted. Its attempt is still open (DL-566)
+                opened = engine.journal.open.attempts[str(cancelled[job][1])]
+                watch = engine.oracle.catalog.jobs[job].job_type == "FW"
+                stopped.append((job, engine.replacement_plan(opened).kind if watch else "rerun"))
             else:
                 stopped.append((job, "none"))
         for attempt in self._others:
@@ -854,6 +865,20 @@ class EngineUpdate:
         answer, self._answer = self._answer, None
         assert answer is not None  # `admit` and `resume` each set the request's answer
         _settle(answer.applied, dict(self._body))
+
+
+def watch_ordinals(attempts: Iterable[OpenAttempt], live: Live) -> dict[str, int]:
+    """Each file watch's open attempt of its row's current run, by ordinal: the attempt a stop
+    of that live row selects, which `reread`'s forecast gives the interruption rule (DL-566).
+    An open attempt of another run of the job is not that stop's: a watch's task cancelled
+    when its next run started stays open until it is reaped."""
+    return {
+        attempt.job: attempt.ordinal
+        for attempt in attempts
+        if (job_ir := live.catalog.jobs.get(attempt.job)) is not None
+        and job_ir.job_type == "FW"
+        and live.runs.get(attempt.job) == attempt.run_number
+    }
 
 
 def admitted_of(intent: Mapping[str, Any]) -> Admitted:

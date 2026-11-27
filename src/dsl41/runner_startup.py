@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import contextlib
 import shutil
+import itertools
 import tempfile
 import os
 import signal
@@ -71,6 +72,7 @@ from dsl41.runner import (
     Deferred,
     Engine,
     adapter_switch,
+    facts_of,
     refit_adapters,
 )
 from dsl41.runner_adapters import (
@@ -112,7 +114,6 @@ from dsl41.runner_journal import (
 )
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, LeaderLock, acquire_run_root
 from dsl41.runner_scheduler import Scheduler
-from dsl41.runner_stops import AttemptFacts
 from dsl41.runner_store import Record, SqliteStore, Store, StoreError
 from dsl41.runner_transitions import begin as begin_transitions
 from dsl41.runner_transitions import settle_history
@@ -843,6 +844,7 @@ async def _resume_under_lock(
         if rt.run_number:
             engine._dispatched[job] = rt.run_number
     _fold_evidence(engine, snapshot, tail)
+    _note_watch_changes(engine, tail, after)
     # the fold: every open attempt instantiated before the loop's first step, then the first
     # reading, then the catch-up's steps in seq order and the owed work after them (§§2-6)
     steps = _adopt_open_attempts(engine, _interrupted_drain(tail) or frozenset(), last_at)
@@ -1170,6 +1172,32 @@ def _replay_into_engine(
 # ---------------------------------------------------------------- the fold and the first reading
 
 
+def _note_watch_changes(engine: Engine, tail: list[tuple[int, Record]], after: int) -> None:
+    """The jobs each committed `config applied` record names changed, from the oldest open file
+    watch's dispatch on, for `Engine.changed_since` (DL-566). The records before the snapshot
+    are read from the store, which keeps every record from the oldest open attempt's on; the
+    rest are the tail. Nothing is read when no watch is open."""
+    assert engine.journal is not None
+    catalog = engine.oracle.catalog.jobs
+    seqs = [
+        attempt.seq
+        for attempt in engine.journal.open.attempts.values()
+        if (job_ir := catalog.get(attempt.job)) is not None and job_ir.job_type == "FW"
+    ]
+    if not seqs:
+        return
+    floor = min(seqs)
+    older = (
+        itertools.takewhile(lambda item: item[0] <= after, engine.journal.store.read_from(floor))
+        if floor < after
+        else ()
+    )
+    for seq, record in itertools.chain(older, tail):
+        body = record.payload
+        if seq > floor and record.kind == "config" and body.get("event") == "applied":
+            engine.note_changed(seq, [str(job) for job in body.get("changed") or ()])
+
+
 def _adopt_open_attempts(
     engine: Engine, stopping: frozenset[str], last_at: datetime
 ) -> list[Callable[[_procid.Ours | None], None]]:
@@ -1187,7 +1215,7 @@ def _adopt_open_attempts(
         if job_ir is not None and job_ir.job_type == "FW":
             steps.append(partial(_watch, engine, job_ir, attempt, last_at))
             continue
-        facts = _facts_of(attempt)
+        facts = facts_of(attempt)
         if attempt.closing:
             # a snapshot older than the outcome's kind reads as a stop's (DL-431)
             outcome = AttemptOutcome(cast("Any", attempt.outcome or "stopped"), cause=attempt.stop)
@@ -1199,22 +1227,6 @@ def _adopt_open_attempts(
             stop = attempt.stop or (ENGINE_STOP if attempt.attempt in stopping else None)
             steps.append(partial(_observe, engine, attempt, stop))
     return steps
-
-
-def _facts_of(attempt: OpenAttempt) -> AttemptFacts:
-    # a restart holds a run root, and every attempt dispatched under one names its spool
-    assert attempt.spool is not None
-    return AttemptFacts(
-        attempt.attempt,
-        attempt.job,
-        attempt.run_number,
-        attempt.ordinal,
-        Path(attempt.spool),
-        dict(attempt.env),
-        attempt.after,
-        exited=True,  # its wrapper was the previous engine's
-        closing=attempt.closing,
-    )
 
 
 def _first_reading(
@@ -1377,7 +1389,7 @@ def _watch(
     if split is None:
         _resume_watch(engine, job_ir, attempt, last_at)
         return
-    engine.adopt_attempt(_facts_of(attempt), observed=False)
+    engine.adopt_attempt(facts_of(attempt), observed=False)
     engine.quarantine(attempt.attempt, split)
 
 
@@ -1494,14 +1506,19 @@ def _resume_watch(engine: Engine, job_ir: JobIR, attempt: OpenAttempt, last_at: 
     RUNNING; a complete log is fed through the stale-completion gate, never re-watched; a watch
     whose run ended is closed with no plan. An unfinished watch of a live run is not launched
     while an update in STOPPING holds its job in the dispatch filter or its stop list names
-    this attempt: the update takes it up or closes it after its application (DL-526)."""
+    this attempt: the update takes it up or closes it after its application (DL-526). Else it
+    is taken up where an update's application takes one up (`Engine.take_up_watch`): an
+    attempt whose job an update changed since its dispatch is replaced, and its log is not read
+    for a completion (DL-566)."""
     from dsl41.runner_adapters import FileWatcherAdapter
     from dsl41.semantics import fw_existence_immediate
 
     assert engine.journal is not None
     job, run = job_ir.name, attempt.run_number
     spool = Path(attempt.spool) if attempt.spool is not None else None
-    watch = read_watch_log(spool) if spool is not None else None
+    # DL-566: the observations were made for another definition; they complete nothing
+    obsolete = engine.replaces(attempt)
+    watch = read_watch_log(spool) if spool is not None and not obsolete else None
     adapter = engine.adapters.get("FW")
     if adapter is None:
         raise AssertionError(
@@ -1509,11 +1526,14 @@ def _resume_watch(engine: Engine, job_ir: JobIR, attempt: OpenAttempt, last_at: 
             " wired, so adapter cannot be None here"
         )
     # DL-258: an `immediate` watch with no minimum size is complete when the run's first poll
-    # qualifies, and only the first: `watch_seq == 2` is exactly one poll line
+    # qualifies, and only the first: `watch_seq == 2` is exactly one poll line, and only attempt
+    # one of the run has it (DL-566)
     immediate = isinstance(adapter, FileWatcherAdapter) and fw_existence_immediate(
         job_ir, adapter.existence
     )
-    immediate_first_poll = immediate and watch is not None and watch.watch_seq == 2
+    immediate_first_poll = (
+        immediate and attempt.ordinal == 1 and watch is not None and watch.watch_seq == 2
+    )
     if watch is not None and (watch.complete or (immediate_first_poll and watch.qualifying)):
         # PR-34a: the engine died between the completing poll and the STATUS input: the
         # completion is fed from the log, never re-polled
@@ -1526,13 +1546,13 @@ def _resume_watch(engine: Engine, job_ir: JobIR, attempt: OpenAttempt, last_at: 
         ended = ExitRecord(
             exit_code=0, ended_at=watch.last_at.isoformat(), wrapper_outcome="exited"
         )
-        engine.adopt_attempt(_facts_of(attempt), observed=False)
+        engine.adopt_attempt(facts_of(attempt), observed=False)
         engine.record_outcome(attempt.attempt, AttemptOutcome("natural", record=ended))
         return
     rt = engine.oracle.store.job.get(job)
     if rt is None or rt.run_number != run or rt.status not in LIVE:
         # DL-242: only a live row is watched again; the oracle ended the run, so plan `none`
-        engine.adopt_attempt(_facts_of(attempt), observed=False)
+        engine.adopt_attempt(facts_of(attempt), observed=False)
         engine.record_outcome(attempt.attempt, AttemptOutcome("stopped", cause="run ended"))
         return
     if engine.update.holds(job) or engine.update.stops(job, attempt.attempt):
@@ -1540,8 +1560,8 @@ def _resume_watch(engine: Engine, job_ir: JobIR, attempt: OpenAttempt, last_at: 
         engine.update.hold_watch(job, run, attempt.attempt)
         return
     # an idempotent read: the adapter reconstructs progress from the log and appends no second
-    # `start` line, under the attempt's recorded id (DL-118)
-    engine._launch(job_ir, run, adapter, run_id=attempt.attempt, spool=spool)
+    # `start` line, under the attempt's recorded id (DL-118); or the attempt is replaced
+    engine.take_up_watch(attempt)
 
 
 # ---------------------------------------------------------------- the owed work and the barrier

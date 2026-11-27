@@ -25961,6 +25961,7 @@ relitigate an entry; append a new one.
   first-poll rule remains; target changes do not reopen its immediate exception.
   Run numbering, run identity, line kinds, fields and persisted formats stay unchanged.
   THE REASON. A valid target edit must not stop the engine or make its restart fail.
+  NARROWED BY DL-566: sampling holds for the rest of an attempt; a changed watch is replaced.
 - DL-468 Restart keeps applied IR across compatible patch releases (2026-11-05;
   owner 2026-11-05 release ruling point 3; runner-design §7, protocol-evolution §1,
   control-protocol §4, deploy)
@@ -27381,6 +27382,7 @@ relitigate an entry; append a new one.
   its log or quarantined.
   THE LIMIT. A watch cancelled by an update that finishes while the engine drains is still
   launched again (BUG-101).
+  NARROWED BY DL-566: a watch the update changed since its dispatch is replaced, not taken up.
 - DL-527 While an update waits, no job it names is launched, unchanged box members included
   (2026-11-20; src/dsl41/reload_update.py, src/dsl41/runner_update.py,
   tests/test_update_member_holds.py, tests/test_update_watches.py, docs/blocks/update.md;
@@ -28415,3 +28417,42 @@ relitigate an entry; append a new one.
   qualifies, so a run the time advance ended leaves no open attempt.
   `config applied.stopped` still names `rerun` for a watch left to the restart. No record
   kind, record field or version constant.
+- DL-566 A file watch an update changed since its attempt's dispatch is replaced, not taken up
+  (2026-11-27; owner ruling; closes BUG-102; narrows DL-258, DL-467 and DL-526; runner.py,
+  runner_update.py, runner_startup.py, runner_adapters.py, reread_worker.py; docs: FW, attempts
+  and update blocks, runner-design, protocol-evolution, control-protocol, deploy)
+  THE RULE. Evidence belongs to an attempt, and an attempt to one definition. (1) A watch's open
+  attempt goes on with its log only if no committed `config applied` after its `dispatch` names its
+  job in `changed`. A restart reads those records from the oldest open watch's dispatch on, before
+  the snapshot too; no two definitions are compared, and a configuration row without its record
+  counts for nothing. (2) Otherwise the attempt is replaced: closed once, `stopped` with cause
+  `update_stop`, its log not read for a completion, with the interruption rule's plan in the same
+  transaction: `rerun`, a new attempt of the run under the applied rev with a new id, its own spool
+  and an empty log; `hold` at the attempt limit (DL-485), which `config applied.stopped` names and
+  `reread` forecasts, from the same rule; `none` for a run that ended. (3) `Engine.take_up_watch`
+  decides, by job type, for the update's take-up and the restart's; the restart still quarantines a
+  foreign log first. (4) The holds stay: a watch the stop list or the filter names waits, a draining
+  engine takes none up, and the run is checked again after the time advance. (5) Attempt one keeps
+  `runs/<job>.<run>/`, attempt n>1 uses `runs/<job>.<run>/<n>/`, each launch syncs the parent of
+  each directory it can make, addressed from the run root, nothing above it, and a resumption uses
+  the spool its dispatch names. (6) Only attempt one may complete on its first poll under
+  `immediate`, in the adapter and in the restart's reader. (7) An unchanged watch resumes as before;
+  a restart alone replaces nothing.
+  THE DEFECT. The take-up reused a log whose lines do not say which definition they observed: a
+  new target of the old size completed after one look, `immediate` completed from the old
+  target's first poll, and a restart after `config applied` fed SUCCESS from the old log.
+  REJECTED. Comparing the dispatch rev's definition with the applied one: A to B to A compares
+  equal while B's look counts. A definition tag on each log line: a format change that still
+  needs the first-poll rule. Keeping unchanged fields' evidence: the rule per field is the bug.
+  NARROWS. DL-467's sampling "for the rest of a run" holds within an attempt, and an update no
+  longer restores a changed watch's progress. DL-526's take-up "under the same run id" holds for
+  an unchanged watch only. DL-258's "the run's first poll" is attempt one's.
+  THE CONTRACT. No record kind, record field or version constant; `STATE_MACHINE_VERSION` stays 28,
+  as replay derives an earlier log's state. An earlier build is not guarded on a root where a run of
+  a file watch has a second attempt, open or owed: the state version is the same and gives no
+  refusal. Observed with the build before this entry: it can stop on such a root (an owed
+  replacement, or the watch's next edit, meets attempt one's log under another id), and it can
+  report SUCCESS from evidence of an earlier definition, the defect this entry closes. Go back to an
+  earlier build only when no run of a file watch is open.
+  THE COST. A changed watch starts its streak again: a file seen once before the update and gone
+  after it is missed. A restart with an open watch reads the records since its dispatch once.
