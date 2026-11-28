@@ -35,10 +35,30 @@
   button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
              outline: 2px solid #2563eb; outline-offset: 2px; }
   button:disabled { color: #9ca3af; cursor: default; background: #f9fafb; }
-  .disclosure[aria-expanded="true"] { background: #dbeafe; border-color: #93c5fd; }
-  .disclosure::after { content: " ▾"; }
-  .disclosure[aria-expanded="true"]::after { content: " ▴"; }
+  .disclosure[aria-expanded="true"], .menu-button[aria-expanded="true"] {
+             background: #dbeafe; border-color: #93c5fd; }
+  .disclosure::after, .menu-button::after { content: " ▾"; }
+  .disclosure[aria-expanded="true"]::after, .menu-button[aria-expanded="true"]::after {
+             content: " ▴"; }
+  #snapshot-toggle { margin-left: auto; }
   #chrome-backdrop { position: absolute; inset: 0; z-index: 25; }
+  /* A menu is fixed to the viewport, so the scrolling toolbar cannot clip it;
+     placeHeaderMenu puts it under its button and inside the window (DL-568). */
+  .chrome-menu { position: fixed; z-index: 40; box-sizing: border-box; min-width: 13rem;
+             max-width: calc(100vw - 16px); overflow: auto; padding: 4px 0;
+             background: #fff; border: 1px solid #d1d5db; border-radius: 6px;
+             box-shadow: 0 2px 8px #0003; white-space: nowrap; }
+  header .chrome-menu button { display: block; width: 100%; box-sizing: border-box;
+             padding: 3px 14px 3px 26px; border: 0; border-radius: 0; background: none;
+             text-align: left; position: relative; }
+  header .chrome-menu button:hover:enabled, header .chrome-menu button:focus {
+             background: #dbeafe; outline: none; }
+  header .chrome-menu button:disabled { background: none; }
+  .chrome-menu [aria-checked="true"]::before { content: "✓"; position: absolute; left: 9px; }
+  .chrome-menu [role="separator"] { border-top: 1px solid #e5e7eb; margin: 4px 0; }
+  .chrome-menu .menu-label { padding: 3px 14px 1px; color: #6b7280; font-size: 12px; }
+  .chrome-menu .menu-hint { padding: 1px 14px 3px 26px; max-width: 18rem; white-space: normal;
+             color: #6b7280; font-size: 11px; }
   .chrome-panel { position: absolute; top: 8px; left: 8px; z-index: 30;
              box-sizing: border-box; width: 32rem; max-width: calc(100% - 16px);
              max-height: calc(100% - 16px); overflow: auto; padding: 10px;
@@ -100,7 +120,7 @@
   #d-observation { border-top: 1px solid #e5e7eb; margin-top: 8px; padding-top: 6px;
              font-size: 12px; }
   #d-observation h3 { margin: 0 0 6px; font-size: 12px; }
-  /* above #chrome-backdrop (25), below .chrome-panel (30): a controls panel
+  /* above #chrome-backdrop (25), below .chrome-panel (30): a menu or panel
      must not make the node details inert. The backdrop is what dismisses a
      panel on an outside gesture, and it covers all of #wrap -- so details
      sitting under it took the click instead of its own buttons, DL-191's
@@ -212,7 +232,6 @@
   <div class="title-row">
     <h1 title="Explore: __DSL41_TITLE__">Explore: __DSL41_TITLE__</h1>
     <span class="summary" title="__DSL41_SUMMARY__">__DSL41_SUMMARY__</span>
-    <button tabindex="0" type="button" id="fit">fit</button>
     <button tabindex="0" type="button" id="help-toggle" class="disclosure" aria-expanded="false" aria-controls="help-panel">Help</button>
   </div>
   <div id="toolbar" aria-label="Graph controls">
@@ -223,10 +242,59 @@
       <button tabindex="0" type="button" id="find-select" disabled title="select every node whose name holds the text, replacing the selection (Enter does the same); shift adds them instead. Matches are un-hidden, a folded box holding one is expanded in place, and the view fits them.">select matches</button>
       <button tabindex="0" type="button" id="find-highlight" disabled title="highlight every node whose name holds the text; the selection is left alone. Matches are un-hidden, a folded box holding one is expanded in place, and the view fits them.">highlight matches</button>
     </span>
-    <button tabindex="0" type="button" id="selection-toggle" class="disclosure" aria-expanded="false" aria-controls="selection-panel">Selection</button>
-    <button tabindex="0" type="button" id="highlight-toggle" class="disclosure" aria-expanded="false" aria-controls="highlight-panel">Highlight</button>
-    <button tabindex="0" type="button" id="visibility-toggle" class="disclosure" aria-expanded="false" aria-controls="visibility-panel">Visibility</button>
-    <button tabindex="0" type="button" id="view-toggle" class="disclosure" aria-expanded="false" aria-controls="view-panel">View</button>
+    <button tabindex="0" type="button" id="fit">fit</button>
+    <button tabindex="0" type="button" id="arrange" disabled title="run the layout again over what is drawn &mdash; the one control that moves nodes on purpose (DL-196)">arrange</button>
+    <button tabindex="0" type="button" id="selection-toggle" class="menu-button" aria-haspopup="menu" aria-expanded="false" aria-controls="selection-menu">Select</button>
+    <div id="selection-menu" class="chrome-menu" role="menu" aria-label="Select" hidden>
+      <button tabindex="-1" type="button" role="menuitem" id="sel-fan-in" disabled title="add the direct producers of every selected node (with &ldquo;trace through boxes&rdquo; on: its boxes and what gates them too)">+ fan-in</button>
+      <button tabindex="-1" type="button" role="menuitem" id="sel-fan-in-tree" disabled title="add everything upstream of the selection">+ fan-in, transitive</button>
+      <button tabindex="-1" type="button" role="menuitem" id="sel-fan-out" disabled title="add the direct consumers of every selected node (with &ldquo;trace through boxes&rdquo; on: what its boxes release too)">+ fan-out</button>
+      <button tabindex="-1" type="button" role="menuitem" id="sel-fan-out-tree" disabled title="add everything downstream of the selection">+ fan-out, transitive</button>
+      <button tabindex="-1" type="button" role="menuitem" id="sel-both-trees" disabled title="add everything upstream and everything downstream of the selection">+ both cones, transitive</button>
+      <button tabindex="-1" type="button" role="menuitem" id="sel-neighbours" disabled title="add the direct producers and the direct consumers of every selected node">+ neighbours</button>
+      <button tabindex="-1" type="button" role="menuitem" id="sel-lock-peers" disabled title="add the lock peers of every selected node: a job's direct pair partners and the members of its own hubs, a hub's members">+ lock peers</button>
+      <div role="separator"></div>
+      <button tabindex="-1" type="button" role="menuitem" id="select-highlighted" disabled title="add every highlighted node to the selection: it is un-hidden, and a folded box holding one is expanded in place">select highlighted</button>
+      <button tabindex="-1" type="button" role="menuitem" id="clear-selection" disabled title="select nothing; a click on the canvas does the same">clear selection</button>
+      <div role="separator"></div>
+      <button tabindex="-1" type="button" role="menuitemcheckbox" aria-checked="true" id="trace-boxes" title="on: a member's fan-in adds every enclosing box and what gates it (SEM-10: a member starts only once its box is RUNNING); fan-out adds a box's members and what an enclosing box's completion releases (SEM-11). off: the condition edges alone. Applies to the next focus.">trace through boxes</button>
+    </div>
+    <button tabindex="0" type="button" id="visibility-toggle" class="menu-button" aria-haspopup="menu" aria-expanded="false" aria-controls="visibility-menu">Show</button>
+    <div id="visibility-menu" class="chrome-menu" role="menu" aria-label="Show" hidden>
+      <button tabindex="-1" type="button" role="menuitem" id="hide-others" disabled title="hide everything but the selected nodes, their boxes and their own locks; a selected box with no selected member is collapsed, so it stands for them">show only selection</button>
+      <button tabindex="-1" type="button" role="menuitem" id="hide-selected" disabled title="hide the selected nodes and their members; what is hidden leaves the selection">hide selection</button>
+      <button tabindex="-1" type="button" role="menuitem" id="show-all" title="draw every node again; the selection and the highlights stay">show all</button>
+      <div role="separator"></div>
+      <button tabindex="-1" type="button" role="menuitem" id="highlight-selected" disabled title="mark the selected nodes; the mark survives clicks, selection changes, hiding and folding, until it is cleared">highlight selection</button>
+      <button tabindex="-1" type="button" role="menuitem" id="unhighlight-selected" disabled title="take the mark off the selected nodes">unhighlight selection</button>
+      <button tabindex="-1" type="button" role="menuitem" id="clear-highlights" disabled title="take the mark off every node, folded members included">clear highlights</button>
+      <div role="separator"></div>
+      <button tabindex="-1" type="button" role="menuitem" id="collapse-all">collapse all boxes</button>
+      <button tabindex="-1" type="button" role="menuitem" id="expand-all">expand all boxes</button>
+      <div role="separator"></div>
+      <button tabindex="-1" type="button" role="menuitemcheckbox" aria-checked="true" id="locks" title="the resource semaphores and mutual exclusions (M07/DL-21). They order nothing, so they are never part of a fan-in or a fan-out; off hides them entirely.">locks</button>
+    </div>
+    <button tabindex="0" type="button" id="view-toggle" class="menu-button" aria-haspopup="menu" aria-expanded="false" aria-controls="view-menu">View</button>
+    <div id="view-menu" class="chrome-menu" role="menu" aria-label="View" hidden>
+      <button tabindex="-1" type="button" role="menuitem" id="fit-selection" disabled title="fit the view to the selected nodes">fit selection</button>
+      <div role="separator"></div>
+      <div role="group" id="edge-style" aria-labelledby="edge-style-label" aria-describedby="edge-style-note" title="Change arrow paths without moving nodes.">
+        <div class="menu-label" id="edge-style-label" aria-hidden="true">Edge style</div>
+        <button tabindex="-1" type="button" role="menuitemradio" aria-checked="true" id="edge-style-elk" data-value="elk">ELK routes</button>
+        <button tabindex="-1" type="button" role="menuitemradio" aria-checked="false" id="edge-style-taxi" data-value="taxi">Orthogonal</button>
+        <button tabindex="-1" type="button" role="menuitemradio" aria-checked="false" id="edge-style-bezier" data-value="bezier">Bezier</button>
+        <div class="menu-hint" id="edge-style-note" aria-hidden="true">Arrange refreshes ELK routes after moving or folding nodes.</div>
+      </div>
+      <div role="separator"></div>
+      <div role="group" id="node-labels" aria-labelledby="node-labels-label" aria-describedby="node-labels-note">
+        <div class="menu-label" id="node-labels-label" aria-hidden="true">Labels</div>
+        <button tabindex="-1" type="button" role="menuitemradio" aria-checked="true" id="node-labels-adaptive" data-value="adaptive">Adaptive</button>
+        <button tabindex="-1" type="button" role="menuitemradio" aria-checked="false" id="node-labels-always" data-value="always">Always</button>
+        <div class="menu-hint" id="node-labels-note" aria-hidden="true">Adaptive hides captions below 8 screen pixels. Hover or inspect for the full name. Find and details always use full names.</div>
+      </div>
+      <div role="separator"></div>
+      <button tabindex="-1" type="button" role="menuitemcheckbox" aria-checked="false" id="relayout" title="what a hide op does with the space it frees. On: &ldquo;hide selection&rdquo;, &ldquo;show only selection&rdquo; and &ldquo;show all&rdquo; run the layout again over what is left. Off (the default): every node keeps where it is, and only &ldquo;show only selection&rdquo; and &ldquo;show all&rdquo; fit the view. &ldquo;hide this node&rdquo; and &ldquo;hide selection&rdquo; never re-arrange and never move the view, and neither does a collapse or an expand; the arrange button runs a layout on demand.">arrange after hiding</button>
+    </div>
     <button tabindex="0" type="button" id="snapshot-toggle" class="disclosure" aria-expanded="false" aria-controls="snapshot-panel">Snapshot</button>
   </div>
 </header>
@@ -235,68 +303,6 @@
   <svg id="name-link" hidden aria-hidden="true"><line stroke="#6b7280" stroke-width="1"/></svg>
   <div id="name-callout" hidden aria-hidden="true"></div>
   <div id="chrome-backdrop" hidden aria-hidden="true"></div>
-  <section id="selection-panel" class="chrome-panel" role="region" aria-labelledby="selection-heading" hidden>
-    <div class="panel-heading"><h2 id="selection-heading">Selection</h2>
-      <button tabindex="0" type="button" data-close-panel aria-label="Close selection">Close</button></div>
-    <div class="panel-actions">
-      <button tabindex="0" type="button" id="sel-fan-in" disabled title="add the direct producers of every selected node (with &ldquo;trace through boxes&rdquo; on: its boxes and what gates them too)">+ fan-in</button>
-      <button tabindex="0" type="button" id="sel-fan-in-tree" disabled title="add everything upstream of the selection">+ fan-in, transitive</button>
-      <button tabindex="0" type="button" id="sel-fan-out" disabled title="add the direct consumers of every selected node (with &ldquo;trace through boxes&rdquo; on: what its boxes release too)">+ fan-out</button>
-      <button tabindex="0" type="button" id="sel-fan-out-tree" disabled title="add everything downstream of the selection">+ fan-out, transitive</button>
-      <button tabindex="0" type="button" id="sel-lock-peers" disabled title="add the lock peers of every selected node: a job's direct pair partners and the members of its own hubs, a hub's members">+ lock peers</button>
-      <button tabindex="0" type="button" id="select-highlighted" disabled title="add every highlighted node to the selection: it is un-hidden, and a folded box holding one is expanded in place">select highlighted</button>
-      <button tabindex="0" type="button" id="clear-selection" disabled title="select nothing; a click on the canvas does the same">clear selection</button>
-    </div>
-    <div class="panel-settings">
-      <label title="on: a member's fan-in adds every enclosing box and what gates it (SEM-10: a member starts only once its box is RUNNING); fan-out adds a box's members and what an enclosing box's completion releases (SEM-11). off: the condition edges alone. Applies to the next focus."><input tabindex="0" type="checkbox" id="trace-boxes" checked> trace through boxes</label>
-    </div>
-  </section>
-  <section id="highlight-panel" class="chrome-panel" role="region" aria-labelledby="highlight-heading" hidden>
-    <div class="panel-heading"><h2 id="highlight-heading">Highlight</h2>
-      <button tabindex="0" type="button" data-close-panel aria-label="Close highlight">Close</button></div>
-    <div class="panel-actions">
-      <button tabindex="0" type="button" id="highlight-selected" disabled title="mark the selected nodes; the mark survives clicks, selection changes, hiding and folding, until it is cleared">highlight selected</button>
-      <button tabindex="0" type="button" id="unhighlight-selected" disabled title="take the mark off the selected nodes">unhighlight selected</button>
-      <button tabindex="0" type="button" id="clear-highlights" disabled title="take the mark off every node, folded members included">clear highlights</button>
-    </div>
-  </section>
-  <section id="visibility-panel" class="chrome-panel" role="region" aria-labelledby="visibility-heading" hidden>
-    <div class="panel-heading"><h2 id="visibility-heading">Visibility</h2>
-      <button tabindex="0" type="button" data-close-panel aria-label="Close visibility">Close</button></div>
-    <div class="panel-actions">
-      <button tabindex="0" type="button" id="hide-selected" disabled title="hide the selected nodes and their members; what is hidden leaves the selection">hide selected</button>
-      <button tabindex="0" type="button" id="hide-others" disabled title="hide everything but the selected nodes, their boxes and their own locks; a selected box with no selected member is collapsed, so it stands for them">hide others</button>
-      <button tabindex="0" type="button" id="show-all" title="draw every node again; the selection and the highlights stay">show all</button>
-    </div>
-    <div class="panel-settings">
-      <label title="what a hide op does with the space it frees. On: &ldquo;hide selected&rdquo;, &ldquo;hide others&rdquo; and &ldquo;show all&rdquo; run the layout again over what is left. Off (the default): every node keeps where it is, and only &ldquo;hide others&rdquo; and &ldquo;show all&rdquo; fit the view. &ldquo;hide this node&rdquo; and &ldquo;hide selected&rdquo; never re-arrange and never move the view, and neither does a collapse or an expand; the arrange button runs a layout on demand."><input tabindex="0" type="checkbox" id="relayout"> arrange after hiding</label>
-      <label title="the resource semaphores and mutual exclusions (M07/DL-21). They order nothing, so they are never part of a fan-in or a fan-out; off hides them entirely."><input tabindex="0" type="checkbox" id="locks" checked> locks</label>
-    </div>
-  </section>
-  <section id="view-panel" class="chrome-panel" role="region" aria-labelledby="view-heading" hidden>
-    <div class="panel-heading"><h2 id="view-heading">View</h2>
-      <button tabindex="0" type="button" data-close-panel aria-label="Close view">Close</button></div>
-    <div class="panel-actions">
-      <button tabindex="0" type="button" id="fit-selection" disabled title="fit the view to the selected nodes">fit selection</button>
-      <button tabindex="0" type="button" id="arrange" disabled title="run the layout again over what is drawn &mdash; the one control that moves nodes on purpose (DL-196)">arrange</button>
-      <button tabindex="0" type="button" id="collapse-all">collapse boxes</button>
-      <button tabindex="0" type="button" id="expand-all">expand boxes</button>
-    </div>
-    <div class="panel-settings">
-      <div><label for="node-labels">Labels</label>
-      <select tabindex="0" id="node-labels" aria-describedby="node-labels-note">
-        <option value="adaptive" selected>Adaptive</option>
-        <option value="always">Always</option>
-      </select><span class="hint" id="node-labels-note">Adaptive hides captions below 8 screen pixels. Hover or inspect for the full name. Find and details always use full names.</span></div>
-      <div><label for="edge-style">Edge style</label>
-      <select tabindex="0" id="edge-style" aria-describedby="edge-style-note"
-              title="Change arrow paths without moving nodes.">
-        <option value="taxi" selected>Orthogonal</option>
-        <option value="elk">ELK routes</option>
-        <option value="bezier">Bezier</option>
-      </select><span class="hint" id="edge-style-note">Arrange refreshes ELK routes after moving or folding nodes.</span></div>
-    </div>
-  </section>
   <section id="snapshot-panel" class="chrome-panel" role="region" aria-labelledby="snapshot-heading" hidden>
     <div class="panel-heading"><h2 id="snapshot-heading">Snapshot</h2>
       <button tabindex="0" type="button" data-close-panel aria-label="Close snapshot">Close</button></div>
@@ -351,7 +357,7 @@
     toggles one &middot; shift+drag the background selects a region, and adds it
     &middot; right-click a node, or the canvas for the selection, to add a walk
     &middot; double-click a box, or its corner cue, to collapse or expand it
-    &middot; Escape closes a menu or controls/help panel, else empties the find field
+    &middot; Escape closes a menu or panel, else empties the find field
     you are typing in, else clears the selection</p>
     <p>drag pans, wheel zooms &middot; dragging a selected node
     moves the whole selection &middot; a node otherwise moves only when a
@@ -363,7 +369,7 @@
     carries &#8744; &middot; a bare n() is a lock and draws no arrow</p>
     <p>dotted gray = lock &middot; the tee marks the job that
     waits</p>
-    <p>View&rsquo;s Edge style offers Orthogonal, ELK routes, and Bezier.
+    <p>View&rsquo;s Edge style offers ELK routes (the default), Orthogonal, and Bezier.
     Single Bezier connections are direct lines; parallel connections curve apart.
     Switching styles keeps nodes in place.</p>
     <p>ELK routes follow the layout&rsquo;s bend points. Moving, hiding, revealing,
@@ -408,8 +414,33 @@ var DIRECTION = "__DSL41_ELK_DIRECTION__";
 var LABEL_ZOOM = 0.6; /* edge labels overlap at fit zoom; hide below this */
 /* Orthogonal edge routing follows ELK's layering axis (DL-381). */
 var TAXI_DIRECTION = DIRECTION === "DOWN" ? "vertical" : "horizontal";
-var edgeStyleSelect = document.getElementById("edge-style");
-var nodeLabelsSelect = document.getElementById("node-labels");
+
+/* A View menu choice is the checked item of its group; the markup holds the
+   default, read once here (DL-568: ELK routes and Adaptive). The style
+   functions read the variables, never the DOM, because they run per edge. */
+function radioValue(groupId) {
+  return document.querySelector("#" + groupId + ' [aria-checked="true"]').dataset.value;
+}
+function isChecked(item) { return item.getAttribute("aria-checked") === "true"; }
+/* A pick in an exclusive group checks that item alone, then applies its value. */
+function wireRadios(groupId, apply) {
+  var items = document.querySelectorAll("#" + groupId + ' [role="menuitemradio"]');
+  items.forEach(function (item) {
+    item.addEventListener("click", function () {
+      items.forEach(function (other) { other.setAttribute("aria-checked", String(other === item)); });
+      apply(item.dataset.value);
+    });
+  });
+}
+/* A checkable item flips its own state, then tells whoever reads it. */
+function wireCheck(item, apply) {
+  item.addEventListener("click", function () {
+    item.setAttribute("aria-checked", String(!isChecked(item)));
+    if (apply) apply();
+  });
+}
+var edgeStyle = radioValue("edge-style");
+var nodeLabels = radioValue("node-labels");
 var NODE_LABEL_MIN = 8;
 var captionsShown = true;
 
@@ -473,7 +504,7 @@ var arrangeQueued = null;
 function updateRoutingStatus() {
   var note = document.getElementById("routing-status");
   var refresh = document.getElementById("refresh-routes");
-  var shown = edgeStyleSelect.value === "elk" || !!layoutError;
+  var shown = edgeStyle === "elk" || !!layoutError;
   note.hidden = !shown;
   refresh.hidden = !shown || !!elkRunning || (!layoutError && routeLayoutEpoch === routeEpoch);
   if (!shown) return;
@@ -495,11 +526,11 @@ function updateRoutingStatus() {
 
 function elkRoute(edge) {
   var route = edge.scratch("_elkRoute");
-  return edgeStyleSelect.value === "elk" && route && route.epoch === routeEpoch ? route : null;
+  return edgeStyle === "elk" && route && route.epoch === routeEpoch ? route : null;
 }
 
 function edgeCurve(edge) {
-  if (edgeStyleSelect.value !== "elk") return edgeStyleSelect.value;
+  if (edgeStyle !== "elk") return edgeStyle;
   var route = elkRoute(edge);
   return route ? (route.points.length > 2 ? "round-segments" : "straight") : "taxi";
 }
@@ -1080,7 +1111,8 @@ var cy = cytoscape({
 
 /* Refresh the existing stylesheet: every edge, including a restored or new
    meta-edge, reads the same control without accumulating rules (DL-381). */
-edgeStyleSelect.addEventListener("change", function () {
+wireRadios("edge-style", function (value) {
+  edgeStyle = value;
   cy.style().update();
   updateRoutingStatus();
 });
@@ -1088,12 +1120,12 @@ edgeStyleSelect.addEventListener("change", function () {
 /* Caption disclosure changes paint only. The caption string and its font
    stay in every layout envelope even while invisible (DL-384). */
 function updateNodeLabels() {
-  var shown = nodeLabelsSelect.value === "always" || cy.zoom() * 11 >= NODE_LABEL_MIN;
+  var shown = nodeLabels === "always" || cy.zoom() * 11 >= NODE_LABEL_MIN;
   if (shown === captionsShown) return;
   captionsShown = shown;
   cy.nodes().updateStyle();
 }
-nodeLabelsSelect.addEventListener("change", updateNodeLabels);
+wireRadios("node-labels", function (value) { nodeLabels = value; updateNodeLabels(); });
 cy.on("zoom", updateNodeLabels);
 
 /* One screen-sized name follows hover, then inspection. It owns no graph
@@ -1156,7 +1188,7 @@ cy.on("render resize", scheduleNameCallout);
    element. */
 cy.edges().unselectify();
 
-/* A job with a lock link is offered "select lock peers" on its menu; one
+/* A job with a lock link is offered "+ lock peers" on its menu; one
    without has none to select, and an item that could only select nothing is
    the DL-77 shape in miniature. A CLASS, not a show-or-hide as the menu
    opens: the selector decides the item and the plugin's own dividers, which
@@ -1327,6 +1359,7 @@ function placeLocks() {
 
 var stats = document.getElementById("stats");
 var relayoutToggle = document.getElementById("relayout");
+wireCheck(relayoutToggle);
 
 /* A control this browser could not give us, named for the operator: every
    updateStats keeps it, so a degraded page never looks like a whole one. */
@@ -1366,19 +1399,20 @@ var statsBuilt = false;
 
 /* A control whose op reads the selection is disabled while nothing is
    selected, and one that reads the highlight while nothing is highlighted
-   (DL-196: "hide others first of all"). They start disabled in the markup --
-   at load neither layer holds anything -- and every #stats rewrite refreshes
+   (DL-196: the hide-others control, "show only selection", first of all).
+   A disabled item stays visible in its menu (DL-568). They start disabled in
+   the markup -- at load neither layer holds anything -- and every #stats rewrite refreshes
    them, which is every op and every selection change. A disabled control
    cannot mislead about what the next click would act on, and it is the same
    answer the keyboard gets. */
 /* set once the optional menu plugin is up; null means the page has no menu
-   (DL-77), and the four canvas walks it would carry do not exist either */
+   (DL-77), and the canvas walks it would carry do not exist either */
 var menuApi = null;
 
-/* the four walks that take the selection as their seed. Both cones and
-   neighbours stay compositions and node-menu-only items (DL-199) -- this
-   list must never grow to all six. */
-var SELECTION_WALKS = ["fan-in", "fan-out", "fan-in-tree", "fan-out-tree"];
+/* every walk also takes the selection as its seed: the Select menu and the
+   canvas menu offer all six (DL-568) */
+var SELECTION_WALKS = ["fan-in", "fan-out", "fan-in-tree", "fan-out-tree", "both-trees",
+  "neighbours"];
 var SELECTION_CONTROLS = SELECTION_WALKS.map(function (kind) { return "sel-" + kind; })
   .concat(["sel-lock-peers", "clear-selection", "highlight-selected",
     "unhighlight-selected", "hide-selected", "hide-others", "fit-selection"]);
@@ -1392,7 +1426,7 @@ function refreshControls(selected, marked) {
     document.getElementById(id).disabled = !marked;
   });
   statsButton.disabled = !selected;
-  /* the canvas menu's four walks are the same ops over the same seed, and
+  /* the canvas menu's walks are the same ops over the same seed, and
      DL-196's rule names no exception for a menu */
   if (menuApi) {
     SELECTION_WALKS.forEach(function (kind) {
@@ -1654,7 +1688,7 @@ function hideNodes(nodes) {
    hiding a selection does not, because what is left was on the screen
    already. */
 function settleAfterHide(op, fit) {
-  if (relayoutToggle.checked) { arrangeVisible(op); return; }
+  if (isChecked(relayoutToggle)) { arrangeVisible(op); return; }
   placeLocks();
   if (fit) fitVisible();
   updateStats(op);
@@ -1702,7 +1736,7 @@ function focusOn(keep, how) {
 function hideOthers() {
   var sel = selectedNodes();
   if (sel.empty()) { updateStats("nothing selected"); return; }  /* hiding all would be a blank page */
-  focusOn(sel, "hide others (" + sel.length + " kept)");
+  focusOn(sel, "show only selection (" + sel.length + " kept)");
 }
 
 function showAll() {
@@ -1718,11 +1752,11 @@ function showAll() {
    and gives the border-crossing ones new meta-edges, and neither carries the
    class the toggle last applied, so locks switched off could come back drawn
    (and switched on, stay hidden). `peered`: which nodes have a lock link at
-   all decides whether the menu offers "select lock peers", and a collapsed
+   all decides whether the menu offers "+ lock peers", and a collapsed
    box borrows its folded members' links -- it stands for them, as it does
    for a walk's edges (DL-190), so the item follows. */
 function syncLocks() {
-  cy.elements(".lock").toggleClass("lockoff", !locksToggle.checked);
+  cy.elements(".lock").toggleClass("lockoff", !isChecked(locksToggle));
 }
 
 function markPeered() {
@@ -2386,11 +2420,138 @@ function closeChrome(restoreFocus) {
   if (restoreFocus) trigger.focus();
 }
 
+/* Select, Show and View are menus, the WAI-ARIA menu button pattern (DL-568).
+   A pick acts and closes the menu. Escape, Tab and an outside click close it;
+   the backdrop takes that click, so it never reaches the graph. One menu or
+   panel is open at a time. The items are native buttons: a disabled one takes
+   no click, the arrow keys skip it, and every action keeps its keyboard path
+   without the optional graph menu (DL-77). */
+var openMenuButton = null;
+
+function headerMenu(button) { return document.getElementById(button.getAttribute("aria-controls")); }
+function enabledItems(menu) {
+  return Array.from(menu.querySelectorAll('[role^="menuitem"]')).filter(function (item) {
+    return !item.disabled;
+  });
+}
+
+/* Fixed to the viewport, so the scrolling toolbar cannot clip it: under its
+   button, shifted left when the window is narrower, scrolling when shorter. */
+function placeHeaderMenu() {
+  if (!openMenuButton) return;
+  var menu = headerMenu(openMenuButton), at = openMenuButton.getBoundingClientRect();
+  var top = at.bottom + 2;
+  menu.style.top = top + "px";
+  menu.style.maxHeight = Math.max(80, window.innerHeight - top - 8) + "px";
+  var left = Math.min(at.left, window.innerWidth - menu.offsetWidth - 8);
+  menu.style.left = Math.max(8, left) + "px";
+}
+
+function closeHeaderMenu(restoreFocus) {
+  if (!openMenuButton) return;
+  var button = openMenuButton;
+  headerMenu(button).hidden = true;
+  button.setAttribute("aria-expanded", "false");
+  openMenuButton = null;
+  chromeBackdrop.hidden = true;
+  if (restoreFocus) button.focus();
+}
+
+function openHeaderMenu(button, last) {
+  closeChrome(false);
+  closeHeaderMenu(false);
+  var graphMenu = openMenu();
+  if (graphMenu) graphMenu.style.display = "none";
+  openMenuButton = button;
+  var menu = headerMenu(button);
+  menu.hidden = false;
+  button.setAttribute("aria-expanded", "true");
+  chromeBackdrop.hidden = false;
+  placeHeaderMenu();
+  var items = enabledItems(menu);
+  (items.length ? items[last ? items.length - 1 : 0] : menu).focus();
+}
+
+document.querySelectorAll(".menu-button").forEach(function (button) {
+  var menu = headerMenu(button);
+  menu.tabIndex = -1;
+  button.addEventListener("click", function () {
+    if (openMenuButton === button) closeHeaderMenu(true); else openHeaderMenu(button, false);
+  });
+  button.addEventListener("keydown", function (evt) {
+    if (evt.key !== "ArrowDown" && evt.key !== "ArrowUp") return;
+    evt.preventDefault();
+    openHeaderMenu(button, evt.key === "ArrowUp");
+  });
+  /* the item's own handler acts first; the pick then closes the menu. Whether
+     it was a pick is read before the item acts, because an act can disable
+     its own item: clear selection leaves nothing to clear. */
+  var picked = false;
+  menu.addEventListener("click", function (evt) {
+    var item = evt.target.closest('[role^="menuitem"]');
+    picked = !!item && !item.disabled;
+  }, true);
+  menu.addEventListener("click", function (evt) {
+    if (picked) {
+      guardRepeat(evt);
+      closeHeaderMenu(true);
+    }
+    picked = false;
+  });
+  menu.addEventListener("keydown", function (evt) {
+    if (evt.key === "Tab") {
+      /* the browser moves on from the button, so Tab and Shift+Tab leave the
+         menu for the controls on either side of it */
+      closeHeaderMenu(true);
+      return;
+    }
+    /* `at` is -1 when the menu itself has the focus (a click on a caption or
+       a disabled item): Down then goes to the first item and Up to the last */
+    var items = enabledItems(menu), at = items.indexOf(document.activeElement), next = null;
+    if (!items.length) return;
+    if (evt.key === "ArrowDown") next = items[(at + 1) % items.length];
+    else if (evt.key === "ArrowUp") next = items[((at < 0 ? 0 : at) - 1 + items.length) % items.length];
+    else if (evt.key === "Home") next = items[0];
+    else if (evt.key === "End") next = items[items.length - 1];
+    if (!next) return;
+    evt.preventDefault();
+    next.focus();
+  });
+});
+window.addEventListener("resize", placeHeaderMenu);
+
+/* Dismissing a menu never changes the selection (DL-196, DL-568). A pick or
+   an outside click closes the menu, and takes the backdrop away, on its first
+   click; the second press of a double-click would then reach whatever lies
+   under it -- the graph, which clears or replaces the selection. The browser
+   gives every primary mousedown, mouseup, click and dblclick of one press
+   sequence its click count in `detail`: 1 for the first press, 2 or more for
+   the presses that repeat it. A mouse pick or dismissal arms the guard; while
+   it is armed, a primary-button event with a count of 2 or more is taken in
+   the window's capture phase, before the graph or any other listener sees it.
+   A mousedown with a count of 1 begins a new sequence and disarms. An event
+   with a count of 0 -- a click made by the keyboard, a label or a script --
+   is never taken and disarms nothing, and neither is a press of another
+   button. The decision reads the event alone: no state beyond the arming. */
+var repeatGuard = false;
+function guardRepeat(evt) { if (evt.detail > 0) repeatGuard = true; }
+function takeRepeat(evt) {
+  if (evt.type === "mousedown" && evt.detail === 1) repeatGuard = false;
+  if (!repeatGuard || evt.button !== 0 || evt.detail < 2) return;
+  evt.stopPropagation();
+  evt.preventDefault();
+}
+["mousedown", "mouseup", "click", "dblclick"].forEach(function (type) {
+  window.addEventListener(type, takeRepeat, true);
+});
+document.getElementById("toolbar").addEventListener("scroll", placeHeaderMenu);
+
 document.querySelectorAll(".disclosure").forEach(function (trigger) {
   trigger.addEventListener("click", function () {
     var wasOpen = chromeTrigger === trigger;
     closeChrome(false);
     if (wasOpen) return;
+    closeHeaderMenu(false);
     var menu = openMenu();
     if (menu) menu.style.display = "none";
     chromeTrigger = trigger;
@@ -2406,29 +2567,37 @@ document.querySelectorAll("[data-close-panel]").forEach(function (button) {
 });
 /* The backdrop consumes the complete outside gesture. It is removed on click,
    after mouseup, so neither a canvas tap nor a drag can clear the selection. */
-chromeBackdrop.addEventListener("click", function () { closeChrome(true); });
+chromeBackdrop.addEventListener("click", function (evt) {
+  guardRepeat(evt);
+  closeHeaderMenu(true);
+  closeChrome(true);
+});
 chromeBackdrop.addEventListener("contextmenu", function (evt) {
   evt.preventDefault();
+  closeHeaderMenu(true);
   closeChrome(true);
 });
 document.addEventListener("click", function (evt) {
+  if (openMenuButton && !evt.target.closest(".chrome-menu, .menu-button")) closeHeaderMenu(false);
   if (!chromeTrigger || evt.target.closest(".chrome-panel, .disclosure")) return;
   closeChrome(false);
 });
 /* Tabbing out dismisses the overlay without pulling focus back. Its controls
    are ordinary HTML, including when the optional graph menu failed to load. */
 document.addEventListener("focusin", function (evt) {
+  if (openMenuButton && evt.target !== openMenuButton &&
+      !headerMenu(openMenuButton).contains(evt.target)) closeHeaderMenu(false);
   if (!chromeTrigger || evt.target === chromeTrigger || evt.target.closest(".chrome-panel")) return;
   closeChrome(false);
 });
 
 /* ----------------------------------------------------------------- toolbar */
 
-/* Every op over the selection is a toolbar button, so it is
-   keyboard-reachable and works when the optional menu plugin fails (DL-77);
-   the node-seeded items are the menu's, and each has a selection-seeded
-   equivalent here (both cones and neighbours are two walks; hide this node
-   is a click and hide selected). Nothing runs inside the load window: the
+/* Every op over the selection is a toolbar button or a header menu item, so
+   it is keyboard-reachable and works when the optional menu plugin fails
+   (DL-77); the node-seeded items are the graph menu's, and each has a
+   selection-seeded equivalent here (hide this node is a click and hide
+   selection; DL-568). Nothing runs inside the load window: the
    readiness signal in #stats must mean what it says until the load path's
    last layout stops, and a second ELK run there would race the first (G6). */
 function guarded(fn) {
@@ -2771,16 +2940,17 @@ document.getElementById("expand-all").addEventListener("click", function () {
    composes with focus hiding instead of fighting it: a focus that hid a job
    and a toggle that hid its lock are two independent facts. */
 var locksToggle = document.getElementById("locks");
-locksToggle.addEventListener("change", function () {
+wireCheck(locksToggle, function () {
   syncLocks();
   /* off keeps its authority (DL-196): a hub it hides is not selected, and a
      reveal whose target is a hub skips it and says so */
-  if (!locksToggle.checked) cy.nodes(".lock").unselect();
+  if (!isChecked(locksToggle)) cy.nodes(".lock").unselect();
   updateStats();
 });
 
 var traceToggle = document.getElementById("trace-boxes");
-function viaBoxes() { return traceToggle.checked; }
+wireCheck(traceToggle);
+function viaBoxes() { return isChecked(traceToggle); }
 function howLabel(what) { return what + (viaBoxes() ? ", via boxes" : ", edges only"); }
 
 /* A box-override edge (box_success / box_failure) is a COMPLETION
@@ -2970,7 +3140,7 @@ function lockMemberNodes(hub) {
 function selectLockMembers(hub) {
   var found = lockMemberNodes(hub);
   selectNodes(found.nodes, false);
-  var op = "members of " + lockTitle(hub) + " (" + found.nodes.length + ")";
+  var op = "lock peers of " + lockTitle(hub) + " (" + found.nodes.length + ")";
   reportAfterFold(found.expanded, function () { updateStats(op); });
 }
 
@@ -3031,17 +3201,19 @@ function selectLockPeersOfSelection() {
 function target(evt) { return evt.target || evt.cyTarget; }
 
 /* Menus carry seed-relative items only (DL-196); everything else is a
-   toolbar button. Node: the walks, seeded from that node, lock peers, hide,
-   collapse or expand. Hub: select members, hide. Canvas: the walks, seeded
-   from the selection. The labels are rewritten as a menu opens, below, to
-   name the seed. Item ids become DOM ids: distinct from the toolbar's. */
+   toolbar button or a header menu item. Node: the walks, seeded from that
+   node, lock peers, hide, collapse or expand. Hub: its lock peers, which are
+   its members, and hide. Canvas: the walks, seeded from the selection. An
+   item uses the Select menu's words for the same op (DL-568), and its label
+   is rewritten as the menu opens, below, to name the seed. Item ids become
+   DOM ids: distinct from the toolbar's. */
 function nodeWalkItem(kind, extra) {
   /* a lock hub has no flow edges, so a walk from it is always empty; the
      walks are not offered on one (DL-197). node[!lock] excludes only hubs --
      a job carries `self_lock` at most, never `lock` (viz_explore.py) --
      cytoscape has no :not(), so the attribute-absence form is what selects
      "every node except a hub". */
-  var item = { id: kind, content: "select " + WALKS[kind].word, selector: "node[!lock]",
+  var item = { id: kind, content: "+ " + WALKS[kind].word, selector: "node[!lock]",
     onClickFunction: function (evt) {
       var n = target(evt);
       runWalk(kind, n, shortId(n.id()));
@@ -3050,7 +3222,7 @@ function nodeWalkItem(kind, extra) {
   return item;
 }
 function selectionWalkItem(kind) {
-  return { id: "menu-" + kind, content: "select " + WALKS[kind].word + " of selection",
+  return { id: "menu-" + kind, content: "+ " + WALKS[kind].word + " of selection",
     coreAsWell: true,
     onClickFunction: function () { runWalk(kind, selectedNodes(), selectionLabel()); } };
 }
@@ -3062,13 +3234,13 @@ var menuItems = [
   nodeWalkItem("fan-out-tree"),
   nodeWalkItem("both-trees"),
   nodeWalkItem("neighbours", { hasTrailingDivider: true }),
-  { id: "lock-peers", content: "select lock peers", selector: "node[!lock].peered",
+  { id: "lock-peers", content: "+ lock peers", selector: "node[!lock].peered",
     onClickFunction: function (evt) { selectLockPeers(target(evt)); },
     hasTrailingDivider: true },
   { id: "hide", content: "hide this node", selector: "node[!lock]",
     onClickFunction: function (evt) { hideThisNode(target(evt)); },
     hasTrailingDivider: true },
-  { id: "lock-members", content: "select lock members", selector: "node.lock",
+  { id: "lock-members", content: "+ lock peers", selector: "node.lock",
     onClickFunction: function (evt) { selectLockMembers(target(evt)); } },
   { id: "hide-lock", content: "hide this lock", selector: "node.lock",
     onClickFunction: function (evt) { hideThisNode(target(evt)); } }
@@ -3113,7 +3285,7 @@ cy.on("tap", function (evt) {
   }, 0);
 });
 
-/* Escape closes a menu or the new controls/help panel, then keeps DL-196's
+/* Escape closes the graph menu, a header menu or a panel, then keeps DL-196's
    find/selection order: it clears a find
    field the operator is typing in, else it clears the selection. The most
    local surface comes first, so it never reaches past what is in
@@ -3134,6 +3306,7 @@ document.addEventListener("keydown", function (evt) {
     menu.style.display = "none";
     return;
   }
+  if (openMenuButton) { closeHeaderMenu(true); return; }
   if (chromeTrigger) { closeChrome(true); return; }
   /* An EMPTY focused field has nothing to clear, so Escape moves on to the
      selection rather than doing nothing at all: DL-196 orders the three
@@ -3160,27 +3333,25 @@ try {
   menuItems.forEach(function (item) { item.onClickFunction = guarded(item.onClickFunction); });
   cy.contextMenus({ menuItems: menuItems });
   menuApi = cy.contextMenus("get");
-  refreshControls(selectedNodes().length, highlighted().length);  /* the four canvas walks start disabled too */
+  refreshControls(selectedNodes().length, highlighted().length);  /* the canvas walks start disabled too */
   /* As the menu opens -- after the plugin's own cxttap handler has shown
-     the items the target matches -- the labels name the seed: "select
-     fan-in of JOB_A, transitive", "... of selection (7)". */
+     the items the target matches -- the labels name the seed: "+ fan-in of
+     JOB_A, transitive", "... of selection (7)". */
   cy.on("cxttap", function (evt) {
     var t = target(evt);
     var onNode = t !== cy && typeof t.isNode === "function" && t.isNode();
     var seedLabel = onNode ? shortId(t.id()) : selectionLabel();
     Object.keys(WALKS).forEach(function (kind) {
-      setMenuLabel(kind, "select " + walkName(kind, seedLabel));
+      setMenuLabel(kind, "+ " + walkName(kind, seedLabel));
     });
     /* the canvas items are seeded from the selection whatever was
-       right-clicked; on a node menu they are hidden, not renamed. Only
-       four walks carry a canvas item (DL-199), so this loop runs the new
-       list, not all six -- the other two have no "menu-" id to find. */
+       right-clicked; on a node menu they are hidden, not renamed */
     SELECTION_WALKS.forEach(function (kind) {
-      setMenuLabel("menu-" + kind, "select " + walkName(kind, selectionLabel()));
+      setMenuLabel("menu-" + kind, "+ " + walkName(kind, selectionLabel()));
     });
     if (!onNode) return;
-    setMenuLabel("lock-peers", "select lock peers of " + seedLabel);
-    if (t.hasClass("lock")) setMenuLabel("lock-members", "select members of " + lockTitle(t));
+    setMenuLabel("lock-peers", "+ lock peers of " + seedLabel);
+    if (t.hasClass("lock")) setMenuLabel("lock-members", "+ lock peers of " + lockTitle(t));
   });
 } catch (err) {
   lostFeature += " · context menu unavailable in this browser";

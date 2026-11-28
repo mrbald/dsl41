@@ -241,22 +241,23 @@ large estates; the report stays the artifact of record. What the page does:
   while keeping data inspectable in Snapshot. Unknown and ineligible IDs
   stay inspectable there. The page performs no network access or live polling.
 - Boxes collapse to one node and expand again: double-click, the corner cue,
-  the menu, or two toolbar buttons. `--collapse-threshold` folds the
-  over-threshold top-level boxes after the first layout; without it nothing
-  folds. A collapse or an expand runs no layout, so the rest of the picture
-  stays where it is.
+  the right-click menu, or Show's "collapse all boxes" and "expand all
+  boxes". `--collapse-threshold` folds the over-threshold top-level boxes
+  after the first layout; without it nothing folds. A collapse or an expand
+  runs no layout, so the rest of the picture stays where it is.
 - Navigation has three independent layers. The selection is built by
   clicking, by a substring find that selects or highlights every match, or
   by walking a node's or the selection's fan-in or fan-out, direct or
-  transitive, from the right-click menu or the toolbar. The highlight is
-  sticky and survives clicks, hiding, and folding. Visibility is "hide
-  selected", "hide others", and "show all".
+  transitive, both cones, or neighbours, from the right-click menu or the
+  Select menu. The highlight is sticky and survives clicks, hiding, and
+  folding. Visibility is "show only selection", "hide selection", and
+  "show all".
   Multiple Find matches also appear as full-name buttons in the details
   panel. Each button selects and inspects that exact match and fits it.
 - Shift+drag (or ctrl or cmd) on the background adds a region to the
   selection; plain drag pans. Escape closes an open menu or panel, else
   empties the find field while typing there, else clears the selection.
-- View's Edge style offers Orthogonal (the default), ELK routes, and Bezier.
+- View's Edge style offers ELK routes (the default), Orthogonal, and Bezier.
   Single Bezier connections are direct lines; parallel connections curve
   apart. Switching styles keeps node positions, pan, and zoom.
   ELK routes use the layout's bend points and separate connection ports.
@@ -265,16 +266,23 @@ large estates; the report stays the artifact of record. What the page does:
   straight, and ancestor/member edges stay Bezier. The bottom status shows
   routed and fallback counts, or an Arrange action when routes expire.
   A failed layout releases the controls and offers Arrange to retry.
-- The header keeps Find, its two match actions, Fit, and Help. Selection,
-  Highlight, Visibility, View, and Snapshot open panels over the canvas. A
-  panel stays
-  open for repeat commands; Close, Escape, or an outside click dismisses it.
-  Help lists the catalog totals, the gestures, and the legend. The bottom
-  status shows counts, a fit-to-selection button, and operation feedback. A
-  feature that fails to load shows a persistent notice.
-- Every operation over the selection has an HTML button, so the page works
-  where the menu plugin cannot load. A control is disabled while the layer
-  its operation reads is empty.
+- The toolbar holds Find and its two match actions, fit, arrange, the
+  Select, Show and View menus, and Snapshot; Help sits on the title row.
+  Select holds the walks, "select highlighted", "clear selection" and
+  "trace through boxes". Show holds the visibility and highlight actions,
+  "collapse all boxes", "expand all boxes" and "locks". View holds "fit
+  selection", Edge style, Labels and "arrange after hiding". A pick acts
+  and closes the menu; Escape or a click outside closes it without
+  touching the graph. The arrow keys, Home and End move in a menu, and
+  Enter or Space picks. Snapshot and Help open panels; Close, Escape, or
+  an outside click dismisses one. Help lists the catalog totals, the
+  gestures, and the legend. The bottom status shows counts, a
+  fit-to-selection button, and operation feedback. A feature that fails
+  to load shows a persistent notice.
+- Every operation over the selection has a toolbar button or a menu item,
+  so the page works where the right-click menu plugin cannot load. The
+  right-click menu uses the Select menu's words. An item is disabled
+  while the layer its operation reads is empty.
 - Dragging a selected node moves the whole selection. Otherwise nodes move
   only when a layout runs: at load, on "arrange", or after a hide operation
   when "arrange after hiding" is on (it is off by default). There is no undo.
@@ -292,7 +300,7 @@ large estates; the report stays the artifact of record. What the page does:
   hub. A resource semaphore is a hub per consumed `insert_resource`,
   labelled with its capacity. Locks sit outside the layout, beside their
   members, and take no part in walks.
-- Edges route orthogonally along the layout axis.
+- ELK routes and Orthogonal edges follow the layout axis.
 
 Chrome, Safari, and Firefox all drive the page, and CI runs it in all three
 on pushes to main and on pull requests. If a browser refuses the menu or
@@ -932,9 +940,9 @@ Compiler:
   invariant, vendored-payload integrity, script order, and CLI flag
   absorption.
 - `tests/test_viz_explore_browser.py`: the `explore` page running in
-  chromium, webkit, and firefox: layout completes, and the toolbar, find,
-  focus, panels, context menu, collapse, condition badge, branch paint,
-  and lock controls respond without throwing.
+  chromium, webkit, and firefox: layout completes, and the toolbar, its
+  menus, find, focus, panels, context menu, collapse, condition badge,
+  branch paint, and lock controls respond without throwing.
 - `tests/test_oracle.py`: the AutoSys oracle trace tests against the SEM
   entries.
 - `tests/test_oracle_goldens.py`: the oracle reproduces the golden digests

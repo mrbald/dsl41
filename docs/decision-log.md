@@ -28474,3 +28474,26 @@ relitigate an entry; append a new one.
   included, under the engine's identity; the caller names no path.
   WHAT STAYS. Stopping the engine stays adm. No record kind, record field or version
   constant.
+- DL-568 Explore draws ELK routes by default and its controls are menus
+  (2026-11-28; owner ruling; narrows DL-196, DL-199, DL-200, DL-201, DL-204, DL-381 and DL-382;
+  templates/viz_explore.html; docs: README)
+  THE RULE. (1) Edge style starts as ELK routes. Orthogonal and Bezier stay in View. Routes
+  that expire fall back to Orthogonal as before (DL-382, DL-383); Arrange, now a toolbar
+  button beside Fit, refreshes them. (2) Select, Show and View are menus: a pick acts and
+  closes the menu; Escape or a click outside closes it, and that click does not reach the
+  graph. Snapshot and Help stay panels. (3) Select holds the walks (fan-in and fan-out,
+  direct and transitive, both cones, neighbours, lock peers), select highlighted, clear
+  selection and trace through boxes. Show holds show only selection, hide selection, show
+  all, the three highlight actions, collapse and expand all boxes, and locks. View holds fit
+  selection, edge style, labels and arrange after hiding. (4) The canvas menu uses the same
+  words for the same actions, with `+` where it said `select`; a hub's members are its lock
+  peers, in its item and its status line. Both cones and neighbours are walks of the
+  selection in both places; DL-199 and DL-201 had left them as compositions.
+  THE REASON. Orthogonal merges arrows into shared trunks, so one dependency cannot be
+  followed from end to end; ELK gives each arrow its own lane. The panels looked like menus
+  but blocked the graph they acted on, split one task over two panels, and gave three
+  buttons a panel of their own.
+  WHAT STAYS. Every default but the edge style, the disabling of an action with nothing to
+  act on, keyboard reach of every action without the menu plugin, no layout on a move or a
+  fold (DL-198), no stored preference and no CLI flag. A tooltip changes only where it
+  names a renamed item.

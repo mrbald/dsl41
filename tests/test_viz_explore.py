@@ -909,12 +909,23 @@ def test_to_explore_html_wires_everything_essential_above_the_optional_plugin() 
 
 
 def test_to_explore_html_routes_edges_along_the_layout_axis() -> None:
-    # Orthogonal remains the default and follows ELK's layering axis (DL-77, DL-381).
+    # ELK routes are the default (DL-568); Orthogonal follows ELK's layering
+    # axis (DL-77, DL-381). The three styles are exclusive items of one group,
+    # and the markup's checked item is the default the script reads.
     catalog = catalog_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n")
     page = to_explore_html(catalog)
-    assert '<option value="taxi" selected>Orthogonal</option>' in page
-    assert '<option value="elk">ELK routes</option>' in page
-    assert '<option value="bezier">Bezier</option>' in page
+    group = page[page.index('<div role="group" id="edge-style"') :]
+    group = group[: group.index("</div>\n      <div role=")]
+    radios = re.findall(
+        r'role="menuitemradio" aria-checked="(\w+)" id="[\w-]+" data-value="(\w+)">([^<]+)<', group
+    )
+    assert radios == [
+        ("true", "elk", "ELK routes"),
+        ("false", "taxi", "Orthogonal"),
+        ("false", "bezier", "Bezier"),
+    ]
+    assert 'var edgeStyle = radioValue("edge-style");' in page
+    assert "<select" not in page[: page.index('<section id="snapshot-panel"')]
     assert '"taxi-direction": TAXI_DIRECTION' in page
     assert 'TAXI_DIRECTION = DIRECTION === "DOWN" ? "vertical" : "horizontal"' in page
     # Ancestor/member edges stay Bezier: taxi cannot draw their overlapping endpoints (DL-381).
@@ -979,8 +990,10 @@ def test_to_explore_html_folds_without_a_layout_and_carries_the_arrange_button()
     assert "layoutBy: function" not in page  # the fold called relayoutOrFit through this
     assert 'id="arrange"' in page
     assert page.index('id="fit"') < page.index('id="arrange"') < page.index('id="collapse-all"')
-    assert '<input tabindex="0" type="checkbox" id="relayout"> arrange after hiding' in page
-    assert 'id="relayout" checked' not in page
+    assert (
+        'role="menuitemcheckbox" aria-checked="false" id="relayout" title="what a hide op' in page
+    )
+    assert ">arrange after hiding</button>" in page
     assert "re-layout on focus" not in page
     # the button and the toggle's ON branch are one layout path, not two
     assert "function arrangeVisible(suffix)" in page
@@ -1022,6 +1035,8 @@ def test_to_explore_html_pins_the_marquee_selection_controls_and_escape() -> Non
         "sel-fan-in-tree",
         "sel-fan-out",
         "sel-fan-out-tree",
+        "sel-both-trees",
+        "sel-neighbours",
         "sel-lock-peers",
         "clear-selection",
         "highlight-selected",
@@ -1140,8 +1155,9 @@ def test_to_explore_html_carries_the_lock_grammar() -> None:
     assert '{ selector: "edge.lock[?source_tee]", style: {' in page
     assert '"target-arrow-shape": "tee"' in page
     assert 'shape: "octagon"' in page
-    # DL-196 slice 3: a hub's menu offers its members and its own hiding
-    assert '{ id: "lock-members", content: "select lock members", selector: "node.lock",' in page
+    # DL-196 slice 3: a hub's menu offers its members and its own hiding, the
+    # members under the Select menu's word for them (DL-568)
+    assert '{ id: "lock-members", content: "+ lock peers", selector: "node.lock",' in page
     assert '{ id: "hide-lock", content: "hide this lock", selector: "node.lock",' in page
     assert "focus-lock" not in page
     assert "dotted gray = lock" in page
