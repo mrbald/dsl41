@@ -20,3 +20,17 @@ def write_config(directory: Path, **options) -> Path:
 
 def prepare_estate(directory: Path) -> Estate:
     return main_config.prepare(directory / "dsl41.toml")
+
+
+def in_process_worker(server):
+    """`ControlServer._prepare_reload` with the worker run in this process: the same payload
+    and the same answer, through JSON, as the isolated interpreter gives (DL-463, DL-569)."""
+    import json
+
+    from dsl41.reread_worker import answer
+
+    async def prepare(*, update: bool, plan: str | None = None) -> dict:
+        reply = json.loads(json.dumps(answer(server._reload_payload(update=update, plan=plan))))
+        return reply if reply["ok"] else {**reply, "refused": True}
+
+    return prepare

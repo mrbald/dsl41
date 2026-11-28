@@ -4,10 +4,11 @@ An entry is removed when it is older, by a day, than the oldest row the live sto
 run is `runs/<job>.<run>/` with everything in it plus `logs/<job>.<run>.out` and `.err`, judged
 together by the newest mtime among them. A plan is `plans/<token>/`, judged by its `plan.json`,
 or by the directory when it has none. A name that does not parse as the engine's, and an
-entry that is a symbolic link, is left alone. Never removed: a run an open record names, the run of each job's last dispatch, and
-every plan while a preparation or an update is in flight. With `[engine] expired_dir` set, an
-expired entry is moved there, keeping its place and name, instead of removed; a move never
-replaces a name already there.
+entry that is a symbolic link, is left alone. Never removed: a run an open record names, the
+run of each job's last dispatch, the staged read's plan, and every plan while a preparation or
+an update is in flight (DL-569). With `[engine] expired_dir` set, an expired entry is moved
+there, keeping its place and name, instead of removed; a move never replaces a name already
+there.
 
 A round lists the three directories on a thread of its own and reports the old entries to the
 engine's loop. The loop removes them in bounded steps, each against the horizon it reads then.
@@ -399,16 +400,19 @@ def step(
     runs: frozenset[str],
     plans: bool,
     expired: Path | None,
+    staged: str | None = None,
 ) -> None:
     """One owed step: at most `STEP` entries off the round's list, and at most one plan
     removed, since a plan holds every captured part. An entry a kept run names, any plan
-    while `plans` is True, an entry that is now a link, and an entry not older than `before`
-    now are dropped; each other is removed or moved. With no `before` every entry is
-    dropped."""
+    while `plans` is True, the staged read's plan (`staged`, DL-569), an entry that is now a
+    link, and an entry not older than `before` now are dropped; each other is removed or
+    moved. With no `before` every entry is dropped."""
     plan_taken = False
     for _ in range(min(STEP, len(round.owed))):
         entry = round.owed.popleft()
-        if before is None or (entry.name in runs if entry.kind == "run" else plans):
+        if before is None or (
+            entry.name in runs if entry.kind == "run" else plans or entry.name == staged
+        ):
             continue
         if entry.linked(root):
             continue

@@ -284,8 +284,10 @@ def test_whole_difference_budget_for_5000_jobs_and_300_settings(short_root, cli_
     path = write_inputs("old")
     with cli_engine(path):
         write_inputs("new")
+        # the test's own wait, not a time budget: DL-482's budget is bytes, and the server
+        # gives a preparation 120 s (DL-463)
         answer = roundtrip(
-            short_root / "run" / "control.sock", {"v": 5, "cmd": "reread"}, timeout=15
+            short_root / "run" / "control.sock", {"v": 5, "cmd": "reread"}, timeout=60
         )
         assert answer["ok"] is True, answer
     view = answer["preview"]

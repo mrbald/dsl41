@@ -456,9 +456,25 @@ def prepare_reread(
         ]
         if any(reason in reported for reason in details["blocked"]):
             footer.append("update would refuse: blocking findings are reported on stderr")
-    elif not refusal:
-        footer.append("apply with: " + apply_command)
-    footer.append("forecast at reread time; update rereads before applying")
+    # the read the engine staged is what `update NAME` applies, not the files then; under a
+    # forecast refusal its name is shown and no apply command offered (DL-559, DL-569)
+    staged = answer.get("staged_read")
+    last = "forecast at reread time; update checks the read against the engine's state again"
+    if "staged_read" not in answer:
+        # an engine before DL-569 stages nothing, and its update reads the files
+        if details and not details["blocked"] and not refusal:
+            footer.append(f"apply with: {apply_command} --reread")
+        last = "forecast at reread time; update --reread reads the files again"
+    elif staged is None:
+        footer.append("nothing staged for update")
+    else:
+        actor = f" by {one_line(staged['actor'])}" if staged.get("actor") else ""
+        footer.append(
+            f"staged read {staged['name']}{actor} at {one_line(format_local_at(staged['at']))}"
+        )
+        if not refusal:
+            footer.append(f"apply with: {apply_command} {staged['name']}")
+    footer.append(last)
     if (
         not jobs_changed
         and not settings_changed

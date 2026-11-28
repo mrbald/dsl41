@@ -274,7 +274,7 @@ def test_spec_serves_original_source_at_startup_and_after_applied_update(
         source.write_text(after)
         preview = runner.invoke(app, ["reread", "-S", str(socket)])
         assert preview.exit_code == 0, preview.output
-        applied = runner.invoke(app, ["update", "-S", str(socket), "--wait"])
+        applied = runner.invoke(app, ["update", "--reread", "-S", str(socket), "--wait"])
         assert applied.exit_code == 0, applied.output
         assert ask()["revision"] == 2
         reply = roundtrip(socket, {"v": 5, "cmd": "spec", "job": name})

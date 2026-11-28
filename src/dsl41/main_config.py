@@ -620,30 +620,52 @@ def config_path(value: str) -> Path:
     return path
 
 
-def pending_source_changes(estate: Estate) -> int:
-    """Observe drift after startup; source drift cannot refuse a restart (DL-437)."""
+def source_baseline(estate: Estate) -> dict[str, Any]:
+    """What `changed_sources` compares the disk with, as JSON: the captured inputs' hashes,
+    the config document and path, each input's path and role, and whether the marks file was
+    absent. The control server keeps one for the applied estate and one for a staged read
+    (DL-569)."""
+    metadata = estate.metadata
+    return {
+        "fingerprint": fingerprint(estate),
+        "config": metadata["config"],
+        "config_path": metadata["config_path"],
+        "records": [{"path": r["path"], "role": r["role"]} for r in metadata["records"]],
+        "absent_exceptions": metadata["absent_exceptions"],
+    }
+
+
+def changed_sources(baseline: Mapping[str, Any]) -> set[str]:
+    """The input paths whose disk state differs from `baseline`: a changed, unreadable or
+    removed file, a file the include or properties globs match on one side only, and a marks
+    file that appeared (DL-437, DL-569)."""
     changed: set[str] = set()
-    for original, expected in fingerprint(estate).items():
+    for original, expected in baseline["fingerprint"].items():
         try:
             actual = hashlib.sha256(input_bytes(original)).hexdigest()
         except RereadRefused:
             actual = "unreadable"
         if actual != expected:
             changed.add(original)
-    metadata = estate.metadata
-    config = MainConfig.model_validate(metadata["config"])
-    path = Path(metadata["config_path"])
+    records = baseline["records"]
+    config = MainConfig.model_validate(baseline["config"])
+    path = Path(baseline["config_path"])
     patterns = list(config.estate.properties)
     if config.engine.environment is not None:
         patterns += config.estate.environments[config.engine.environment].properties
     for roles, patterns in [({"jil", "python"}, config.estate.include), ({"properties"}, patterns)]:
-        baseline = {r["path"] for r in metadata["records"] if r["role"] in roles}
+        selected = {r["path"] for r in records if r["role"] in roles}
         try:
-            changed |= baseline ^ set(expand(path, patterns, []))
+            changed |= selected ^ set(expand(path, patterns, []))
         except (RereadRefused, ValueError):
             changed.add(str(path))
-    if metadata["absent_exceptions"]:
-        exception = next(r["path"] for r in metadata["records"] if r["role"] == "exceptions")
+    if baseline["absent_exceptions"]:
+        exception = next(r["path"] for r in records if r["role"] == "exceptions")
         if os.path.lexists(exception):
             changed.add(exception)
-    return len(changed)
+    return changed
+
+
+def pending_source_changes(estate: Estate) -> int:
+    """Observe drift after startup; source drift cannot refuse a restart (DL-437)."""
+    return len(changed_sources(source_baseline(estate)))

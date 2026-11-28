@@ -1225,8 +1225,9 @@ conversion, and the pending-source scan blocks the loop.
 non-idempotent marks. Main-config rows also hold captured source bytes and
 mapping (DL-437). Reread and update require a main-config candidate. Reload plan
 version 1, including an absent version, refuses as retired (DL-486), including
-restart of an open update before writes or signals. `reread -S SOCKET` passively reports current launch-config inputs. `update -S SOCKET`
-prepares current inputs itself (DL-463).
+restart of an open update before writes or signals. `reread -S SOCKET` reads current
+launch-config inputs and the engine stages the read; `update -S SOCKET NAME` applies the
+staged read, and `update -S SOCKET --reread` prepares current inputs itself (DL-463, DL-569).
 The engine prepares both candidates in a separate interpreter, `reread_worker.py`.
 It terminates and reaps the worker on timeout or cancellation (DL-463). A failed
 preparation carries the last 8192 bytes of the worker's error output (DL-475).
@@ -1744,8 +1745,8 @@ path limit. A relative bind beneath a deep cwd can succeed while the
 exported absolute path is too long for a client to connect.
 
 Mutations are `sendevent`, `engine_stop` and `update` (DL-429, DL-432).
-`reread` prepares and reports a candidate and changes no revision or record
-(DL-463). The socket also serves queries and streaming `subscribe`. `docs/control-protocol.md` is the
+`reread` prepares and reports a candidate, stages its read in memory and changes no
+revision or record (DL-463, DL-569). The socket also serves queries and streaming `subscribe`. `docs/control-protocol.md` is the
 frozen inventory; what follows is what each is for.
 
 - **sendevent parity** (maps 1:1 onto oracle EventKind): STARTJOB,
@@ -1775,12 +1776,12 @@ frozen inventory; what follows is what each is for.
   — `state_rev` (the revision an `expect` may name, DL-87), `held` (always
   false; it only keeps its place in the row, DL-94 and DL-528), plus,
   for a live FW run, a `watching {file, interval, min_size}`
-  object (DL-68), and a `spec_drift` flag — a lazy fingerprint re-check of the
-  loaded input files; the flag tells the operator the running catalog
-  differs from disk. `reread` reports disk changes; `update` adopts them (DL-463). The optional
-  per-job reread annotation is the last preview stored: a new reread replaces it only
-  while the revision it read is still the applied one (DL-521), and a failed reread,
-  an applied update and a restart clear it. Drift still compares against the applied capture. The CLI adds
+  object (DL-68), and a `spec_drift` flag — a lazy re-check of the
+  input files and globs against the loaded ones; the flag tells the operator the running catalog
+  differs from disk. `reread` reads and stages disk changes; `update NAME` adopts the staged
+  read (DL-463, DL-569). The optional per-job reread annotation and the `staged_read` block
+  are the staged read's: a reread of the disk replaces it, and an applied update and a
+  restart drop it (DL-569). Drift still compares against the applied capture. The CLI adds
   scriptable predicates `is-success`/`is-failed` (print status, exit
   0/1) over the status verb.
 - **subscribe** — stream the store's wire records from a seq (the UI feed;

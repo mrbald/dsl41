@@ -97,15 +97,19 @@ class _Wire:
         async def dispatch(
             server: ControlServer, request: dict[str, Any], *, authority: Tier = Tier.ADM
         ) -> dict[str, Any]:
-            if request.get("cmd") == "status":
-                await park("status")
+            # an update parks before its preparation: the reread parked in its own holds the
+            # one preparation slot (DL-569)
+            if request.get("cmd") in ("status", "update"):
+                await park(str(request["cmd"]))
             return await real_dispatch(server, request, authority=authority)
 
         async def read_store(server: ControlServer, journal: Any, work: Any) -> dict[str, Any]:
             await park("history")
             return await real_read_store(server, journal, work)
 
-        async def prepare(server: ControlServer, *, update: bool) -> dict[str, Any]:
+        async def prepare(
+            server: ControlServer, *, update: bool, plan: str | None = None
+        ) -> dict[str, Any]:
             # the worker's own work is not under test: what the handler answers after it is
             await park("update" if update else "reread")
             rev = server.engine.config_rev

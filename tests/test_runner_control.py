@@ -3551,7 +3551,12 @@ def test_reload_worker_context_output_and_findings(short_root: Path, monkeypatch
             answer = await _control_call(server.path, {"v": 5, "cmd": "reread"})
             assert answer["ok"], answer
             assert answer["preview"]["added"] == ["P"]
-            assert not list((short_root / "run" / "plans").iterdir())
+            # the read is staged: its plan is the one directory under plans/ (DL-569)
+            staged = answer["staged_read"]["name"]
+            assert [p.name for p in (short_root / "run" / "plans").iterdir()] == [
+                engine.update.staged.token
+            ]
+            assert staged == engine.update.staged.token[:12]
             assert "noise" not in json.dumps(answer)
             assert engine.config_rev == 1
             config_file(short_root, lint='refuse = "warn"\n')
@@ -3562,17 +3567,18 @@ def test_reload_worker_context_output_and_findings(short_root: Path, monkeypatch
             assert report["ok"] and any(
                 "L001" in item for item in report["preview"]["lint_messages"]
             )
-            marks = dict(engine.reread_marks)
+            # a candidate the lint policy refuses stages nothing (DL-569)
+            assert report["staged_read"] is None and engine.update.staged is None
             refused = await _control_call(
                 server.path,
                 {"v": 5, "cmd": "update", "request_id": "lint", "baseline_id": engine.baseline_id},
             )
             assert not refused["ok"] and "L001" in refused["error"]
-            assert engine.reread_marks == marks and engine.config_rev == 1
+            assert engine.update.staged is None and engine.config_rev == 1
             (short_root / "a.jil").write_text("broken jil")
             failed = await _control_call(server.path, {"v": 5, "cmd": "reread"})
             assert not failed["ok"] and "error" in failed
-            assert engine.reread_marks == {}
+            assert engine.update.staged is None
         finally:
             await _teardown(engine, server, loop)
 
@@ -3970,7 +3976,7 @@ def test_update_preparation_has_one_slot_and_exact_retry(short_root: Path, monke
             short_root / "run", "insert_job: A\njob_type: c\ncommand: x\nmachine: localhost\n"
         )
 
-        async def prepare(*, update):
+        async def prepare(*, update, plan=None):
             preparations.append(update)
             entered.set()
             await release.wait()
@@ -4096,7 +4102,7 @@ def test_update_decision_timeout_and_preparation_cancellation(short_root: Path, 
             "request_id": "pending",
         }
 
-        async def prepare(*, update):
+        async def prepare(*, update, plan=None):
             return {"ok": True, "token": "internal", "live_rev": 1}
 
         monkeypatch.setattr(server, "_prepare_reload", prepare)
@@ -4124,7 +4130,7 @@ def test_update_decision_timeout_and_preparation_cancellation(short_root: Path, 
                     assert "reread" not in reply["error"]
             gate = asyncio.Event()
 
-            async def blocked(*, update):
+            async def blocked(*, update, plan=None):
                 gate.set()
                 await asyncio.Future()
 

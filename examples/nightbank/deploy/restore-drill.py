@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -111,8 +112,11 @@ def drill(dsl41: str, root: Path, config: Path, inputs: Path, night: Path, state
         "insert_job: DRILL_RESTORE_ICE_C\njob_type: c\ncommand: true\n"
         "machine: bank_core\ncondition: v(DRILL_GATE) = OPEN\n"
     )
-    cli("reread", "-S", socket)
-    cli("update", "-S", socket, "--wait")
+    # the update applies the read this reread staged, by the name its own reply printed, so
+    # another operator's later read is refused stale_plan, not applied (DL-569)
+    staged = re.search(r"^staged read ([0-9a-f]{12})\b", cli("reread", "-S", socket), re.M)
+    assert staged is not None, "reread staged no read"
+    cli("update", "-S", socket, staged.group(1), "--wait")
     revision = status()["config_rev"]
     event("ON_HOLD", "DRILL_RESTORE_HOLD_C")
     event("ON_ICE", "DRILL_RESTORE_ICE_C")

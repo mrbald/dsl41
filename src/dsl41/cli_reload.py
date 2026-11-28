@@ -25,6 +25,8 @@ class UpdateReply:
     pending: bool = False
     request_id: str = ""
     unchanged: Mapping[str, Any] | None = None
+    #: the refusal's prose, printed when it names no job (DL-569)
+    error: str = ""
 
 
 class SendFailed(Exception):
@@ -53,10 +55,10 @@ def reread_command(
     return 1 if view["stop"] or view.get("update_refusal") else 0
 
 
-def _render_refusal(refusal: Refused) -> None:
+def _render_refusal(refusal: Refused, error: str = "") -> None:
     typer.echo(
         f"update: refused {refusal.code}"
-        + (f": {', '.join(refusal.names)}" if refusal.names else ""),
+        + (f": {', '.join(refusal.names)}" if refusal.names else f": {error}" if error else ""),
         err=True,
     )
 
@@ -67,12 +69,14 @@ def update_command(
     wait: bool = False,
     style: OutputStyle = OutputStyle.focused,
     check_command: str = "dsl41 update",
+    read: str | None = None,
 ) -> int:
-    reply = send("update", {"wait": wait})
+    """Apply the staged read `read`, or with none read the files and apply them (DL-569)."""
+    reply = send("update", {"wait": wait, "read": read})
     if not isinstance(reply, UpdateReply):
         raise TypeError("update did not answer an UpdateReply")
     if isinstance(reply.decision, Refused):
-        _render_refusal(reply.decision)
+        _render_refusal(reply.decision, reply.error)
         return 2
     if reply.unchanged is not None:
         typer.echo(
@@ -93,8 +97,10 @@ def update_command(
             else "update admitted; application not yet confirmed"
         )
         if reply.request_id:
+            form = "--reread" if read is None else shlex.quote(read)
             typer.echo(
-                f"check with: {check_command} --request-id {shlex.quote(reply.request_id)} --wait"
+                f"check with: {check_command} {form} --request-id"
+                f" {shlex.quote(reply.request_id)} --wait"
             )
     return 1 if reply.pending else 0
 
@@ -129,6 +135,9 @@ def socket_send(socket_path: Path, *, request_id: str | None = None, timeout: fl
             "baseline_id": header["baseline_id"],
             "claimed_actor": claimed_actor(),
         }
+        if args.get("read") is not None:
+            # the staged read to apply; without it the engine reads the files (DL-569)
+            request["read"] = args["read"]
         window = float(header.get("update_window_s") or 0) if args.get("wait") else 0
         return update_reply_of(
             ask(
@@ -151,7 +160,10 @@ def update_reply_of(answer: Mapping[str, Any]) -> UpdateReply:
     if not answer.get("ok"):
         code = answer.get("code")
         if code in _CHART_CODES:
-            return UpdateReply(Refused(token, code, tuple(answer.get("names") or ())))
+            return UpdateReply(
+                Refused(token, code, tuple(answer.get("names") or ())),
+                error=str(answer.get("error") or ""),
+            )
         outcome = (
             ""
             if answer.get("refused")
@@ -200,7 +212,8 @@ def reread(
     socket_path: Path = SOCKET_OPT,
     style: OutputStyle = typer.Option(OutputStyle.focused, "--style", help="Text layout."),
 ) -> None:
-    """Report current launch-config and JIL changes without applying them."""
+    """Read the launch-config inputs, report their changes and stage the read for
+    `dsl41 update NAME`, without applying them."""
     _run(
         lambda: reread_command(
             send=socket_send(socket_path),
@@ -210,20 +223,55 @@ def reread(
     )
 
 
+#: what a plain `dsl41 update` prints: it names the two forms (DL-569)
+UPDATE_FORMS = (
+    "update: name what to apply: `dsl41 update NAME` applies the read `dsl41 reread`"
+    " staged as NAME; `dsl41 update --reread` reads the files and applies them in one go"
+)
+
+
 def update(
-    socket_path: Path = SOCKET_OPT,
+    read: str | None = typer.Argument(
+        None,
+        metavar="NAME",
+        help="The 12-digit name of the read `dsl41 reread` staged and printed.",
+    ),
+    # optional here, so that the two forms are named before the socket is required (DL-569)
+    socket_path: Path | None = typer.Option(
+        None,
+        "--socket",
+        "-S",
+        envvar="DSL41_SOCKET",
+        readable=False,
+        help="The engine's control socket, <run-root>/control.sock.",
+    ),
+    reread: bool = typer.Option(
+        False, "--reread", help="Read the files now and apply them, without a staged read."
+    ),
     wait: bool = typer.Option(False, "--wait", help="Wait for application."),
     request_id: str | None = typer.Option(
         None, "--request-id", help="Look up an update whose outcome is unknown."
     ),
     style: OutputStyle = typer.Option(OutputStyle.focused, "--style", help="Text layout."),
 ) -> None:
-    """Reread current inputs and apply, stopping and restarting affected jobs."""
+    """Apply the read NAME, or with --reread read the files and apply them, stopping and
+    rerunning the jobs the update changes."""
+    if (read is None) == (not reread):
+        typer.echo(
+            UPDATE_FORMS if read is None else "update: give NAME or --reread, not both",
+            err=True,
+        )
+        raise typer.Exit(2)
+    if socket_path is None:
+        typer.echo("update: Missing option '--socket' / '-S', or set DSL41_SOCKET", err=True)
+        raise typer.Exit(2)
+    path = socket_path
     _run(
         lambda: update_command(
-            send=socket_send(socket_path, request_id=request_id),
+            send=socket_send(path, request_id=request_id),
             wait=wait,
             style=style,
-            check_command=f"dsl41 update -S {shlex.quote(str(socket_path))}",
+            check_command=f"dsl41 update -S {shlex.quote(str(path))}",
+            read=read,
         )
     )

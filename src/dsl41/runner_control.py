@@ -59,6 +59,7 @@ Protocol v5 (DL-498; docs/control-protocol.md is the frozen text):
 from __future__ import annotations
 
 import asyncio
+import base64
 import sys
 from dataclasses import asdict
 from contextlib import suppress
@@ -121,7 +122,14 @@ from dsl41.reload_diff import catalog_hash_v2, catalog_payload
 from dsl41.reload_update import Admitted, Refused
 from dsl41.runner_config import EngineSettings
 from dsl41.reload_plan import spec_texts
-from dsl41.runner_update import APPLICATION_KEYS, OpenedPlan, UpdateRequest, UpdateAnswer
+from dsl41.runner_update import (
+    APPLICATION_KEYS,
+    NAME_DIGITS,
+    OpenedPlan,
+    StagedRead,
+    UpdateAnswer,
+    UpdateRequest,
+)
 from dsl41.runner_store import SqliteStore, Store
 from dsl41.runner_runs import BUDGET as HISTORY_BUDGET
 from dsl41.runner_runs import REPLY_BYTES as HISTORY_REPLY_BYTES
@@ -252,6 +260,12 @@ def _update_refusal(code: Code, error: str, names: Sequence[str] = ()) -> dict[s
     """An `update` refusal: it writes nothing and names the jobs or boxes it
     concerns, none for a refusal about the request itself (control-protocol ss2)."""
     return _failure(code, error, refused=True) | {"names": list(names)}
+
+
+def _staged_view(staged: StagedRead) -> dict[str, Any]:
+    """What a `reread` answer and `status` say of the staged read: its name, who read it and
+    when (DL-569)."""
+    return {"name": staged.name, "actor": staged.actor, "at": staged.at}
 
 
 def _applied(body: Mapping[str, Any]) -> dict[str, Any]:
@@ -487,6 +501,7 @@ class ControlServer:
         *,
         spec_texts: Mapping[str, str] | None = None,
         estate_fingerprint: Mapping[str, str] | None = None,
+        sources: Mapping[str, Any] | None = None,
         access: AccessControl | None = None,
     ) -> None:
         self.engine = engine
@@ -498,7 +513,13 @@ class ControlServer:
         #: status flag (DL-65): there is no reload, and the hint tells the operator the
         #: catalog differs from the files on disk.
         self.estate_fingerprint: Mapping[str, str] = estate_fingerprint or {}
-        self._drift: bool = False
+        #: the applied main-config estate's source baseline (`main_config.source_baseline`):
+        #: with one, `spec_drift` follows `main_config.changed_sources`, so a new file under an
+        #: existing glob counts (DL-569)
+        self.sources: Mapping[str, Any] | None = sources
+        self._drift: bool | None = False
+        #: whether the disk differs from the staged read, as of the last drift check (DL-569)
+        self._staged_drift: bool = False
         self._drift_checked_at: float | None = None
         self._server: asyncio.Server | None = None
         self._conn_tasks: set[asyncio.Task[Any]] = set()
@@ -507,7 +528,10 @@ class ControlServer:
         #: connection at once (ss5, DL-267)
         self._closing = False
         self._preparing_update: tuple[str, str, asyncio.Future[UpdateAnswer]] | None = None
-        engine.update.preparing = lambda: self._preparing_update is not None
+        #: whether a `reread` is preparing: one preparation runs at a time, a reread's or an
+        #: update's (DL-569)
+        self._rereading = False
+        engine.update.preparing = lambda: self._preparing_update is not None or self._rereading
         #: each subscription's backlog budget (ss5); tests lower it
         self.subscriber_budget = SUBSCRIBER_BACKLOG_BYTES
         #: the byte cap of one whole `transitions` answer (ss4); tests lower it
@@ -538,8 +562,14 @@ class ControlServer:
         """An update applied: `spec` serves the applied plan's JIL, and `spec_drift` compares
         the files on disk with the applied plan's bytes, so it keeps saying whether the running
         catalog differs from disk (DL-65)."""
+        from dsl41.main_config import source_baseline
+
         self.spec_texts = spec_texts(opened.estate.parsed, self.engine.oracle.catalog)
         self.estate_fingerprint = opened.fingerprint()
+        if self.engine.reread_source is not None:
+            # only an engine with a main config to reread compares globs; a JIL-only restart
+            # that finishes an update keeps the fingerprint check (DL-569)
+            self.sources = source_baseline(opened.estate)
         self._drift_checked_at = None  # read the disk again at the next status
 
     async def start(self) -> None:
@@ -865,23 +895,43 @@ class ControlServer:
             return await self._reread(request)
         return _failure("unknown_cmd", f"unknown cmd {cmd!r}", refused=True)
 
-    async def _prepare_reload(self, *, update: bool) -> dict[str, Any]:
+    def _reload_payload(self, *, update: bool, plan: str | None) -> dict[str, Any]:
+        """What the worker is given: the engine's state now and the inputs to read. The
+        candidate is the disk's, or with `plan` that stored plan's captured bytes; a `reread`
+        of the disk also stages its read when it may (DL-569)."""
+        live = self.engine.update.live()
+        # a read is staged only when no update stops and the engine is not draining, so the
+        # worker then writes no plan, and none into the open update's directory (DL-569)
+        stage = not (update or plan or self.engine.update.stopping or self.engine.draining)
+        payload: dict[str, Any] = {
+            "source": self.engine.reread_source,
+            "run_root": str(self.engine.run_root),
+            "update": update,
+            "plan": plan,
+            "stage": stage,
+            "live": {**asdict(live), "catalog": catalog_payload(live.catalog)},
+            "source_fingerprint": self.estate_fingerprint,
+        }
+        if payload["stage"]:
+            # what the worker tells a wholly equal candidate by, as the admission does (DL-478)
+            journal = self.engine.journal
+            assert journal is not None  # a main-config engine runs on a store (DL-437)
+            profile = self.engine.profile
+            payload["applied"] = base64.b64encode(
+                journal.store.get_config(self.engine.config_rev)
+            ).decode("ascii")
+            payload["profile"] = None if profile is None else profile.model_dump(mode="json")
+        return payload
+
+    async def _prepare_reload(self, *, update: bool, plan: str | None = None) -> dict[str, Any]:
         """The handler owns the worker from creation through reap (DL-463)."""
-        source = self.engine.reread_source
-        if source is None:
+        if self.engine.reread_source is None:
             return _failure(
                 "invalid_argument",
                 "This engine was started without a main config. Drain it and start on a fresh run root to change definitions.",
                 refused=True,
             )
-        live = self.engine.update.live()
-        payload = {
-            "source": source,
-            "run_root": str(self.engine.run_root),
-            "update": update,
-            "live": {**asdict(live), "catalog": catalog_payload(live.catalog)},
-            "source_fingerprint": self.estate_fingerprint,
-        }
+        payload = self._reload_payload(update=update, plan=plan)
         try:
             async with _worker_stderr() as (stderr, stderr_detail):
                 creation = asyncio.create_task(
@@ -941,18 +991,137 @@ class ControlServer:
                 "engine_error", f"preparation failed: {type(exc).__name__}: {exc}", refused=True
             )
 
-    async def _reread(self, request: dict[str, Any]) -> dict[str, Any]:
-        if set(request) - {"v", "cmd", "claimed_actor"} or (
-            request.get("claimed_actor") is not None
-            and not isinstance(request["claimed_actor"], str)
+    def _release_update_slot(self, own: asyncio.Future[UpdateAnswer]) -> None:
+        """Free the update slot if it still holds the preparation whose answer is `own`: a
+        request that took the slot after this one was answered keeps it (DL-569)."""
+        slot = self._preparing_update
+        if slot is not None and slot[2] is own:
+            self._preparing_update = None
+
+    def _preparation_busy(self) -> dict[str, Any] | None:
+        """The refusal a `reread` gets while another preparation runs: one runs at a time, a
+        reread's or an update's (DL-569)."""
+        if not self._rereading and self._preparing_update is None:
+            return None
+        return _failure(
+            "update_in_progress",
+            "another reread or update is preparing; wait for it to finish",
+            refused=True,
+        )
+
+    def _not_staged(self, read: str) -> str | None:
+        """Why a request that names `read` is refused `stale_plan`, or None when `read` is the
+        staged read's name. Only equality with that name counts: no prefix and no token is
+        matched (DL-569)."""
+        staged = self.engine.update.staged
+        if staged is not None and staged.name == read:
+            return None
+        return (
+            f"{read} is not the staged read: another reread, an update or a restart replaced it;"
+            " run reread and look again"
+        )
+
+    def _staged_token(self) -> str:
+        """The staged read's whole plan token, once its name has matched (`_not_staged`)."""
+        staged = self.engine.update.staged
+        assert staged is not None
+        # every revision step is an application, which drops the staged read in that step,
+        # and a restart forgets it: a staged read is always of the applied revision (DL-569)
+        assert staged.rev == self.engine.config_rev
+        return staged.token
+
+    @staticmethod
+    def _foreign_worker(answer: dict[str, Any], token: str) -> dict[str, Any] | None:
+        """The refusal for a worker answer that was not read from the staged plan `token`: a
+        worker of another build ignores `plan` and reads the disk (DL-569). None when it was."""
+        if not answer.get("ok") or (
+            answer.get("plan") == token and answer.get("token", token) == token
         ):
-            return _failure("invalid_argument", "reread accepts only claimed_actor", refused=True)
-        answer = await self._prepare_reload(update=False)
-        marks = answer.get("preview", {}).pop("marks", {})
-        # A forecast is cached only for the revision still applied; a failure clears it (DL-521).
-        if not answer.get("ok") or answer.get("live_rev") == self.engine.config_rev:
-            self.engine.reread_marks = marks
-        details = answer.get("preview", {}).get("definition_changes")
+            return None
+        return _failure(
+            "engine_error",
+            "the preparation worker did not read the staged plan: the worker is not this"
+            " engine's build; nothing was applied. Restart the engine on the installed build,"
+            " or use the worker of the build the engine runs",
+            refused=True,
+        )
+
+    def _stage(self, answer: dict[str, Any], actor: str | None) -> None:
+        """Stage the read a `reread` of the disk took, or nothing (DL-569): it stages when the
+        worker stored its plan (the candidate passes the preparation checks and is not wholly
+        the applied configuration), the revision it read is still the applied one, no update
+        stops its jobs and the engine is not draining."""
+        token = answer.pop("token", None)
+        sources = answer.pop("sources", None)
+        preview = answer.get("preview", {})
+        marks = preview.pop("marks", {})
+        update = self.engine.update
+        if token is None:
+            return
+        if answer["live_rev"] != self.engine.config_rev:
+            preview["definition_changes"]["blocked"].append(
+                "an update applied while this reread read the files; reread again"
+            )
+            return
+        if update.stopping or self.engine.draining:
+            return  # the blocked reasons below say why
+        update.staged = StagedRead(
+            name=token[:NAME_DIGITS],
+            token=token,
+            rev=answer["live_rev"],
+            actor=actor,
+            at=naive_utc(self.engine.now_present(remember=False)).isoformat(),
+            added=len(preview["added"]),
+            changed=len(preview["changed"]),
+            removed=len(preview["removed"]),
+            marks=marks,
+            sources=sources,
+        )
+        self._drift_checked_at = None  # compare the disk with the new read at the next status
+
+    async def _reread(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Read the files and stage the read, or with `read` preview the staged read again
+        against the engine's state now, reading no file and staging nothing (DL-569)."""
+        read = request.get("read")
+        if (
+            set(request) - {"v", "cmd", "claimed_actor", "read"}
+            or (
+                request.get("claimed_actor") is not None
+                and not isinstance(request["claimed_actor"], str)
+            )
+            or ("read" in request and not isinstance(read, str))
+        ):
+            return _failure(
+                "invalid_argument", "reread accepts only claimed_actor and read", refused=True
+            )
+        busy = self._preparation_busy()
+        if busy is not None:
+            return busy
+        if read is not None:
+            stale = self._not_staged(read)
+            if stale is not None:
+                return _failure("stale_plan", stale, refused=True)
+        else:
+            # a read of the disk replaces the staged read, with its own or with nothing
+            self.engine.update.staged = None
+        # the worker reads the staged read's plan by its whole token (DL-569)
+        plan = None if read is None else self._staged_token()
+        self._rereading = True
+        try:
+            answer = await self._prepare_reload(update=False, plan=plan)
+        finally:
+            self._rereading = False
+        if plan is None:
+            self._stage(answer, request.get("claimed_actor"))
+        else:
+            foreign = self._foreign_worker(answer, plan)
+            if foreign is not None:
+                return foreign
+            answer.pop("plan", None)
+            answer.get("preview", {}).pop("marks", None)
+        if not answer.get("ok"):
+            return answer
+        details = answer["preview"].get("definition_changes")
         if details is not None:
             # a drain or an open update refuses an update before its admission could, so the
             # forecast follows that order and gives no `tree_active` then (DL-559)
@@ -961,11 +1130,11 @@ class ControlServer:
                     "the engine is draining; it takes no update until it restarts"
                 )
                 answer["preview"]["update_refusal"] = None
-            if self.engine.update.token is not None or self._preparing_update is not None:
-                details["blocked"].append(
-                    "another update is open or preparing; wait for it to finish"
-                )
+            if self.engine.update.token is not None:
+                details["blocked"].append("another update is open; wait for it to finish")
                 answer["preview"]["update_refusal"] = None
+        staged = self.engine.update.staged
+        answer["staged_read"] = None if staged is None else _staged_view(staged)
         return answer
 
     def _catalog(self, *, authority: Tier = Tier.ADM) -> dict[str, Any]:
@@ -992,16 +1161,29 @@ class ControlServer:
         return body
 
     async def _update(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Prepare current launch inputs once per admitted identity (DL-463)."""
+        """Prepare once per admitted identity (DL-463): with `read`, the captured bytes of the
+        staged read of that name; without it, the files on disk, which drops the staged read
+        (DL-569)."""
         wait = request.get("wait", False)
+        read = request.get("read")
         if (
             set(request)
-            - {"v", "cmd", "claimed_actor", "baseline_id", "request_id", "wait", "retry_only"}
+            - {
+                "v",
+                "cmd",
+                "claimed_actor",
+                "baseline_id",
+                "request_id",
+                "wait",
+                "retry_only",
+                "read",
+            }
             or type(wait) is not bool
             or type(request.get("retry_only", False)) is not bool
+            or ("read" in request and not isinstance(read, str))
         ):
             return _update_refusal(
-                "invalid_argument", "update accepts identity, wait and retry_only only"
+                "invalid_argument", "update accepts identity, wait, retry_only and read only"
             )
         try:
             envelope = parse_envelope(
@@ -1012,7 +1194,7 @@ class ControlServer:
         except EnvelopeError as exc:
             return _update_refusal(exc.code, str(exc))
         identity = UpdateRequest(
-            "", 0, self.engine.baseline_id, envelope.request_id, envelope.claimed_actor
+            "", 0, self.engine.baseline_id, envelope.request_id, envelope.claimed_actor, read
         )
         prior = (
             self.engine.update._prior(identity, self.engine.journal)
@@ -1036,17 +1218,31 @@ class ControlServer:
                 )
             if self.engine.update.stopping:
                 return _update_refusal("update_in_progress", "another update is stopping its jobs")
+            if self._rereading:
+                return _update_refusal("update_in_progress", "a reread is preparing")
+            plan = None
+            if read is not None:
+                stale = self._not_staged(read)
+                if stale is not None:
+                    return _update_refusal("stale_plan", stale)
+                plan = self._staged_token()
+            else:
+                # a read of the disk replaces the staged read (DL-569)
+                self.engine.update.staged = None
             future = asyncio.get_running_loop().create_future()
             self._preparing_update = (envelope.request_id, identity.fingerprint, future)
 
-            def clear_slot(done: asyncio.Future[UpdateAnswer]) -> None:
-                self._preparing_update = None
-
-            future.add_done_callback(clear_slot)
+            future.add_done_callback(self._release_update_slot)
             try:
-                prepared = await self._prepare_reload(update=True)
+                prepared = await self._prepare_reload(update=True, plan=plan)
+                foreign = None if plan is None else self._foreign_worker(prepared, plan)
+                if foreign is not None:
+                    prepared = foreign
                 if not prepared["ok"]:
                     future.set_result(UpdateAnswer(code=prepared["code"], error=prepared["error"]))
+                    # the preparation is over when this handler answers, not a loop turn later,
+                    # so the next request finds the one slot free (DL-569)
+                    self._release_update_slot(future)
                 else:
                     submitted = UpdateRequest(
                         prepared["token"],
@@ -1054,6 +1250,7 @@ class ControlServer:
                         self.engine.baseline_id,
                         envelope.request_id,
                         envelope.claimed_actor,
+                        read,
                     )
                     admission = self.engine.request_update(submitted)
                     admission.add_done_callback(lambda done: future.set_result(done.result()))
@@ -1280,25 +1477,36 @@ class ControlServer:
     def _spec_drift(self) -> bool | None:
         """None when there is no fingerprint to check against (embedders). Re-reads lazily at
         most every DRIFT_CHECK_INTERVAL_S; estate files are small, so the synchronous reads
-        in a status query are acceptable."""
-        if not self.estate_fingerprint:
-            return None
+        in a status query are acceptable. A main-config engine compares the disk with the
+        applied estate, and with the staged read, by `main_config.changed_sources` (DL-569)."""
         now = time.monotonic()
         if self._drift_checked_at is None or now - self._drift_checked_at >= (
             self.DRIFT_CHECK_INTERVAL_S
         ):
+            from dsl41.main_config import changed_sources
+
             self._drift_checked_at = now
-            self._drift = False
-            for path, digest in self.estate_fingerprint.items():
-                try:
-                    current = hashlib.sha256(Path(path).read_bytes()).hexdigest()
-                except OSError:
-                    self._drift = True  # unreadable/deleted counts as changed
-                    break
-                if current != digest:
-                    self._drift = True
-                    break
+            staged = self.engine.update.staged
+            self._staged_drift = staged is not None and bool(changed_sources(staged.sources))
+            self._drift = self._disk_drift()
         return self._drift
+
+    def _disk_drift(self) -> bool | None:
+        """Whether the files on disk differ from the applied estate (`_spec_drift`)."""
+        from dsl41.main_config import changed_sources
+
+        if self.sources is not None:
+            return bool(changed_sources(self.sources))
+        if not self.estate_fingerprint:
+            return None
+        for path, digest in self.estate_fingerprint.items():
+            try:
+                current = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            except OSError:
+                return True  # unreadable/deleted counts as changed
+            if current != digest:
+                return True
+        return False
 
     def _status(self, request: dict[str, Any]) -> dict[str, Any]:
         catalog = self.engine.oracle.catalog
@@ -1316,6 +1524,9 @@ class ControlServer:
         for due, timer_job, kind in self.engine.oracle.pending_timers():
             pending.setdefault(timer_job, []).append({"due": due.isoformat(), "kind": kind})
         jobs: dict[str, dict[str, Any]] = {}
+        staged = self.engine.update.staged
+        # the row marks are the staged read's, as of its read (DL-569)
+        marks = {} if staged is None else staged.marks
         for name in names:
             rt = store.job.get(name) or JobRuntime()  # never insert from a query
             log_out = log_err = None
@@ -1352,8 +1563,8 @@ class ControlServer:
                 "job_type": job_ir.job_type if job_ir is not None else None,
                 "box_name": job_ir.box.box_name if job_ir is not None else None,
             }
-            if name in self.engine.reread_marks:
-                jobs[name]["reread"] = self.engine.reread_marks[name]
+            if name in marks:
+                jobs[name]["reread"] = dict(marks[name])
             if job_ir is not None:
                 watching = self._fw_watching(job_ir)
                 if watching is not None:
@@ -1368,6 +1579,16 @@ class ControlServer:
                 # spec-crash: the interrupted attempt a hold names, until the job's next start
                 jobs[name]["interrupted"] = held
         answer: dict[str, Any] = {"ok": True, "jobs": jobs, "spec_drift": self._spec_drift()}
+        if staged is not None:
+            # DL-569: the read `update` with its name applies, and whether the disk has changed
+            # since it was read
+            answer["staged_read"] = {
+                **_staged_view(staged),
+                "added": staged.added,
+                "changed": staged.changed,
+                "removed": staged.removed,
+                "disk_changed": self._staged_drift,
+            }
         # spec-reload: the configuration rev the engine runs, and an update while it stops
         answer["config_rev"] = self.engine.config_rev
         # spec-restart ss8: the lifecycle's state, STARTING until a restart's barrier lifts

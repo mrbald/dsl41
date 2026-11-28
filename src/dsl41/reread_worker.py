@@ -327,17 +327,47 @@ _WORKER_REMEDY = (
 )
 
 
+def _unchanged(candidate: Any, request: dict[str, Any]) -> bool:
+    """Whether the candidate is wholly the applied configuration under the live profile, by the
+    rule an update's admission uses (`runner_update.equal_to_applied`, DL-478); a `reread` of
+    it stages nothing (DL-569)."""
+    import base64
+
+    from dsl41.idempotence import Exceptions
+    from dsl41.runner_config import Configuration, RuntimeProfile
+    from dsl41.runner_update import OpenedPlan, configuration_of, equal_to_applied
+
+    profile = request["profile"]
+    live = None if profile is None else RuntimeProfile.model_validate(profile)
+    applied = Configuration.from_bytes(
+        base64.b64decode(request["applied"]), where="the applied configuration"
+    )
+    opened = OpenedPlan({}, candidate, Exceptions(candidate.metadata["non_idempotent"]))
+    return equal_to_applied(applied, configuration_of(opened, live or RuntimeProfile()), live)
+
+
 def run(request: dict[str, Any]) -> dict[str, Any]:
+    """One preparation (DL-463, DL-569). The candidate is the disk's, or with `plan` the
+    captured bytes of that stored plan. With `update` the plan is checked and stored for the
+    admission; with `stage` a disk read that passes the same checks and is not wholly the
+    applied configuration is stored too, and its token and source baseline are returned."""
+    from dsl41.main_config import source_baseline
+    from dsl41.runner_update import open_plan
+
     raw = request["live"]
     # the engine's catalog is read as a stored one is (DL-561)
     check_ir_version(raw["catalog"], where="reread: the engine's catalog", remedy=_WORKER_REMEDY)
     live = Live(**{**raw, "catalog": CatalogIR.model_validate(raw["catalog"])})
+    root = Path(request["run_root"])
     path = Path(request["source"])
-    candidate = prepare(path)
+    named = request.get("plan")
+    candidate = prepare(path) if named is None else open_plan(root, named).estate
     result = {
         "ok": True,
         "live_rev": live.revision,
         "source": {"kind": "main", "path": str(path)},
+        # the stored plan this answer was read from, which the engine checks (DL-569)
+        **({} if named is None else {"plan": named}),
         "preview": preview(
             candidate,
             live,
@@ -346,26 +376,37 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
         ),
     }
     if request["update"]:
-        from dsl41.runner_update import open_plan
-
-        prepared = reread(live, Path(request["run_root"]) / "plans", candidate=candidate)
-        open_plan(Path(request["run_root"]), prepared.token)
+        prepared = reread(live, root / "plans", candidate=candidate)
+        open_plan(root, prepared.token)
         result["token"] = prepared.token
+    elif request.get("stage") and not _unchanged(candidate, request):
+        try:
+            prepared = reread(live, root / "plans", candidate=candidate)
+        except RereadRefused:
+            # the preview's `blocked` gives the reasons; nothing is staged (DL-569)
+            return result
+        result["token"] = prepared.token
+        result["sources"] = source_baseline(candidate)
     return result
+
+
+def answer(request: dict[str, Any]) -> dict[str, Any]:
+    """The worker's answer to one request: `run`'s, or its refusal or failure as codes."""
+    try:
+        return run(request)
+    except RereadRefused as exc:
+        return {"ok": False, "code": "invalid_argument", "error": "; ".join(exc.findings)}
+    except Exception as exc:
+        return {"ok": False, "code": "engine_error", "error": str(exc)}
 
 
 def main() -> None:
     result_fd = os.dup(1)
     with open(os.devnull, "w") as sink:
         os.dup2(sink.fileno(), 1)
-    try:
-        answer = run(json.load(sys.stdin))
-    except RereadRefused as exc:
-        answer = {"ok": False, "code": "invalid_argument", "error": "; ".join(exc.findings)}
-    except Exception as exc:
-        answer = {"ok": False, "code": "engine_error", "error": str(exc)}
+    reply = answer(json.load(sys.stdin))
     with os.fdopen(result_fd, "w") as output:
-        json.dump(answer, output)
+        json.dump(reply, output)
         output.write("\n")
 
 

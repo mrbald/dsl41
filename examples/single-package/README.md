@@ -240,7 +240,8 @@ down for diagnosis. Keep the clock waiter and host checks from
 The template omits the optional site status hook and failure unit.
 
 `Type=simple` does not establish engine readiness. `%posttrans` polls
-`query status --json` for up to 180 seconds before issuing one `update --wait`.
+`query status --json` for up to 180 seconds before issuing one `update --reread --wait`,
+which reads the delivered files and applies them in one go (DL-569).
 A no-change update prints `nothing changed: ...` and changes no revision (DL-478).
 A changed update adopts the delivered JIL (DL-437, DL-463).
 Do not put a bare update in `ExecStartPost`: it can race socket creation.
@@ -260,9 +261,9 @@ on an upgrade the old release's JIL is gone.
 | Outcome | What remains | Next step |
 | --- | --- | --- |
 | Unit fails to start | Engine down. | Read `journalctl -u synthetic-engine.service`; for a state-version refusal, follow [recovery](#recover-a-refused-start). |
-| Readiness wait times out | Engine may be running or still starting on the stored estate. | Check `query status --json`; once it reports `RUNNING`, run `update --wait` by hand. |
-| Update is refused | Engine `RUNNING` on the old estate; new JIL pending. | Ship corrected JIL in a new release. Only in an emergency, correct the installed JIL and run `update --wait`; the next upgrade overwrites that edit. |
-| Update outcome is uncertain | Application is unconfirmed. | Look up the printed request ID with `update --wait --request-id ID`; do not submit a fresh request blindly. |
+| Readiness wait times out | Engine may be running or still starting on the stored estate. | Check `query status --json`; once it reports `RUNNING`, run `reread`, review it, then `update NAME --wait` with the name it printed. |
+| Update is refused | Engine `RUNNING` on the old estate; new JIL pending. | Ship corrected JIL in a new release. Only in an emergency, correct the installed JIL, run `reread`, then `update NAME --wait` with the name it printed; the next upgrade overwrites that edit. |
+| Update outcome is uncertain | Application is unconfirmed. | Look up the printed request ID in the form the scriptlet used, `update --reread --request-id ID --wait`; do not submit a fresh request blindly. |
 
 Run socket commands as the service account through
 `/opt/synthetic-engine/runtime/bin/dsl41`, with

@@ -24,6 +24,7 @@ from dsl41.runner_journal import replay_store
 from dsl41.runner_startup import active_configuration, resume_run, start_run
 from dsl41.runner_store import MemoryStore, Record, SqliteStore
 from dsl41.runner_update import UpdateRequest
+from reload_fixtures import in_process_worker
 from test_main_config import JOB, PYTHON, T0, config_file, estate_file
 
 
@@ -59,11 +60,9 @@ def test_dl561_the_reread_worker_refuses_an_engine_catalog_at_another_ir_version
 @pytest.mark.parametrize("wait", [False, True])
 @pytest.mark.parametrize("cleanup", ["ok", "missing", "permission"])
 def test_bug57_unchanged_update_cli(tmp_path, monkeypatch, wait, cleanup):
-    from dataclasses import asdict
     from typer.testing import CliRunner
     from dsl41.cli import app
     from dsl41 import runner_control
-    from dsl41.reread_worker import run
     from dsl41.runner_control import ControlServer
 
     path = estate_file(tmp_path)
@@ -85,16 +84,8 @@ def test_bug57_unchanged_update_cli(tmp_path, monkeypatch, wait, cleanup):
         request_update = engine.request_update
         remove = runner_update.shutil.rmtree
 
-        async def prepare(*, update):
-            live = engine.update.live()
-            return run(
-                {
-                    "source": str(path),
-                    "run_root": str(root),
-                    "update": update,
-                    "live": {**asdict(live), "catalog": live.catalog.model_dump(mode="json")},
-                }
-            )
+        engine.reread_source = str(path)
+        prepare = in_process_worker(server)
 
         def submit(request):
             answer = request_update(request)
@@ -159,7 +150,8 @@ def test_bug57_unchanged_update_cli(tmp_path, monkeypatch, wait, cleanup):
 
                 monkeypatch.setattr(runner_control, "roundtrip", roundtrip)
                 result = CliRunner().invoke(
-                    app, ["update", "-S", str(server.path)] + (["--wait"] if wait else [])
+                    app,
+                    ["update", "--reread", "-S", str(server.path)] + (["--wait"] if wait else []),
                 )
                 assert result.exit_code == 0, result.output
                 assert result.stdout == (
@@ -176,8 +168,8 @@ def test_bug57_unchanged_update_cli(tmp_path, monkeypatch, wait, cleanup):
 
 
 def test_bug57_unchanged_update_preserves_marks_until_next_reread(tmp_path, monkeypatch):
-    from dataclasses import asdict
-    from dsl41.reread_worker import run
+    """DL-478: an update that finds nothing changed leaves the staged read and its marks; the
+    next reread, of files equal to the applied ones, stages nothing (DL-569)."""
     from dsl41.runner_control import ControlServer
 
     path = estate_file(tmp_path)
@@ -196,16 +188,8 @@ def test_bug57_unchanged_update_preserves_marks_until_next_reread(tmp_path, monk
         engine.launch_settings = initial.metadata["launch"]
         server = ControlServer(engine, root / "control.sock")
 
-        async def prepare(*, update):
-            live = engine.update.live()
-            return run(
-                {
-                    "source": str(path),
-                    "run_root": str(root),
-                    "update": update,
-                    "live": {**asdict(live), "catalog": live.catalog.model_dump(mode="json")},
-                }
-            )
+        engine.reread_source = str(path)
+        prepare = in_process_worker(server)
 
         monkeypatch.setattr(server, "_prepare_reload", prepare)
         try:
@@ -213,7 +197,7 @@ def test_bug57_unchanged_update_preserves_marks_until_next_reread(tmp_path, monk
             (tmp_path / "a.jil").write_text(JOB.replace("true", "echo changed"))
             assert (await server._reread({"v": 5, "cmd": "reread"}))["ok"]
             assert server._status({})["jobs"]["A"]["reread"]["change"] == "changed"
-            marks = dict(engine.reread_marks)
+            marks = dict(engine.update.staged.marks)
             (tmp_path / "a.jil").write_text(JOB)
             plan = reread(
                 engine.update.live(),
@@ -226,10 +210,10 @@ def test_bug57_unchanged_update_preserves_marks_until_next_reread(tmp_path, monk
             )
             await engine.run_until_quiescent(T0)
             assert pending.result().unchanged is not None
-            assert engine.reread_marks == marks
+            assert engine.update.staged.marks == marks
             assert server._status({})["jobs"]["A"]["reread"] == marks["A"]
             assert (await server._reread({"v": 5, "cmd": "reread"}))["ok"]
-            assert engine.reread_marks == {}
+            assert engine.update.staged is None
             assert "reread" not in server._status({})["jobs"]["A"]
         finally:
             await engine.shutdown()
@@ -239,11 +223,10 @@ def test_bug57_unchanged_update_preserves_marks_until_next_reread(tmp_path, monk
 
 
 @pytest.mark.parametrize("newer_reread", [False, True])
-def test_bug16_late_reread_keeps_the_forecast_of_the_applied_revision(
-    tmp_path, monkeypatch, newer_reread
-):
-    from dataclasses import asdict
-    from dsl41.reread_worker import run
+def test_bug16_dl569_a_reread_an_update_outran_stages_nothing(tmp_path, monkeypatch, newer_reread):
+    """DL-521, DL-569: a reread that began under revision 1 and ends after an update applied
+    revision 2 stages nothing and says why. A second reread meanwhile is refused: one
+    preparation runs at a time."""
     from dsl41.runner_control import ControlServer
 
     path = estate_file(tmp_path)
@@ -262,20 +245,14 @@ def test_bug16_late_reread_keeps_the_forecast_of_the_applied_revision(
             source_capture=main.encoded_parts(initial),
         )
         engine.launch_settings = initial.metadata["launch"]
+        engine.reread_source = str(path)
         server = ControlServer(engine, root / "control.sock")
         gate = asyncio.Event()
         held = []
+        worker = in_process_worker(server)
 
-        async def prepare(*, update):
-            live = engine.update.live()
-            answer = run(
-                {
-                    "source": str(path),
-                    "run_root": str(root),
-                    "update": update,
-                    "live": {**asdict(live), "catalog": live.catalog.model_dump(mode="json")},
-                }
-            )
+        async def prepare(**kwargs):
+            answer = await worker(**kwargs)
             if not held:
                 held.append(True)
                 await gate.wait()
@@ -299,24 +276,20 @@ def test_bug16_late_reread_keeps_the_forecast_of_the_applied_revision(
             )
             await engine.run_until_quiescent(T0)
             assert pending.result().applied.result()["rev"] == 2
-            assert engine.config_rev == 2 and engine.reread_marks == {}
-            newer = {}
+            assert engine.config_rev == 2 and engine.update.staged is None
             if newer_reread:
-                (tmp_path / "a.jil").write_text(
-                    JOB.replace("true", "echo changed") + "\n" + job_b.replace("true", "echo b")
-                )
-                assert (await server._reread({"v": 5, "cmd": "reread"}))["ok"]
-                newer = dict(engine.reread_marks)
-                assert set(newer) == {"B"} and newer["B"]["change"] == "changed"
+                second = await server._reread({"v": 5, "cmd": "reread"})
+                assert second["code"] == "update_in_progress" and second["refused"]
             gate.set()
             answer = await late
             assert answer["ok"] and answer["live_rev"] == 1
-            assert "marks" not in answer["preview"]
-            assert engine.reread_marks == newer
-            if newer_reread:
-                assert server._status({})["jobs"]["B"]["reread"] == newer["B"]
-            else:
-                assert "reread" not in server._status({})["jobs"]["A"]
+            assert "marks" not in answer["preview"] and "token" not in answer
+            assert answer["staged_read"] is None and engine.update.staged is None
+            assert (
+                "an update applied while this reread read the files; reread again"
+                in answer["preview"]["definition_changes"]["blocked"]
+            )
+            assert "reread" not in server._status({})["jobs"]["A"]
         finally:
             await engine.shutdown()
             engine.journal.close()
@@ -1359,7 +1332,12 @@ def test_socket_reload_preview_update_retry_and_marker(short_root: Path) -> None
             result = await ask("reread")
             assert result["ok"], result
             assert result["preview"]["changed"] == [{"name": "A", "reason": None}]
-            assert not list((short_root / "run" / "plans").iterdir())
+            # the read is staged: its plan is the one directory under plans/ (DL-569)
+            staged = result["staged_read"]["name"]
+            assert [p.name for p in (short_root / "run" / "plans").iterdir()] == [
+                engine.update.staged.token
+            ]
+            assert staged == engine.update.staged.token[:12]
             status = await ask("status")
             assert status["jobs"]["A"]["reread"]["change"] == "changed"
             rev = engine.config_rev
@@ -1944,7 +1922,6 @@ def test_dl559_forecast_names_every_active_job_of_a_touched_tree(
     changed in place (running or finished) or a standalone running job moved in. The forecast
     labels only the stops and says the update would be refused by every active job of the
     touched trees, the sub-box's unchanged members included. It writes nothing."""
-    from dsl41.reread_worker import preview
     from dsl41.runner_control import ControlServer
 
     member = JOB.replace("A", "MEMBER")
@@ -1989,16 +1966,13 @@ def test_dl559_forecast_names_every_active_job_of_a_touched_tree(
             elif case == "move_in":
                 new = new.replace(member, member + "box_name: INNER\n")
             jil.write_text(new)
-            candidate = main.prepare(path)
-            live = engine.update.live()
             before = list(engine.journal.store.read_from(0))
-
-            async def prepare(*, update):
-                assert not update
-                return {"ok": True, "live_rev": live.revision, "preview": preview(candidate, live)}
-
-            monkeypatch.setattr(server, "_prepare_reload", prepare)
-            view = (await server._reread({"v": 5, "cmd": "reread"}))["preview"]
+            engine.reread_source = str(path)
+            monkeypatch.setattr(server, "_prepare_reload", in_process_worker(server))
+            read = await server._reread({"v": 5, "cmd": "reread"})
+            # the read stages: the forecast refusal is the admission's, not a preparation check
+            assert read["staged_read"]["name"] == engine.update.staged.name
+            view = read["preview"]
             stop = case in {"in_place_running", "move_in"}
             effects = [("MEMBER", "rerun")] if stop else []
             marks = {"BX": {"change": "changed", "action": None}}

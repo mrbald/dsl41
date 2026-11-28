@@ -28497,3 +28497,42 @@ relitigate an entry; append a new one.
   act on, keyboard reach of every action without the menu plugin, no layout on a move or a
   fold (DL-198), no stored preference and no CLI flag. A tooltip changes only where it
   names a renamed item.
+- DL-569 `update` applies what `reread` read
+  (2026-11-28; owner ruling; returns to DL-432 and DL-437; narrows DL-463 and DL-521; fixes
+  BUG-126; runner_control.py, runner_update.py, reread_worker.py, main_config.py,
+  runner_retention.py, cli_reload.py, cli_output.py; docs: control-protocol, protocol-evolution,
+  update block, deploy, runner-design)
+  THE RULE. (1) `reread` reads the files and the engine stages the read: one, in memory, named by
+  the first 12 hex digits of its plan token, with its revision, who read it and when, its counts,
+  its row marks and the inputs it read. It stages when the candidate passes the preparation
+  checks, is not wholly the applied configuration (DL-478's test), the revision it read is still
+  applied when it ends, no update stops its jobs and the engine is not draining. A `reread` of the
+  files replaces the staged read, with its own or with nothing. (2) `update` with `read: NAME`
+  applies the staged read of that name: the worker gets its captured bytes, not the disk, and the
+  same checks and admission run against the engine's state then. An answer the worker did not read
+  from that plan, as from another build's worker, is refused before admission. Another name is
+  refused `stale_plan` before anything is written; a refused apply keeps the read, an applied
+  update and a restart drop it.
+  (3) `update` without `read` reads the files and applies them, as before on the wire, and drops
+  the staged read. `reread` with `read` previews the staged read again and reads no file.
+  (4) One preparation runs at a time: a second `reread` or `update` is refused
+  `update_in_progress`, and an exact retry still joins. The fingerprint binds `read`.
+  (5) `dsl41 update NAME` applies a read, `dsl41 update --reread` reads and applies, and a plain
+  `dsl41 update` exits 2 naming both. (6) `status` adds `staged_read`, with whether the disk has
+  changed since the read, and its row marks are the read's. Retention keeps the staged plan.
+  (7) `spec_drift` follows `main_config.changed_sources`, the restart's pending rule.
+  THE REASON. An operator applies what was looked at. Files that land after the look wait for
+  the next one; `status` says they are there.
+  THE DEFECT (BUG-126). `spec_drift` re-hashed only the files the engine loaded, so a new file
+  that an existing include or properties glob matched was not seen.
+  NARROWS. DL-463: update prepares the disk only without `read`. DL-521: a reread that stages
+  nothing, a late one included, leaves nothing staged and no marks.
+  WHAT STAYS. The update chart, the journal, the restart path, every record kind and field, the
+  plan format, `STATE_MACHINE_VERSION` and dialect 5. A 2.1.0 client's `update` reads the disk.
+  THE COST. A blocked `reread` leaves no marks in `status`. A restart loses the read. The name is
+  the token's first 12 hex digits, and `read` must equal it. Only the staged read is compared, so
+  a clash of two names cannot select another read's bytes unless both are staged in turn with the
+  same 12 digits. One preparation runs at a time, so an `update --reread` sent while another
+  caller's `reread` prepares is refused `update_in_progress` and is sent again. A `reread` of the
+  files also runs the preparation checks and stores its plan: on a 5000-job estate its worker took
+  6.4 s instead of 3.0 s, measured on one machine.

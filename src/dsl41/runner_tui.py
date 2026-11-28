@@ -3082,7 +3082,8 @@ class RunnerApp(App[None]):
         self._refresh_subtitle()
 
     def _set_drift(self, drift: bool) -> None:
-        """Report source drift (DL-65); reread previews and update adopts disk inputs (DL-463)."""
+        """Report source drift (DL-65); reread reads and stages the disk inputs, and the update
+        command it prints applies that read (DL-569)."""
         if drift == self._spec_drift:
             return
         self._spec_drift = drift
@@ -3092,7 +3093,8 @@ class RunnerApp(App[None]):
             self._console_write(
                 Text(
                     "spec drift: estate files changed on disk; run dsl41 reread"
-                    f" -S {socket} to preview, then dsl41 update --wait -S {socket} to adopt",
+                    f" -S {socket} to read them, then the dsl41 update command it prints"
+                    " to adopt",
                     style="yellow",
                 )
             )

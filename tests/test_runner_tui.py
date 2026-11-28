@@ -1171,7 +1171,7 @@ def test_pilot_spec_drift_advice_clears_and_does_not_repeat_on_reconnect(
             socket = shlex.quote(str((socket_root / "control.sock").absolute()))
             expected = (
                 "spec drift: estate files changed on disk; run dsl41 reread"
-                f" -S {socket} to preview, then dsl41 update --wait -S {socket} to adopt"
+                f" -S {socket} to read them, then the dsl41 update command it prints to adopt"
             )
             badge = "[SPEC DRIFT: estate files changed on disk]"
             assert badge not in app.sub_title

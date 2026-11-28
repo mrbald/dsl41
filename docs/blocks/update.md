@@ -2,8 +2,8 @@
 
 ## Purpose
 
-`dsl41 reread` reports current launch-config sources against the engine catalog (DL-463).
-`dsl41 update` prepares and applies current sources to the running engine: it stops every process the engine owns at admission for a job the plan changes or removes ([DL-525](../decision-log.md)), swaps the catalog, the settings and the marked set, and keeps the engine running throughout ([DL-427](../decision-log.md)). It never restarts a box: an update that changes box membership while a touched tree is active is refused `tree_active` ([DL-559](../decision-log.md)).
+`dsl41 reread` reads current launch-config sources against the engine catalog (DL-463), and the engine stages that read ([DL-569](../decision-log.md)).
+`dsl41 update NAME` applies the staged read, and `dsl41 update --reread` prepares and applies current sources, to the running engine: it stops every process the engine owns at admission for a job the plan changes or removes ([DL-525](../decision-log.md)), swaps the catalog, the settings and the marked set, and keeps the engine running throughout ([DL-427](../decision-log.md)). It never restarts a box: an update that changes box membership while a touched tree is active is refused `tree_active` ([DL-559](../decision-log.md)).
 
 ## Fate
 
@@ -12,11 +12,11 @@ Its intent and its application are store records. With nothing to stop they comm
 
 ## Interface
 
-- `dsl41 reread -S SOCK` previews; `dsl41 update -S SOCK [--wait]` prepares and applies current inputs. Both default to DSL41_SOCKET. They use v5 OPS requests (DL-498, DL-567); there is no token or consent handoff (DL-463).
+- `dsl41 reread -S SOCK` reads and stages; `dsl41 update -S SOCK NAME [--wait]` applies the staged read and `dsl41 update -S SOCK --reread [--wait]` prepares and applies current inputs; a plain `dsl41 update` exits 2 and names both. Both default to DSL41_SOCKET. They use v5 OPS requests (DL-498, DL-567); the staged read's name is the first 12 hex digits of its plan token (DL-569).
 - `reload_plan.reread` computes and stores the plan; `runner_update.EngineUpdate.admit` checks it against the engine's state now; `reload_update.admission_data` builds the admitted data; `reload_update.plan_application` and `apply_application` compute and apply the swap.
 - `runner_update.EngineUpdate` binds the update chart's tier to the engine: the admission as one step of the single writer, the stops through the attempt tier, the dispatch filter, the application and its records.
 - The store records `config intent` (the token, the stop set with the attempt each stop interrupts, the dispatch filter, `restart_boxes: []`, the request's id and fingerprint) and `config applied` (the new rev, its segment fields, the job sets and the members it woke, `woken`). A configuration row holds each rev's catalog, profile and marked set (DL-489).
-- `status` shows `config_rev`, `update_window_s` and, while an update stops, the update and the jobs it waits for; the TUI shows the rev and the update in its subtitle. Once applied, `spec` and `spec_drift` follow the applied plan.
+- `status` shows `config_rev`, `update_window_s`, the staged read and whether the disk changed since it (`staged_read`, DL-569) and, while an update stops, the update and the jobs it waits for; the TUI shows the rev and the update in its subtitle. Once applied, `spec` and `spec_drift` follow the applied plan.
 
 ## States
 
@@ -111,7 +111,7 @@ The [chart lifecycles](../chart-lifecycles.md) view lists each target state with
 - `test_dl564_an_update_that_stops_a_member_records_and_makes_the_attempt_at_its_look`
 - `test_dl564_a_death_after_the_application_makes_the_attempt_at_the_first_input_after_restart`
 
-The CLI/TUI status annotation caches the last reread forecast in memory. A new reread replaces it when the revision it read is still the applied one (DL-521); a failed reread, an applied update and a restart clear it. Update never consumes it.
+The staged read is one object in engine memory, owned by the update's engine side (`runner_update.EngineUpdate.staged`), and the CLI/TUI status annotation is its forecast. A reread of the disk stages its read when the candidate passes the preparation checks, is not wholly the applied configuration, the revision it read is still applied, no update stops and the engine is not draining; otherwise it stages nothing. A reread of the disk and an `update --reread` replace it; an applied update and a restart drop it; a refused update keeps it. `update NAME` applies it from its captured bytes, checked against the engine's state then; another name is refused `stale_plan`. One reread or update prepares at a time. Retention keeps the staged plan (DL-569).
 Forecast labels follow the first-match rule in the [control protocol](../control-protocol.md#2-transport-and-framing-frozen) (DL-559): `hold`, `remove` or `rerun`, each for a stop; a kept file watch's label comes from the interruption rule the application replaces it with, read for its current run's open attempt, so one at the limit forecasts `hold` (DL-566).
 The forecast reads statuses, not flags. `preview.update_refusal` forecasts the `tree_active` refusal from the same function and inputs as the admission, the jobs the engine owns a process of included, and is `null` when the update's preparation would refuse first. Both read their stops from one rule, `reload_plan.stop_runs`. `dsl41 reread` prints the refusal as one line, offers no apply command, and exits 1. A job the plan retypes prints as replaced by a new job of its name; a removed one keeps "no replacement".
 

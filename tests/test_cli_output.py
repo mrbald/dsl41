@@ -19,6 +19,7 @@ from dsl41 import main_config
 from test_main_config import estate_file
 from dsl41.reload_update import Admitted, Application, Refused
 from dsl41.reread_worker import preview
+from dsl41.display_time import format_local_at
 
 pytestmark = pytest.mark.usefixtures("cli_env", "local_timezone")
 runner = CliRunner()
@@ -27,6 +28,27 @@ runner = CliRunner()
 @pytest.fixture(params=list(OutputStyle))
 def style(request):
     return request.param
+
+
+#: a read the engine staged, as a `reread` answer names it (DL-569)
+STAGED = {"name": "c" * 12, "actor": "alice", "at": "2026-07-01T00:00:00"}
+#: the forecast's last line (DL-569)
+LAST = "forecast at reread time; update checks the read against the engine's state again"
+
+
+def staged(answer):
+    """The answer as the engine gives it: a read with no blocking finding is staged."""
+    blocked = answer["preview"].get("definition_changes", {}).get("blocked")
+    answer["staged_read"] = None if blocked else dict(STAGED)
+    return answer
+
+
+def staged_lines(command="dsl41 update"):
+    """The staged read's two lines: its name, who read it and when, and the command."""
+    return [
+        f"staged read {STAGED['name']} by alice at {format_local_at(STAGED['at'])}",
+        f"apply with: {command} {STAGED['name']}",
+    ]
 
 
 def invoke(command, style, *args):
@@ -121,7 +143,7 @@ def test_status_clock_hold_notice_and_json(monkeypatch, style, held):
     assert json.loads(raw.stdout) == answer
 
 
-@pytest.mark.parametrize("command", [["query", "status"], ["reread"], ["update"]])
+@pytest.mark.parametrize("command", [["query", "status"], ["reread"], ["update", "--reread"]])
 def test_unreachable_keeps_transport_error(monkeypatch, style, command):
     error = "dsl41: no engine is running at /synthetic/control.sock"
 
@@ -161,7 +183,7 @@ def test_refused_answers_keep_one_failure_owner(monkeypatch, style, error):
         )
 
     monkeypatch.setattr(cli_reload, "socket_send", lambda *a, **kw: fail)
-    result = invoke(["update"], style)
+    result = invoke(["update", "--reread"], style)
     assert result.exit_code == 2 and error in result.stderr
 
 
@@ -236,6 +258,8 @@ def candidate_answer(tmp_path, *, changed=True, running=False, settings_only=Fal
         "live_rev": 1,
         "source": {"path": "/synthetic/estate.jil"},
         "preview": preview(candidate, live),
+        # a candidate equal to the applied one stages nothing (DL-569)
+        "staged_read": dict(STAGED) if changed or settings_only else None,
     }
 
 
@@ -253,7 +277,8 @@ def test_reread_cases(monkeypatch, style, changed, running, settings_only, tmp_p
     assert ("stopping 1 running job" in result.stdout) == running
     assert ("no job or setting changes" in result.stdout) == (not changed and not settings_only)
     assert "nothing changed" not in result.stdout
-    assert "apply with:" in result.stdout
+    assert ("apply with:" in result.stdout) == (changed or settings_only)
+    assert ("nothing staged for update" in result.stdout) == (not changed and not settings_only)
     if settings_only:
         assert "estate setting job_env" in result.stdout
 
@@ -305,9 +330,11 @@ def test_reread_grouping_240_jobs(monkeypatch, style, running, tmp_path):
 def test_reread_advice_only_with_shared_admission_success(monkeypatch, style, blocked, tmp_path):
     answer = candidate_answer(tmp_path)
     answer["preview"]["definition_changes"]["blocked"] = blocked
+    staged(answer)
     monkeypatch.setattr(cli_reload, "socket_send", lambda *a, **kw: lambda *a: answer)
     result = invoke(["reread"], style)
     assert ("apply with:" in result.stdout) == (not blocked)
+    assert ("nothing staged for update" in result.stdout) == bool(blocked)
     assert ("update would refuse:" in result.stdout) == bool(blocked)
 
 
@@ -331,7 +358,7 @@ def test_update_cases(monkeypatch, style, case):
     if case == "refused":
         reply = cli_reload.UpdateReply(Refused("", "update_in_progress"))
     monkeypatch.setattr(cli_reload, "socket_send", lambda *a, **kw: lambda *a: reply)
-    result = invoke(["update"], style)
+    result = invoke(["update", "--reread"], style)
     assert result.exit_code == (2 if case == "refused" else 1 if case == "pending" else 0), (
         result.output
     )
@@ -350,7 +377,7 @@ def test_every_update_outcome_has_true_text(monkeypatch, style):
     )
     reply = cli_reload.UpdateReply(Admitted("", choices, frozenset()), application)
     monkeypatch.setattr(cli_reload, "socket_send", lambda *a, **kw: lambda *a: reply)
-    result = invoke(["update"], style)
+    result = invoke(["update", "--reread"], style)
     assert result.exit_code == 0
     for text in (
         "its own result stands",
@@ -368,7 +395,7 @@ def test_update_groups_240_identical_outcomes(monkeypatch, style):
     )
     reply = cli_reload.UpdateReply(Admitted("", names, frozenset()), application)
     monkeypatch.setattr(cli_reload, "socket_send", lambda *a, **kw: lambda *a: reply)
-    result = invoke(["update"], style)
+    result = invoke(["update", "--reread"], style)
     assert result.exit_code == 0
     assert result.stdout.count("stopped, rerun under the new definition") == (
         1 if style is OutputStyle.focused else 240
@@ -610,6 +637,8 @@ def test_hostname_240_has_exactly_one_difference_line(tmp_path, style, defined):
 def test_engine_state_prevents_affirmative_reread_advice(
     style, draining, open_update, preparing, tmp_path
 ):
+    """A drain or an open update stages nothing and says why; while another preparation runs,
+    the reread is refused, since one runs at a time (DL-569)."""
     import asyncio
     from types import SimpleNamespace
     from dsl41.runner_control import ControlServer
@@ -619,15 +648,22 @@ def test_engine_state_prevents_affirmative_reread_advice(
     server.engine = SimpleNamespace(
         draining=draining,
         config_rev=1,
-        update=SimpleNamespace(token="open" if open_update else None),
+        update=SimpleNamespace(
+            token="open" if open_update else None, stopping=open_update, staged=None
+        ),
     )
     server._preparing_update = object() if preparing else None
+    server._rereading = False
 
     async def prepare(**kwargs):
-        return candidate_answer(tmp_path)
+        return {**candidate_answer(tmp_path), "token": "t" * 64}
 
     server._prepare_reload = prepare
     answer = asyncio.run(server._reread({"v": 5, "cmd": "reread"}))
+    if preparing:
+        assert answer["code"] == "update_in_progress" and answer["refused"]
+        return
+    assert answer["staged_read"] is None and server.engine.update.staged is None
     text = "\n".join(reread_lines(answer, style, "dsl41 update"))
     assert "apply with:" not in text
     assert ("draining" if draining else "another update") in text
@@ -639,7 +675,7 @@ def test_empty_stop_set_only_claims_what_update_proves(monkeypatch, style):
     application = Application("", 2, "hash", "", CatalogIR(), ("new_child",), (), (), (), ())
     reply = cli_reload.UpdateReply(Admitted("", (), frozenset()), application)
     monkeypatch.setattr(cli_reload, "socket_send", lambda *a, **kw: lambda *a: reply)
-    result = invoke(["update"], style)
+    result = invoke(["update", "--reread"], style)
     assert result.exit_code == 0
     assert "no running job is stopped" not in result.stdout
     assert "no process or watch stops reported" not in result.stdout
@@ -651,7 +687,7 @@ def test_empty_stop_set_only_claims_what_update_proves(monkeypatch, style):
         "socket_send",
         lambda *a, **kw: lambda *a: cli_reload.UpdateReply(reply.decision, settings),
     )
-    result = invoke(["update"], style)
+    result = invoke(["update", "--reread"], style)
     assert "running box" not in result.stdout and "nothing changed" not in result.stdout
 
 
@@ -729,7 +765,7 @@ def test_hash_affecting_setting_is_described_once_without_a_job_list(style, tmp_
 def test_r2_stop_line_is_absent_or_names_only_reported_stops(monkeypatch, style, stops):
     reply = cli_reload.UpdateReply(Admitted("", stops, frozenset()), request_id="sample")
     monkeypatch.setattr(cli_reload, "socket_send", lambda *a, **kw: lambda *a: reply)
-    result = invoke(["update"], style)
+    result = invoke(["update", "--reread"], style)
     assert result.exit_code == 0
     if stops:
         assert (
@@ -802,7 +838,7 @@ def test_r3_admission_words_match_pending_and_applied_answers(monkeypatch, style
         pending=pending,
     )
     monkeypatch.setattr(cli_reload, "socket_send", lambda *a, **kw: lambda *a: reply)
-    result = invoke(["update"], style)
+    result = invoke(["update", "--reread"], style)
     assert result.exit_code == int(pending)
     request_lines = [
         line for line in result.stdout.splitlines() if line.startswith("stop requested for")
@@ -979,11 +1015,11 @@ def _seed_forms(tmp_path, *, mixed: bool, status: str = "ON_HOLD", lint: str = "
         "preview": preview(candidate, live),
     }
     if lint:
-        return answer, None
+        return staged(answer), None
     result = reread(live, tmp_path / "plans", candidate=candidate)
     document = read_plan(tmp_path / "plans", result.token)
     assert document is not None
-    return answer, plan_application(Oracle(before.catalog), candidate.catalog, document)
+    return staged(answer), plan_application(Oracle(before.catalog), candidate.catalog, document)
 
 
 def test_a_seed_only_reread_and_update_name_the_seed_once_in_each_layout(tmp_path, style):
@@ -1009,8 +1045,8 @@ def test_a_seed_only_reread_and_update_name_the_seed_once_in_each_layout(tmp_pat
         "",
         "if applied now: no running job is stopped",
         f"read from: {tmp_path / 'a.jil'}",
-        "apply with: dsl41 update",
-        "forecast at reread time; update rereads before applying",
+        *staged_lines(),
+        LAST,
     ]
     assert application is not None and application.changed == ()
     assert application.seed_only == (("seeded", None, "ON_HOLD"), ("twin", None, "ON_HOLD"))
@@ -1137,8 +1173,8 @@ def test_a_mixed_reread_and_update_count_the_seed_on_its_own(tmp_path, style):
         "",
         "if applied now: no running job is stopped",
         f"read from: {tmp_path / 'a.jil'}",
-        "apply with: dsl41 update",
-        "forecast at reread time; update rereads before applying",
+        *staged_lines(),
+        LAST,
     ]
     assert application is not None
     assert application_lines(application, style) == [
@@ -1159,13 +1195,13 @@ def test_a_seed_that_raises_a_refused_finding_offers_no_update(tmp_path, style):
         "condition: s(seeded) & s(twin)\n"
     )
     hold, _ = _seed_forms(tmp_path / "hold", mixed=False, lint=lint, extra=consumer)
-    assert "apply with: dsl41 update" in reread_lines(hold, style, "dsl41 update")
+    assert staged_lines()[1] in reread_lines(hold, style, "dsl41 update")
     ice, _ = _seed_forms(tmp_path / "ice", mixed=False, status="ON_ICE", lint=lint, extra=consumer)
     assert any("L020" in message for message in ice["preview"]["lint_messages"])
     assert not any("L020" in message for message in hold["preview"]["lint_messages"])
     text = reread_lines(ice, style, "dsl41 update")
     assert any(line.startswith("update would refuse") for line in text)
-    assert "apply with: dsl41 update" not in text
+    assert staged_lines()[1] not in text and "nothing staged for update" in text
     assert any(
         "initial_status: (unset) -> ON_ICE; the status: edit itself" in line for line in text
     )
@@ -1319,7 +1355,7 @@ def test_a_status_only_update_applies_live_with_no_stop_and_restart_keeps_the_ro
     ]
     reply = cli_reload.update_reply_of(seen["answer"])
     monkeypatch.setattr(cli_reload, "socket_send", lambda *a, **kw: lambda *a: reply)
-    result = invoke(["update"], OutputStyle.neutral, "--wait")
+    result = invoke(["update", "--reread"], OutputStyle.neutral, "--wait")
     assert result.exit_code == 0, result.output
     assert "nothing changed" not in result.stdout
     assert "stop requested" not in result.stdout
@@ -1353,12 +1389,14 @@ def _boxed_answer(tmp_path, text: str, status: dict[str, str], marked: str = "")
     before = main_config.prepare(path)
     (tmp_path / "a.jil").write_text(text + _box_member("m2"))
     candidate = main_config.prepare(path)
-    return {
-        "ok": True,
-        "live_rev": 1,
-        "source": {"path": str(path)},
-        "preview": preview(candidate, live_of(before, status)),
-    }
+    return staged(
+        {
+            "ok": True,
+            "live_rev": 1,
+            "source": {"path": str(path)},
+            "preview": preview(candidate, live_of(before, status)),
+        }
+    )
 
 
 def test_a_box_with_a_seed_and_a_membership_change_is_counted_once_as_changed(tmp_path, style):
@@ -1392,8 +1430,8 @@ def test_a_box_with_a_seed_and_a_membership_change_is_counted_once_as_changed(tm
         "",
         "if applied now: no running job is stopped",
         f"read from: {tmp_path / 'a.jil'}",
-        "apply with: dsl41 update",
-        "forecast at reread time; update rereads before applying",
+        *staged_lines(),
+        LAST,
     ]
 
 
@@ -1434,7 +1472,8 @@ def test_a_marked_seed_only_member_of_a_refusing_box_shows_its_seed_and_the_refu
         "update would be refused: it changes box membership and these jobs are active or"
         " would be stopped: B, m1",
         f"read from: {tmp_path / 'a.jil'}",
-        "forecast at reread time; update rereads before applying",
+        staged_lines()[0],
+        LAST,
     ]
     application = Application(
         "",
@@ -1484,10 +1523,12 @@ def test_a_forecast_refusal_names_every_job_in_the_neutral_layout_and_offers_no_
 def test_an_older_engines_box_restart_labels_still_print(tmp_path, style):
     """DL-559: an engine before DL-559 forecasts its box restarts with `restart_box` and
     `restart` and sends no `update_refusal`. A newer client prints both labels in both
-    layouts, and the apply line as before."""
+    layouts. That engine stages no read (DL-569), so the apply line is the form that reads the
+    files, and none is offered when its update would refuse."""
     from dsl41.cli_output import reread_lines
 
     answer = _boxed_answer(tmp_path, _BOXED, {"B": "RUNNING", "m1": "RUNNING"})
+    del answer["staged_read"]
     view = answer["preview"]
     del view["update_refusal"]
     view["stop"] = ["B", "m1"]
@@ -1498,7 +1539,14 @@ def test_an_older_engines_box_restart_labels_still_print(tmp_path, style):
     lines = reread_lines(answer, style, "dsl41 update")
     assert "  B   would restart as a new box run" in lines
     assert "  m1   would restart with its box" in lines
-    assert "apply with: dsl41 update" in lines
+    assert "apply with: dsl41 update --reread" in lines
+    assert not any(line.startswith(("staged read", "nothing staged")) for line in lines)
+    # its update reads the files, so the footer does not say a read is checked again
+    assert lines[-1] == "forecast at reread time; update --reread reads the files again"
+    assert LAST not in lines
+    view["definition_changes"]["blocked"] = ["the engine is draining"]
+    lines = reread_lines(answer, style, "dsl41 update")
+    assert not any(line.startswith("apply with:") for line in lines)
 
 
 def test_bug72_a_retyped_stop_reads_as_replaced_and_a_removed_one_as_removed(tmp_path, style):

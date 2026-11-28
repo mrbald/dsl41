@@ -1230,8 +1230,13 @@ Use the engine's socket. Every engine command takes `-S`/`--socket`, with
 
 ```sh
 dsl41 reread -S /path/to/control.sock
-dsl41 update -S /path/to/control.sock --wait
+dsl41 update -S /path/to/control.sock NAME --wait
 ```
+
+`reread` reads the files and the engine stages that read under a name, the
+`NAME` it prints, 12 hex digits. `dsl41 update NAME` applies what was read, not what is on
+disk then. `dsl41 update --reread` reads the files and applies them in one go.
+A plain `dsl41 update` exits 2 and names the two forms (DL-569).
 
 Both commands default to focused text. Add `--style neutral` for per-job
 rows over the same prepared data (DL-482). Reread groups identical job changes
@@ -1242,9 +1247,12 @@ Long values end in `[cut]`; large lists and condition trees say `changed`.
 A 1 MiB byte budget bounds the whole difference field; omitted differences
 are counted as `N more differences not shown`. The `read from:` line is capped
 at 240 characters and marks a cut.
-The footer offers `update` only when the shared candidate check passes and
-the engine is neither draining nor already preparing or stopping an update.
-Otherwise it explains the refusal while retaining the passive difference.
+The footer names the staged read when the shared candidate check passes, the
+files differ from the running estate, and the engine is neither draining nor
+stopping an update. It offers `update NAME` then, except under a forecast
+`tree_active` refusal: the read is staged and named, and no apply command is
+printed until the named jobs are quiet. Otherwise it says nothing is staged and
+explains the refusal while retaining the passive difference.
 When update is allowed, source-only edits say that update still applies the estate files. A header
 saying no job, setting or estate file changed reports those comparisons;
 only update's `unchanged` answer proves no application (DL-478).
@@ -1280,14 +1288,20 @@ is now and can start it or the jobs that wait on it, so look at the job's
 current state first (DL-561). Such a job inside a box whose
 members the update changes counts as any member of that box (DL-533, DL-559).
 
-Status in the CLI and TUI annotates changed and removed jobs with this forecast.
-It describes reread time. Another reread replaces it when the revision it read
-is still the applied one (DL-521); failed reread, applied update and engine
-restart clear it. It is held only in engine memory.
+Status in the CLI and TUI annotates changed and removed jobs with the staged
+read's forecast. It describes the time of the read. The staged read is held only
+in engine memory: the next `reread` replaces it, with its own read or with
+nothing, and an applied update and an engine restart drop it. A refused update
+keeps it. `query status --json` shows it as `staged_read`, with whether the files
+on disk have changed since the read (DL-569).
 
-Update rereads the files itself. Edits made after preview are included.
-It prints a request ID before sending. Use `--request-id ID` only to look up
-that original work after an unknown outcome. An unknown or expired ID submits
+`update NAME` applies the read, checked again against the engine's state when it
+applies. Files that land after the read wait for the next `reread`; `status`
+then still says the files on disk differ. A name that is no longer staged is
+refused `stale_plan`: read again and look. One `reread` or `update` prepares at a
+time; another is refused `update_in_progress`.
+Update prints a request ID before sending. Use `--request-id ID`, with the same
+`NAME` or `--reread`, only to look up that original work after an unknown outcome. An unknown or expired ID submits
 nothing. Do not blindly submit a fresh update after a lost reply.
 A no-change update retains no request ID; a later lookup reports not retained (DL-478).
 Both update forms print `nothing changed: catalog revision N (H)` and exit 0
@@ -1480,10 +1494,11 @@ This variant follows the same [engine and client rollout rule](#upgrade-the-engi
 
    Restart keeps the applied revision. The TUI's `spec drift: estate files changed
    on disk` line directs reread and update. Review the preview's findings and
-   affected jobs before applying it. Then run:
+   affected jobs before applying it. Then apply the read it staged, with the
+   `NAME` it printed:
 
    ```sh
-   sudo -u dsl41 ENGINE update --wait \
+   sudo -u dsl41 ENGINE update NAME --wait \
      --socket /srv/dsl41/runs/nightbank/control.sock
    ```
 

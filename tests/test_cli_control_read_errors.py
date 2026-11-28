@@ -190,7 +190,9 @@ def test_reload_cli_reports_plain_connect_errors(
         raise OSError(error, os.strerror(error))
 
     monkeypatch.setattr(socket.socket, "connect", fail)
-    result = runner.invoke(app, [command, "-S", str(path)])
+    # a plain `update` names its two forms and sends nothing (DL-569)
+    form = [command, "--reread"] if command == "update" else [command]
+    result = runner.invoke(app, [*form, "-S", str(path)])
     expected = (
         _permission_message(path)
         if error in (errno.EACCES, errno.EPERM)
@@ -216,7 +218,7 @@ def test_update_connect_failure_after_the_header_prints_no_recovery_receipt(
         return real_roundtrip(socket_path, request, **kwargs)
 
     monkeypatch.setattr(runner_control, "roundtrip", answer_header)
-    result = runner.invoke(app, ["update", "-S", str(path)])
+    result = runner.invoke(app, ["update", "--reread", "-S", str(path)])
     assert calls == ["status", "update"]
     assert result.exit_code == 2, result.output
     assert result.stderr == f"dsl41: no engine is running at {path}\n"
@@ -372,7 +374,8 @@ def test_reload_cli_reports_a_busy_engine(
         raise OSError(error, os.strerror(error))
 
     monkeypatch.setattr(socket.socket, "connect", busy)
-    result = runner.invoke(app, [verb, "-S", str(path)])
+    form = [verb, "--reread"] if verb == "update" else [verb]
+    result = runner.invoke(app, [*form, "-S", str(path)])
     assert result.exit_code == 2, result.output
     assert result.stderr == f"dsl41: the engine at {path} is busy; try again\n"
     assert result.stdout == ""

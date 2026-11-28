@@ -413,7 +413,7 @@ action, which stops the process.
 `SIGHUP` reloads the armed access map's contents only. It does not reread
 the main config or apply estate changes. Main-config host settings,
 including the access-map path, apply at restart (DL-437).
-`dsl41 reread` previews and `dsl41 update` adopts job configuration through the
+`dsl41 reread` reads and stages and `dsl41 update` adopts job configuration through the
 [control protocol §2](control-protocol.md#2-transport-and-framing-frozen)
 (DL-463).
 

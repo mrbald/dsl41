@@ -1099,6 +1099,10 @@ def test_an_input_naming_a_removed_job_is_refused_before_the_oracle(tmp_path: Pa
 
 
 def test_reread_and_update_over_the_control_socket(short_root: Path) -> None:
+    """Over a real engine and the shell: `reread` stages the files it read and prints the
+    command that applies them; files that land later wait for the next read; a box-membership
+    change refused `tree_active` keeps its read, and the same command applies it once the
+    tree is quiet (DL-559, DL-569)."""
     from typer.testing import CliRunner
     from dsl41.cli import app
     from dsl41.runner_control import roundtrip
@@ -1145,8 +1149,11 @@ def test_reread_and_update_over_the_control_socket(short_root: Path) -> None:
         assert "changed 1 job" in preview.output and "1 job: A" in preview.output
         assert "stopping 1 running job: A" in preview.output
         assert "token:" not in preview.output
+        name = re.search(r"staged read (\S+)", preview.output).group(1)
+        assert f"apply with: dsl41 update -S {sock} {name}" in preview.output
+        # a second delivery after the read waits for the next read
         source.write_text(JOB.replace("true", "sleep 32") + box)
-        result = runner.invoke(app, ["update", "-S", str(sock), "--wait"])
+        result = runner.invoke(app, ["update", "-S", str(sock), name, "--wait"])
         assert result.exit_code == 0, result.output
         deadline = time.monotonic() + 10
         while ask("status")["jobs"]["A"].get("attempt", {}).get("n") != 2:
@@ -1155,7 +1162,9 @@ def test_reread_and_update_over_the_control_socket(short_root: Path) -> None:
         row = ask("status")["jobs"]["A"]
         assert row["run_number"] == 1 and row["attempt"]["after"] == "update_stop"
         assert "reread" not in row
-        assert ask()["catalog"]["jobs"]["A"]["exec_"]["command"] == "sleep 32"
+        assert ask()["catalog"]["jobs"]["A"]["exec_"]["command"] == "sleep 31"
+        status = ask("status")
+        assert status["spec_drift"] is True and "staged_read" not in status
         rid = re.search(r"request_id: (\S+)", result.output).group(1)
         status = ask("status")
         assert roundtrip(
@@ -1176,8 +1185,9 @@ def test_reread_and_update_over_the_control_socket(short_root: Path) -> None:
         ):
             assert time.monotonic() < deadline
             time.sleep(0.01)
+        # A as applied, so the read changes only the box's membership
         source.write_text(
-            JOB.replace("true", "sleep 32") + box + JOB.replace("A", "NEW") + "box_name: BX\n"
+            JOB.replace("true", "sleep 31") + box + JOB.replace("A", "NEW") + "box_name: BX\n"
         )
         preview = runner.invoke(app, ["reread", "-S", str(sock)])
         # DL-559: a member added under running BX: the forecast and the update refuse it by
@@ -1188,10 +1198,14 @@ def test_reread_and_update_over_the_control_socket(short_root: Path) -> None:
             " would be stopped: B, BX"
         ) in preview.output
         assert ask("status")["jobs"]["BX"]["reread"] == {"change": "changed", "action": None}
-        refused = runner.invoke(app, ["update", "-S", str(sock), "--wait"])
+        boxed = re.search(r"staged read (\S+)", preview.output).group(1)
+        assert "apply with:" not in preview.output
+        refused = runner.invoke(app, ["update", "-S", str(sock), boxed, "--wait"])
         assert refused.exit_code == 2, refused.output
         assert "update: refused tree_active: B, BX" in refused.output
         assert ask()["revision"] == 2
+        # a refused apply keeps the read
+        assert ask("status")["staged_read"]["name"] == boxed
         # the operator's stop: B is killed, and BX if it still runs, until the tree is quiet
         for job in ("B", "BX"):
             status = ask("status")
@@ -1215,13 +1229,13 @@ def test_reread_and_update_over_the_control_socket(short_root: Path) -> None:
             } or row.get("attempt"):
                 assert time.monotonic() < deadline
                 time.sleep(0.01)
-        box_result = runner.invoke(app, ["update", "-S", str(sock), "--wait"])
+        box_result = runner.invoke(app, ["update", "-S", str(sock), boxed, "--wait"])
         assert box_result.exit_code == 0, box_result.output
         jobs = ask("status")["jobs"]
         assert jobs["BX"]["run_number"] == 1
         assert jobs["NEW"]["status"] == "INACTIVE" and not jobs["C"]["on_hold"]
         source.unlink()
-        retry = runner.invoke(app, ["update", "-S", str(sock), "--request-id", rid, "--wait"])
+        retry = runner.invoke(app, ["update", "-S", str(sock), name, "--request-id", rid, "--wait"])
         assert retry.exit_code == 0, retry.output
         assert "applied: catalog revision 2" in retry.output
         assert ask()["revision"] == 3

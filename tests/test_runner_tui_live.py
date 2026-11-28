@@ -387,9 +387,8 @@ def test_pilot_disk_drift_advice_clears_after_a_real_update(short_root: Path, cl
             app = RunnerApp(client.path)
             async with app.run_test(size=(200, 40)) as pilot:
                 await _wait_for_ui(pilot, lambda: "SPEC DRIFT" in app.sub_title)
-                assert "rundsl41reread" in _console(app) and "thendsl41update--wait" in _console(
-                    app
-                )
+                assert "rundsl41reread" in _console(app)
+                assert "thenthedsl41updatecommanditprints" in _console(app)
                 await pilot.press("r")
                 assert _console(app).count("specdrift:") == 1
                 answer = await client.request(

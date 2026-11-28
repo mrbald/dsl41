@@ -484,7 +484,8 @@ def test_reread_blocked_notes_and_update_id_collision_over_the_socket(short_root
             await client.update(rid="shared-id")
             preview = await client.ask("reread")
             assert (
-                "another update is open or preparing; wait for it to finish"
+                # one preparation runs at a time, so only an open update is named (DL-569)
+                "another update is open; wait for it to finish"
                 in preview["preview"]["definition_changes"]["blocked"]
             )
             status = await client.ask("status")

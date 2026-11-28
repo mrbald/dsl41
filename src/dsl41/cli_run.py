@@ -979,6 +979,8 @@ async def _serve_run(
     engine: "Engine | None" = None
     code = 1
     running = False
+    # the applied estate's source baseline, which `spec_drift` compares the disk with (DL-569)
+    sources: "dict[str, Any] | None" = None
     try:
         if main_config_path is not None:
             from dsl41 import main_config
@@ -1008,6 +1010,7 @@ async def _serve_run(
                 assert captured_estate is not None
                 spec_texts = _spec_texts(list(captured_estate.parsed), catalog)
                 estate_fingerprint = main_config.fingerprint(captured_estate)
+                sources = main_config.source_baseline(captured_estate)
                 non_idempotent = captured_estate.metadata["non_idempotent"]
             except (EngineError, ValueError, RereadRefused) as exc:
                 return refuse(exc)
@@ -1113,6 +1116,7 @@ async def _serve_run(
             run_root / "control.sock",
             spec_texts=spec_texts,
             estate_fingerprint=estate_fingerprint,
+            sources=sources,
             access=access,
         )
         # Handlers go in BEFORE the socket is bound, so a SIGHUP after this engine bound

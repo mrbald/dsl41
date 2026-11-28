@@ -17,8 +17,9 @@ Versions v1 (DL-90), v2 (DL-118), v3 and v4 (DL-498) are retired.
 The version door in §2 refuses each by name with its retiring entry.
 Other values, including an absent version, are refused as unknown.
 
-OPS `reread` reports current inputs. Tokenless OPS `update` prepares and applies them (DL-567).
-Status may carry a reread annotation (DL-463).
+OPS `reread` reads current inputs and stages the read. OPS `update` applies the staged read
+it names, or reads and applies current inputs (DL-567, DL-569).
+Status may carry a reread annotation and the staged read (DL-463, DL-569).
 KILLJOB accepts optional `payload.kill_signals`, an ordered array of supported
 positive integer signals ending in KILL (9). `sendevent -k 2,9` supplies it
 for that command and its causal kills (DL-462).
@@ -185,7 +186,8 @@ no peer pid, or no connection is made, it waits on `leader.lock` (DL-496).
 The OPS request `{"v":5,"cmd":"reread","claimed_actor":null}` reports current
 inputs from the main config the engine was last started with (DL-486).
 Engines without a main config refuse reread and update (DL-463). It runs preparation
-in an owned worker; it admits no engine mutation and publishes no retained plan.
+in an owned worker and admits no engine mutation; the plan of a read it stages is stored under
+`plans/` (the staged read, below).
 Runtime state never refuses a diff. Broken input returns `invalid_argument`
 with the reason no diff is available; worker failures return `engine_error`.
 Success adds `live_rev`, `source: {kind, path}` and `preview` to the read header.
@@ -241,10 +243,42 @@ verbatim. Update preparation omits `lint_summary`. No version step is needed
 
 The OPS update request (DL-567) is `{"v":5,"cmd":"update","baseline_id":"...",
 "request_id":"...","claimed_actor":null,"wait":false,"retry_only":false}`.
-Only the listed fields are accepted. No token, source path, consent or `expect` is accepted. The engine prepares
-current inputs itself and checks the captured revision before effects.
+Only the listed fields and the optional `read` (below) are accepted. No token, source path,
+consent or `expect` is accepted. Without `read` the engine prepares current inputs itself and
+checks the captured revision before effects.
 
-The fingerprint binds operation, baseline and actor, excluding source bytes,
+**The staged read (DL-569).** The engine keeps at most one staged read, in memory; a restart
+forgets it. A `reread` of the files stages its read when the candidate passes the preparation
+checks behind `blocked`, is not wholly the applied configuration (the equality of DL-478), the
+revision it read is still the applied one when it finishes, no update stops its jobs and the
+engine is not draining. Any `reread` of the files replaces the staged read, with its own or
+with nothing. Its answer adds `staged_read`: `{name, actor, at}`, or `null` when nothing is
+staged. `name` is the first 12 hex digits of the plan's token; `staged_read` shows only the
+name, while `status`'s `update.token` (§4) shows the whole plan token of an update that stops
+its jobs. `actor` is the request's `claimed_actor`, which an armed
+perimeter sets to the authenticated spelling. `at` is engine time, written as `engine_now` is.
+The optional field `read` names a staged read, and its absence selects the files on disk.
+`reread` with `read` previews it again against
+the engine's state now; it reads no file and changes nothing staged. `update` with `read`
+applies it: the worker is fed the read's captured bytes, not the files on disk, and the same
+preparation checks and admission run against the engine's state now. A `read` must equal the
+staged read's name; the whole token, a shorter prefix or any other value is refused
+`stale_plan` before anything is written. Both verbs then check that the worker read that
+plan: an answer that does not name the staged plan's token, as from a worker of another build
+that ignores the plan it is given, is refused `engine_error` before admission; nothing is admitted or applied, though that
+worker may have stored a plan directory. An
+`update` without `read` drops the staged read. An applied update drops it, and so does an
+equal candidate's answer that removes its plan; a refused one keeps it.
+One preparation runs at a time, a `reread`'s or an `update`'s. A `reread` meanwhile is refused
+`update_in_progress` with no `names`. An `update` meanwhile is refused `update_in_progress`
+with empty `names`, unless it reuses the preparing request's id: an exact retry joins that
+preparation, and the same id with another `read` or actor is refused `request_id_reused`. A
+request under another baseline is refused `baseline_mismatch`. A `reread` while an update stops its jobs, or while the engine
+drains, writes no plan.
+The fields are additive; a client may ignore them, and no version step is needed (DL-217).
+
+The fingerprint binds operation, baseline, actor and `read` when the request names one
+(DL-569), excluding source bytes,
 artifact identity, prepared revision, wait and retry_only. Lookup happens before
 source reads. A matching in-flight request joins one preparation; a retained
 request returns its original admission/application. `retry_only` with no known
@@ -382,8 +416,8 @@ The client action says what a client does next:
 | `engine_apply_faulted` | rejected | applying an input on a fork of the engine's state raised, and its time half applied alone, so the input was logged with this rejection and only its time half applied: it is quarantined (DL-320). The live engine stores it for an engine-made input. Replay stores it for any input admitted with no decision whose apply raises the same way, a control input included. Like every stored code, an exact retry of that control input is answered with it | operator |
 | `engine_error` | refused | an engine refusal whose raise site names no code | operator |
 | `engine_draining` | rejected | the mutation was admitted after `stop_requested` (a SIGTERM or `engine_stop`, below): it is logged with this rejection and only its time half applied; an exact retry is answered with it (spec-drain) | wait |
-| `stale_plan` | refused | the plan was diffed against another configuration rev or catalog than the engine runs (its revision or its catalog hash), or the internal plan predates the engine (no estate directory) | run update again |
-| `update_in_progress` | refused | another update is preparing or stopping its jobs; `names` is empty | wait |
+| `stale_plan` | refused | the plan was diffed against another configuration rev or catalog than the engine runs (its revision or its catalog hash), the internal plan predates the engine (no estate directory), or the `read` a request names is not the staged read (DL-569) | run reread or update again |
+| `update_in_progress` | refused | another reread or update is preparing, or an update is stopping its jobs; `names` is empty (DL-569) | wait |
 | `tree_active` | refused | the update changes box membership while it would stop a job or a job of a touched tree is active; `names` lists the stops and the active jobs of those trees (DL-559) | operator: stop or wait for the named jobs, then update again |
 
 The update refusal rows are `update`'s refusals (DL-432): each writes nothing, and the
@@ -649,10 +683,9 @@ A row may add `reread: {change, action}` (DL-463).
 `action` is `rerun`, `hold` or `remove`, the same values
 as the preview's effects, with the first-match rule in §2's reread forecast
 (DL-559), or `null` when the forecast assigns no action.
-It is the cached forecast
-at the last reread, not a live plan. A new reread replaces it when the revision it
-read is still the applied one (DL-521); a failed reread, an applied update and an
-engine restart clear it. It is absent for unmarked rows. CLI and TUI
+It is the staged read's forecast
+at the time of its read, not a live plan (§2): it is there while a read is staged and goes
+with it (DL-569). It is absent for unmarked rows. CLI and TUI
 append an annotation; a client may ignore this additive answer field.
 
 `{"ok": true, "jobs": {<name>: {…}}, "spec_drift": bool|null}`. Omitting
@@ -717,11 +750,19 @@ run id, the outcome's kind and cause, its start and end, the signal or exit
 code the wrapper saw, the attempt limit when that is why it is held, and
 the run number.
 
-`spec_drift` is a lazy re-hash of the input files the engine loaded, at most
-every 15 s. `null` means the server holds no fingerprint (DL-65).
-An unreadable or deleted captured path counts as drift. It does not
-adopt disk changes. `dsl41 reread` reports current inputs; `dsl41 update`
-independently prepares and applies them (DL-432, DL-437, DL-463).
+`spec_drift` is a lazy comparison of the files on disk with the inputs the engine loaded, at
+most every 15 s. `null` means the server holds no fingerprint (DL-65).
+An unreadable or deleted captured path counts as drift. A main-config engine compares by the
+rule the restart's pending count uses: a file an include or properties glob now matches or no
+longer matches counts too, and so does a marks file that appeared (DL-569). It does not
+adopt disk changes. `dsl41 reread` reads and stages current inputs; `dsl41 update NAME`
+applies the staged read, and `dsl41 update --reread` reads and applies (DL-432, DL-437,
+DL-569).
+
+While a read is staged (§2), the answer carries `staged_read`: `{name, actor, at, added,
+changed, removed, disk_changed}`. The counts are the read's added, changed and removed jobs.
+`disk_changed` says whether the files on disk differ from the read, by the rule of
+`spec_drift`, refreshed with it. A client may ignore this additive field (DL-569).
 
 A main-config restart resumes the last applied revision from the store;
 estate, lint and `engine.environment` edits stay pending (DL-437).

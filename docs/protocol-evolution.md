@@ -262,6 +262,13 @@ when it can, and writes no revision or record (DL-478). Its successful answer ad
 
 OPS reread and tokenless update use dialect 5 (DL-463, DL-498, DL-567).
 Status may carry an optional memory-only reread annotation.
+The staged read adds, within dialect 5, the optional request field `read` on `reread` and
+`update`, `staged_read` on the `reread` and `status` answers, and `stale_plan` for a name
+that is not the staged read. The absence of `read` selects the files on disk: an `update`
+without it reads the files and applies them, as a client of 2.1.0 means it. A staged read's
+name is the first 12 hex digits of its plan token; `status`'s `update.token` shows a
+stopping update's whole token. The staged read is in memory only; no record, plan or state
+format changes (DL-569).
 Persisted formats are independent of the control dialect.
 Older engines refuse without client fallback.
 
@@ -281,8 +288,10 @@ the update itself stay right.
 `main-inputs.json` binds
 config bytes, environment, lint policy, source mapping, membership and part
 names. Each Python part retains its generated JIL. Every part has a SHA-256
-in `plan.json`, published last. Update preparation rereads current sources in an
-isolated worker; application validates the internal artifact and executes its captured generated JIL (DL-463).
+in `plan.json`, published last. Update preparation reads, in an isolated worker, the captured
+bytes of the staged read a request names in `read`, or current sources when the request has
+no `read` field (DL-463, DL-569); application validates
+the internal artifact and executes its captured generated JIL.
 Stored configuration rows retain the capture for replay and restart.
 
 The main config selects one engine through `/etc/dsl41/dsl41.toml` or an

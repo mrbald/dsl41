@@ -101,7 +101,7 @@ if ! timeout -k 5 180 /bin/sh -c '
 fi
 # One request only: an uncertain answer requires operator diagnosis (DL-463).
 if ! timeout -k 5 180 runuser -u synthetic-engine -- \
-    /opt/synthetic-engine/runtime/bin/dsl41 update --wait \
+    /opt/synthetic-engine/runtime/bin/dsl41 update --reread --wait \
     --socket /srv/synthetic-engine/run/control.sock; then
     echo 'estate update failed or uncertain; inspect status and the printed request ID; do not retry blindly' >&2
     exit 1

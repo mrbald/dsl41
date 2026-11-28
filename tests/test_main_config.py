@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -1192,7 +1193,10 @@ def test_known_unsupported_startup_and_socket_reread_process(short_root):
                 assert result.returncode == 0, result.stdout + result.stderr
                 assert "changed 1 job" in result.stdout and "1 job: A" in result.stdout
                 assert "token:" not in result.stdout
-                assert set((root / "plans").iterdir()) == before
+                # the one plan a reread writes is the read it staged, when it stages (DL-569)
+                staged = re.search(r"staged read (\S+)", result.stdout)
+                written = {path.name[:12] for path in set((root / "plans").iterdir()) - before}
+                assert written == (set() if staged is None else {staged.group(1)})
                 full = policy == "warn" and not ignored
                 assert result.stderr.count("known-unsupported warn:") == (
                     len(expected) if full else int(not ignored)

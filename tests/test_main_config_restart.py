@@ -290,7 +290,7 @@ def test_b4_updated_root_resumes_captured_inputs(short_root: Path, change: str) 
     with cli_engine(path) as ask:
         (short_root / "a.jil").write_text(JOB.replace("true", "echo reviewed"))
         result = CliRunner().invoke(
-            app, ["update", "-S", str(short_root / "run" / "control.sock"), "--wait"]
+            app, ["update", "--reread", "-S", str(short_root / "run" / "control.sock"), "--wait"]
         )
         assert result.exit_code == 0, result.output
         assert ask()["revision"] == 2
@@ -1247,7 +1247,7 @@ def test_k6_socket_update_retry_does_not_reopen_sources(
     with cli_engine(path) as ask:
         (short_root / "a.jil").write_text(JOB.replace("true", "echo reviewed"))
         first = CliRunner().invoke(
-            app, ["update", "-S", str(short_root / "run" / "control.sock"), "--wait"]
+            app, ["update", "--reread", "-S", str(short_root / "run" / "control.sock"), "--wait"]
         )
         assert first.exit_code == 0, first.output
         rid = re.search(r"request_id: (\S+)", first.output).group(1)
@@ -1265,6 +1265,7 @@ def test_k6_socket_update_retry_does_not_reopen_sources(
             app,
             [
                 "update",
+                "--reread",
                 "-S",
                 str(short_root / "run" / "control.sock"),
                 "--request-id",
@@ -1691,7 +1692,8 @@ def test_reload_uses_latest_launch_config_but_drift_uses_applied_capture(short_r
     other.write_text(path.read_text().replace('["*.jil"]', '["b.jil"]'))
     (short_root / "b.jil").write_text(JOB.replace("true", "echo from-b"))
     with cli_engine(other) as ask:
-        assert ask("status")["spec_drift"] is False
+        # b.jil is a new file under the applied capture's `*.jil` glob (DL-569, BUG-126)
+        assert ask("status")["spec_drift"] is True
         assert ask()["catalog"]["jobs"]["A"]["exec_"]["command"] == "true"
         result = roundtrip(socket, {"v": 5, "cmd": "reread"})
         assert result["ok"] and result["source"]["path"] == str(other)

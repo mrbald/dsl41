@@ -1520,7 +1520,7 @@ def test_update_prints_the_decision_and_with_wait_the_application(
     decision = admission_data(document, live=world.live())
     send = _send(world, UpdateReply(decision))
     assert update_command(send=send) == 0
-    assert send.calls == [("update", {"wait": False})]
+    assert send.calls == [("update", {"wait": False, "read": None})]
     assert capsys.readouterr().out.splitlines() == [
         "stop requested for 1 running job: OPS_HEARTBEAT_C",
         "update admitted; application not yet confirmed",
@@ -1594,7 +1594,7 @@ def test_bug57_unchanged_update_over_socket(short_root):
                 asyncio.to_thread(
                     CliRunner().invoke,
                     app,
-                    ["update", "-S", str(server.path), "--wait"],
+                    ["update", "--reread", "-S", str(server.path), "--wait"],
                 )
             )
             await asyncio.wait((command, pump), return_when=asyncio.FIRST_COMPLETED)

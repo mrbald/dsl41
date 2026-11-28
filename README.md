@@ -872,8 +872,9 @@ CLI and scripts:
 - `src/dsl41/cli_reload.py`: the 2.x `reread` and `update` verbs: their
   rendering and exit codes, with the engine reached through one function
   bound to the control socket's v5 `reread` and `update` verbs (DL-463, DL-498).
-  Both use `-S` or `DSL41_SOCKET`. Reread is passive; update prepares current inputs.
-  JIL-only launches refuse reload. Status annotates the last reread forecast.
+  Both use `-S` or `DSL41_SOCKET`. Reread stages what it read; `update NAME` applies
+  that read and `update --reread` reads and applies (DL-569).
+  JIL-only launches refuse reload. Status annotates the staged read's forecast.
   `--style focused|neutral` chooses the text layout; focused is the default (DL-482).
 - `src/dsl41/__main__.py`: `python -m dsl41`, which `serve` uses to spawn
   one `dsl41 ui` per browser session.

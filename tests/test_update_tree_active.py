@@ -806,7 +806,8 @@ def test_dl559_an_open_update_or_a_drain_comes_before_the_forecast_tree_active(
             view = answer["preview"]
             assert view["added"] == ["NEW"] and view["update_refusal"] is None
             note = (
-                "another update is open or preparing; wait for it to finish"
+                # one preparation runs at a time, so only an open update is named (DL-569)
+                "another update is open; wait for it to finish"
                 if case == "stopping"
                 else "the engine is draining; it takes no update until it restarts"
             )

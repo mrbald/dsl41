@@ -579,7 +579,6 @@ class Engine:
         self.source_capture: dict[str, str] = {}
         self.launch_settings: dict[str, object] = {}
         self.reread_source: str | None = None
-        self.reread_marks: dict[str, dict[str, str | None]] = {}
         self.trace_rev: int | None = None
         #: the clock instant and journal seq of the last snapshot this engine took
         self._snapshot_at: datetime | None = None
@@ -2989,6 +2988,8 @@ class Engine:
             before=retention.horizon(round.first_at, self.journal.store.first_at()),
             runs=retention.kept_runs(self.journal.open),
             plans=self.update.token is not None or self.update.preparing(),
+            # the staged read's plan stays while it is staged (DL-569)
+            staged=None if self.update.staged is None else self.update.staged.token,
             expired=None if expired is None else Path(str(expired)),
         )
         if not round.owed:

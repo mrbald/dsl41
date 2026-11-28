@@ -47,8 +47,8 @@ it keeps commits before it (spec-restart §6, ruling R1, DL-433). An unfinished 
 live run whose job the dispatch filter names, or whose attempt the stop list names, is not
 launched: the restart hands it to the update as a task it cancelled (`hold_watch`, DL-526).
 
-An exact retry of an admitted request binds operation, baseline and actor (DL-463),
-and is answered from its `config intent` record and, once applied, from its
+An exact retry of an admitted request binds operation, baseline and actor (DL-463), and
+the staged read it names (DL-569), and is answered from its `config intent` record and, once applied, from its
 `config applied` record. A refusal is not recorded, so a retry of one is admitted afresh.
 """
 
@@ -133,17 +133,47 @@ class UpdateRequest:
     baseline_id: str
     request_id: str
     claimed_actor: str | None = None
+    #: the staged read the request applies (`read`), None for one that reads the disk (DL-569)
+    read: str | None = None
 
     @property
     def fingerprint(self) -> str:
-        """What an exact retry repeats: everything but `--wait` and the request id."""
-        return digest(
-            {
-                "cmd": "update",
-                "baseline_id": self.baseline_id,
-                "claimed_actor": self.claimed_actor,
-            }
-        )
+        """What an exact retry repeats: the operation, the baseline, the actor and, when the
+        request names one, the staged read; never `--wait` or the request id. A request that
+        reads the disk binds no `read` key (DL-569)."""
+        bound: dict[str, Any] = {
+            "cmd": "update",
+            "baseline_id": self.baseline_id,
+            "claimed_actor": self.claimed_actor,
+        }
+        if self.read is not None:
+            bound["read"] = self.read
+        return digest(bound)
+
+
+#: the hex digits of a plan token a staged read's public name keeps (DL-569)
+NAME_DIGITS: Final = 12
+
+
+@dataclass(frozen=True)
+class StagedRead:
+    """The one read `update` with `read` applies (DL-569). It lives in memory only, so a
+    restart forgets it; a `reread` of the disk replaces it and any applied update drops it.
+    `marks` are the `reread` row marks `status` shows, and `sources` is what the disk is
+    compared with (`main_config.source_baseline`). `name` is the public name, the first
+    `NAME_DIGITS` hex digits of the plan token: what answers show and a request's `read` must
+    equal. `token` is the whole plan token, which only the engine uses."""
+
+    name: str
+    token: str
+    rev: int
+    actor: str | None
+    at: str
+    added: int
+    changed: int
+    removed: int
+    marks: Mapping[str, Mapping[str, str | None]]
+    sources: Mapping[str, Any]
 
 
 @dataclass
@@ -302,6 +332,8 @@ class EngineUpdate:
         #: control server's one slot answers it. File retention keeps every plan meanwhile
         #: (DL-557)
         self.preparing: Callable[[], bool] = lambda: False
+        #: the read an `update` that names it applies; None when nothing is staged (DL-569)
+        self.staged: StagedRead | None = None
 
     # ---- what the engine asks
 
@@ -440,9 +472,12 @@ class EngineUpdate:
             where=f"configuration rev {engine.config_rev}",
         )
         # DL-478: only equal applied inputs and live policy complete without admission.
-        if same_configuration(applied, candidate) and candidate.profile == engine.profile:
+        if equal_to_applied(applied, candidate, engine.profile):
             with suppress(OSError):
                 shutil.rmtree(engine.run_root / PLANS / request.token)
+            if self.staged is not None and self.staged.token == request.token:
+                # the staged read equals what is applied, and its plan is gone (DL-569)
+                self.staged = None
             return UpdateAnswer(
                 Admitted(request.token, (), frozenset()),
                 unchanged={"rev": engine.config_rev, "catalog_hash": applied.catalog_hash},
@@ -759,7 +794,8 @@ class EngineUpdate:
         journal = engine.journal
         assert journal is not None  # `admit` and `resume` refuse an engine with none
         engine.source_capture = dict(configuration.source_capture)
-        engine.reread_marks = {}
+        # an applied update drops the staged read and its marks (DL-569)
+        self.staged = None
         application = replace(application, stopped=self._choose_follow_ups())
         at = engine.now_admitted()
         body = {
@@ -922,6 +958,15 @@ def same_configuration(existing: Configuration, candidate: Configuration) -> boo
     )
 
 
+def equal_to_applied(
+    applied: Configuration, candidate: Configuration, live: RuntimeProfile | None
+) -> bool:
+    """Whether `candidate` is wholly the applied configuration under the live profile: an
+    update of it completes with nothing admitted (DL-478), and a `reread` of it stages
+    nothing (DL-569)."""
+    return same_configuration(applied, candidate) and candidate.profile == live
+
+
 def store_config(store: Store, configuration: Configuration, rev: int) -> None:
     """Append the next rev, or retain equal definitions, order and inputs (DL-438, DL-468).
 
@@ -1022,10 +1067,13 @@ __all__ = [
     "APPLICATION_KEYS",
     "PLANS",
     "EngineUpdate",
+    "NAME_DIGITS",
+    "StagedRead",
     "UpdateAnswer",
     "UpdateRequest",
     "admitted_of",
     "application_body",
+    "equal_to_applied",
     "OpenedPlan",
     "PlanUnreadable",
     "open_plan",

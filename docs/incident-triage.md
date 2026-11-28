@@ -140,9 +140,10 @@ The [intervention procedure](#send-the-intervention) explains sendevent's
 0/2/3/4 outcomes and recovery after an unknown result.
 
 To preview or apply edited definitions, follow [Reload a changed estate](deploy.md#reload-a-changed-estate):
-`"$DSL41" reread -S "$S"` reports current launch-config and glob inputs;
-`"$DSL41" update -S "$S" --wait` rereads and applies them (DL-463).
-No config selector, token or stop-consent argument is used.
+`"$DSL41" reread -S "$S"` reads current launch-config and glob inputs and stages the read;
+`"$DSL41" update -S "$S" NAME --wait` applies that read, with the `NAME` reread printed, and
+`--reread` in place of `NAME` reads and applies in one go (DL-463, DL-569).
+No config selector or stop-consent argument is used.
 
 ## The job has not started
 

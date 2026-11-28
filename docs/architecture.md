@@ -39,9 +39,10 @@ It selects the run root, host settings, JIL or Python DSL inputs through
 include globs, properties, interpretation settings and lint policy.
 [Control §2](control-protocol.md#2-transport-and-framing-frozen) and
 [DL-437](decision-log.md) define this input selection.
-Socket reread/update use `-S` or `DSL41_SOCKET` (DL-463). Reread is passive; update
-prepares current main-config sources in an owned worker. Status annotations cache
-the last forecast only. JIL-only launches refuse this interface.
+Socket reread/update use `-S` or `DSL41_SOCKET` (DL-463). Reread prepares current
+main-config sources in an owned worker and stages the read; update applies the staged read
+it names, or with `--reread` reads and applies (DL-569). Status annotations show the staged
+read's forecast only. JIL-only launches refuse this interface.
 
 The compiler loads a `CatalogIR`; the runner executes that catalog locally.
 IR-G is derived for analysis and visualization, not persisted engine state.
@@ -130,8 +131,8 @@ journal. See [wrapper spool](wrapper-protocol.md#3-spool-format-frozen)
 and [DL-428](decision-log.md).
 The run root also holds `engine.toml`, `plans/`, logs and, with access
 control, `perimeter.jsonl`. [Deploy](deploy.md) owns the service and filesystem layout.
-`dsl41 reread -S SOCK` reports current inputs; `dsl41 update -S SOCK` asks the engine to prepare and
-read and apply that captured plan.
+`dsl41 reread -S SOCK` reads current inputs and the engine stages the captured plan;
+`dsl41 update -S SOCK NAME` applies that plan (DL-569).
 Period, segment-file, seal and lineage identities resolve to [DL-424](decision-log.md).
 
 ## 4. Engine components

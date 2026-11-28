@@ -55,7 +55,7 @@ def _run(*args: str, socket: Path | None = None) -> Any:
     params=[
         ("query", "status"),
         ("reread",),
-        ("update",),
+        ("update", "--reread"),
         ("sendevent", "ON_HOLD", "--job", "socket_job"),
         ("off-hold-all", "--dry-run"),
         ("engine", "stop"),
@@ -628,7 +628,8 @@ def test_reload_old_engine_has_no_fallback(monkeypatch, cli_env, verb, code):
         return {"ok": False, "refused": True, "code": code, "error": "old engine"}
 
     monkeypatch.setattr(runner_control, "roundtrip", reply)
-    result = _run(verb)
+    # a plain `update` names its two forms and sends nothing (DL-569)
+    result = _run(*([verb, "--reread"] if verb == "update" else [verb]))
     assert result.exit_code == 2, result.output
     assert "old engine" in result.output
     assert len([r for r in calls if r["cmd"] == verb]) == 1

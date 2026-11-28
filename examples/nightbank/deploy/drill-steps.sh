@@ -286,7 +286,11 @@ step_reload() { # reread and update with a live job and a changed definition (DL
     [ "$rc" = 1 ] || fail "reread exited $rc, not 1 (a plan that stops a running job)"
     status | jq -e '.jobs.DRILL_LONG_C.reread == {change: "changed", action: "rerun"}' >/dev/null ||
         fail "reread does not forecast DRILL_LONG_C changed and rerun"
-    out=$(cli update -S "$SOCK" --wait) || fail "update --wait failed: $out"
+    # the update applies the read this reread staged, by the name its own reply printed, so
+    # another operator's later read is refused stale_plan, not applied (DL-569)
+    name=$(printf '%s\n' "$out" | sed -n 's/^staged read \([0-9a-f]\{12\}\)\( .*\)\{0,1\}$/\1/p')
+    [ -n "$name" ] || fail "reread staged no read"
+    out=$(cli update -S "$SOCK" "$name" --wait) || fail "update --wait failed: $out"
     printf '%s\n' "$out"
     [ "$(status | jq .config_rev)" = $((rev + 1)) ] || fail "config_rev did not move past $rev"
     wait_for 60 "DRILL_LONG_C reran" attempt_is DRILL_LONG_C 2 RUNNING
