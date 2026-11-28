@@ -685,8 +685,8 @@ as the preview's effects, with the first-match rule in §2's reread forecast
 (DL-559), or `null` when the forecast assigns no action.
 It is the staged read's forecast
 at the time of its read, not a live plan (§2): it is there while a read is staged and goes
-with it (DL-569). It is absent for unmarked rows. CLI and TUI
-append an annotation; a client may ignore this additive answer field.
+with it (DL-569). It is absent for unmarked rows. The CLI appends an annotation and the TUI
+marks the row (DL-570); a client may ignore this additive answer field.
 
 `{"ok": true, "jobs": {<name>: {…}}, "spec_drift": bool|null}`. Omitting
 `job` returns every catalog job unioned with every store row, so

@@ -461,7 +461,8 @@ def prepare_reread(
     staged = answer.get("staged_read")
     last = "forecast at reread time; update checks the read against the engine's state again"
     if "staged_read" not in answer:
-        # an engine before DL-569 stages nothing, and its update reads the files
+        # an engine that sends no `staged_read` stages nothing, and its update reads the files
+        # (DL-569)
         if details and not details["blocked"] and not refusal:
             footer.append(f"apply with: {apply_command} --reread")
         last = "forecast at reread time; update --reread reads the files again"

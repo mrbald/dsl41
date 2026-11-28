@@ -1802,7 +1802,9 @@ dependencies.
 The app is a **client of the control socket only** — never in-process with
 the engine. This split is forced, not stylistic. textual-serve spawns one
 app instance per browser session, so an in-process engine hands every
-viewer a private universe. Views: jobs table (status with a cached reread annotation (DL-463), run_number, pending
+viewer a private universe. Views: a pending banner under the header (an update that stops its
+jobs, the staged read, or files on disk no read took; `u` sends `reread` — DL-570), jobs table
+(status, the staged read's row mark beside the job (DL-463, DL-570), run_number, pending
 timers/alarms), explain pane (why the selected job has not started, from
 `explain`: the instant, the deciding gate, the condition's atoms, capacity, the
 dispatch wait and the wakes, each line naming a job a link that `e`, up, down

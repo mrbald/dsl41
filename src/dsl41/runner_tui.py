@@ -154,8 +154,15 @@ Contract detail for DL-46, within DL-41's frame:
   log pager focused `/` searches
   the log instead. `v` cycles the view all, problems, active.
   Filtered and non-'all' views are flat, so a match inside a folded box is never invisible. The
-  console is on `:`. The status response's spec_drift flag renders in the subtitle: files changed
-  on disk, the running catalog is the truth.
+  console is on `:`.
+- Pending banner (DL-570): one line under the header, shown while one state holds, first match:
+  an update stops its jobs; this viewer's `u` read is out; a staged read waits, with whether the
+  files changed again since it; the files on disk differ from the applied estate. It is derived
+  from the latest status answer; while disconnected or refused it says the state is unknown. The
+  text is fitted to the width: `since this read` goes first, then who read and when, then the end
+  is cut. The column after the job marks each row the staged read touches (`!` would stop, `~`
+  changed, `-` removed), as of the read. `u` sends `reread` on a connection of its own, once at
+  a time, and its answer is one console line.
 - Pane geometry (DL-520): three splits, the table column against the side column and the explain
   pane against the log pane as ratios, the console as rows, kept for the session and across a
   change of the terminal's size. A first-button drag on a split's border, the two lines that
@@ -226,6 +233,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover -- exercised via CLI guar
         "the dsl41 TUI needs the optional [ui] extra: pip install 'dsl41[ui]'"
     ) from exc
 
+from dsl41.cli_output import one_line
 from dsl41.console_words import STATUS_ROWS, VERB_ROWS, complete_line
 from dsl41.display_time import format_local_at
 from dsl41.job_filter import JobFilter, read_filter
@@ -247,7 +255,6 @@ from dsl41.runner_control import (
     ATTEMPT_NOTE_WIDTH,
     ControlClientError,
     attempt_note,
-    reread_note,
     claimed_actor,
     command,
     original_decision_text,
@@ -297,12 +304,16 @@ _FILTER_LIMIT_S = 0.25
 #: seconds of processor time one pass of the log pager may use; an honest pattern costs more
 #: over 10 000 log lines than over the job names (DL-514)
 _PAGER_LIMIT_S = 5.0
-_COLUMNS = ("job", "status", "attempt", "at", "run", "exit", "flags", "timers", "alarms")
+_COLUMNS = ("job", "mark", "status", "attempt", "at", "run", "exit", "flags", "timers", "alarms")
+#: a header label other than the column's key: the mark column's is empty, and the table's
+#: title and the help give its legend (DL-570)
+_COLUMN_LABELS = {"mark": ""}
 #: fixed render widths for the bounded columns (the wider of content and header label).
 #: Auto-width stays on job and timers, whose content varies. Fixed widths keep update_cell's
 #: update_width off these columns: textual's width recompute re-measures a whole column per
 #: updated cell, which is O(cells x rows) at estate scale (~25s of blocked loop at 519 jobs).
 _COLUMN_WIDTHS = {
+    "mark": 1,
     "status": 10,
     "attempt": ATTEMPT_NOTE_WIDTH,
     "at": 19,
@@ -699,20 +710,13 @@ class _TableSync:
         columns: Sequence[str],
         rows: Sequence[Sequence[Any]],
         on_rebuild: Callable[[Sequence[Any], Any], Any | None] | None = None,
-        column_widths: Mapping[str, int] | None = None,
     ) -> None:
         """On a membership or order change, `on_rebuild` runs once, after clear() and before any
         add_row. It gets `(new_identity, old_selected)`: the identity about to be shown and the
         identity the cursor sat on, read before clear() resets `table.cursor_row` (DL-178v). It
         returns the identity to restore the cursor to, or None; with None the cursor stays on
         row 0, where clear() and add_row leave it."""
-        resized = False
-        for column_info in table.ordered_columns:
-            width = (column_widths or {}).get(column_info.key.value or "")
-            if width is not None and column_info.width != width:
-                column_info.width = width
-                resized = True
-        if list(identity) != self.identity or resized:
+        if list(identity) != self.identity:
             cursor = table.cursor_row
             old_selected = self.identity[cursor] if 0 <= cursor < len(self.identity) else None
             table.clear()
@@ -759,6 +763,39 @@ class _LocalHeader(Header):
         yield _LocalHeaderClock()
 
 
+class _PendingBanner(Widget):
+    """The line under the header that says what waits to be read or applied (DL-570). It
+    shows only while a state holds, and its text is fitted to its width at each render, so
+    it never scrolls and is never cut by the terminal."""
+
+    DEFAULT_CSS = """
+    _PendingBanner { height: 1; display: none; text-style: bold; }
+    _PendingBanner.-update { background: $error; color: $text; }
+    _PendingBanner.-read, _PendingBanner.-files { background: $warning; color: $background; }
+    _PendingBanner.-reading { background: $primary; color: $text; }
+    _PendingBanner.-unknown { background: $panel; color: $text; }
+    """
+    _KINDS = ("unknown", "update", "reading", "read", "files")
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.pending: Pending | None = None
+
+    def show(self, pending: Pending | None) -> None:
+        if pending == self.pending:
+            return
+        self.pending = pending
+        self.display = pending is not None
+        for kind in self._KINDS:
+            self.set_class(pending is not None and pending.kind == kind, f"-{kind}")
+        self.refresh()
+
+    def render(self) -> RenderResult:
+        if self.pending is None:
+            return Text()
+        return Text(banner_line(self.pending, self.size.width), no_wrap=True)
+
+
 #: spliced into every modal's BINDINGS (DL-187 item 7): a modal chain blocks app bindings
 #: (screen.py:449), so help must be reachable from each modal.
 _HELP_BINDINGS = (
@@ -772,7 +809,7 @@ _OPERATOR_BELLS = tuple(
     Binding(key, "app.bell", "", show=False)
     for key in (
         *("s", "f", "k", "i", "I", "h", "H", "n", "N"),
-        *("d", "m", "o", "slash", "v", "space", "z", "colon", "e", "E", "]", "[", "}", "{"),
+        *("d", "m", "o", "u", "slash", "v", "space", "z", "colon", "e", "E", "]", "[", "}", "{"),
         *("plus", "equals_sign", "minus"),
     )
 )
@@ -1147,6 +1184,14 @@ class _JobsTable(DataTable[Any]):
 
     e moves focus to the explain pane, where up, down and Enter go to
     the job a line names, and Backspace goes back (DL-535).
+
+    The banner under the header says what waits (DL-570): files on disk
+    not read, a read waiting to be applied, files changed again since
+    it, or an update stopping its jobs. u reads the files and stages
+    the read, as dsl41 reread does; dsl41 update NAME applies it. The
+    column after the job marks the jobs the staged read touches: ! it
+    would stop the job, ~ it changes it, - it removes it. The marks are
+    as of the read, not live; details give them in words.
 
     E opens the stored events before the oldest the console holds in
     the pager; E there reads the page before (DL-541). The alarms
@@ -2539,8 +2584,9 @@ class _ExplainPane(VerticalScroll):
 
 
 def config_line(status: Mapping[str, Any]) -> str:
-    """What the subtitle says of the configuration (spec-reload): `rev N`, and while an update
-    stops its jobs, the internal plan token's first twelve hex digits and the jobs still stopping.
+    """What the console says of the configuration when it changes (spec-reload): `rev N`, and
+    while an update stops its jobs, the internal plan token's first twelve hex digits and the
+    jobs still stopping. The subtitle shows the rev alone; the banner shows the update (DL-570).
     Empty for an engine that names no rev."""
     rev = status.get("config_rev")
     if not isinstance(rev, int):
@@ -2551,6 +2597,164 @@ def config_line(status: Mapping[str, Any]) -> str:
         jobs = ", ".join(str(job) for job in update.get("stopping") or ()) or "none"
         line += f"  [update {str(update.get('token', ''))[:12]} stopping: {jobs}]"
     return line
+
+
+#: DL-570: the banner's first character. With the capital word after it, it sets the banner
+#: apart without its colour.
+_BANNER_MARK = "»"
+
+
+@dataclass(frozen=True)
+class Pending:
+    """What the pending banner says (DL-570). `kind` is `unknown`, `update`, `reading`, `read`
+    or `files`; the other fields belong to one kind each."""
+
+    kind: str
+    why: str = ""
+    stopping: tuple[str, ...] = ()
+    name: str = ""
+    who: str = ""
+    at: str = ""
+    counts: tuple[int, int, int] = (0, 0, 0)
+    changed_again: bool = False
+
+
+def pending_of(status: Mapping[str, Any], *, reading: bool, unknown: str = "") -> Pending | None:
+    """The banner's one state, from the latest status answer and whether a `reread` of this
+    viewer is out (DL-570). `unknown` names why no answer is current; then nothing of the
+    engine's is shown as pending. Otherwise, first match: an update that stops its jobs, this
+    viewer's read under way, the staged read, files on disk that differ from the applied
+    estate. None when none holds."""
+    if unknown:
+        return Pending("unknown", why=unknown)
+    update = status.get("update")
+    if isinstance(update, Mapping):
+        return Pending("update", stopping=tuple(str(job) for job in update.get("stopping") or ()))
+    if reading:
+        return Pending("reading")
+    staged = status.get("staged_read")
+    if isinstance(staged, Mapping):
+        actor = staged.get("actor")
+        return Pending(
+            "read",
+            name=str(staged.get("name", "")),
+            # one line, as the CLI prints an actor (DL-482)
+            who=one_line(actor) if isinstance(actor, str) and actor else "unnamed",
+            at=format_local_at(staged.get("at")),
+            counts=(
+                int(staged.get("added") or 0),
+                int(staged.get("changed") or 0),
+                int(staged.get("removed") or 0),
+            ),
+            changed_again=bool(staged.get("disk_changed")),
+        )
+    if status.get("spec_drift"):
+        return Pending("files")
+    return None
+
+
+def _fit_names(names: Sequence[str], width: int) -> str:
+    """`names` joined by commas in at most `width` cells; the names that do not fit give way
+    to `… +N`, and the first name is cut to make room for that count (DL-570)."""
+    shown = ", ".join(names)
+    if cell_len(shown) <= width:
+        return shown
+    for keep in range(len(names) - 1, 0, -1):
+        shown = ", ".join(names[:keep]) + f" … +{len(names) - keep}"
+        if cell_len(shown) <= width:
+            return shown
+    rest = f" … +{len(names) - 1}" if len(names) > 1 else ""
+    return _cut(names[0], width - cell_len(rest)) + rest
+
+
+def _cut(text: str, width: int) -> str:
+    """`text` in at most `width` cells, ending in `…` when it is cut."""
+    if cell_len(text) <= width:
+        return text
+    cut = Text(text)
+    cut.truncate(max(width, 1), overflow="ellipsis")
+    return cut.plain
+
+
+def banner_line(pending: Pending, width: int) -> str:
+    """The banner's text in at most `width` cells (DL-570). A part is dropped when the line does
+    not fit, in this order: `since this read`, then who read and when. What still does not fit
+    is cut at its end with `…`. The update's names are cut with a count."""
+    mark = _BANNER_MARK
+    if pending.kind == "unknown":
+        return _cut(f"{mark} UNKNOWN: {pending.why}, so no read or update is shown", width)
+    if pending.kind == "update":
+        head = f"{mark} UPDATE applying: stopping {len(pending.stopping)}"
+        if not pending.stopping:
+            return _cut(head, width)
+        return _cut(head + ": " + _fit_names(pending.stopping, width - cell_len(head) - 2), width)
+    if pending.kind == "reading":
+        return _cut(f"{mark} READING the files…", width)
+    if pending.kind == "files":
+        return _cut(f"{mark} FILES CHANGED on disk, not read · u reads them", width)
+    added, changed, removed = pending.counts
+    head = f"{mark} READ {pending.name} waits"
+    who = f" ({pending.who}, {pending.at})"
+    counts = f": +{added} ~{changed} -{removed}"
+    if pending.changed_again:
+        tails = [
+            " · FILES CHANGED AGAIN since this read · u reads again",
+            " · FILES CHANGED AGAIN · u reads again",
+        ]
+    else:
+        tails = [f" · apply: dsl41 update {pending.name}"]
+    candidates = [head + who + counts + tail for tail in tails]
+    candidates += [head + counts + tail for tail in tails[-1:]]
+    for line in candidates:
+        if cell_len(line) <= width:
+            return line
+    return _cut(candidates[-1], width)
+
+
+def reread_mark(row: Mapping[str, Any]) -> str:
+    """The row's mark from the staged read, as of the read (DL-570): `!` a job it would stop
+    (an action), else `~` changed or `-` removed; empty for a row it does not touch."""
+    mark = row.get("reread")
+    if not isinstance(mark, Mapping):
+        return ""
+    if mark.get("action"):
+        return "!"
+    return "-" if mark.get("change") == "removed" else "~"
+
+
+_MARK_STYLE = {"!": "bold red", "~": "bold yellow", "-": "bold magenta"}
+
+
+def reread_summary(answer: Mapping[str, Any]) -> Text:
+    """The console line for the answer to this viewer's `reread` (DL-570): the staged read's
+    name and counts, or why nothing was staged, or the refusal with its text."""
+    if not answer.get("ok"):
+        return Text(f"read refused ({answer.get('code')}): {answer.get('error', '')}", style="red")
+    preview = answer.get("preview") or {}
+    counts = " ".join(
+        f"{sign}{len(preview.get(key) or ())}"
+        for sign, key in (("+", "added"), ("~", "changed"), ("-", "removed"))
+    )
+    staged = answer.get("staged_read")
+    if isinstance(staged, Mapping):
+        name = staged.get("name")
+        stops = len(preview.get("stop") or ())
+        stop = f", stops {stops} running" if stops else ""
+        refusal = preview.get("update_refusal")
+        if isinstance(refusal, Mapping):
+            # a forecast refusal offers no apply, as the CLI's reread does (DL-559)
+            names = ", ".join(one_line(job) for job in refusal.get("names") or ())
+            return Text(
+                f"read {name} staged: {counts}{stop}; update would be refused"
+                f" ({refusal.get('code')}): {names}",
+                style="yellow",
+            )
+        return Text(
+            f"read {name} staged: {counts}{stop}; apply: dsl41 update {name}", style="yellow"
+        )
+    blocked = (preview.get("definition_changes") or {}).get("blocked") or ()
+    why = "; ".join(str(reason) for reason in blocked) or "the files are the applied estate"
+    return Text(f"read: nothing staged ({counts}): {why}", style="yellow")
 
 
 @dataclass
@@ -2712,6 +2916,8 @@ class RunnerApp(App[None]):
         Binding("m", "maximize_log", "zoom log"),
         Binding("o", "toggle_stream", "out/err"),
         Binding("r", "refresh", "refresh"),
+        # the files on disk read and staged, as `dsl41 reread` does (DL-570)
+        Binding("u", "reread", "read files"),
         Binding("f1", "toggle_help_panel", "help"),
         # the pager's `?` binding shadows this one while the log has focus (DL-187 item 7)
         Binding("question_mark", "toggle_help_panel", "help", show=False),
@@ -2761,6 +2967,8 @@ class RunnerApp(App[None]):
         #: DL-541: the pager's and the details popup's history reads have a connection of their
         #: own, so a stalled read never holds the table's refresh or the operator's keys
         self._reads = ControlClient(self.socket_path, person)
+        #: DL-570: `u`'s read takes seconds, so it has a connection of its own too
+        self._rereads = ControlClient(self.socket_path, person)
         #: the selection is a job, not a row (DL-532). `_chosen` is the job the operator picked
         #: last, kept while a fold or a filter hides it. `_selected`, what the keys act on, is
         #: derived from it on each render: the job when shown, else the folded box that stands
@@ -2863,8 +3071,16 @@ class RunnerApp(App[None]):
         self._collapsed: set[str] = set()  # box rows folded shut
         self._table_sync = _TableSync()  # DL-178v: shared with TriggersScreen
         self._spec_drift = False
+        #: DL-570: the latest status answer the engine gave, which the pending banner reads,
+        #: and whether this viewer's `reread` is out: the viewer's only state of a read
+        self._status_seen: Mapping[str, Any] = {}
+        self._rereading = False
+        #: DL-570: after the `reread` answer, the status requests sent until then; READING
+        #: stays until a status request sent later is answered, so the banner never shows the
+        #: state the read replaced
+        self._reread_settles: int | None = None
         #: spec-reload: the configuration rev the engine runs and, while an update stops its
-        #: jobs, its token and those jobs, as the subtitle shows them
+        #: jobs, its token and those jobs, as the console notes them
         self._config = ""
         self._connected: bool | None = None  # None = never yet reported
         self._refreshing = False
@@ -2884,6 +3100,7 @@ class RunnerApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield _LocalHeader()
+        yield _PendingBanner(id="pending")
         with _PaneRow(id="main"):
             with Vertical(id="tablecol"):
                 yield _FilterInput(
@@ -2910,8 +3127,8 @@ class RunnerApp(App[None]):
     def on_mount(self) -> None:
         table = self.query_one("#jobs", DataTable)
         table.cursor_type = "row"
-        for label in _COLUMNS:  # singular add_column: key= predates the 6.2 tuple form
-            table.add_column(label, key=label, width=_COLUMN_WIDTHS.get(label))
+        for key in _COLUMNS:  # singular add_column: key= predates the 6.2 tuple form
+            table.add_column(_COLUMN_LABELS.get(key, key), key=key, width=_COLUMN_WIDTHS.get(key))
         self.query_one("#explain-box").border_title = "explain"
         self.query_one("#console", RichLog).border_title = "events"
         table.focus()
@@ -2935,6 +3152,39 @@ class RunnerApp(App[None]):
         self.run_worker(self._refresh(), group="refresh", exclusive=False)
 
     def action_refresh(self) -> None:
+        self._poll()
+
+    def action_reread(self) -> None:
+        """`u`: read the files on disk and stage the read, as `dsl41 reread` does (DL-570). A
+        second `u` while the first is out does nothing."""
+        if self._rereading or self._reread_settles is not None:
+            return
+        self._rereading = True
+        self._refresh_banner()
+        self.run_worker(self._reread, group="reread", exclusive=False)  # type: ignore[arg-type]
+
+    async def _reread(self) -> None:
+        """The read takes seconds, so it has a connection of its own and the table's refresh
+        goes on meanwhile. Its answer is one console line; the banner and the marks follow the
+        next status answer (DL-570)."""
+        request = {"cmd": "reread", "claimed_actor": self._claimed_actor}
+        try:
+            answer = await self._rereads.request(request)
+        except ControlClientError as exc:
+            line = Text(
+                f"read: the engine did not answer: {exc}; the status shows whether a read"
+                " was staged",
+                style="red",
+            )
+        else:
+            line = reread_summary(answer)
+            self._reread_settles = self._status_asked
+        finally:
+            self._rereading = False
+            # closed after each read, so no connection is left for the teardown to wait on
+            await self._rereads.close()
+        self._console_write(line)
+        self._refresh_banner()
         self._poll()
 
     def _reset_history(self) -> None:
@@ -2985,6 +3235,8 @@ class RunnerApp(App[None]):
                     self._set_connected(False, str(exc))
                     self._stop_hop("the engine did not answer")
                     return
+                if self._reread_settles is not None and asked > self._reread_settles:
+                    self._reread_settles = None  # the first answer asked after the read's
                 self._set_connected(True)
                 # DL-187 item 6 (P1-1): an ok:false status answer is a query refusal, not a
                 # dead socket: the last good table stays and the operator is told
@@ -2996,9 +3248,11 @@ class RunnerApp(App[None]):
                     self._check_status_baseline(status)
                     # concurrency-model ss6 read header: the revisions below belong to THIS log
                     self._baseline = str(status.get("baseline_id") or "")
+                    self._status_seen = status
                     self._set_drift(bool(status.get("spec_drift")))
-                    self._set_config(config_line(status))
                     self._config_rev = status.get("config_rev")
+                    self._set_config(config_line(status))
+                    self._refresh_banner()
                     self._update_table(status.get("jobs", {}))
                     self._confirm_hop(asked)
                 else:
@@ -3037,15 +3291,30 @@ class RunnerApp(App[None]):
             base += " (disconnected)"
         if self._query_faults:
             base += " (refused)"
-        if self._config:
-            base += f"  {self._config}"
-        if self._spec_drift:
-            base += "  [SPEC DRIFT: estate files changed on disk]"
+        if isinstance(self._config_rev, int):
+            # the drift and an update that stops its jobs are the banner's (DL-570)
+            base += f"  rev {self._config_rev}"
         self.sub_title = base
 
+    def _refresh_banner(self) -> None:
+        """Show the pending banner's state (DL-570). Without a current status answer, a lost
+        connection or a refused status, it says so and shows nothing of the engine's as
+        pending."""
+        unknown = ""
+        if self._connected is False:
+            unknown = "disconnected"
+        elif "status" in self._query_faults:
+            unknown = "status refused"
+        try:
+            banner = self.query_one("#pending", _PendingBanner)
+        except NoMatches:
+            return  # before compose or at teardown
+        reading = self._rereading or self._reread_settles is not None
+        banner.show(pending_of(self._status_seen, reading=reading, unknown=unknown))
+
     def _set_config(self, line: str) -> None:
-        """spec-reload: the subtitle names the configuration rev and an update while it stops;
-        the console says when one starts stopping and when the rev moves."""
+        """spec-reload: the subtitle names the configuration rev; the console says when an
+        update starts stopping and when the rev moves."""
         if line == self._config:
             return
         if self._config:
@@ -3057,7 +3326,11 @@ class RunnerApp(App[None]):
         if up == self._connected:
             return
         self._connected = up
+        if not up:
+            # DL-570: the banner shows only a status answer read since the connection was lost
+            self._status_seen = {}
         self._refresh_subtitle()
+        self._refresh_banner()
         if up:
             self._console_write(Text("connected", style="green"))
         else:
@@ -3080,21 +3353,21 @@ class RunnerApp(App[None]):
             self._query_faults[verb] = error
             self._console_write(Text(f"{verb} query refused: {error}", style="red"))
         self._refresh_subtitle()
+        self._refresh_banner()
 
     def _set_drift(self, drift: bool) -> None:
-        """Report source drift (DL-65); reread reads and stages the disk inputs, and the update
-        command it prints applies that read (DL-569)."""
+        """Note in the console when the files on disk come to differ from the applied estate
+        (DL-65); `u` or reread reads and stages them, and `dsl41 update NAME` applies the read
+        (DL-569). The banner shows the state (DL-570)."""
         if drift == self._spec_drift:
             return
         self._spec_drift = drift
-        self._refresh_subtitle()
         if drift:
             socket = shlex.quote(str(self.socket_path.absolute()))
             self._console_write(
                 Text(
-                    "spec drift: estate files changed on disk; run dsl41 reread"
-                    f" -S {socket} to read them, then the dsl41 update command it prints"
-                    " to adopt",
+                    f"files changed on disk: u reads them (dsl41 reread -S {socket});"
+                    " dsl41 update NAME applies a read",
                     style="yellow",
                 )
             )
@@ -3712,11 +3985,6 @@ class RunnerApp(App[None]):
             columns=_COLUMNS,
             rows=rows,
             on_rebuild=on_rebuild,
-            column_widths={
-                "status": 44
-                if any(self._jobs_snapshot[name].get("reread") for name in order)
-                else 10
-            },
         )
         # a Text title, since border_title strings parse as rich markup
         title = Text(f"jobs {len(order)}/{len(self._jobs_snapshot)}")
@@ -3729,6 +3997,9 @@ class RunnerApp(App[None]):
         if note:
             # DL-541: the alarm part of Problems, and the alarms column, is marked
             title.append(f" · {note}", style="yellow")
+        if any(reread_mark(self._jobs_snapshot.get(name, {})) for name in order):
+            # DL-570: the marks are the staged read's forecast at its read, not a live plan
+            title.append(" · marks as of the read", style="yellow")
         table.border_title = title
         if target is not None and table.cursor_row != order.index(target):
             table.move_cursor(row=order.index(target))
@@ -3754,9 +4025,12 @@ class RunnerApp(App[None]):
                 timer_text += f" +{len(timers) - 1}"
         alarms = self._alarm_count(name)
         exit_code = row.get("exit_code")
+        mark = reread_mark(row)
         return [
             name,
-            Text(status + reread_note(row), style=_STATUS_STYLE.get(status, "")),
+            # DL-570: the staged read's mark, as of the read; its words are in the details
+            Text(mark, style=_MARK_STYLE.get(mark, "")),
+            Text(status, style=_STATUS_STYLE.get(status, "")),
             attempt_note(row),  # DL-426: beside the status, empty for a first attempt running
             format_local_at(row.get("status_at")),
             str(row.get("run_number", "")),
@@ -4357,6 +4631,12 @@ class RunnerApp(App[None]):
                 f"  exit {'-' if exit_code is None else exit_code}"
                 f"  at {format_local_at(row.get('status_at'))}\n"
             )
+            mark = row.get("reread")
+            if isinstance(mark, Mapping):
+                # DL-570: the row mark's words, the staged read's forecast at its read
+                action = mark.get("action")
+                body.append("reread: ", style="bold")
+                body.append(f"{mark.get('change')}; {action or 'no stop'} (as of the read)\n")
             # DL-68 trigger lines
             timer_entries = timers.get("timers", []) if timers.get("ok") else []
             for line in assemble_detail_trigger_lines(job, row, timer_entries):

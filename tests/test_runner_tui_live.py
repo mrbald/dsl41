@@ -25,7 +25,7 @@ from dsl41.runner_control import ControlClient, ControlServer
 from dsl41.runner_config import EngineSettings
 from dsl41.runner_scheduler import Scheduler
 from dsl41.runner_startup import resume_run, start_run
-from dsl41.runner_tui import RunnerApp, SpecScreen, TriggersScreen
+from dsl41.runner_tui import Pending, RunnerApp, SpecScreen, TriggersScreen, _PendingBanner
 
 TEXT = "insert_job: live_job\njob_type: c\ncommand: true\n"
 T0 = datetime(2026, 7, 1, 8)
@@ -156,50 +156,62 @@ async def _source_run(root: Path, text: str = TEXT):
             await client.close()
 
 
-def test_pilot_reread_widens_the_live_status_column(short_root: Path, cli_env) -> None:
+def test_pilot_dl570_a_delivered_file_shows_the_banner_and_u_stages_a_marked_read(
+    short_root: Path, cli_env
+) -> None:
+    """DL-570 on a real engine: a delivered file shows the files-changed banner; `u` reads it,
+    the banner names the staged read and the changed row carries `~`, with the status column
+    at its width; applying the read clears both."""
+
     async def scenario() -> None:
         async with _source_run(short_root) as (client, jil):
+            # delivered before the first status, since the engine re-hashes the files at most
+            # every 15 s after it
+            jil.write_text(TEXT.replace("true", "false"))
             app = RunnerApp(client.path)
             async with app.run_test(size=(160, 40)) as pilot:
                 await _wait_for_ui(pilot, lambda: "live_job" in app._rows)
                 table = app.query_one("#jobs", DataTable)
-                assert table.columns["status"].width == 10
-                original_width = table.virtual_size.width
-                jil.write_text(TEXT.replace("true", "false"))
-                answer = await client.request({"cmd": "reread"})
-                assert answer["ok"], answer
-                await pilot.press("r")
+                banner = app.query_one("#pending", _PendingBanner)
+                await _wait_for_ui(pilot, lambda: banner.pending == Pending("files"))
+                assert banner.display
+                assert str(banner.render()).startswith("» FILES CHANGED on disk, not read")
+                await pilot.press("u")
                 await _wait_for_ui(
-                    pilot, lambda: "reread" in str(table.get_cell("live_job", "status"))
+                    pilot,
+                    lambda: banner.pending is not None and banner.pending.kind == "read",
+                    timeout_s=30,
                 )
-                assert table.columns["status"].width == 44
-                assert table.virtual_size.width == original_width + 34
+                staged = app._status_seen["staged_read"]
+                assert banner.pending.name == staged["name"] and banner.pending.counts == (0, 1, 0)
+                assert str(banner.render()).endswith(f"apply: dsl41 update {staged['name']}")
+                assert str(table.get_cell("live_job", "mark")) == "~"
+                assert str(table.get_cell("live_job", "status")) == "INACTIVE"
+                assert table.columns["status"].width == 10
+                assert f"read{staged['name']}staged:+0~1-0" in _console(app)
                 answer = await client.request(
                     {
                         "cmd": "update",
                         "baseline_id": app._baseline,
-                        "request_id": "reread",
+                        "request_id": "dl570",
+                        "read": staged["name"],
                         "wait": True,
                     }
                 )
                 assert answer["ok"], answer
                 await pilot.press("r")
-                await _wait_for_ui(
-                    pilot,
-                    lambda: (
-                        table.columns["status"].width == 10
-                        and table.virtual_size.width == original_width
-                    ),
-                )
-                assert "reread" not in str(table.get_cell("live_job", "status"))
+                await _wait_for_ui(pilot, lambda: banner.pending is None)
+                assert str(table.get_cell("live_job", "mark")) == ""
+                assert "rev 2" in app.sub_title
 
     asyncio.run(scenario())
 
 
-def test_pilot_subtitle_names_a_stopping_update_then_the_applied_revision(
+def test_pilot_banner_names_a_stopping_update_then_the_subtitle_the_applied_revision(
     short_root: Path, cli_env
 ) -> None:
-    """The configuration line names a live update until its TERM-ignoring job stops."""
+    """The banner names a live update until its TERM-ignoring job stops (DL-570); the
+    subtitle names the rev and the console each change of the configuration line."""
     program = short_root / "stubborn.py"
     program.write_text(
         "import signal\n"
@@ -215,6 +227,7 @@ def test_pilot_subtitle_names_a_stopping_update_then_the_applied_revision(
             async with app.run_test(size=(200, 40)) as pilot:
                 await _wait_for_ui(pilot, lambda: "live_job" in app._rows)
                 assert "rev 1" in app.sub_title
+                banner = app.query_one("#pending", _PendingBanner)
                 await pilot.press("s")
 
                 def ready() -> bool:
@@ -254,12 +267,16 @@ def test_pilot_subtitle_names_a_stopping_update_then_the_applied_revision(
                 assert stopping["update"]["stopping"] == ["live_job"], stopping
                 line = f"rev 1  [update {stopping['update']['token'][:12]} stopping: live_job]"
                 await pilot.press("r")
-                await _wait_for_ui(pilot, lambda: line in app.sub_title)
+                applying = Pending("update", stopping=("live_job",))
+                await _wait_for_ui(pilot, lambda: banner.pending == applying)
+                assert str(banner.render()) == "» UPDATE applying: stopping 1: live_job"
+                # DL-570: the update is the banner's; the subtitle keeps the rev alone
+                assert app.sub_title.endswith("  rev 1") and "[update " not in app.sub_title
                 console = app.query_one("#console", RichLog)
                 assert any(entry.text == line for entry in console.lines)
 
                 await _wait_for_ui(pilot, lambda: "rev 2" in app.sub_title, timeout_s=10)
-                assert "[update " not in app.sub_title
+                assert "[update " not in app.sub_title and banner.pending != applying
                 assert any(entry.text == "rev 2" for entry in console.lines)
                 applied = await client.request({"cmd": "status"})
                 assert applied["config_rev"] == 2 and "update" not in applied, applied
@@ -386,11 +403,12 @@ def test_pilot_disk_drift_advice_clears_after_a_real_update(short_root: Path, cl
             jil.write_text(TEXT + "description: synthetic edit\n")
             app = RunnerApp(client.path)
             async with app.run_test(size=(200, 40)) as pilot:
-                await _wait_for_ui(pilot, lambda: "SPEC DRIFT" in app.sub_title)
-                assert "rundsl41reread" in _console(app)
-                assert "thenthedsl41updatecommanditprints" in _console(app)
+                banner = app.query_one("#pending", _PendingBanner)
+                await _wait_for_ui(pilot, lambda: banner.pending == Pending("files"))
+                assert "ureadsthem(dsl41reread-S" in _console(app)
+                assert "dsl41updateNAMEappliesaread" in _console(app)
                 await pilot.press("r")
-                assert _console(app).count("specdrift:") == 1
+                assert _console(app).count("fileschangedondisk:") == 1
                 answer = await client.request(
                     {
                         "cmd": "update",
@@ -401,8 +419,8 @@ def test_pilot_disk_drift_advice_clears_after_a_real_update(short_root: Path, cl
                 )
                 assert answer["ok"], answer
                 await pilot.press("r")
-                await _wait_for_ui(pilot, lambda: "SPEC DRIFT" not in app.sub_title)
-                assert _console(app).count("specdrift:") == 1
+                await _wait_for_ui(pilot, lambda: banner.pending is None)
+                assert _console(app).count("fileschangedondisk:") == 1
                 assert "rev 2" in app.sub_title
                 console = app.query_one("#console", RichLog)
                 assert any(line.text == "rev 2" for line in console.lines)

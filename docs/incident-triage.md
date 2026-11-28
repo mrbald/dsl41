@@ -402,7 +402,7 @@ Escalate `dsl41: statechart error`, `dsl41: input quarantined`,
 `engine failed:`, unexplained shutdowns, or engine exit `6` or `7`.
 A normal `engine stopped: clean_shutdown` is a stop record, not a fault.
 Keep statechart report lines whole. A job's own exit code and logs belong
-to the application. `SPEC DRIFT: estate files changed on disk` and
+to the application. The TUI banner's `FILES CHANGED on disk, not read` and
 `N pending source changes; run dsl41 reread -S SOCKET` report pending sources.
 The pending-count line prints only when N is above zero (DL-483).
 To adopt the sources, [review an update](deploy.md#reload-a-changed-estate).

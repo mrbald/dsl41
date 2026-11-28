@@ -472,10 +472,11 @@ def test_cmd_retry_query_and_tui_note(short_root, capsys, cli_env):
                 row = answer["jobs"]["j"]
                 assert attempt_note(row) == "attempt 2, after exit 3"
                 assert status_label(row) == "RUNNING (attempt 2, after exit 3)"
-                from dsl41.runner_tui import RunnerApp
+                from dsl41.runner_tui import _COLUMNS, RunnerApp
 
                 app = RunnerApp(root / "control.sock")
-                assert app._row_cells("j", row)[2] == "attempt 2, after exit 3"
+                cells = app._row_cells("j", row)
+                assert cells[_COLUMNS.index("attempt")] == "attempt 2, after exit 3"
                 query = await asyncio.create_subprocess_exec(
                     sys.executable,
                     "-m",

@@ -414,7 +414,14 @@ The TUI is the optional `[ui]` extra. It is a thin client of the control
 socket: a jobs table with pending timers and alarms, an explain pane that
 says why the selected job has not started, a log tail, and a sendevent
 console. In the explain pane (`e`), Enter goes to the job a line names and
-Backspace goes back (DL-535). Zooming the
+Backspace goes back (DL-535).
+A banner under the header shows what waits, one state at a time: an update
+stopping its jobs, a staged read and its counts (with whether the files changed
+again since), or files on disk that no read took. `u` reads the files and stages
+the read, as `dsl41 reread` does, and `dsl41 update NAME` applies it. While a
+read is staged, the column after the job marks the jobs it touches: `!` it would
+stop the job, `~` it changes it, `-` it removes it, as of the read (DL-570).
+Zooming the
 log tail (`m`) turns it into a less-style pager with `/` search, `&` filter,
 `n`/`N`, and `F` follow; the operator verbs are unreachable while paging.
 The console reads the engine's stored history (`transitions`): the last 500

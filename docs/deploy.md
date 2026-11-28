@@ -1492,8 +1492,8 @@ This variant follows the same [engine and client rollout rule](#upgrade-the-engi
      --socket /srv/dsl41/runs/nightbank/control.sock
    ```
 
-   Restart keeps the applied revision. The TUI's `spec drift: estate files changed
-   on disk` line directs reread and update. Review the preview's findings and
+   Restart keeps the applied revision. The TUI's banner says `FILES CHANGED on disk,
+   not read`, and its `u` key reads them as reread does. Review the preview's findings and
    affected jobs before applying it. Then apply the read it staged, with the
    `NAME` it printed:
 

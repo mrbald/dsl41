@@ -28536,3 +28536,35 @@ relitigate an entry; append a new one.
   caller's `reread` prepares is refused `update_in_progress` and is sent again. A `reread` of the
   files also runs the preparation checks and stores its plan: on a 5000-job estate its worker took
   6.4 s instead of 3.0 s, measured on one machine.
+- DL-570 The terminal UI shows a pending read or update in a banner, and `u` reads the files
+  (2026-11-28; owner requirement; narrows DL-65's drift subtitle and DL-463's row annotation in
+  the TUI; runner_tui.py; docs: README, runner-design, deploy, incident-triage, update block,
+  cli-tui-qualification, control-protocol)
+  THE RULE. (1) One line under the header shows one state, first match: an update that stops
+  its jobs (`UPDATE applying: stopping N: names`), this viewer's `u` read while it is out
+  (`READING the files…`), the staged read (`READ NAME waits (who, when): +A ~C -R`, then
+  `FILES CHANGED AGAIN since this read · u reads again` when `disk_changed`, else
+  `apply: dsl41 update NAME`), files on disk that differ from the applied estate
+  (`FILES CHANGED on disk, not read · u reads them`). It is absent when none holds. Each state
+  starts with `»` and a word in capitals, and its colour is an addition. (2) The text fits the
+  line's width: `since this read` goes first, then who read and when, then the end is cut with
+  `…`; names that do not fit give way to `… +N`. (3) While disconnected, or while `status` is
+  refused, the line says `UNKNOWN` and shows nothing of the engine's as pending; after a lost
+  connection it shows only a status answer read since. (4) A
+  one-character column after the job marks each row the staged read touches: `!` an action (it
+  would stop the job), else `~` changed or `-` removed. The status cell carries the status
+  alone; the details give the change and action in words. The marks are as of the read, and
+  the table's title says so. (5) `u` sends `reread` on a connection of its own, one at a time;
+  a second `u` meanwhile does nothing. READING lasts until a status asked after the answer is
+  answered. The answer is one console line: the staged name and counts, with the apply command
+  unless the update would be refused (then that refusal and its jobs), why nothing was staged,
+  or the refusal with its text. (6) The subtitle keeps the
+  socket or person and `rev N`; the console still notes each change of the configuration line
+  and, on a new drift, says `u` reads the files.
+  THE REASON. The owner: a pending update must be unmissable, not only in the scrolling log. A
+  suffix of a truncated subtitle and a note inside the status cell were easy to miss.
+  WHAT STAYS. The engine, the control protocol and the CLI. The viewer holds no state of a read
+  but whether its own `reread` is still settling; everything else is the latest status
+  answer's. Applying
+  from the UI is not built here. Keys already bound keep their meaning; `u` in the log pager
+  still pages up.

@@ -32,6 +32,7 @@ import shlex
 import sys
 import textwrap
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -65,7 +66,9 @@ from dsl41.console_words import STATUS_ROWS, VERB_ROWS
 from dsl41.runner_startup import start_run
 from dsl41.runner_transitions import agrees_through
 from dsl41.runner_tui import (
+    Pending,
     _COLUMNS,
+    _PendingBanner,
     _CONSOLE_VERBS,
     ConfirmScreen,
     ConsoleWordsScreen,
@@ -1170,11 +1173,12 @@ def test_pilot_spec_drift_advice_clears_and_does_not_repeat_on_reconnect(
             monkeypatch.setattr(app, "_console_write", record)
             socket = shlex.quote(str((socket_root / "control.sock").absolute()))
             expected = (
-                "spec drift: estate files changed on disk; run dsl41 reread"
-                f" -S {socket} to read them, then the dsl41 update command it prints to adopt"
+                f"files changed on disk: u reads them (dsl41 reread -S {socket});"
+                " dsl41 update NAME applies a read"
             )
-            badge = "[SPEC DRIFT: estate files changed on disk]"
-            assert badge not in app.sub_title
+            banner = app.query_one("#pending", _PendingBanner)
+            files = Pending("files")
+            assert banner.pending is None and not banner.display
 
             replies.status["spec_drift"] = True
             await pilot.press("r")
@@ -1182,7 +1186,9 @@ def test_pilot_spec_drift_advice_clears_and_does_not_repeat_on_reconnect(
             assert notices.count(expected) == 1
             rendered = re.sub(r"\s+", "", "".join(line.text for line in console.lines))
             assert re.sub(r"\s+", "", expected) in rendered
-            assert badge in app.sub_title
+            assert banner.pending == files and banner.display
+            # DL-570: the drift is the banner's; the subtitle names the socket and the rev
+            assert "DRIFT" not in app.sub_title.upper()
 
             await pilot.press("r")
             await pilot.pause()
@@ -1192,21 +1198,23 @@ def test_pilot_spec_drift_advice_clears_and_does_not_repeat_on_reconnect(
             await pilot.press("r")
             await pilot.pause()
             assert app._connected is False
+            assert banner.pending == Pending("unknown", why="disconnected")
             replies.disconnected = False
             await pilot.press("r")
             await pilot.pause()
             assert app._connected is True
             assert notices.count(expected) == 1
+            assert banner.pending == files
 
             for cleared in (False, None):
                 replies.status["spec_drift"] = cleared
                 await pilot.press("r")
                 await pilot.pause()
-                assert badge not in app.sub_title
+                assert banner.pending is None and not banner.display
                 replies.status["spec_drift"] = True
                 await pilot.press("r")
                 await pilot.pause()
-                assert badge in app.sub_title
+                assert banner.pending == files
             assert notices.count(expected) == 3
             assert {request["cmd"] for request in replies.requests} <= {
                 "status",
@@ -6262,3 +6270,463 @@ def test_the_configuration_line_names_the_revision_or_is_empty() -> None:
     assert config_line({"config_rev": 1}) == "rev 1"
     assert config_line({"config_rev": 2}) == "rev 2"
     assert config_line({}) == ""
+
+
+# ------------------------------------------------------- the pending banner (DL-570)
+
+_READ_NAME = "0123456789ab"
+
+
+def _staged(**fields: Any) -> dict[str, Any]:
+    """A status answer's `staged_read` (control-protocol ss4, DL-569)."""
+    return {
+        "name": _READ_NAME,
+        "actor": "alice",
+        "at": "2026-07-01T08:00:00",
+        "added": 1,
+        "changed": 2,
+        "removed": 0,
+        "disk_changed": False,
+        **fields,
+    }
+
+
+def test_dl570_the_banner_shows_one_state_by_priority() -> None:
+    """An update that stops its jobs wins over this viewer's read under way, which wins over
+    the staged read, which wins over files that differ; no answer current wins over all, and
+    nothing holding shows nothing."""
+    from dsl41.runner_tui import pending_of
+
+    at = runner_tui.format_local_at("2026-07-01T08:00:00")
+    read = Pending("read", name=_READ_NAME, who="alice", at=at, counts=(1, 2, 0))
+    update = {"token": "ab" * 32, "stopping": ["a", "b"]}
+    everything = {"update": update, "staged_read": _staged(), "spec_drift": True}
+    assert pending_of(everything, reading=True, unknown="disconnected") == Pending(
+        "unknown", why="disconnected"
+    )
+    assert pending_of(everything, reading=True) == Pending("update", stopping=("a", "b"))
+    assert pending_of({"update": {"token": "t"}}, reading=False) == Pending("update")
+    without_update = {"staged_read": _staged(), "spec_drift": True}
+    assert pending_of(without_update, reading=True) == Pending("reading")
+    assert pending_of(without_update, reading=False) == read
+    again = {"staged_read": _staged(disk_changed=True), "spec_drift": True}
+    assert pending_of(again, reading=False) == replace(read, changed_again=True)
+    unnamed = pending_of({"staged_read": _staged(actor=None)}, reading=False)
+    assert unnamed == replace(read, who="unnamed")
+    assert pending_of({"spec_drift": True}, reading=False) == Pending("files")
+    assert pending_of({"spec_drift": False}, reading=False) is None
+    assert pending_of({"spec_drift": None}, reading=False) is None
+    assert pending_of({}, reading=False) is None
+
+
+def test_dl570_the_banner_text_at_120_and_80_columns() -> None:
+    """Each state's words at 120 columns, and at 80 the parts dropped in order: `since this
+    read` first, then who read and when. No line is wider than its columns."""
+    from dsl41.runner_tui import banner_line
+
+    at = runner_tui.format_local_at("2026-07-01T08:00:00")
+    read = Pending("read", name=_READ_NAME, who="alice", at=at, counts=(1, 2, 0))
+    apply = f" · apply: dsl41 update {_READ_NAME}"
+    lines = {
+        120: {
+            "read": f"» READ {_READ_NAME} waits (alice, {at}): +1 ~2 -0{apply}",
+            "again": f"» READ {_READ_NAME} waits (alice, {at}): +1 ~2 -0"
+            " · FILES CHANGED AGAIN since this read · u reads again",
+        },
+        80: {
+            "read": f"» READ {_READ_NAME} waits: +1 ~2 -0{apply}",
+            "again": f"» READ {_READ_NAME} waits: +1 ~2 -0 · FILES CHANGED AGAIN · u reads again",
+        },
+    }
+    for width, expected in lines.items():
+        assert banner_line(read, width) == expected["read"]
+        assert banner_line(replace(read, changed_again=True), width) == expected["again"]
+        for pending, text in (
+            (Pending("files"), "» FILES CHANGED on disk, not read · u reads them"),
+            (Pending("reading"), "» READING the files…"),
+            (Pending("update", stopping=("a", "b")), "» UPDATE applying: stopping 2: a, b"),
+            (Pending("update"), "» UPDATE applying: stopping 0"),
+            (
+                Pending("unknown", why="disconnected"),
+                "» UNKNOWN: disconnected, so no read or update is shown",
+            ),
+        ):
+            assert banner_line(pending, width) == text
+    # between the two, `since this read` is dropped first
+    who = f" (alice, {at})"
+    middle = f"» READ {_READ_NAME} waits{who}: +1 ~2 -0 · FILES CHANGED AGAIN · u reads again"
+    assert banner_line(replace(read, changed_again=True), 110) == middle
+    # what still does not fit is cut at its end
+    narrow = banner_line(replace(read, counts=(1000, 2000, 3000)), 60)
+    assert runner_tui.cell_len(narrow) == 60 and narrow.endswith("…")
+    assert banner_line(Pending("files"), 10) == "» FILES C…"
+
+
+def test_dl570_an_update_s_names_are_cut_with_a_count() -> None:
+    from dsl41.runner_tui import banner_line
+
+    names = tuple(f"job_{index:02d}" for index in range(12))
+    line = banner_line(Pending("update", stopping=names), 80)
+    assert line == ("» UPDATE applying: stopping 12: job_00, job_01, job_02, job_03, job_04 … +7")
+    assert runner_tui.cell_len(line) <= 80
+    long = ("a" * 90, "b")
+    assert banner_line(Pending("update", stopping=long), 60) == (
+        "» UPDATE applying: stopping 2: " + "a" * 23 + "… … +1"
+    )
+    assert banner_line(Pending("update", stopping=("c" * 90,)), 40) == (
+        "» UPDATE applying: stopping 1: " + "c" * 8 + "…"
+    )
+
+
+def test_dl570_row_marks_for_each_case_and_an_untouched_row() -> None:
+    """`!` a job the read would stop wins over `~` changed and `-` removed; an untouched row
+    has no mark. The status cell carries the status alone."""
+    from dsl41.runner_tui import reread_mark
+
+    cases = {
+        "!": [
+            {"change": "changed", "action": "rerun"},
+            {"change": "changed", "action": "hold"},
+            {"change": "removed", "action": "remove"},
+        ],
+        "~": [{"change": "changed", "action": None}],
+        "-": [{"change": "removed", "action": None}],
+    }
+    app = RunnerApp(Path("/nonexistent/control.sock"))
+    mark_cell = _COLUMNS.index("mark")
+    status_cell = _COLUMNS.index("status")
+    for mark, notes in cases.items():
+        for note in notes:
+            row = {"status": "RUNNING", "reread": note}
+            assert reread_mark(row) == mark
+            cells = app._row_cells("j", row)
+            assert cells[mark_cell].plain == mark
+            assert cells[status_cell].plain == "RUNNING"
+    assert reread_mark({"status": "RUNNING"}) == ""
+    assert app._row_cells("j", {"status": "RUNNING"})[mark_cell].plain == ""
+
+
+def test_dl570_the_console_line_for_each_kind_of_reread_answer() -> None:
+    from dsl41.runner_tui import reread_summary
+
+    preview = {"added": ["a"], "changed": ["b", "c"], "removed": [], "stop": ["b"]}
+    staged = {"ok": True, "preview": preview, "staged_read": _staged()}
+    assert reread_summary(staged).plain == (
+        f"read {_READ_NAME} staged: +1 ~2 -0, stops 1 running; apply: dsl41 update {_READ_NAME}"
+    )
+    quiet = {**staged, "preview": {**preview, "stop": []}}
+    assert reread_summary(quiet).plain == (
+        f"read {_READ_NAME} staged: +1 ~2 -0; apply: dsl41 update {_READ_NAME}"
+    )
+    blocked = {
+        "ok": True,
+        "staged_read": None,
+        "preview": {**preview, "definition_changes": {"blocked": ["one", "two"]}},
+    }
+    assert reread_summary(blocked).plain == "read: nothing staged (+1 ~2 -0): one; two"
+    equal = {
+        "ok": True,
+        "staged_read": None,
+        "preview": {"added": [], "changed": [], "removed": [], "definition_changes": {}},
+    }
+    assert reread_summary(equal).plain == (
+        "read: nothing staged (+0 ~0 -0): the files are the applied estate"
+    )
+    denied = {"ok": False, "code": "access_denied", "error": "reread needs ops tier"}
+    line = reread_summary(denied)
+    assert line.plain == "read refused (access_denied): reread needs ops tier"
+    assert str(line.style) == "red"
+
+
+@contextlib.asynccontextmanager
+async def _reread_app(short_root: Path, size: tuple[int, int] = (160, 40)):
+    """The history-poll app with `u`'s connection answered by the test: each request waits for
+    `release`, then answers `reply[0]`, or raises it when it is an exception."""
+    async with _history_poll_app(short_root, size=size) as (app, pilot, replies):
+        sent: list[dict] = []
+        release = asyncio.Event()
+        reply: list[Any] = [{"ok": True}]
+
+        async def reread(request: dict) -> dict:
+            sent.append(request)
+            await release.wait()
+            if isinstance(reply[0], Exception):
+                raise reply[0]
+            return reply[0]
+
+        app._rereads.request = reread
+        yield app, pilot, replies, sent, release, reply
+
+
+_PREVIEW = {"added": [], "changed": ["trace_job"], "removed": [], "stop": []}
+
+
+@pytest.mark.parametrize(
+    "answer, line, staged",
+    [
+        (
+            {"ok": True, "preview": _PREVIEW, "staged_read": _staged()},
+            f"read {_READ_NAME} staged: +0 ~1 -0; apply: dsl41 update {_READ_NAME}",
+            True,
+        ),
+        (
+            {
+                "ok": True,
+                "preview": {**_PREVIEW, "definition_changes": {"blocked": ["lint error"]}},
+                "staged_read": None,
+            },
+            "read: nothing staged (+0 ~1 -0): lint error",
+            False,
+        ),
+        (
+            {"ok": False, "code": "update_in_progress", "error": "a preparation runs"},
+            "read refused (update_in_progress): a preparation runs",
+            False,
+        ),
+        (
+            {"ok": False, "code": "access_denied", "error": "reread needs ops tier"},
+            "read refused (access_denied): reread needs ops tier",
+            False,
+        ),
+        (
+            ControlClientError("engine hung up", delivered=True),
+            "read: the engine did not answer: engine hung up; the status shows whether a read"
+            " was staged",
+            False,
+        ),
+    ],
+    ids=["staged", "nothing-staged", "refused", "access-denied", "engine-gone"],
+)
+def test_pilot_dl570_u_sends_one_reread_shows_reading_and_says_the_answer(
+    short_root: Path, answer: Any, line: str, staged: bool
+) -> None:
+    """`u` sends one `reread` on its own connection and the banner says READING until the
+    answer; a second `u` meanwhile sends nothing, and the table's refresh goes on. The answer
+    is one console line; the banner and the marks follow the next status answer."""
+
+    async def scenario() -> None:
+        async with _reread_app(short_root) as (app, pilot, replies, sent, release, reply):
+            reply[0] = answer
+            banner = app.query_one("#pending", _PendingBanner)
+            table = app.query_one("#jobs", DataTable)
+            replies.status["spec_drift"] = True
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: banner.pending == Pending("files"))
+            await pilot.press("u")
+            await _wait_for_ui(pilot, lambda: len(sent) == 1)
+            assert sent == [{"cmd": "reread", "claimed_actor": app._claimed_actor}]
+            assert banner.pending == Pending("reading")
+            assert str(banner.render()) == "» READING the files…"
+            await pilot.press("u")
+            asked = app._status_asked
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: app._status_asked > asked)
+            assert len(sent) == 1 and banner.pending == Pending("reading")
+            if staged:
+                replies.status["staged_read"] = _staged(added=0, changed=1)
+                replies.status["jobs"]["trace_job"]["reread"] = {
+                    "change": "changed",
+                    "action": None,
+                }
+            release.set()
+            await _wait_for_ui(pilot, lambda: _console_has(app, line))
+            assert not app._rereading
+            if staged:
+                await _wait_for_ui(pilot, lambda: banner.pending is not None)
+                await _wait_for_ui(pilot, lambda: banner.pending.kind == "read")
+                assert str(table.get_cell("trace_job", "mark")) == "~"
+                assert "marks as of the read" in str(table.border_title)
+            else:
+                await _wait_for_ui(pilot, lambda: banner.pending == Pending("files"))
+                assert str(table.get_cell("trace_job", "mark")) == ""
+                assert "marks" not in str(table.border_title)
+            await pilot.press("u")  # the next `u` sends again
+            await _wait_for_ui(pilot, lambda: len(sent) == 2)
+
+    asyncio.run(scenario())
+
+
+def _console_has(app: RunnerApp, line: str) -> bool:
+    """Whether the console holds `line`, which it may have wrapped."""
+    lines = "".join(entry.text for entry in app.query_one("#console", RichLog).lines)
+    return re.sub(r"\s+", "", line) in re.sub(r"\s+", "", lines)
+
+
+def test_pilot_dl570_the_subtitle_carries_neither_the_drift_nor_the_update(
+    short_root: Path,
+) -> None:
+    """The subtitle keeps the socket and the rev; the drift and an update that stops its jobs
+    are the banner's, with the update first. At 80 columns the banner is one line of the
+    screen's width and its text fits."""
+
+    async def scenario() -> None:
+        async with _history_poll_app(short_root, size=(80, 30)) as (app, pilot, replies):
+            banner = app.query_one("#pending", _PendingBanner)
+            names = [f"job_{index:02d}" for index in range(12)]
+            replies.status.update(
+                spec_drift=True,
+                config_rev=3,
+                staged_read=_staged(),
+                update={"token": "ab" * 32, "stopping": names},
+            )
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: banner.pending is not None)
+            await _wait_for_ui(pilot, lambda: banner.pending.kind == "update")
+            assert app.sub_title == f"{app._subtitle_base}  rev 3"
+            assert banner.region.width == 80 and banner.region.height == 1
+            text = str(banner.render())
+            assert text.startswith("» UPDATE applying: stopping 12: job_00")
+            assert text.endswith(" … +7") and runner_tui.cell_len(text) <= 80
+            del replies.status["update"]
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: banner.pending.kind == "read")
+            assert str(banner.render()).endswith(f"apply: dsl41 update {_READ_NAME}")
+            assert app.sub_title == f"{app._subtitle_base}  rev 3"
+            replies.status["staged_read"] = _staged(disk_changed=True)
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: banner.pending.changed_again)
+            assert "FILES CHANGED AGAIN · u reads again" in str(banner.render())
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl570_a_refused_status_shows_the_pending_state_as_unknown(
+    short_root: Path,
+) -> None:
+    async def scenario() -> None:
+        async with _history_poll_app(short_root) as (app, pilot, replies):
+            banner = app.query_one("#pending", _PendingBanner)
+            replies.status["staged_read"] = _staged()
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: banner.pending is not None)
+            good = replies.status
+            # a detached viewer ends on a denied status (DL-499); any other refusal stands
+            replies.status = {"ok": False, "code": "internal_error", "error": "a query bug"}
+            await pilot.press("r")
+            await _wait_for_ui(
+                pilot, lambda: banner.pending == Pending("unknown", why="status refused")
+            )
+            replies.status = good
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: banner.pending is not None)
+            await _wait_for_ui(pilot, lambda: banner.pending.kind == "read")
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl570_details_give_the_mark_in_words(short_root: Path) -> None:
+    async def scenario() -> None:
+        async with _history_poll_app(short_root) as (app, pilot, replies):
+            row = replies.status["jobs"]["trace_job"]
+            for note, words in (
+                ({"change": "changed", "action": "rerun"}, "reread: changed; rerun"),
+                ({"change": "removed", "action": None}, "reread: removed; no stop"),
+            ):
+                row["reread"] = note
+                await pilot.press("r")
+                await pilot.pause()
+                await pilot.press("d")
+                await _wait_for_ui(pilot, lambda: isinstance(app.screen, SpecScreen))
+                body = str(app.screen.query_one("#specbox Static", Static).content)
+                assert f"{words} (as of the read)" in body
+                await pilot.press("escape")
+                await _wait_for_ui(pilot, lambda: not isinstance(app.screen, SpecScreen))
+
+    asyncio.run(scenario())
+
+
+def test_dl570_a_forecast_refusal_offers_no_apply_and_an_actor_is_one_line() -> None:
+    """A staged read whose update the forecast refuses names the refusal and its jobs and
+    offers no apply command, as the CLI's reread does (DL-559). An actor with a line break
+    stays on the banner's one line (DL-482)."""
+    from dsl41.runner_tui import pending_of, reread_summary
+
+    refusal = {"code": "tree_active", "names": ["box_a", "member\nb"]}
+    preview = {"added": [], "changed": ["box_a"], "removed": [], "update_refusal": refusal}
+    line = reread_summary({"ok": True, "preview": preview, "staged_read": _staged()}).plain
+    assert line == (
+        f"read {_READ_NAME} staged: +0 ~1 -0; update would be refused (tree_active):"
+        " box_a, member\\nb"
+    )
+    assert "apply" not in line
+    pending = pending_of({"staged_read": _staged(actor="eve\nREAD x waits")}, reading=False)
+    assert pending is not None and pending.who == "eve\\nREAD x waits"
+
+
+def test_pilot_dl570_after_a_lost_connection_the_banner_shows_no_earlier_answer(
+    short_root: Path,
+) -> None:
+    """An update was stopping when the connection was lost. A `timers` answer that reconnects
+    before any new `status` shows neither the update nor the read of the earlier answer."""
+
+    async def scenario() -> None:
+        async with _history_poll_app(short_root) as (app, pilot, replies):
+            banner = app.query_one("#pending", _PendingBanner)
+            replies.status.update(
+                staged_read=_staged(), update={"token": "ab" * 32, "stopping": ["trace_job"]}
+            )
+            await pilot.press("r")
+            await _wait_for_ui(
+                pilot, lambda: banner.pending == Pending("update", stopping=("trace_job",))
+            )
+            replies.disconnected = True
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: app._connected is False)
+            assert banner.pending == Pending("unknown", why="disconnected")
+            replies.disconnected = False
+            asked = sum(request["cmd"] == "status" for request in replies.requests)
+            await pilot.press("t")
+            await _wait_for_ui(pilot, lambda: app._connected is True)
+            assert any(request["cmd"] == "timers" for request in replies.requests)
+            assert sum(request["cmd"] == "status" for request in replies.requests) == asked
+            assert banner.pending is None and not banner.display
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl570_reading_stays_until_the_status_asked_after_the_answer(
+    short_root: Path,
+) -> None:
+    """Between the `reread` answer and the answer to the status asked after it, the banner
+    stays READING: no frame shows the files state the read replaced. That status is asked at
+    once, and its answer ends READING."""
+
+    async def scenario() -> None:
+        async with _reread_app(short_root) as (app, pilot, replies, sent, release, reply):
+            reply[0] = {"ok": True, "preview": _PREVIEW, "staged_read": _staged()}
+            banner = app.query_one("#pending", _PendingBanner)
+            replies.status["spec_drift"] = True
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: banner.pending == Pending("files"))
+            await pilot.press("u")
+            await _wait_for_ui(pilot, lambda: len(sent) == 1)
+            shown: list[Pending | None] = []
+            show = banner.show
+
+            def record(pending: Pending | None) -> None:
+                shown.append(pending)
+                show(pending)
+
+            banner.show = record  # type: ignore[method-assign]
+            held = asyncio.Event()
+            replies.gates.append((lambda request: request["cmd"] == "status", held))
+            replies.status["staged_read"] = _staged(added=0, changed=1)
+            before = sum(request["cmd"] == "status" for request in replies.requests)
+            release.set()
+            line = f"read {_READ_NAME} staged: +0 ~1 -0; apply: dsl41 update {_READ_NAME}"
+            await _wait_for_ui(pilot, lambda: _console_has(app, line))
+            await _wait_for_ui(
+                pilot,
+                lambda: sum(request["cmd"] == "status" for request in replies.requests) > before,
+            )
+            await pilot.press("u")  # still settling: sends nothing
+            assert len(sent) == 1
+            assert banner.pending == Pending("reading")
+            assert set(shown) <= {Pending("reading")}
+            held.set()
+            await _wait_for_ui(pilot, lambda: banner.pending is not None)
+            await _wait_for_ui(pilot, lambda: banner.pending.kind == "read")
+            assert Pending("files") not in shown
+            assert app._reread_settles is None
+
+    asyncio.run(scenario())
