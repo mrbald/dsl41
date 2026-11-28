@@ -1493,14 +1493,25 @@ This variant follows the same [engine and client rollout rule](#upgrade-the-engi
    ```
 
    Restart keeps the applied revision. The TUI's banner says `FILES CHANGED on disk,
-   not read`, and its `u` key reads them as reread does. Review the preview's findings and
-   affected jobs before applying it. Then apply the read it staged, with the
-   `NAME` it printed:
+   not read`. Review the preview's findings and affected jobs before applying it. Then
+   apply the read it staged, with the `NAME` it printed:
 
    ```sh
    sudo -u dsl41 ENGINE update NAME --wait \
      --socket /srv/dsl41/runs/nightbank/control.sock
    ```
+
+   In the TUI, `u` opens the update pane, which reads the files as reread does and shows
+   the read, the jobs applying it would stop now, the changes and the findings. `a` and
+   then `y` apply the read the pane shows, as `update NAME` does; the console line says
+   what was applied and stopped, or the refusal. `a` is not offered once the status names
+   another read or the TUI is disconnected; `r` reads again. The confirmation takes only
+   keys made after it opened, so keys typed before `a` do not answer it; a `y` typed after
+   `a` does, even before the dialog reaches a slow screen. If the connection drops after the
+   request was sent, the line names the request id. In the terminal it also names the
+   `update NAME --request-id ID --wait` command that asks for the outcome; in the served UI
+   the banner shows the update if it was admitted, and the revision moves when it applied.
+   The TUI does not send it again (DL-571).
 
    Exit 0 prints `applied: catalog revision N (H)` or
    `nothing changed: catalog revision N (H)`;

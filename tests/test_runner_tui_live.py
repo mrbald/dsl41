@@ -25,7 +25,15 @@ from dsl41.runner_control import ControlClient, ControlServer
 from dsl41.runner_config import EngineSettings
 from dsl41.runner_scheduler import Scheduler
 from dsl41.runner_startup import resume_run, start_run
-from dsl41.runner_tui import Pending, RunnerApp, SpecScreen, TriggersScreen, _PendingBanner
+from dsl41.runner_tui import (
+    ApplyConfirmScreen,
+    Pending,
+    RunnerApp,
+    SpecScreen,
+    TriggersScreen,
+    UpdateScreen,
+    _PendingBanner,
+)
 
 TEXT = "insert_job: live_job\njob_type: c\ncommand: true\n"
 T0 = datetime(2026, 7, 1, 8)
@@ -184,7 +192,7 @@ def test_pilot_dl570_a_delivered_file_shows_the_banner_and_u_stages_a_marked_rea
                 )
                 staged = app._status_seen["staged_read"]
                 assert banner.pending.name == staged["name"] and banner.pending.counts == (0, 1, 0)
-                assert str(banner.render()).endswith(f"apply: dsl41 update {staged['name']}")
+                assert str(banner.render()).endswith(" · u reviews and applies")
                 assert str(table.get_cell("live_job", "mark")) == "~"
                 assert str(table.get_cell("live_job", "status")) == "INACTIVE"
                 assert table.columns["status"].width == 10
@@ -199,10 +207,81 @@ def test_pilot_dl570_a_delivered_file_shows_the_banner_and_u_stages_a_marked_rea
                     }
                 )
                 assert answer["ok"], answer
+                await pilot.press("escape")  # the update pane `u` opened (DL-571)
                 await pilot.press("r")
                 await _wait_for_ui(pilot, lambda: banner.pending is None)
                 assert str(table.get_cell("live_job", "mark")) == ""
                 assert "rev 2" in app.sub_title
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl571_u_shows_the_stop_and_a_y_apply_the_read_shown(
+    short_root: Path, cli_env
+) -> None:
+    """DL-571 on a real engine: a job runs and a delivered file changes it. `u` reads the files
+    and the pane names the job it would stop. With that read staged and the files unchanged,
+    `u` again previews it: no file is read and the staged name stays. `a` and `y` apply the
+    read the pane showed, the console says what was stopped, the revision moves and the
+    banner clears."""
+
+    async def scenario() -> None:
+        async with _source_run(short_root, TEXT.replace("true", "sleep 60")) as (client, jil):
+            app = RunnerApp(client.path)
+            async with app.run_test(size=(160, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "live_job" in app._rows)
+                banner = app.query_one("#pending", _PendingBanner)
+                await pilot.press("s")
+                await _wait_for_ui(
+                    pilot,
+                    lambda: app._jobs_snapshot["live_job"]["status"] == "RUNNING",
+                    timeout_s=10,
+                )
+                jil.write_text(TEXT)
+                sent: list[dict] = []
+                request = app._rereads.request
+
+                async def recorded(payload: dict) -> dict:
+                    sent.append(dict(payload))
+                    return await request(payload)
+
+                app._rereads.request = recorded  # type: ignore[method-assign]
+                stop = (
+                    "  stopping 1 running job:\n"
+                    "    live_job   would rerun under the new definition\n"
+                )
+                for read in ("files", "preview"):
+                    await pilot.press("u")
+                    await _wait_for_ui(pilot, lambda: isinstance(app.screen, UpdateScreen))
+                    pane = app.screen
+                    assert isinstance(pane, UpdateScreen)
+                    await _wait_for_ui(pilot, lambda: pane.answer is not None, timeout_s=30)
+                    assert isinstance(pane.answer, dict) and pane.answer["ok"], pane.answer
+                    body = str(pane.query_one("#update-text", Static).content)
+                    assert stop in body, body
+                    if read == "files":
+                        name = pane.answer["staged_read"]["name"]
+                        assert "read" not in sent[-1]
+                        await pilot.press("escape")
+                        await _wait_for_ui(
+                            pilot,
+                            lambda: banner.pending is not None and banner.pending.kind == "read",
+                            timeout_s=10,
+                        )
+                assert sent[-1]["read"] == name and len(sent) == 2
+                assert pane.answer["staged_read"]["name"] == name
+                assert app._status_seen["staged_read"]["name"] == name
+                offer = str(pane.query_one("#update-offer", Static).content)
+                assert offer == f"a applies read {name}"
+                await pilot.press("a")
+                await _wait_for_ui(pilot, lambda: isinstance(app.screen, ApplyConfirmScreen))
+                await pilot.press("y")
+                applied = f"update{name}applied:catalogrevision2;stopped1:live_job(rerun)"
+                await _wait_for_ui(pilot, lambda: applied in _console(app), timeout_s=30)
+                assert not isinstance(app.screen, UpdateScreen)
+                await _wait_for_ui(pilot, lambda: "rev 2" in app.sub_title)
+                await pilot.press("r")
+                await _wait_for_ui(pilot, lambda: banner.pending is None)
 
     asyncio.run(scenario())
 
@@ -406,7 +485,7 @@ def test_pilot_disk_drift_advice_clears_after_a_real_update(short_root: Path, cl
                 banner = app.query_one("#pending", _PendingBanner)
                 await _wait_for_ui(pilot, lambda: banner.pending == Pending("files"))
                 assert "ureadsthem(dsl41reread-S" in _console(app)
-                assert "dsl41updateNAMEappliesaread" in _console(app)
+                assert "ureviewsandappliesaread" in _console(app)
                 await pilot.press("r")
                 assert _console(app).count("fileschangedondisk:") == 1
                 answer = await client.request(

@@ -417,10 +417,24 @@ console. In the explain pane (`e`), Enter goes to the job a line names and
 Backspace goes back (DL-535).
 A banner under the header shows what waits, one state at a time: an update
 stopping its jobs, a staged read and its counts (with whether the files changed
-again since), or files on disk that no read took. `u` reads the files and stages
-the read, as `dsl41 reread` does, and `dsl41 update NAME` applies it. While a
-read is staged, the column after the job marks the jobs it touches: `!` it would
-stop the job, `~` it changes it, `-` it removes it, as of the read (DL-570).
+again since), or files on disk that no read took. While a read is staged, the
+column after the job marks the jobs it touches: `!` it would stop the job, `~` it
+changes it, `-` it removes it, as of the read (DL-570).
+`u` opens the update pane (DL-571). It reads the files, as `dsl41 reread` does,
+unless a read is staged and the files have not changed since; then it previews
+that read against the engine's state now. The pane shows the read, the jobs
+applying it would stop now with the action for each, a forecast refusal, the
+added, changed and removed jobs, and the findings. `a` applies the read the pane
+shows, as `dsl41 update NAME` does, after a confirmation that only `y` answers;
+`r` reads the files again. `a` is offered only for a staged read with no
+forecast refusal while no update stops its jobs and the latest status still
+names that read; otherwise the pane says why. The console says in one line what
+was applied and stopped, or the refusal. When the connection drops after the
+request was sent, the line names the request id; in the terminal it also names
+the command that asks for the outcome, and in the served UI the banner and the
+revision show it. A confirmation takes only keys made after it opened in the
+UI's process, so keys typed before `a` was handled do not answer it. A `y` typed
+after `a` still does, even before the dialog reaches a slow screen.
 Zooming the
 log tail (`m`) turns it into a less-style pager with `/` search, `&` filter,
 `n`/`N`, and `F` follow; the operator verbs are unreachable while paging.

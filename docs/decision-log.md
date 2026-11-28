@@ -28568,3 +28568,40 @@ relitigate an entry; append a new one.
   answer's. Applying
   from the UI is not built here. Keys already bound keep their meaning; `u` in the log pager
   still pages up.
+- DL-571 The terminal UI reviews a read and applies it
+  (2026-11-28; owner requirement; narrows DL-570's `u`, its hints and its read line; fixes
+  BUG-96; runner_tui.py, cli_output.py; docs: README, runner-design, deploy, incident-triage,
+  update block, cli-tui-qualification)
+  THE RULE. (1) `u` opens the update pane, a modal that shows one `reread` answer. With a read
+  staged and the files unchanged since it, the pane previews that read (`reread` with
+  `read: NAME`); otherwise it reads the files, with DL-570's console line. One read at a time.
+  (2) Top to bottom: the read and who read it when, or why there is none (the refusal, the lost
+  engine, nothing staged); the stops by name with their actions, the non-idempotent reasons and
+  a forecast refusal; the counts, the CLI's notes and the added, changed and removed jobs, the
+  shared settings apart; the findings. The words are `prepare_reread`'s, neutral layout.
+  (3) `a` is offered for a staged read while the viewer is connected and the latest status
+  names that read, with no forecast refusal or blocked reason, no update stopping its jobs and
+  none of this viewer's out; otherwise the pane says why, and an open confirmation for the read
+  closes with that reason in the console. `r` reads the files again; Escape or `q` closes.
+  (4) The confirmation names the read and the preview's stops. `y` sends `update` with the name
+  shown, a new request id and `wait`. One console line gives the outcome. An uncertain one
+  names the request id, says the banner shows the update if it was admitted and the revision
+  moves when it applied, and in the terminal names `dsl41 update NAME --request-id ID --wait`;
+  the served UI's actor differs from the shell's, so it names none. Nothing is sent again.
+  (5) A confirm answers only a key it received itself, made after it mounted in the UI's
+  process. Its bindings are labels whose action is the bell, so a key another screen took
+  before it opened answers nothing. The apply confirm takes `y`, never Enter; the kill, force
+  and quit confirms keep Enter and `y`. (6) A details popup read while a dialog opened is not
+  opened over it (BUG-96). (7) The banner and the console lines say `u reviews and applies`.
+  THE REASON. The owner: the operator reviews what a read would change and applies it from the
+  UI, and what is applied is the read looked at (DL-569). Keys typed ahead of `a` must not
+  apply an update that can stop many jobs.
+  WHAT STAYS. The engine, the control protocol and the CLI's output. No stop-consent guard: the
+  confirmation lists the stops as of the preview, and the console says what was stopped. The
+  UI keeps no copy of the read but the pane's one answer. Keys already bound keep their
+  meaning. BUG-97 stays.
+  THE COST. The guard is against keys typed before `a` was handled, not against a deliberate
+  `a` then `y`: a `y` typed after `a` and before the dialog has reached the operator's screen,
+  as on a slow link or in the served UI, still answers it. A key handled before the mount rings
+  the bell and is typed again. A preview runs the preparation worker, seconds on a large estate.
+  The pane follows the status but not the files; `r` reads them again.

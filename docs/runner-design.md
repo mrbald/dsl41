@@ -1803,7 +1803,9 @@ The app is a **client of the control socket only** — never in-process with
 the engine. This split is forced, not stylistic. textual-serve spawns one
 app instance per browser session, so an in-process engine hands every
 viewer a private universe. Views: a pending banner under the header (an update that stops its
-jobs, the staged read, or files on disk no read took; `u` sends `reread` — DL-570), jobs table
+jobs, the staged read, or files on disk no read took — DL-570), an update pane on `u`
+(one `reread` answer: the read, the stops applying it would make now, the changes and the
+findings; `a` and `y` send `update` with the read it shows — DL-571), jobs table
 (status, the staged read's row mark beside the job (DL-463, DL-570), run_number, pending
 timers/alarms), explain pane (why the selected job has not started, from
 `explain`: the instant, the deciding gate, the condition's atoms, capacity, the

@@ -405,7 +405,8 @@ Keep statechart report lines whole. A job's own exit code and logs belong
 to the application. The TUI banner's `FILES CHANGED on disk, not read` and
 `N pending source changes; run dsl41 reread -S SOCKET` report pending sources.
 The pending-count line prints only when N is above zero (DL-483).
-To adopt the sources, [review an update](deploy.md#reload-a-changed-estate).
+To adopt the sources, [review an update](deploy.md#reload-a-changed-estate): `dsl41 reread`
+and `dsl41 update NAME`, or in the TUI `u`, then `a` and `y` in its update pane (DL-571).
 
 An update never restarts a box (DL-559). A root an older build wrote is refused at start by
 its IR-F version (DL-561). A start that refuses with

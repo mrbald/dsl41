@@ -32,6 +32,7 @@ import shlex
 import sys
 import textwrap
 import time
+import uuid
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -42,6 +43,7 @@ import pytest
 pytest.importorskip("textual")
 
 from rich.console import Console
+from rich.text import Text
 from textual import events
 from textual.binding import Binding
 from textual.containers import VerticalScroll
@@ -54,6 +56,7 @@ from dsl41.ir import lower_source
 from dsl41.oracle_state import Event
 from dsl41.pane_layout import Split
 from dsl41.runner import Engine
+from dsl41.runner_access import Principal
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import RealClock
 from dsl41.runner_control import (
@@ -70,11 +73,13 @@ from dsl41.runner_tui import (
     _COLUMNS,
     _PendingBanner,
     _CONSOLE_VERBS,
+    ApplyConfirmScreen,
     ConfirmScreen,
     ConsoleWordsScreen,
     RunnerApp,
     SpecScreen,
     TriggersScreen,
+    UpdateScreen,
     _ConsoleInput,
     _FilterInput,
     _JobsTable,
@@ -1127,11 +1132,14 @@ class _HistoryReplies:
 
 
 @contextlib.asynccontextmanager
-async def _history_poll_app(short_root: Path, *, size: tuple[int, int] = (160, 40)):
+async def _history_poll_app(
+    short_root: Path, *, size: tuple[int, int] = (160, 40), person: Principal | None = None
+):
     """Mount the real widgets over `_HistoryReplies`, with polling driven only by each test's r
-    key; it yields once the join and its alarm scans are read."""
+    key; it yields once the join and its alarm scans are read. `person` serves the app as the
+    web UI does (DL-510)."""
     replies = _HistoryReplies()
-    app = RunnerApp(short_root / "control.sock")
+    app = RunnerApp(short_root / "control.sock", person=person)
     app._client.request = replies.request
     app._reads.request = replies.request
 
@@ -1174,7 +1182,7 @@ def test_pilot_spec_drift_advice_clears_and_does_not_repeat_on_reconnect(
             socket = shlex.quote(str((socket_root / "control.sock").absolute()))
             expected = (
                 f"files changed on disk: u reads them (dsl41 reread -S {socket});"
-                " dsl41 update NAME applies a read"
+                " u reviews and applies a read"
             )
             banner = app.query_one("#pending", _PendingBanner)
             files = Pending("files")
@@ -6326,7 +6334,7 @@ def test_dl570_the_banner_text_at_120_and_80_columns() -> None:
 
     at = runner_tui.format_local_at("2026-07-01T08:00:00")
     read = Pending("read", name=_READ_NAME, who="alice", at=at, counts=(1, 2, 0))
-    apply = f" · apply: dsl41 update {_READ_NAME}"
+    apply = " · u reviews and applies"
     lines = {
         120: {
             "read": f"» READ {_READ_NAME} waits (alice, {at}): +1 ~2 -0{apply}",
@@ -6412,11 +6420,11 @@ def test_dl570_the_console_line_for_each_kind_of_reread_answer() -> None:
     preview = {"added": ["a"], "changed": ["b", "c"], "removed": [], "stop": ["b"]}
     staged = {"ok": True, "preview": preview, "staged_read": _staged()}
     assert reread_summary(staged).plain == (
-        f"read {_READ_NAME} staged: +1 ~2 -0, stops 1 running; apply: dsl41 update {_READ_NAME}"
+        f"read {_READ_NAME} staged: +1 ~2 -0, stops 1 running; u reviews and applies"
     )
     quiet = {**staged, "preview": {**preview, "stop": []}}
     assert reread_summary(quiet).plain == (
-        f"read {_READ_NAME} staged: +1 ~2 -0; apply: dsl41 update {_READ_NAME}"
+        f"read {_READ_NAME} staged: +1 ~2 -0; u reviews and applies"
     )
     blocked = {
         "ok": True,
@@ -6458,23 +6466,68 @@ async def _reread_app(short_root: Path, size: tuple[int, int] = (160, 40)):
         yield app, pilot, replies, sent, release, reply
 
 
-_PREVIEW = {"added": [], "changed": ["trace_job"], "removed": [], "stop": []}
+def _preview(**fields: Any) -> dict[str, Any]:
+    """A `reread` answer's preview with every field the CLI's renderer reads
+    (`reread_worker.preview`, control-protocol ss2)."""
+    return {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "seed_only": [],
+        "unchanged": 0,
+        "stop": [],
+        "effects": [],
+        "update_refusal": None,
+        "restored": [],
+        "non_idempotent": [],
+        "lint_messages": [],
+        "diagnostics": [],
+        "source_changes": [],
+        "settings_sources": [],
+        "definition_changes": {
+            "groups": [],
+            "blocked": [],
+            "sources_changed": True,
+            "settings_changed": False,
+            "omitted": 0,
+        },
+        **fields,
+    }
+
+
+def _blocked(*reasons: str) -> dict[str, Any]:
+    """`definition_changes` whose `blocked` gives `reasons` (control-protocol ss2)."""
+    return {**_preview()["definition_changes"], "blocked": list(reasons)}
+
+
+#: the `staged_read` of a `reread` answer: its name, who read it and when (DL-569)
+_ANSWER_STAGED = {"name": _READ_NAME, "actor": "alice", "at": "2026-07-01T08:00:00"}
+
+
+def _answer(preview: dict[str, Any] | None = None, *, staged: bool = True) -> dict[str, Any]:
+    """A successful `reread` answer; `staged` says whether it staged its read (DL-569)."""
+    return {
+        "ok": True,
+        "live_rev": 1,
+        "source": {"path": "/estate/main.toml"},
+        "preview": _preview() if preview is None else preview,
+        "staged_read": dict(_ANSWER_STAGED) if staged else None,
+    }
+
+
+_PREVIEW = _preview(changed=[{"name": "trace_job", "reason": "command"}], unchanged=0)
 
 
 @pytest.mark.parametrize(
     "answer, line, staged",
     [
         (
-            {"ok": True, "preview": _PREVIEW, "staged_read": _staged()},
-            f"read {_READ_NAME} staged: +0 ~1 -0; apply: dsl41 update {_READ_NAME}",
+            _answer(_PREVIEW),
+            f"read {_READ_NAME} staged: +0 ~1 -0; u reviews and applies",
             True,
         ),
         (
-            {
-                "ok": True,
-                "preview": {**_PREVIEW, "definition_changes": {"blocked": ["lint error"]}},
-                "staged_read": None,
-            },
+            _answer({**_PREVIEW, "definition_changes": _blocked("lint error")}, staged=False),
             "read: nothing staged (+0 ~1 -0): lint error",
             False,
         ),
@@ -6500,9 +6553,11 @@ _PREVIEW = {"added": [], "changed": ["trace_job"], "removed": [], "stop": []}
 def test_pilot_dl570_u_sends_one_reread_shows_reading_and_says_the_answer(
     short_root: Path, answer: Any, line: str, staged: bool
 ) -> None:
-    """`u` sends one `reread` on its own connection and the banner says READING until the
-    answer; a second `u` meanwhile sends nothing, and the table's refresh goes on. The answer
-    is one console line; the banner and the marks follow the next status answer."""
+    """With nothing staged, `u` opens the update pane, which sends one `reread` of the files on
+    a connection of its own (DL-571). The banner says READING until the answer; a second `u`
+    meanwhile sends nothing, and the table's refresh goes on. The answer is one console line
+    and the pane's; the banner and the marks follow the next status answer. After the pane
+    closes, `u` reads again: a preview of the staged read, else the files."""
 
     async def scenario() -> None:
         async with _reread_app(short_root) as (app, pilot, replies, sent, release, reply):
@@ -6514,12 +6569,14 @@ def test_pilot_dl570_u_sends_one_reread_shows_reading_and_says_the_answer(
             await _wait_for_ui(pilot, lambda: banner.pending == Pending("files"))
             await pilot.press("u")
             await _wait_for_ui(pilot, lambda: len(sent) == 1)
-            assert sent == [{"cmd": "reread", "claimed_actor": app._claimed_actor}]
+            files = {"cmd": "reread", "claimed_actor": app._claimed_actor}
+            assert sent == [files]
+            assert isinstance(app.screen, UpdateScreen)
             assert banner.pending == Pending("reading")
             assert str(banner.render()) == "» READING the files…"
-            await pilot.press("u")
+            await pilot.press("u")  # the pane's bell
             asked = app._status_asked
-            await pilot.press("r")
+            app.action_refresh()
             await _wait_for_ui(pilot, lambda: app._status_asked > asked)
             assert len(sent) == 1 and banner.pending == Pending("reading")
             if staged:
@@ -6531,6 +6588,8 @@ def test_pilot_dl570_u_sends_one_reread_shows_reading_and_says_the_answer(
             release.set()
             await _wait_for_ui(pilot, lambda: _console_has(app, line))
             assert not app._rereading
+            pane = app.screen
+            assert isinstance(pane, UpdateScreen) and pane.answer is not None
             if staged:
                 await _wait_for_ui(pilot, lambda: banner.pending is not None)
                 await _wait_for_ui(pilot, lambda: banner.pending.kind == "read")
@@ -6540,8 +6599,11 @@ def test_pilot_dl570_u_sends_one_reread_shows_reading_and_says_the_answer(
                 await _wait_for_ui(pilot, lambda: banner.pending == Pending("files"))
                 assert str(table.get_cell("trace_job", "mark")) == ""
                 assert "marks" not in str(table.border_title)
-            await pilot.press("u")  # the next `u` sends again
+            await pilot.press("escape")
+            await _wait_for_ui(pilot, lambda: not isinstance(app.screen, UpdateScreen))
+            await pilot.press("u")
             await _wait_for_ui(pilot, lambda: len(sent) == 2)
+            assert sent[1] == ({**files, "read": _READ_NAME} if staged else files)
 
     asyncio.run(scenario())
 
@@ -6580,7 +6642,7 @@ def test_pilot_dl570_the_subtitle_carries_neither_the_drift_nor_the_update(
             del replies.status["update"]
             await pilot.press("r")
             await _wait_for_ui(pilot, lambda: banner.pending.kind == "read")
-            assert str(banner.render()).endswith(f"apply: dsl41 update {_READ_NAME}")
+            assert str(banner.render()).endswith(" · u reviews and applies")
             assert app.sub_title == f"{app._subtitle_base}  rev 3"
             replies.status["staged_read"] = _staged(disk_changed=True)
             await pilot.press("r")
@@ -6693,7 +6755,7 @@ def test_pilot_dl570_reading_stays_until_the_status_asked_after_the_answer(
 
     async def scenario() -> None:
         async with _reread_app(short_root) as (app, pilot, replies, sent, release, reply):
-            reply[0] = {"ok": True, "preview": _PREVIEW, "staged_read": _staged()}
+            reply[0] = _answer(_PREVIEW)
             banner = app.query_one("#pending", _PendingBanner)
             replies.status["spec_drift"] = True
             await pilot.press("r")
@@ -6713,7 +6775,7 @@ def test_pilot_dl570_reading_stays_until_the_status_asked_after_the_answer(
             replies.status["staged_read"] = _staged(added=0, changed=1)
             before = sum(request["cmd"] == "status" for request in replies.requests)
             release.set()
-            line = f"read {_READ_NAME} staged: +0 ~1 -0; apply: dsl41 update {_READ_NAME}"
+            line = f"read {_READ_NAME} staged: +0 ~1 -0; u reviews and applies"
             await _wait_for_ui(pilot, lambda: _console_has(app, line))
             await _wait_for_ui(
                 pilot,
@@ -6728,5 +6790,958 @@ def test_pilot_dl570_reading_stays_until_the_status_asked_after_the_answer(
             await _wait_for_ui(pilot, lambda: banner.pending.kind == "read")
             assert Pending("files") not in shown
             assert app._reread_settles is None
+
+    asyncio.run(scenario())
+
+
+# ---------------------------------------------------------- the update pane (DL-571)
+
+#: a staged read that adds, changes and removes jobs and stops three, one per action, with
+#: findings (control-protocol ss2)
+_STOPPING = _preview(
+    added=["new_job"],
+    changed=[
+        {"name": "trace_job", "reason": "command"},
+        {"name": "held_job", "reason": "command"},
+    ],
+    removed=["old_job"],
+    unchanged=3,
+    stop=["trace_job", "held_job", "old_job"],
+    effects=[
+        {"job": "trace_job", "action": "rerun"},
+        {"job": "held_job", "action": "hold"},
+        {"job": "old_job", "action": "remove"},
+    ],
+    non_idempotent=[{"job": "held_job", "reason": "pays twice"}],
+    lint_summary=["lint policy: warn", "L002 info: 2 findings"],
+    diagnostics=["a.jil:3: unknown attribute kept as a comment"],
+)
+
+_STOPPING_BODY = """\
+IF APPLIED NOW
+  stopping 3 running jobs:
+    trace_job   would rerun under the new definition
+    held_job   would be ON_HOLD (marked as not safe to rerun)
+    old_job   would be removed; no replacement
+  marked non-idempotent: held_job (pays twice)
+
+CHANGES
+  estate on disk differs from the running estate (revision 1)
+  changed 2 jobs, added 1, removed 1, unchanged 3
+  added 1:
+    new_job
+  changed 2:
+    held_job   command
+    trace_job   command
+  removed 1:
+    old_job
+
+FINDINGS
+  lint policy: warn
+  L002 info: 2 findings
+  a.jil:3: unknown attribute kept as a comment
+"""
+
+_APPLIED = {
+    "ok": True,
+    "decision": "admitted",
+    "request_id": "r",
+    "stop": ["trace_job", "held_job", "old_job"],
+    "application": {
+        "rev": 2,
+        "catalog_hash": "h",
+        "added": ["new_job"],
+        "changed": ["trace_job", "held_job"],
+        "removed": ["old_job"],
+        "restored": [],
+        "stopped": [["trace_job", "rerun"], ["held_job", "hold"], ["old_job", "none"]],
+        "seed_only": [],
+    },
+}
+
+
+def test_dl571_the_pane_text_for_a_staged_read_with_stops() -> None:
+    """The read first, then what applying would do now with each stop's action, then the
+    counts and the lists by kind with the change's reason, then the findings."""
+    from dsl41.runner_tui import update_view
+
+    view = update_view(_answer(_STOPPING), update_open=False, applying=False)
+    at = runner_tui.format_local_at("2026-07-01T08:00:00")
+    assert view.head == f"READ {_READ_NAME}, read by alice at {at}"
+    assert view.not_offered == ""
+    assert view.body.plain == _STOPPING_BODY
+    assert view.name == _READ_NAME
+    assert view.stops == ("trace_job", "held_job", "old_job")
+    unnamed = update_view(
+        {**_answer(), "staged_read": {**_ANSWER_STAGED, "actor": None}},
+        update_open=False,
+        applying=False,
+    )
+    assert unnamed.head == f"READ {_READ_NAME}, read by unnamed at {at}"
+    quiet = update_view(_answer(_PREVIEW), update_open=False, applying=False).body.plain
+    assert "  no running job is stopped\n" in quiet
+    assert quiet.endswith("FINDINGS\n  none\n")
+
+
+def test_dl571_a_long_list_is_listed_whole() -> None:
+    from dsl41.runner_tui import update_view
+
+    names = [f"job_{index:03d}" for index in range(120)]
+    preview = _preview(changed=[{"name": name, "reason": "command"} for name in names])
+    body = update_view(_answer(preview), update_open=False, applying=False).body.plain
+    assert "  changed 120:\n" in body
+    assert all(f"    {name}   command\n" in body for name in names)
+
+
+@pytest.mark.parametrize(
+    "answer, update_open, applying, head, not_offered",
+    [
+        (
+            _answer(
+                {**_PREVIEW, "definition_changes": _blocked("lint error", "two")}, staged=False
+            ),
+            False,
+            False,
+            "NOTHING STAGED: lint error; two",
+            "nothing is staged",
+        ),
+        (
+            _answer(_preview(), staged=False),
+            False,
+            False,
+            "NOTHING STAGED: the files are the applied estate",
+            "nothing is staged",
+        ),
+        (
+            _answer(
+                {**_PREVIEW, "update_refusal": {"code": "tree_active", "names": ["box_a", "m"]}}
+            ),
+            False,
+            False,
+            None,
+            "the update would be refused (tree_active)",
+        ),
+        (
+            _answer({**_PREVIEW, "definition_changes": _blocked("the engine is draining")}),
+            False,
+            False,
+            None,
+            "the update would refuse: the engine is draining",
+        ),
+        (
+            _answer(_PREVIEW),
+            True,
+            False,
+            None,
+            "an update is stopping its jobs; wait for it to finish",
+        ),
+        (_answer(_PREVIEW), False, True, None, "this viewer's update is under way"),
+        (
+            {"ok": False, "code": "access_denied", "error": "reread needs ops tier"},
+            False,
+            False,
+            "NO READ: refused (access_denied): reread needs ops tier",
+            "the read was refused (access_denied): reread needs ops tier",
+        ),
+    ],
+    ids=["blocked", "equal", "refusal", "blocked-staged", "update-open", "applying", "denied"],
+)
+def test_dl571_why_a_is_not_offered(
+    answer: dict, update_open: bool, applying: bool, head: str | None, not_offered: str
+) -> None:
+    """`a` is offered only for a staged read with no forecast refusal and no blocked reason,
+    while no update stops its jobs and this viewer sends none; otherwise the pane says why."""
+    from dsl41.runner_tui import update_view
+
+    view = update_view(answer, update_open=update_open, applying=applying)
+    if head is not None:
+        assert view.head == head
+    assert view.not_offered == not_offered
+    if answer.get("ok") and answer["preview"]["update_refusal"]:
+        assert (
+            "  update would be refused: it changes box membership and these jobs are active or"
+            " would be stopped: box_a, m\n" in view.body.plain
+        )
+
+
+def test_dl571_the_confirmation_names_the_read_and_its_stops() -> None:
+    from dsl41.runner_tui import apply_confirm_body
+
+    assert apply_confirm_body(_READ_NAME, []) == (
+        f"apply read {_READ_NAME}?\nit stops no running job, as of the preview"
+    )
+    assert apply_confirm_body(_READ_NAME, ["a", "b"]) == (
+        f"apply read {_READ_NAME}?\nit stops 2 running jobs as of the preview: a, b"
+    )
+    many = [f"j{index}" for index in range(12)]
+    assert apply_confirm_body(_READ_NAME, many) == (
+        f"apply read {_READ_NAME}?\nit stops 12 running jobs as of the preview:"
+        " j0, j1, j2, j3, j4, j5, j6, j7 and 4 more"
+    )
+
+
+_CHECK = "dsl41 update -S /run/control.sock"
+_UNKNOWN = (
+    "; request rid is not sent again; if it was admitted the banner shows the update, and the"
+    f" revision moves when it applied; {_CHECK} {_READ_NAME} --request-id rid --wait asks for it"
+)
+
+
+@pytest.mark.parametrize(
+    "answer, line, style",
+    [
+        (
+            _APPLIED,
+            f"update {_READ_NAME} applied: catalog revision 2; stopped 3: trace_job (rerun),"
+            " held_job (hold), old_job (none)",
+            "green",
+        ),
+        (
+            {**_APPLIED, "stop": [], "application": {**_APPLIED["application"], "stopped": []}},
+            f"update {_READ_NAME} applied: catalog revision 2; no job stopped",
+            "green",
+        ),
+        (
+            {**_APPLIED, "application": None, "pending": True},
+            f"update {_READ_NAME} admitted: stopping 3: trace_job, held_job, old_job; not"
+            " applied yet, the banner shows it",
+            "yellow",
+        ),
+        (
+            {**_APPLIED, "stop": [], "application": None, "unchanged": {"rev": 1}},
+            f"update {_READ_NAME}: nothing changed: catalog revision 1",
+            "green",
+        ),
+        (
+            {"ok": False, "refused": True, "code": "stale_plan", "error": "x", "names": []},
+            f"update {_READ_NAME} refused (stale_plan): x; the read changed: u looks again",
+            "red",
+        ),
+        (
+            {
+                "ok": False,
+                "refused": True,
+                "code": "tree_active",
+                "error": "membership",
+                "names": ["box_a", "m"],
+            },
+            f"update {_READ_NAME} refused (tree_active): membership: box_a, m",
+            "red",
+        ),
+        (
+            {"ok": False, "refused": True, "code": "update_in_progress", "error": "wait"},
+            f"update {_READ_NAME} refused (update_in_progress): wait",
+            "red",
+        ),
+        (
+            {"ok": False, "refused": True, "code": "engine_draining", "error": "draining"},
+            f"update {_READ_NAME} refused (engine_draining): draining",
+            "red",
+        ),
+        (
+            {"ok": False, "refused": True, "code": "access_denied", "error": "needs ops"},
+            f"update {_READ_NAME} refused (access_denied): needs ops",
+            "red",
+        ),
+        (
+            {"ok": False, "code": "decision_timeout", "error": "no decision"},
+            f"update {_READ_NAME}: the outcome is unknown (decision_timeout): no decision"
+            + _UNKNOWN,
+            "yellow",
+        ),
+        (
+            ControlClientError("engine hung up", delivered=True),
+            f"update {_READ_NAME}: the outcome is unknown: engine hung up" + _UNKNOWN,
+            "yellow",
+        ),
+        (
+            ControlClientError("no socket", delivered=False),
+            f"update {_READ_NAME}: not sent (no socket); nothing was applied",
+            "red",
+        ),
+    ],
+    ids=[
+        "applied",
+        "applied-no-stop",
+        "pending",
+        "unchanged",
+        "stale-plan",
+        "tree-active",
+        "in-progress",
+        "draining",
+        "denied",
+        "unknown",
+        "dropped",
+        "not-sent",
+    ],
+)
+def test_dl571_each_outcome_line(answer: Any, line: str, style: str) -> None:
+    from dsl41.runner_tui import update_outcome
+
+    text = update_outcome(_READ_NAME, "rid", answer, _CHECK)
+    assert text.plain == line
+    assert str(text.style) == style
+
+
+class _PaneReplies:
+    """The update pane's two connections answered by the test (DL-571): each `reread` waits
+    for `reading` and each `update` for `applying`, then answers its reply or raises it. A
+    read of the files stages its read in the status answers, or drops it, as the engine
+    does (DL-569)."""
+
+    def __init__(self, replies: _HistoryReplies) -> None:
+        self.replies = replies
+        self.rereads: list[dict] = []
+        self.updates: list[dict] = []
+        self.reread: Any = _answer(_STOPPING)
+        self.update: Any = _APPLIED
+        self.reading = asyncio.Event()
+        self.reading.set()
+        self.applying = asyncio.Event()
+        self.applying.set()
+
+    async def on_reread(self, request: dict) -> dict:
+        self.rereads.append(request)
+        await self.reading.wait()
+        if isinstance(self.reread, Exception):
+            raise self.reread
+        staged = self.reread.get("staged_read")
+        if "read" not in request and self.reread.get("ok"):
+            if staged:
+                self.replies.status["staged_read"] = _staged(name=staged["name"])
+            else:
+                self.replies.status.pop("staged_read", None)
+        return self.reread
+
+    async def on_update(self, request: dict) -> dict:
+        self.updates.append(request)
+        await self.applying.wait()
+        if isinstance(self.update, Exception):
+            raise self.update
+        return self.update
+
+
+@contextlib.asynccontextmanager
+async def _pane_app(
+    short_root: Path, size: tuple[int, int] = (160, 40), person: Principal | None = None
+):
+    async with _history_poll_app(short_root, size=size, person=person) as (app, pilot, replies):
+        pane = _PaneReplies(replies)
+        app._rereads.request = pane.on_reread
+        app._applies.request = pane.on_update
+        yield app, pilot, replies, pane
+
+
+def _pane_text(app: RunnerApp, part: str) -> str:
+    return str(app.screen.query_one(f"#update-{part}", Static).content)
+
+
+async def _open_pane(app: RunnerApp, pilot, pane: _PaneReplies) -> UpdateScreen:
+    """`u`, then the pane with its answer."""
+    await pilot.press("u")
+    await _wait_for_ui(pilot, lambda: isinstance(app.screen, UpdateScreen))
+    screen = app.screen
+    assert isinstance(screen, UpdateScreen)
+    await _wait_for_ui(pilot, lambda: screen.answer is not None)
+    return screen
+
+
+@pytest.mark.parametrize(
+    "staged, read, waiting",
+    [
+        (None, None, "READING the files…"),
+        (False, _READ_NAME, f"PREVIEWING read {_READ_NAME} against the engine's state now…"),
+        (True, None, "READING the files…"),
+    ],
+    ids=["nothing-staged", "staged", "disk-changed"],
+)
+def test_pilot_dl571_the_pane_opens_by_what_is_staged(
+    short_root: Path, staged: bool | None, read: str | None, waiting: str
+) -> None:
+    """Nothing staged, or the files changed since the staged read: the pane reads the files.
+    A staged read and no change since: the pane previews that read, reading no file. The
+    pane says which while it waits, and stays responsive."""
+
+    async def scenario() -> None:
+        async with _pane_app(short_root) as (app, pilot, replies, pane):
+            if staged is not None:
+                replies.status["staged_read"] = _staged(disk_changed=staged)
+                await pilot.press("r")
+                await _wait_for_ui(pilot, lambda: app._status_seen.get("staged_read"))
+            pane.reading.clear()
+            await pilot.press("u")
+            await _wait_for_ui(pilot, lambda: len(pane.rereads) == 1)
+            request = {"cmd": "reread", "claimed_actor": app._claimed_actor}
+            assert pane.rereads == [request if read is None else {**request, "read": read}]
+            assert _pane_text(app, "head") == waiting
+            assert _pane_text(app, "offer") == "a is not offered: no answer yet"
+            pane.reading.set()
+            await _wait_for_ui(pilot, lambda: _pane_text(app, "head").startswith("READ "))
+            assert _pane_text(app, "offer") == f"a applies read {_READ_NAME}"
+            assert _pane_text(app, "text") == _STOPPING_BODY
+            await pilot.press("escape")
+            await _wait_for_ui(pilot, lambda: not isinstance(app.screen, UpdateScreen))
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl571_a_asks_and_y_applies_the_read_the_pane_showed(short_root: Path) -> None:
+    """`a` opens the confirmation naming the read and its stops; `y` sends `update` with that
+    read's name and a request id, closes the pane and says the outcome in one line."""
+
+    async def scenario() -> None:
+        async with _pane_app(short_root) as (app, pilot, replies, pane):
+            await _open_pane(app, pilot, pane)
+            await pilot.press("a")
+            await _wait_for_ui(pilot, lambda: isinstance(app.screen, ApplyConfirmScreen))
+            body = str(app.screen.query_one("#confirmbox Static", Static).content)
+            assert body == (
+                f"apply read {_READ_NAME}?\nit stops 3 running jobs as of the preview:"
+                " trace_job, held_job, old_job"
+            )
+            await pilot.press("y")
+            await _wait_for_ui(pilot, lambda: len(pane.updates) == 1)
+            [request] = pane.updates
+            request_id = request.pop("request_id")
+            assert str(uuid.UUID(request_id)) == request_id
+            assert request == {
+                "cmd": "update",
+                "baseline_id": "period-a",
+                "claimed_actor": app._claimed_actor,
+                "wait": True,
+                "retry_only": False,
+                "read": _READ_NAME,
+            }
+            await _wait_for_ui(pilot, lambda: not isinstance(app.screen, UpdateScreen))
+            assert _console_has(app, f"update {_READ_NAME}: sending as request {request_id}")
+            await _wait_for_ui(
+                pilot,
+                lambda: _console_has(
+                    app,
+                    f"update {_READ_NAME} applied: catalog revision 2; stopped 3: trace_job"
+                    " (rerun), held_job (hold), old_job (none)",
+                ),
+            )
+            assert not app._applying
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("closing", ["escape", "n", "q"])
+def test_pilot_dl571_cancelling_the_confirmation_keeps_the_pane(
+    short_root: Path, closing: str
+) -> None:
+    async def scenario() -> None:
+        async with _pane_app(short_root) as (app, pilot, replies, pane):
+            screen = await _open_pane(app, pilot, pane)
+            await pilot.press("a")
+            await _wait_for_ui(pilot, lambda: isinstance(app.screen, ApplyConfirmScreen))
+            await pilot.press(closing)
+            await _wait_for_ui(pilot, lambda: app.screen is screen)
+            assert _console_has(app, f"update {_READ_NAME}: cancelled")
+            await _settle(pilot)
+            assert pane.updates == []
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl571_a_is_not_offered_and_the_pane_says_why(short_root: Path) -> None:
+    """A forecast refusal offers no `a`, and `a` then opens nothing. The reason follows the
+    status: an offered `a` gives way while an update stops its jobs."""
+
+    async def scenario() -> None:
+        async with _pane_app(short_root) as (app, pilot, replies, pane):
+            refusal = {"code": "tree_active", "names": ["box_a"]}
+            pane.reread = _answer({**_STOPPING, "update_refusal": refusal})
+            screen = await _open_pane(app, pilot, pane)
+            offer = "a is not offered: the update would be refused (tree_active)"
+            assert _pane_text(app, "offer") == offer
+            await pilot.press("a")
+            await _settle(pilot)
+            assert app.screen is screen
+            await pilot.press("escape")
+            pane.reread = _answer(_STOPPING)
+            screen = await _open_pane(app, pilot, pane)
+            assert _pane_text(app, "offer") == f"a applies read {_READ_NAME}"
+            replies.status["update"] = {"token": "ab" * 32, "stopping": ["trace_job"]}
+            app.action_refresh()
+            await _wait_for_ui(
+                pilot,
+                lambda: (
+                    _pane_text(app, "offer")
+                    == "a is not offered: an update is stopping its jobs; wait for it to finish"
+                ),
+            )
+            await pilot.press("a")
+            await _settle(pilot)
+            assert app.screen is screen and pane.updates == []
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("keys", [("a", "enter"), ("a", "y")], ids=["a-enter", "a-y"])
+def test_pilot_dl571_a_key_typed_behind_a_does_not_answer_the_confirmation(
+    short_root: Path, keys: tuple[str, str]
+) -> None:
+    """`a` and its answer typed as one burst: the confirmation opens and stays open, and
+    nothing is sent. Enter never answers it."""
+
+    async def scenario() -> None:
+        async with _pane_app(short_root) as (app, pilot, replies, pane):
+            await _open_pane(app, pilot, pane)
+            _queue_keys(app, *((key, key if key != "enter" else None) for key in keys))
+            await _settle(pilot)
+            assert isinstance(app.screen, ApplyConfirmScreen)
+            await pilot.press("enter")
+            await _settle(pilot)
+            assert isinstance(app.screen, ApplyConfirmScreen) and pane.updates == []
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl571_u_a_y_typed_before_the_pane_drew_applies_nothing(short_root: Path) -> None:
+    async def scenario() -> None:
+        async with _pane_app(short_root) as (app, pilot, replies, pane):
+            pane.reading.clear()
+            _queue_keys(app, ("u", "u"), ("a", "a"), ("y", "y"))
+            await _settle(pilot)
+            assert isinstance(app.screen, UpdateScreen)
+            pane.reading.set()
+            screen = app.screen
+            await _wait_for_ui(pilot, lambda: screen.answer is not None)
+            await _settle(pilot)
+            assert app.screen is screen and pane.updates == []
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl571_r_reads_the_files_again(short_root: Path) -> None:
+    """`r` replaces the read: a `reread` of the files, while the pane drops the answer it
+    showed and offers nothing; a second `r` meanwhile sends nothing."""
+
+    async def scenario() -> None:
+        async with _pane_app(short_root) as (app, pilot, replies, pane):
+            replies.status["staged_read"] = _staged()
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: app._status_seen.get("staged_read"))
+            screen = await _open_pane(app, pilot, pane)
+            assert pane.rereads[0]["read"] == _READ_NAME
+            pane.reading.clear()
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: len(pane.rereads) == 2)
+            assert pane.rereads[1] == {"cmd": "reread", "claimed_actor": app._claimed_actor}
+            assert screen.answer is None and _pane_text(app, "head") == "READING the files…"
+            await pilot.press("r", "a")
+            assert len(pane.rereads) == 2 and app.screen is screen
+            pane.reread = _answer(_preview(), staged=False)
+            pane.reading.set()
+            await _wait_for_ui(pilot, lambda: screen.answer is not None)
+            assert _pane_text(app, "head") == "NOTHING STAGED: the files are the applied estate"
+            assert _console_has(app, "read: nothing staged (+0 ~0 -0)")
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("closing", ["escape", "q"])
+def test_pilot_dl571_escape_or_q_closes_the_pane_even_while_it_reads(
+    short_root: Path, closing: str
+) -> None:
+    async def scenario() -> None:
+        async with _pane_app(short_root) as (app, pilot, replies, pane):
+            pane.reading.clear()
+            await pilot.press("u")
+            await _wait_for_ui(pilot, lambda: len(pane.rereads) == 1)
+            await pilot.press(closing)
+            await _wait_for_ui(pilot, lambda: not isinstance(app.screen, UpdateScreen))
+            assert app._exit is False
+            pane.reading.set()
+            await _wait_for_ui(pilot, lambda: _console_has(app, f"read {_READ_NAME} staged"))
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl571_a_read_tier_user_sees_the_refusal_and_no_apply(short_root: Path) -> None:
+    async def scenario() -> None:
+        async with _pane_app(short_root) as (app, pilot, replies, pane):
+            pane.reread = {"ok": False, "code": "access_denied", "error": "reread needs ops tier"}
+            screen = await _open_pane(app, pilot, pane)
+            assert _pane_text(app, "head") == (
+                "NO READ: refused (access_denied): reread needs ops tier"
+            )
+            assert _pane_text(app, "offer") == (
+                "a is not offered: the read was refused (access_denied): reread needs ops tier"
+            )
+            assert _pane_text(app, "text") == ""
+            await pilot.press("a")
+            await _settle(pilot)
+            assert app.screen is screen and pane.updates == []
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl571_a_lost_engine_is_the_pane_s_answer(short_root: Path) -> None:
+    async def scenario() -> None:
+        async with _pane_app(short_root) as (app, pilot, replies, pane):
+            pane.reread = ControlClientError("engine hung up", delivered=True)
+            await _open_pane(app, pilot, pane)
+            assert _pane_text(app, "head") == "NO READ: the engine did not answer: engine hung up"
+            assert _pane_text(app, "offer") == "a is not offered: the engine did not answer"
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl571_an_uncertain_outcome_names_its_request_and_is_not_sent_again(
+    short_root: Path,
+) -> None:
+    """The connection drops after the update was sent: one line names the request id and the
+    command that asks for the outcome, and nothing is sent again. While it is out, a pane
+    opened again offers no `a`; once it ends, the next status offers it again."""
+
+    async def scenario() -> None:
+        async with _pane_app(short_root) as (app, pilot, replies, pane):
+            replies.status["staged_read"] = _staged()
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: app._status_seen.get("staged_read"))
+            await _open_pane(app, pilot, pane)
+            pane.applying.clear()
+            pane.update = ControlClientError("engine hung up", delivered=True)
+            await pilot.press("a")
+            await _wait_for_ui(pilot, lambda: isinstance(app.screen, ApplyConfirmScreen))
+            await pilot.press("y")
+            await _wait_for_ui(pilot, lambda: len(pane.updates) == 1)
+            screen = await _open_pane(app, pilot, pane)
+            assert _pane_text(app, "offer") == "a is not offered: this viewer's update is under way"
+            pane.applying.set()
+            request_id = pane.updates[0]["request_id"]
+            socket = shlex.quote(str(app.socket_path.absolute()))
+            line = (
+                f"update {_READ_NAME}: the outcome is unknown: engine hung up; request"
+                f" {request_id} is not sent again; if it was admitted the banner shows the"
+                " update, and the revision moves when it applied;"
+                f" dsl41 update -S {socket} {_READ_NAME} --request-id {request_id} --wait asks"
+                " for it"
+            )
+            await _wait_for_ui(pilot, lambda: _console_has(app, line))
+            await _wait_for_ui(
+                pilot, lambda: _pane_text(app, "offer") == f"a applies read {_READ_NAME}"
+            )
+            await _settle(pilot)
+            assert len(pane.updates) == 1 and app.screen is screen
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl571_a_pane_opened_while_the_read_is_out_shows_its_answer(
+    short_root: Path,
+) -> None:
+    async def scenario() -> None:
+        async with _pane_app(short_root) as (app, pilot, replies, pane):
+            pane.reading.clear()
+            await pilot.press("u")
+            await _wait_for_ui(pilot, lambda: len(pane.rereads) == 1)
+            await pilot.press("escape")
+            await _wait_for_ui(pilot, lambda: not isinstance(app.screen, UpdateScreen))
+            await pilot.press("u")
+            await _wait_for_ui(pilot, lambda: isinstance(app.screen, UpdateScreen))
+            screen = app.screen
+            assert _pane_text(app, "head") == "READING the files…"
+            pane.reading.set()
+            await _wait_for_ui(pilot, lambda: screen.answer is not None)
+            assert len(pane.rereads) == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("again", ["u", "r"])
+def test_pilot_dl571_a_read_asked_while_the_last_one_settles_starts_after_it(
+    short_root: Path, again: str
+) -> None:
+    """The read was answered and its status is not yet. A pane opened then (`u`) waits, and
+    the status answer that ends the settling starts its preview of the read now staged; `r`
+    in the pane meanwhile waits too, and then reads the files."""
+
+    async def scenario() -> None:
+        async with _pane_app(short_root) as (app, pilot, replies, pane):
+            held = asyncio.Event()
+            await _open_pane(app, pilot, pane)
+            replies.gates.append((lambda request: request["cmd"] == "status", held))
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: len(pane.rereads) == 2)
+            await _wait_for_ui(pilot, lambda: app._reread_settles is not None)
+            if again == "u":
+                await pilot.press("escape")
+            await pilot.press(again)
+            await _wait_for_ui(pilot, lambda: isinstance(app.screen, UpdateScreen))
+            await _wait_for_ui(pilot, lambda: app.screen.answer is None)
+            assert _pane_text(app, "head") == "READING the files…" and len(pane.rereads) == 2
+            replies.status["staged_read"] = _staged()
+            held.set()
+            await _wait_for_ui(pilot, lambda: len(pane.rereads) == 3)
+            assert pane.rereads[2].get("read") == (_READ_NAME if again == "u" else None)
+
+    asyncio.run(scenario())
+
+
+def test_pilot_bug96_details_read_while_a_dialog_opened_do_not_cover_it(
+    short_root: Path,
+) -> None:
+    """BUG-96: `d` reads four answers before its popup opens; a pane opened meanwhile is not
+    covered, and the console says the popup was not opened."""
+
+    async def scenario() -> None:
+        async with _pane_app(short_root) as (app, pilot, replies, pane):
+            held = asyncio.Event()
+            replies.gates.append((lambda request: request["cmd"] == "spec", held))
+            _queue_keys(app, ("d", "d"), ("u", "u"))
+            await _settle(pilot)
+            assert isinstance(app.screen, UpdateScreen)
+            held.set()
+            await _wait_for_ui(
+                pilot, lambda: _console_has(app, "details of trace_job: not opened over the open")
+            )
+            assert isinstance(app.screen, UpdateScreen)
+            assert not any(isinstance(screen, SpecScreen) for screen in app.screen_stack)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("opening", "queued", "owns_run"),
+    [("k", "enter", False), ("d", "q", True)],
+    ids=["enter-behind-k", "q-behind-d-run-ui"],
+)
+def test_pilot_bug96_no_details_popup_opens_over_a_confirm(
+    short_root: Path, opening: str, queued: str, owns_run: bool
+) -> None:
+    """BUG-96: Enter queued behind `k`, or `q` behind `d` under `run --ui`: the confirm stays
+    on top and no details popup is stacked over it. Nothing is sent."""
+
+    async def body(app: RunnerApp, pilot, server: ControlServer) -> None:
+        before = await _trace_length(server)
+        _queue_keys(app, (opening, opening), (queued, None if queued == "enter" else queued))
+        await _settle(pilot)
+        await _settle(pilot)
+        assert isinstance(app.screen, ConfirmScreen)
+        assert not any(isinstance(screen, SpecScreen) for screen in app.screen_stack)
+        assert await _trace_length(server) == before
+        await pilot.press("n")
+        await _wait_for_ui(pilot, lambda: not isinstance(app.screen, ConfirmScreen))
+
+    _run_selected(short_root, "bug96_j", body, owns_run=owns_run)
+
+
+def test_pilot_dl571_a_key_made_before_a_confirm_mounted_does_not_answer_it(
+    short_root: Path,
+) -> None:
+    """The shared confirm (the kill and quit confirms) answers only keys it received that
+    were made after it mounted; a key that is no answer does nothing. Its keys keep their
+    meaning: Enter or `y` confirms."""
+
+    async def scenario() -> None:
+        async with _history_poll_app(short_root) as (app, pilot, replies):
+            for key, character in (("y", "y"), ("enter", None)):
+                results: list[bool | None] = []
+                app.push_screen(ConfirmScreen("t", "b"), callback=results.append)
+                _queue_keys(app, (key, character))
+                await _settle(pilot)
+                assert isinstance(app.screen, ConfirmScreen) and results == []
+                await pilot.press("x")
+                assert isinstance(app.screen, ConfirmScreen)
+                await pilot.press(key)
+                await _wait_for_ui(pilot, lambda: results == [True])
+
+    asyncio.run(scenario())
+
+
+# ------------------------------------------------- the update pane, round 1 (DL-571)
+
+
+@pytest.mark.parametrize(
+    "disconnected, status_read, not_offered",
+    [
+        (True, _READ_NAME, "disconnected"),
+        (False, "fedcba987654", "the read changed: r reads again"),
+        (False, "", "the read changed: r reads again"),
+        (False, _READ_NAME, ""),
+        (False, None, ""),
+    ],
+    ids=["disconnected", "another-read", "no-read", "same-read", "settling"],
+)
+def test_dl571_a_follows_the_latest_status(
+    disconnected: bool, status_read: str | None, not_offered: str
+) -> None:
+    """`a` is offered only while the viewer is connected and the latest status names the read
+    the pane shows; while this viewer's read settles the status predates it and is not read."""
+    from dsl41.runner_tui import update_view
+
+    view = update_view(
+        _answer(_PREVIEW),
+        update_open=False,
+        applying=False,
+        disconnected=disconnected,
+        status_read=status_read,
+    )
+    assert view.not_offered == not_offered
+
+
+def test_dl571_the_pane_keeps_the_cli_s_notes_and_marks() -> None:
+    """The non-idempotent reason, the differences not shown, the files changed with no job or
+    setting changed (then `a` is offered and the update still applies them), and the shared
+    settings, which are listed on their own and not counted as a changed job."""
+    from dsl41.runner_tui import update_view
+
+    def body(preview: dict) -> tuple[str, str]:
+        view = update_view(_answer(preview), update_open=False, applying=False)
+        return view.body.plain, view.not_offered
+
+    marked, _ = body(_STOPPING)
+    assert "  marked non-idempotent: held_job (pays twice)\n" in marked
+    omitted = {**_preview()["definition_changes"], "omitted": 3}
+    text, _ = body({**_PREVIEW, "definition_changes": omitted})
+    assert "  3 more differences not shown\n" in text
+    text, offer = body(_preview())
+    assert "  estate files changed, but no job or setting did; update still applies them\n" in (
+        text
+    )
+    assert offer == ""
+    setting = {
+        "field": "estate setting timezone",
+        "scope": "settings",
+        "before": "UTC",
+        "after": "Europe/Berlin",
+        "complex": False,
+        "redacted": False,
+        "jobs": [],
+    }
+    settings = {**_preview()["definition_changes"], "groups": [setting], "settings_changed": True}
+    text, _ = body(
+        _preview(
+            changed=[{"name": "trace_job", "reason": "command"}],
+            settings_sources=["/estate/main.toml"],
+            definition_changes=settings,
+        )
+    )
+    assert "  shared settings sources: /estate/main.toml\n" in text
+    assert "  shared settings:\n    estate setting timezone: UTC -> Europe/Berlin\n" in text
+    assert "  changed 1:\n    trace_job   affected by shared estate settings\n" in text
+    assert "    shared settings   " not in text
+
+
+def test_dl571_the_served_ui_s_uncertain_line_offers_no_command() -> None:
+    """The CLI's request cannot match a web person's (the actor differs), so the served UI's
+    line names the banner and the revision as the outcome and no command."""
+    from dsl41.runner_tui import update_outcome
+
+    tail = (
+        "; request rid is not sent again; if it was admitted the banner shows the update, and"
+        " the revision moves when it applied"
+    )
+    dropped = ControlClientError("engine hung up", delivered=True)
+    assert update_outcome(_READ_NAME, "rid", dropped, None).plain == (
+        f"update {_READ_NAME}: the outcome is unknown: engine hung up" + tail
+    )
+    timeout = {"ok": False, "code": "decision_timeout", "error": "no decision"}
+    assert update_outcome(_READ_NAME, "rid", timeout, None).plain == (
+        f"update {_READ_NAME}: the outcome is unknown (decision_timeout): no decision" + tail
+    )
+
+
+def test_pilot_dl571_the_served_ui_says_the_uncertain_outcome_without_a_command(
+    short_root: Path,
+) -> None:
+    async def scenario() -> None:
+        person = Principal("app", "alice", frozenset({"ops"}))
+        async with _pane_app(short_root, person=person) as (app, pilot, replies, pane):
+            await _open_pane(app, pilot, pane)
+            pane.update = ControlClientError("engine hung up", delivered=True)
+            await pilot.press("a")
+            await _wait_for_ui(pilot, lambda: isinstance(app.screen, ApplyConfirmScreen))
+            await pilot.press("y")
+            await _wait_for_ui(pilot, lambda: len(pane.updates) == 1)
+            assert pane.updates[0]["claimed_actor"] == "app/alice"
+            request_id = pane.updates[0]["request_id"]
+            line = (
+                f"update {_READ_NAME}: the outcome is unknown: engine hung up; request"
+                f" {request_id} is not sent again; if it was admitted the banner shows the"
+                " update, and the revision moves when it applied"
+            )
+            await _wait_for_ui(pilot, lambda: _console_has(app, line))
+            assert not _console_has(app, "--request-id")
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("under", ["pane", "confirmation"])
+def test_pilot_dl571_a_read_that_changed_under_the_pane_is_not_applied(
+    short_root: Path, under: str
+) -> None:
+    """Another operator's read replaces the one the pane shows. The pane offers no `a` and
+    says why; an open confirmation for that read closes with the same line, and nothing is
+    sent."""
+
+    async def scenario() -> None:
+        async with _pane_app(short_root) as (app, pilot, replies, pane):
+            screen = await _open_pane(app, pilot, pane)
+            await _wait_for_ui(pilot, lambda: app._reread_settles is None)
+            assert _pane_text(app, "offer") == f"a applies read {_READ_NAME}"
+            if under == "confirmation":
+                await pilot.press("a")
+                await _wait_for_ui(pilot, lambda: isinstance(app.screen, ApplyConfirmScreen))
+            replies.status["staged_read"] = _staged(name="fedcba987654", actor="bob")
+            app.action_refresh()
+            await _wait_for_ui(pilot, lambda: app.screen is screen)
+            await _wait_for_ui(
+                pilot,
+                lambda: (
+                    _pane_text(app, "offer") == "a is not offered: the read changed: r reads again"
+                ),
+            )
+            if under == "confirmation":
+                assert _console_has(
+                    app, f"update {_READ_NAME}: the read changed: r reads again; not sent"
+                )
+                assert not _console_has(app, f"update {_READ_NAME}: cancelled")
+            await pilot.press("a", "y")
+            await _settle(pilot)
+            assert app.screen is screen and pane.updates == []
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl571_a_lost_connection_closes_the_confirmation(short_root: Path) -> None:
+    async def scenario() -> None:
+        async with _pane_app(short_root) as (app, pilot, replies, pane):
+            screen = await _open_pane(app, pilot, pane)
+            await _wait_for_ui(pilot, lambda: app._reread_settles is None)
+            await pilot.press("a")
+            await _wait_for_ui(pilot, lambda: isinstance(app.screen, ApplyConfirmScreen))
+            replies.disconnected = True
+            app.action_refresh()
+            await _wait_for_ui(pilot, lambda: app.screen is screen)
+            assert _pane_text(app, "offer") == "a is not offered: disconnected"
+            assert _console_has(app, f"update {_READ_NAME}: disconnected; not sent")
+            replies.disconnected = False
+            app.action_refresh()
+            await _wait_for_ui(
+                pilot, lambda: _pane_text(app, "offer") == f"a applies read {_READ_NAME}"
+            )
+            assert pane.updates == []
+
+    asyncio.run(scenario())
+
+
+def test_pilot_dl571_a_yes_closes_only_the_pane_it_was_asked_from(short_root: Path) -> None:
+    """The pane is closed by identity: with another screen on top it stays, and the update is
+    still sent."""
+
+    async def scenario() -> None:
+        async with _pane_app(short_root) as (app, pilot, replies, pane):
+            screen = await _open_pane(app, pilot, pane)
+            other = SpecScreen("job", Text("x"))
+            app.push_screen(other)
+            await _wait_for_ui(pilot, lambda: app.screen is other)
+            app._answered_apply(screen, _READ_NAME, True)
+            await _wait_for_ui(pilot, lambda: len(pane.updates) == 1)
+            assert app.screen is other and screen in app.screen_stack
 
     asyncio.run(scenario())

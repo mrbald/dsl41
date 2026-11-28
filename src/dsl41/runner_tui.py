@@ -161,8 +161,21 @@ Contract detail for DL-46, within DL-41's frame:
   from the latest status answer; while disconnected or refused it says the state is unknown. The
   text is fitted to the width: `since this read` goes first, then who read and when, then the end
   is cut. The column after the job marks each row the staged read touches (`!` would stop, `~`
-  changed, `-` removed), as of the read. `u` sends `reread` on a connection of its own, once at
-  a time, and its answer is one console line.
+  changed, `-` removed), as of the read.
+- Update pane (DL-571): `u` opens a modal that shows one `reread` answer, sent on a connection
+  of its own, one at a time: a preview of the staged read (`read: NAME`) when the latest status
+  names one and the files have not changed since it, else a read of the files, whose answer is
+  also one console line. It shows the read, what applying it would do now (the stops with each
+  action, a forecast refusal), the counts and lists and the findings, in the CLI's words. `a`
+  asks to apply it, offered only for a staged read with no forecast refusal or blocked reason,
+  while connected, the latest status names that read, no update stops its jobs and this viewer
+  sends none; an open confirmation closes when that ends. `y` in the confirmation sends
+  `update` with that name, a request id and `wait`, and the outcome is one console line. An
+  uncertain outcome names the request id, and the CLI command only in the terminal, whose
+  actor matches; it is never sent again. A confirm answers only keys
+  it received, made after it mounted, so keys typed before `a` answer nothing; the apply
+  confirm takes `y`, never Enter. A details popup read while a dialog opened is not opened over
+  it.
 - Pane geometry (DL-520): three splits, the table column against the side column and the explain
   pane against the log pane as ratios, the console as rows, kept for the session and across a
   change of the terminal's size. A first-button drag on a split's border, the two lines that
@@ -197,6 +210,7 @@ import reprlib
 import shlex
 import sys
 import time
+import uuid
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -233,7 +247,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover -- exercised via CLI guar
         "the dsl41 TUI needs the optional [ui] extra: pip install 'dsl41[ui]'"
     ) from exc
 
-from dsl41.cli_output import one_line
+from dsl41.cli_output import OutputStyle, one_line, prepare_reread
+from dsl41.cli_output import counted as count_of
 from dsl41.console_words import STATUS_ROWS, VERB_ROWS, complete_line
 from dsl41.display_time import format_local_at
 from dsl41.job_filter import JobFilter, read_filter
@@ -898,20 +913,38 @@ class ConfirmScreen(ModalScreen[bool]):
     """A yes/no gate in front of a destructive key (DL-187).
 
     Typed console commands are not gated; `k` sits one keystroke from every navigation key.
-    Enter or `y` confirms; escape, `n` and `q` cancel, since `q` leaves every other view."""
+    Enter or `y` confirms; escape, `n` and `q` cancel, since `q` leaves every other view.
+
+    Only a key the dialog itself receives, made after it was mounted in this process, answers
+    it (DL-571); a key made before then rings the bell. A key another screen received before
+    the dialog opened, whose binding is looked up only once the dialog is on top, finds the
+    bell binding: the answers are read in `on_key`, never from the bindings. The guard is
+    against keys typed before the key that opened the dialog was handled: a key typed after
+    it, before the dialog reaches a slow screen, still answers."""
 
     HELP = """
     Enter or y confirms; escape, n, or q cancels. Nothing is sent until
     confirmed, and then only against the state and revision named above.
+    A key handled before this dialog opened does not answer it.
     """
+    #: each answering key and its answer (DL-187)
+    ANSWERS: Mapping[str, bool] = {
+        "enter": True,
+        "y": True,
+        "escape": False,
+        "n": False,
+        "q": False,
+    }
+    #: the keys' labels for the help panel; their action is the bell (DL-571)
     BINDINGS = [
-        Binding("enter", "confirm", "confirm"),
-        Binding("y", "confirm", "yes", show=False),
-        Binding("escape", "cancel", "cancel"),
-        Binding("n", "cancel", "no", show=False),
-        Binding("q", "cancel", "no", show=False),
+        Binding("enter", "app.bell", "confirm"),
+        Binding("y", "app.bell", "yes", show=False),
+        Binding("escape", "app.bell", "cancel"),
+        Binding("n", "app.bell", "no", show=False),
+        Binding("q", "app.bell", "no", show=False),
         *_HELP_BINDINGS,
     ]
+    SUBTITLE = "enter/y confirm -- esc/n/q cancel"
     CSS = """
     ConfirmScreen { align: center middle; }
     #confirmbox {
@@ -924,22 +957,191 @@ class ConfirmScreen(ModalScreen[bool]):
         super().__init__()
         self._title = title
         self._body = body
+        #: when the dialog was mounted: a key made earlier does not answer it (DL-571)
+        self._mounted_at: float | None = None
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="confirmbox"):
             yield Static(self._body)
 
     def on_mount(self) -> None:
+        self._mounted_at = time.monotonic()
         box = self.query_one("#confirmbox")
         box.border_title = self._title
-        box.border_subtitle = "enter/y confirm -- esc/n/q cancel"
+        box.border_subtitle = self.SUBTITLE
         box.focus()
 
-    def action_confirm(self) -> None:
-        self.dismiss(True)
+    def on_key(self, event: events.Key) -> None:
+        """Answer from a key this dialog received, made after it was mounted (DL-571).
+        Textual stamps each message with time.monotonic off Windows, as `_cursor_set_at`
+        relies on."""
+        answer = self.ANSWERS.get(event.key)
+        if answer is None:
+            return
+        event.stop()
+        event.prevent_default()
+        if self._mounted_at is None or event.time < self._mounted_at:
+            self.app.bell()
+            return
+        self.dismiss(answer)
 
-    def action_cancel(self) -> None:
-        self.dismiss(False)
+
+class ApplyConfirmScreen(ConfirmScreen, inherit_bindings=False):
+    """The confirmation of an update from the terminal UI (DL-571). It can stop many jobs, so
+    only `y` applies; Enter does not answer it, and escape, `n` and `q` cancel. The base
+    class's bindings are not inherited, so Enter here only rings the bell."""
+
+    HELP = """
+    y applies the read named above; escape, n, or q cancels. Enter does
+    not answer this dialog, and a key handled before it opened does not
+    either. The jobs named are those the preview would stop.
+    """
+    ANSWERS: Mapping[str, bool] = {"y": True, "escape": False, "n": False, "q": False}
+    BINDINGS = [
+        Binding("enter", "app.bell", "", show=False),
+        Binding("y", "app.bell", "apply"),
+        Binding("escape", "app.bell", "cancel"),
+        Binding("n", "app.bell", "no", show=False),
+        Binding("q", "app.bell", "no", show=False),
+        *_HELP_BINDINGS,
+    ]
+    SUBTITLE = "y apply -- esc/n/q cancel"
+
+    def __init__(self, name: str, stops: Sequence[str]) -> None:
+        super().__init__("apply", apply_confirm_body(name, stops))
+        #: the staged read it applies, which the open pane follows (DL-571)
+        self.read = name
+
+
+class UpdateScreen(ModalScreen[None]):
+    """The update pane (DL-571): what a read would change and what applying it would do now,
+    from one `reread` answer. On mount the app takes its read: a preview of the staged read
+    when the files have not changed since it, else a read of the files, or this viewer's read
+    already under way. `a` asks to apply the read the answer names, `r` reads the files again,
+    escape or `q` closes. The pane holds that one answer and nothing else of the read."""
+
+    HELP = """
+    The read the update would apply, what applying it would do now
+    (the jobs it stops, by name, and a forecast refusal), the changes
+    it brings and its findings (DL-571).
+
+    a asks to apply this read; it is offered only for a staged read
+    that no refusal is forecast for, while no update stops its jobs.
+    r reads the files again and replaces the read. q or escape closes.
+    Up, Down, PageUp and PageDown scroll.
+    """
+    BINDINGS = [
+        Binding("a", "apply", "apply"),
+        Binding("r", "read_again", "read the files again"),
+        Binding("escape", "dismiss", "close"),
+        Binding("q", "dismiss", "close", show=False),
+        *_HELP_BINDINGS,
+        *_OPERATOR_BELLS,
+    ]
+    CSS = """
+    UpdateScreen { align: center middle; }
+    #updatebox {
+        width: 90%; max-width: 110; height: 80%;
+        border: round $warning; background: $surface; padding: 0 1;
+    }
+    #update-head { text-style: bold; }
+    #update-offer { margin-bottom: 1; }
+    #update-body { height: 1fr; }
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        #: the one answer shown: a `reread` answer, the transport failure's text, or None
+        #: while this viewer's read is out; `waiting` says which read that is, and `files`
+        #: whether the pane asked for a read of the files
+        self.answer: Mapping[str, Any] | str | None = None
+        self.waiting = ""
+        self.files = False
+        #: the text drawn last, as of the latest status answer
+        self.shown = UpdateView("", "no answer yet", Text())
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="updatebox"):
+            yield Static(id="update-head")
+            yield Static(id="update-offer")
+            with VerticalScroll(id="update-body"):
+                yield Static(id="update-text")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one("#updatebox").border_title = "update"
+        self.query_one("#update-body").focus()
+        app = self.app
+        assert isinstance(app, RunnerApp)
+        app._pane_read(self, files=False)
+
+    def wait(self, what: str, *, files: bool) -> None:
+        """A read is out: the pane drops the answer it showed and says which read it waits
+        for; nothing is offered until the answer comes."""
+        self.answer, self.waiting, self.files = None, what, files
+        self.redraw()
+
+    def show_answer(self, answer: Mapping[str, Any] | str) -> None:
+        self.answer = answer
+        self.redraw()
+
+    def _view(self) -> UpdateView:
+        """The pane's text, with whether `a` is offered as of the latest status answer."""
+        if self.answer is None:
+            return UpdateView(self.waiting, "no answer yet", Text())
+        if isinstance(self.answer, str):
+            return UpdateView(
+                f"NO READ: the engine did not answer: {self.answer}",
+                "the engine did not answer",
+                Text(),
+            )
+        app = self.app
+        assert isinstance(app, RunnerApp)
+        staged = app._status_seen.get("staged_read")
+        return update_view(
+            self.answer,
+            update_open=isinstance(app._status_seen.get("update"), Mapping),
+            applying=app._applying,
+            # no status read since the connection was lost is as good as none (DL-570)
+            disconnected=app._connected is False or not app._status_seen,
+            # the status asked before this viewer's read was answered predates the answer
+            status_read=None
+            if app._reread_settles is not None
+            else str(staged.get("name", ""))
+            if isinstance(staged, Mapping)
+            else "",
+        )
+
+    def redraw(self) -> None:
+        self.shown = view = self._view()
+        self.query_one("#update-head", Static).update(Text(view.head))
+        offer = (
+            Text(f"a is not offered: {view.not_offered}", style="yellow")
+            if view.not_offered
+            else Text(f"a applies read {view.name}", style="green")
+        )
+        self.query_one("#update-offer", Static).update(offer)
+        self.query_one("#update-text", Static).update(view.body)
+        self.refresh_bindings()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """`a` is offered only as `update_view` says, and `r` only once an answer is shown;
+        a key not offered shows dimmed in the footer and does nothing (DL-571)."""
+        if action == "apply":
+            return None if self.shown.not_offered else True
+        if action == "read_again":
+            return None if self.answer is None else True
+        return True
+
+    def action_apply(self) -> None:
+        app = self.app
+        assert isinstance(app, RunnerApp)
+        app._ask_apply(self, self.shown.name, self.shown.stops)
+
+    def action_read_again(self) -> None:
+        app = self.app
+        assert isinstance(app, RunnerApp)
+        app._pane_read(self, files=True)
 
 
 def format_countdown(due: datetime, now: datetime) -> str:
@@ -1187,11 +1389,11 @@ class _JobsTable(DataTable[Any]):
 
     The banner under the header says what waits (DL-570): files on disk
     not read, a read waiting to be applied, files changed again since
-    it, or an update stopping its jobs. u reads the files and stages
-    the read, as dsl41 reread does; dsl41 update NAME applies it. The
-    column after the job marks the jobs the staged read touches: ! it
-    would stop the job, ~ it changes it, - it removes it. The marks are
-    as of the read, not live; details give them in words.
+    it, or an update stopping its jobs. The column after the job marks
+    the jobs the staged read touches: ! it would stop the job, ~ it
+    changes it, - it removes it. The marks are as of the read, not
+    live; details give them in words. u opens the update pane, which
+    shows a read and applies it with a and y (DL-571).
 
     E opens the stored events before the oldest the console holds in
     the pager; E there reads the page before (DL-541). The alarms
@@ -2702,7 +2904,8 @@ def banner_line(pending: Pending, width: int) -> str:
             " · FILES CHANGED AGAIN · u reads again",
         ]
     else:
-        tails = [f" · apply: dsl41 update {pending.name}"]
+        # the update pane reviews and applies the read (DL-571)
+        tails = [" · u reviews and applies"]
     candidates = [head + who + counts + tail for tail in tails]
     candidates += [head + counts + tail for tail in tails[-1:]]
     for line in candidates:
@@ -2749,12 +2952,212 @@ def reread_summary(answer: Mapping[str, Any]) -> Text:
                 f" ({refusal.get('code')}): {names}",
                 style="yellow",
             )
-        return Text(
-            f"read {name} staged: {counts}{stop}; apply: dsl41 update {name}", style="yellow"
-        )
+        return Text(f"read {name} staged: {counts}{stop}; u reviews and applies", style="yellow")
+    return Text(f"read: nothing staged ({counts}): {_unstaged_why(preview)}", style="yellow")
+
+
+def _unstaged_why(preview: Mapping[str, Any]) -> str:
+    """Why a successful `reread` staged nothing: the reasons `blocked` gives, else the files
+    are the applied estate (DL-569)."""
     blocked = (preview.get("definition_changes") or {}).get("blocked") or ()
-    why = "; ".join(str(reason) for reason in blocked) or "the files are the applied estate"
-    return Text(f"read: nothing staged ({counts}): {why}", style="yellow")
+    return "; ".join(str(reason) for reason in blocked) or "the files are the applied estate"
+
+
+@dataclass(frozen=True)
+class UpdateView:
+    """What the update pane shows of one `reread` answer (DL-571): one head line, why `a` is
+    not offered (empty when it is), and the body. `name` is the staged read the answer
+    names, the one `a` applies; `stops` are the jobs its preview would stop."""
+
+    head: str
+    not_offered: str
+    body: Text
+    name: str = ""
+    stops: tuple[str, ...] = ()
+
+
+#: the stand-in name of the estate-wide settings among a read's changes (`prepare_reread`)
+_SHARED_SETTINGS = "shared settings"
+
+
+def _not_offered(
+    preview: Mapping[str, Any],
+    name: str,
+    *,
+    update_open: bool,
+    applying: bool,
+    disconnected: bool,
+    status_read: str | None,
+) -> str:
+    """Why `a` is not offered for the read `name` a successful answer staged, first match;
+    empty when it is (DL-571). The arguments are `update_view`'s."""
+    refusal = preview.get("update_refusal")
+    blocked = (preview.get("definition_changes") or {}).get("blocked") or ()
+    if not name:
+        return "nothing is staged"
+    if disconnected:
+        return "disconnected"
+    if status_read is not None and status_read != name:
+        return "the read changed: r reads again"
+    if isinstance(refusal, Mapping):
+        return f"the update would be refused ({refusal.get('code')})"
+    if blocked:
+        return "the update would refuse: " + "; ".join(map(one_line, blocked))
+    if update_open:
+        return "an update is stopping its jobs; wait for it to finish"
+    if applying:
+        return "this viewer's update is under way"
+    return ""
+
+
+def update_view(
+    answer: Mapping[str, Any],
+    *,
+    update_open: bool,
+    applying: bool,
+    disconnected: bool = False,
+    status_read: str | None = None,
+) -> UpdateView:
+    """The update pane's text for one `reread` answer (DL-571). The CLI's renderer gives the
+    words (`prepare_reread`, neutral layout); the pane orders them by importance: the read,
+    what applying would do now, the changes, the findings. `a` is offered for a staged read
+    while the viewer is connected and the latest status names that read (`status_read`, the
+    name it gives or "", None while this viewer's read settles and the status predates the
+    answer), with no forecast refusal and no blocked reason, while no update stops its jobs
+    (`update_open`) and this viewer sends none (`applying`)."""
+    if not answer.get("ok"):
+        refused = f"refused ({answer.get('code')}): {one_line(answer.get('error', ''))}"
+        return UpdateView(f"NO READ: {refused}", f"the read was {refused}", Text())
+    preview = answer["preview"]
+    view = prepare_reread(answer, "dsl41 update", OutputStyle.neutral)
+    staged = answer.get("staged_read")
+    name = ""
+    if isinstance(staged, Mapping):
+        name = str(staged.get("name", ""))
+        actor = staged.get("actor")
+        who = one_line(actor) if isinstance(actor, str) and actor else "unnamed"
+        head = f"READ {name}, read by {who} at {format_local_at(staged.get('at'))}"
+    else:
+        head = f"NOTHING STAGED: {_unstaged_why(preview)}"
+    not_offered = _not_offered(
+        preview,
+        name,
+        update_open=update_open,
+        applying=applying,
+        disconnected=disconnected,
+        status_read=status_read,
+    )
+    stops = tuple(str(job) for job in preview.get("stop") or ())
+    effect = {job: text for text, jobs in view.effects for job in jobs}
+    body = Text()
+    body.append("IF APPLIED NOW\n", style="bold")
+    if stops:
+        body.append(f"  stopping {count_of(len(stops), 'running job')}:\n")
+        for job in stops:
+            body.append(f"    {one_line(job)}   {effect.get(job, '')}".rstrip() + "\n")
+    else:
+        body.append("  no running job is stopped\n")
+    for line in view.marked:
+        body.append(f"  {line}\n")
+    if view.refusal:
+        body.append(f"  {view.refusal}\n", style="red")
+    body.append("\nCHANGES\n", style="bold")
+    body.append(f"  {view.header}\n  {view.summary}\n")
+    for line in view.notes:
+        body.append(f"  {line}\n")
+    added, removed = set(preview.get("added") or ()), set(preview.get("removed") or ())
+    jobs = [item for item in view.changes if item[0] != _SHARED_SETTINGS]
+    kinds = (
+        ("added", [item for item in jobs if item[0] in added], {"added"}),
+        ("changed", [item for item in jobs if item[0] not in added | removed], set[str]()),
+        ("removed", [item for item in jobs if item[0] in removed], {"removed"}),
+    )
+    for texts in (texts for job, texts in view.changes if job == _SHARED_SETTINGS):
+        body.append("  shared settings:\n" + "".join(f"    {text}\n" for text in texts))
+    for kind, items, plain in kinds:
+        if items:
+            body.append(f"  {kind} {len(items)}:\n")
+        for job, texts in items:
+            words = "; ".join(text for text in texts if text not in plain)
+            body.append(f"    {one_line(job)}   {words}".rstrip() + "\n")
+    body.append("\nFINDINGS\n", style="bold")
+    findings = [
+        *preview.get("lint_summary", preview.get("lint_messages") or ()),
+        *(preview.get("diagnostics") or ()),
+    ]
+    for line in findings or ["none"]:
+        body.append(f"  {line}\n")
+    return UpdateView(head, not_offered, body, name, stops)
+
+
+def apply_confirm_body(name: str, stops: Sequence[str]) -> str:
+    """The apply confirmation's text (DL-571): the read and the jobs its preview would stop,
+    a long list cut with a count. The list is as of the preview; the console line after the
+    update says what was stopped."""
+    lines = [f"apply read {name}?"]
+    if stops:
+        shown = ", ".join(map(one_line, stops[:_CONFIRM_MEMBER_CAP]))
+        extra = len(stops) - _CONFIRM_MEMBER_CAP
+        lines.append(
+            f"it stops {count_of(len(stops), 'running job')} as of the preview: {shown}"
+            + (f" and {extra} more" if extra > 0 else "")
+        )
+    else:
+        lines.append("it stops no running job, as of the preview")
+    return "\n".join(lines)
+
+
+def update_outcome(
+    name: str,
+    request_id: str,
+    answer: Mapping[str, Any] | ControlClientError,
+    check: str | None,
+) -> Text:
+    """The console line for this viewer's `update` with `read` (DL-571): applied with the new
+    revision and what was stopped, admitted and still stopping, nothing changed, refused with
+    its code, text and names, or an uncertain outcome naming the request id. The viewer never
+    sends an update again by itself. `check` is the CLI's update command where its request
+    can match this viewer's (the terminal, whose actor is the shell user's); in the served UI
+    it is None and the banner and the revision are the outcome."""
+    label = f"update {name}"
+    unknown = (
+        f"; request {request_id} is not sent again; if it was admitted the banner shows the"
+        " update, and the revision moves when it applied"
+        + (f"; {check} {name} --request-id {request_id} --wait asks for it" if check else "")
+    )
+    if isinstance(answer, ControlClientError):
+        if not answer.delivered:
+            return Text(f"{label}: not sent ({answer}); nothing was applied", style="red")
+        return Text(f"{label}: the outcome is unknown: {answer}{unknown}", style="yellow")
+    if not answer.get("ok"):
+        code, error = answer.get("code"), one_line(answer.get("error", ""))
+        if not answer.get("refused"):
+            return Text(f"{label}: the outcome is unknown ({code}): {error}{unknown}", "yellow")
+        names = ", ".join(map(one_line, answer.get("names") or ()))
+        again = "; the read changed: u looks again" if code == "stale_plan" else ""
+        return Text(
+            f"{label} refused ({code}): {error}" + (f": {names}" if names else "") + again,
+            style="red",
+        )
+    unchanged = answer.get("unchanged")
+    if isinstance(unchanged, Mapping):
+        return Text(f"{label}: nothing changed: catalog revision {unchanged.get('rev')}", "green")
+    application = answer.get("application")
+    if isinstance(application, Mapping):
+        stopped = [(str(job), str(choice)) for job, choice in application.get("stopped") or ()]
+        what = (
+            f"stopped {len(stopped)}: "
+            + ", ".join(f"{one_line(job)} ({choice})" for job, choice in stopped)
+            if stopped
+            else "no job stopped"
+        )
+        return Text(f"{label} applied: catalog revision {application.get('rev')}; {what}", "green")
+    stops = [str(job) for job in answer.get("stop") or ()]
+    return Text(
+        f"{label} admitted: stopping {len(stops)}: {', '.join(map(one_line, stops))};"
+        " not applied yet, the banner shows it",
+        style="yellow",
+    )
 
 
 @dataclass
@@ -2916,8 +3319,8 @@ class RunnerApp(App[None]):
         Binding("m", "maximize_log", "zoom log"),
         Binding("o", "toggle_stream", "out/err"),
         Binding("r", "refresh", "refresh"),
-        # the files on disk read and staged, as `dsl41 reread` does (DL-570)
-        Binding("u", "reread", "read files"),
+        # the update pane: review a read and apply it (DL-571)
+        Binding("u", "update", "update"),
         Binding("f1", "toggle_help_panel", "help"),
         # the pager's `?` binding shadows this one while the log has focus (DL-187 item 7)
         Binding("question_mark", "toggle_help_panel", "help", show=False),
@@ -2963,12 +3366,15 @@ class RunnerApp(App[None]):
             else str(self.socket_path)
         )
         self.sub_title = self._subtitle_base
+        self._person = person
         self._client = ControlClient(self.socket_path, person)
         #: DL-541: the pager's and the details popup's history reads have a connection of their
         #: own, so a stalled read never holds the table's refresh or the operator's keys
         self._reads = ControlClient(self.socket_path, person)
         #: DL-570: `u`'s read takes seconds, so it has a connection of its own too
         self._rereads = ControlClient(self.socket_path, person)
+        #: DL-571: so does the update the pane applies, which waits for its application
+        self._applies = ControlClient(self.socket_path, person)
         #: the selection is a job, not a row (DL-532). `_chosen` is the job the operator picked
         #: last, kept while a fold or a filter hides it. `_selected`, what the keys act on, is
         #: derived from it on each render: the job when shown, else the folded box that stands
@@ -3075,6 +3481,10 @@ class RunnerApp(App[None]):
         #: and whether this viewer's `reread` is out: the viewer's only state of a read
         self._status_seen: Mapping[str, Any] = {}
         self._rereading = False
+        #: DL-571: the staged read the update pane previews while that `reread` is out, and
+        #: whether this viewer's `update` is out; one read at a time, as for `_rereading`
+        self._previewing = ""
+        self._applying = False
         #: DL-570: after the `reread` answer, the status requests sent until then; READING
         #: stays until a status request sent later is answered, so the banner never shows the
         #: state the read replaced
@@ -3154,37 +3564,142 @@ class RunnerApp(App[None]):
     def action_refresh(self) -> None:
         self._poll()
 
-    def action_reread(self) -> None:
-        """`u`: read the files on disk and stage the read, as `dsl41 reread` does (DL-570). A
-        second `u` while the first is out does nothing."""
-        if self._rereading or self._reread_settles is not None:
-            return
-        self._rereading = True
-        self._refresh_banner()
-        self.run_worker(self._reread, group="reread", exclusive=False)  # type: ignore[arg-type]
+    def action_update(self) -> None:
+        """`u`: the update pane, which takes its read when it mounts (DL-571)."""
+        self.push_screen(UpdateScreen())
 
-    async def _reread(self) -> None:
+    def _read_out(self) -> bool:
+        """Whether this viewer's `reread` is out or settling: one read at a time (DL-570)."""
+        return self._rereading or bool(self._previewing) or self._reread_settles is not None
+
+    def _update_pane(self) -> UpdateScreen | None:
+        return next((s for s in self.screen_stack if isinstance(s, UpdateScreen)), None)
+
+    def _pane_read(self, pane: UpdateScreen, *, files: bool) -> None:
+        """The update pane's read (DL-571): with `files` false, a preview of the staged read
+        when the latest status names one and the files have not changed since it, else a read
+        of the files, which replaces the staged read. While this viewer's read is out or
+        settling the pane waits for it; its answer comes to the pane, or the status that ends
+        the settling starts the read the pane asked for."""
+        if not self._read_out():
+            staged = self._status_seen.get("staged_read")
+            if not files and isinstance(staged, Mapping) and not staged.get("disk_changed"):
+                self._previewing = str(staged.get("name", ""))
+            else:
+                self._rereading = True
+                self._refresh_banner()
+            work = functools.partial(self._reread, self._previewing or None)
+            self.run_worker(work, group="reread", exclusive=False)  # type: ignore[arg-type]
+        pane.wait(
+            f"PREVIEWING read {self._previewing} against the engine's state now…"
+            if self._previewing
+            else "READING the files…",
+            files=files,
+        )
+
+    async def _reread(self, read: str | None) -> None:
         """The read takes seconds, so it has a connection of its own and the table's refresh
-        goes on meanwhile. Its answer is one console line; the banner and the marks follow the
-        next status answer (DL-570)."""
+        goes on meanwhile. A read of the files gives one console line; the banner and the
+        marks follow the next status answer (DL-570). The answer goes to the update pane open
+        then, if any (DL-571)."""
         request = {"cmd": "reread", "claimed_actor": self._claimed_actor}
+        if read is not None:
+            request["read"] = read
+        shown: Mapping[str, Any] | str
         try:
             answer = await self._rereads.request(request)
         except ControlClientError as exc:
+            shown = str(exc)
             line = Text(
                 f"read: the engine did not answer: {exc}; the status shows whether a read"
                 " was staged",
                 style="red",
             )
         else:
-            line = reread_summary(answer)
-            self._reread_settles = self._status_asked
+            shown, line = answer, reread_summary(answer)
+            if read is None:
+                self._reread_settles = self._status_asked
         finally:
-            self._rereading = False
+            self._rereading, self._previewing = False, ""
             # closed after each read, so no connection is left for the teardown to wait on
             await self._rereads.close()
-        self._console_write(line)
+        if read is None:
+            self._console_write(line)
+        pane = self._update_pane()
+        if pane is not None:
+            pane.show_answer(shown)
         self._refresh_banner()
+        self._poll()
+
+    def _pane_follow(self) -> None:
+        """A status answer or a change of the connection: the open update pane redraws, since
+        whether `a` is offered follows them, and a pane that waited for this viewer's read to
+        settle takes its own. An open apply confirmation for a read the pane does not offer closes,
+        with the pane's reason in the console (DL-571)."""
+        pane = self._update_pane()
+        if pane is None:
+            return
+        if pane.answer is None and not self._read_out():
+            self._pane_read(pane, files=pane.files)
+            return
+        pane.redraw()
+        confirm = self.screen
+        if isinstance(confirm, ApplyConfirmScreen) and pane.shown.not_offered:
+            self._console_write(
+                Text(f"update {confirm.read}: {pane.shown.not_offered}; not sent", "yellow")
+            )
+            confirm.dismiss(None)
+
+    def _ask_apply(self, pane: UpdateScreen, name: str, stops: Sequence[str]) -> None:
+        """`a` in the update pane: the confirmation, pushed before the next key is handled, so
+        a key handled after `a` reaches it (DL-571)."""
+        dialog = ApplyConfirmScreen(name, stops)
+        self.push_screen(dialog, callback=functools.partial(self._answered_apply, pane, name))
+
+    def _answered_apply(self, pane: UpdateScreen, name: str, yes: bool | None) -> None:
+        """The confirmation's answer: None when the pane closed it, its line written."""
+        if yes is None:
+            return
+        if not yes:
+            self._console_write(Text(f"update {name}: cancelled", style="dim"))
+            return
+        if self.screen is pane:
+            pane.dismiss()
+        self._applying = True
+        work = functools.partial(self._apply, name)
+        self.run_worker(work, group="apply", exclusive=False)  # type: ignore[arg-type]
+
+    async def _apply(self, name: str) -> None:
+        """Send `update` with the name the pane showed (DL-569, DL-571), on a connection of
+        its own, and wait for its application. The request id is in the console before the
+        write; the outcome is one console line, and an uncertain one is never sent again."""
+        request_id = str(uuid.uuid4())
+        request = {
+            "cmd": "update",
+            "baseline_id": self._baseline,
+            "request_id": request_id,
+            "claimed_actor": self._claimed_actor,
+            "wait": True,
+            "retry_only": False,
+            "read": name,
+        }
+        self._console_write(Text(f"update {name}: sending as request {request_id}", style="dim"))
+        answer: Mapping[str, Any] | ControlClientError
+        try:
+            answer = await self._applies.request(request)
+        except ControlClientError as exc:
+            answer = exc
+        finally:
+            self._applying = False
+            await self._applies.close()
+        # the CLI's request matches this one only where its actor is this viewer's: in the
+        # terminal, not the served UI, whose person the perimeter names (DL-510, DL-571)
+        check = (
+            f"dsl41 update -S {shlex.quote(str(self.socket_path.absolute()))}"
+            if self._person is None
+            else None
+        )
+        self._console_write(update_outcome(name, request_id, answer, check))
         self._poll()
 
     def _reset_history(self) -> None:
@@ -3253,6 +3768,7 @@ class RunnerApp(App[None]):
                     self._config_rev = status.get("config_rev")
                     self._set_config(config_line(status))
                     self._refresh_banner()
+                    self._pane_follow()
                     self._update_table(status.get("jobs", {}))
                     self._confirm_hop(asked)
                 else:
@@ -3331,6 +3847,7 @@ class RunnerApp(App[None]):
             self._status_seen = {}
         self._refresh_subtitle()
         self._refresh_banner()
+        self._pane_follow()
         if up:
             self._console_write(Text("connected", style="green"))
         else:
@@ -3367,7 +3884,7 @@ class RunnerApp(App[None]):
             self._console_write(
                 Text(
                     f"files changed on disk: u reads them (dsl41 reread -S {socket});"
-                    " dsl41 update NAME applies a read",
+                    " u reviews and applies a read",
                     style="yellow",
                 )
             )
@@ -4708,6 +5225,11 @@ class RunnerApp(App[None]):
                 body.append("\nlog tail:\n", style="bold")
                 for line in lines:
                     body.append(f"  {line}\n", style="dim")
+        if not isinstance(self.screen, _MainScreen):
+            # DL-571: a popup that opens from a worker never covers a dialog or pane opened
+            # while it was read
+            self._console_write(Text(f"details of {job}: not opened over the open dialog"))
+            return
         screen = SpecScreen(job, head + body)
         self.push_screen(screen)
         self._release(hold)

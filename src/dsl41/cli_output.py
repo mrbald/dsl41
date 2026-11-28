@@ -300,6 +300,16 @@ class ReloadView:
     footer: tuple[str, ...]
     effects: tuple[tuple[str, tuple[str, ...]], ...]
     effect_index: int
+    #: each touched name with its change texts, in the order of `rows`; the terminal UI's
+    #: update pane lists them by kind (DL-571)
+    changes: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    #: the forecast refusal's footer line, empty when none is forecast (DL-559, DL-571)
+    refusal: str = ""
+    #: the footer's lines before the stop line: files changed with no job or setting
+    #: changed, the differences not shown, the shared settings sources (DL-571)
+    notes: tuple[str, ...] = ()
+    #: the footer's line for each stop marked non-idempotent, with its reason (DL-571)
+    marked: tuple[str, ...] = ()
 
 
 def prepare_reread(
@@ -389,6 +399,7 @@ def prepare_reread(
         footer.append(
             "shared settings sources: " + ", ".join(map(one_line, view["settings_sources"]))
         )
+    notes = tuple(footer)
     stops = view["stop"]
     footer.append(
         "if applied now: "
@@ -399,11 +410,12 @@ def prepare_reread(
         )
     )
     refusal = view.get("update_refusal")
+    refusal_line = ""
     if refusal:
         # the admission's own refusal, forecast from the same function; the neutral layout
         # names every job in the way (DL-559)
         names = refusal["names"]
-        footer.append(
+        refusal_line = (
             "update would be refused: it changes box membership and these jobs are active or"
             " would be stopped: "
             + (
@@ -412,6 +424,7 @@ def prepare_reread(
                 else names_text(names)
             )
         )
+        footer.append(refusal_line)
     effect_index = len(footer)
     effects = {
         "rerun": "would rerun under the new definition",
@@ -431,10 +444,11 @@ def prepare_reread(
             else effects[effect["action"]]
         )
         effect_groups[text].append(effect["job"])
-    for item in view["non_idempotent"]:
-        footer.append(
-            f"marked non-idempotent: {one_line(item['job'])} ({one_line(item['reason'])})"
-        )
+    marked = tuple(
+        f"marked non-idempotent: {one_line(item['job'])} ({one_line(item['reason'])})"
+        for item in view["non_idempotent"]
+    )
+    footer.extend(marked)
     paths = sorted(
         {
             item["after"] or item["before"]
@@ -488,20 +502,25 @@ def prepare_reread(
         header = (
             f"no job definition changes against the running estate (revision {answer['live_rev']})"
         )
+    changes = tuple(
+        (name, tuple(texts))
+        for name, texts in sorted(
+            rows.items(), key=lambda item: (item[0] != "shared settings", item[0])
+        )
+    )
     return ReloadView(
         header,
         f"changed {counted(count)}, added {len(view['added'])}, removed {len(view['removed'])}"
         f"{seed_count(seed_counted(view))}, unchanged {view['unchanged']}",
         tuple(groups),
-        tuple(
-            f"{one_line(name)}   {'; '.join(changes)}"
-            for name, changes in sorted(
-                rows.items(), key=lambda item: (item[0] != "shared settings", item[0])
-            )
-        ),
+        tuple(f"{one_line(name)}   {'; '.join(texts)}" for name, texts in changes),
         tuple(footer),
         tuple((text, tuple(names)) for text, names in effect_groups.items()),
         effect_index,
+        changes,
+        refusal_line,
+        notes,
+        marked,
     )
 
 
