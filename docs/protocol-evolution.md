@@ -260,7 +260,7 @@ An equal candidate completes before admission, removes its prepared plan directo
 when it can, and writes no revision or record (DL-478). Its successful answer adds the optional
 `unchanged: {rev, catalog_hash}` field; wire dialects and persisted formats stay unchanged.
 
-ADM reread and tokenless update use dialect 5 (DL-463, DL-498).
+OPS reread and tokenless update use dialect 5 (DL-463, DL-498, DL-567).
 Status may carry an optional memory-only reread annotation.
 Persisted formats are independent of the control dialect.
 Older engines refuse without client fallback.

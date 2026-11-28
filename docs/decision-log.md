@@ -28456,3 +28456,21 @@ relitigate an entry; append a new one.
   earlier build only when no run of a file watch is open.
   THE COST. A changed watch starts its streak again: a file seen once before the update and gone
   after it is missed. A restart with an open watch reads the records since its dispatch once.
+- DL-567 `reread` and `update` require the ops tier
+  (2026-11-28; owner ruling; narrows DL-432's tiers for the two commands; runner_access.py;
+  docs: access-model, control-protocol, protocol-evolution, deploy, gateway, package README)
+  THE RULE. The socket commands `reread` and `update` require ops. `engine_stop` alone stays
+  adm (DL-429). Requests, answers and the dispatcher's refusals are as before; the perimeter's
+  denial of a read caller now names ops. The preparation worker still runs under the engine's
+  identity and reads the engine's own configured inputs.
+  THE REASON. The operator on shift is the one who sees that files were delivered and must be
+  able to look at them and apply them. Ops is destructive by design: it already may kill,
+  force-start and set the status of any job (DL-146). An update stops the changed jobs that
+  run, as ops may job by job; what it adds, removes and redefines comes only from the
+  delivered files, which a socket tier cannot write.
+  WHAT OPS GAINS. `reread` shows the pending definitions, their source paths, lint findings
+  and diagnostics, from files the caller's OS account may be unable to read. `update` applies
+  that delivery to the whole estate. Both run the configured preparation, trusted Python
+  included, under the engine's identity; the caller names no path.
+  WHAT STAYS. Stopping the engine stays adm. No record kind, record field or version
+  constant.

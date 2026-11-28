@@ -302,7 +302,7 @@ Each line restates a rule from the linked page; follow the link for detail.
 | A regular file owned by the engine's account, not group- or other-writable | Startup refuses any other file. |
 | A parent that is not a symlink, owned by root or the engine's account, not group- or other-writable | Otherwise another account could rename a file over the map. |
 | A path under root-owned directories, such as `/etc`, not under a world-writable tree | The engine checks the file and its parent, not the directories above. |
-| `user:os/<engine account>` bound at `adm` | With an access file, the unit's `ExecStop` is checked like any caller. Without this row `systemctl stop` cannot drain the engine, and the template's `%posttrans` cannot run `update`. |
+| `user:os/<engine account>` bound at `adm` | With an access file, the unit's `ExecStop` is checked like any caller and needs `adm`. Without this row `systemctl stop` cannot drain the engine. The template's `%posttrans` runs `update`, which needs only `ops` (DL-567); `adm` includes it. |
 | Each application role bound at `read`, `ops` or `adm` | The [verb table](../../docs/access-model.md#10-the-verb-table) says what each level allows. The command alone decides the level, so a level applies to every job. |
 | `unmapped = "deny"` | A caller that matches no row is denied. `"read"` is the only other value, and it discloses data. |
 | `socket_group`, optional: the OS group whose members may reach the socket | Without it the socket stays owner-only (`0600`), access file or not. Startup refuses a group the host does not know ([§8](../../docs/access-model.md#8-filesystem-modes)). |

@@ -17,7 +17,7 @@ Versions v1 (DL-90), v2 (DL-118), v3 and v4 (DL-498) are retired.
 The version door in §2 refuses each by name with its retiring entry.
 Other values, including an absent version, are refused as unknown.
 
-ADM `reread` reports current inputs. Tokenless ADM `update` prepares and applies them.
+OPS `reread` reports current inputs. Tokenless OPS `update` prepares and applies them (DL-567).
 Status may carry a reread annotation (DL-463).
 KILLJOB accepts optional `payload.kill_signals`, an ordered array of supported
 positive integer signals ending in KILL (9). `sendevent -k 2,9` supplies it
@@ -182,7 +182,7 @@ no peer pid, or no connection is made, it waits on `leader.lock` (DL-496).
 
 **Reread and update (DL-462, DL-463).**
 
-The ADM request `{"v":5,"cmd":"reread","claimed_actor":null}` reports current
+The OPS request `{"v":5,"cmd":"reread","claimed_actor":null}` reports current
 inputs from the main config the engine was last started with (DL-486).
 Engines without a main config refuse reread and update (DL-463). It runs preparation
 in an owned worker; it admits no engine mutation and publishes no retained plan.
@@ -239,7 +239,7 @@ Reread clients print `lint_summary` when present, otherwise `lint_messages`
 verbatim. Update preparation omits `lint_summary`. No version step is needed
 (DL-217).
 
-The ADM update request is `{"v":5,"cmd":"update","baseline_id":"...",
+The OPS update request (DL-567) is `{"v":5,"cmd":"update","baseline_id":"...",
 "request_id":"...","claimed_actor":null,"wait":false,"retry_only":false}`.
 Only the listed fields are accepted. No token, source path, consent or `expect` is accepted. The engine prepares
 current inputs itself and checks the captured revision before effects.
@@ -847,7 +847,7 @@ READ receives `environment_view: "read"` and `job_env_names`, a list of
 names. Both `settings.job_env` and `path_environment` are absent.
 The authenticated authority selects the view; request fields and actor
 claims cannot select it. With no access map, the owner keeps the full view.
-`reread` requires ADM and prepares inputs under the engine identity (DL-463).
+`reread` requires OPS and prepares inputs under the engine identity (DL-463, DL-567).
 Redaction removes values; it never substitutes empty strings.
 
 ### `trace [since]`

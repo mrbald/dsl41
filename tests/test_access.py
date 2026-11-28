@@ -392,6 +392,63 @@ def test_access_ops_admitted_actor_overwritten_and_ledgered(short_root: Path, cl
     asyncio.run(scenario())
 
 
+def test_access_reread_and_update_need_ops_and_engine_stop_needs_adm() -> None:
+    """DL-567: the two engine-owned preparation commands sit at ops; stop alone sits at adm."""
+    assert REQUIRED_TIER["reread"] is Tier.OPS
+    assert REQUIRED_TIER["update"] is Tier.OPS
+    assert REQUIRED_TIER["engine_stop"] is Tier.ADM
+
+
+@pytest.mark.parametrize("tier", ["read", "ops", "adm"])
+def test_access_reread_and_update_by_tier(short_root: Path, tier: str) -> None:
+    """DL-567: a read principal is refused `reread` and `update`; ops and adm pass the perimeter
+    (the engine has no main config, so the dispatcher answers `invalid_argument`, DL-463);
+    `engine_stop` stays refused below adm."""
+
+    async def scenario() -> None:
+        run_root = short_root / "run"
+        map_path = _map_granting(short_root / "roles.toml", tier)
+        engine, server, loop_task, _access = await _serve_armed(run_root, TEXT, map_path)
+        try:
+            status = await _call(server.path, read_for("job:acc_job"))
+            requests = {
+                "reread": {"cmd": "reread"},
+                "update": {
+                    "cmd": "update",
+                    "baseline_id": status["baseline_id"],
+                    "request_id": "tier-update",
+                },
+            }
+            for cmd, request in requests.items():
+                answer = await _call(server.path, request)
+                if tier == "read":
+                    assert answer == {
+                        "ok": False,
+                        "code": "access_denied",
+                        "refused": True,
+                        "error": f"os/{ME} holds read tier; {cmd} needs ops tier",
+                    }
+                else:
+                    assert answer["code"] == "invalid_argument", answer
+                    assert "started without a main config" in answer["error"], answer
+            if tier != "adm":
+                stop = await _call(server.path, {"cmd": "engine_stop"})
+                assert stop["code"] == "access_denied", stop
+                assert (await _call(server.path, {"cmd": "status"}))["engine"] == "RUNNING"
+        finally:
+            await _teardown(engine, server, loop_task)
+        ledger = [r for r in _receipts(run_root) if r["rec"] == "privileged_admitted"]
+        if tier == "read":
+            assert ledger == []
+        else:
+            assert [(r["action"], r["required_tier"]) for r in ledger] == [
+                ("reread", "ops"),
+                ("update", "ops"),
+            ]
+
+    asyncio.run(scenario())
+
+
 def test_access_unmapped_principal_denied_even_read(short_root: Path, cli_env) -> None:
     """ss4: fail closed -- no binding, no unmapped relaxation, no reads."""
 

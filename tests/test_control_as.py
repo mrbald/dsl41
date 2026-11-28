@@ -82,10 +82,14 @@ def test_access_as_matrix_catalog_and_actor(short_root, tier, subject):
                     request.update(baseline_id=status["baseline_id"], request_id="matrix-update")
                 answer = await client.request(request)
                 assert answer["code"] == (
-                    "invalid_argument" if tier == "adm" else "access_denied"
+                    "access_denied" if tier == "read" else "invalid_argument"
                 ), answer
+                if tier != "read":
+                    assert "started without a main config" in answer["error"], answer
             stop = await client.request({"cmd": "engine_stop"})
             assert stop["ok"] is (tier == "adm")
+            if tier != "adm":
+                assert stop["code"] == "access_denied", stop
         finally:
             await client.close()
             await _teardown(engine, server, loop)

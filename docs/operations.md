@@ -15,7 +15,7 @@ questions.
 
 - **Files.** Where do the estate files live, who may change them, and who reviews a
   change? `reread` and `update` read the launch config's current files and need the
-  adm tier ([access model](access-model.md#1-the-model), DL-463).
+  ops tier ([access model](access-model.md#1-the-model), DL-463, DL-567).
 - **Checks.** What must pass before a change is applied? `lint` and `rehearse` print
   every finding ([start the estate](deploy.md#start-the-estate), DL-483). `reread`
   adds the engine's view: changed jobs, findings and the running jobs an update would

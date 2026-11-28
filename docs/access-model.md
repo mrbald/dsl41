@@ -36,12 +36,12 @@ enum, not a flag matrix.
   records (control-protocol §5), and job logs can hold credentials. Grant it
   deliberately.
 - **ops**: read, plus every
-  `sendevent` verb. Ops is destructive by design: `FORCE_STARTJOB` and
-  `CHANGE_STATUS` are in it (DL-146). There is no fourth
+  `sendevent` verb, `reread` and `update` (DL-463, DL-567). Ops is destructive
+  by design: `FORCE_STARTJOB` and `CHANGE_STATUS` are in it (DL-146). There is no fourth
   "break-glass" tier and no per-verb deny overlay. Either would be a
   second policy axis and a sparse flag matrix. Break-glass is a receipt
   category (§6), not an authorization dimension.
-- **adm**: ops, plus `engine_stop` (DL-429), `reread` and `update` (DL-463).
+- **adm**: ops, plus `engine_stop` (DL-429).
   Configuration files and retention settings also require filesystem
   authority (§2). A socket tier does not grant filesystem access.
 
@@ -51,7 +51,7 @@ complete runtime environment view. Engine-owned reread does not fetch it from a 
 The gate supplies authenticated authority to the response projection.
 Claimed actors and request fields supply no authority.
 Redaction removes values; it never substitutes empty strings.
-ADM `reread` compiles the configured inputs under the engine identity (DL-463).
+OPS `reread` compiles the configured inputs under the engine identity (DL-463, DL-567).
 
 DL-427 defines update admission; DL-424 rules the excluded anchor, prune and reclaim surfaces.
 
@@ -620,7 +620,7 @@ for the tier it falls under. It is not a second classification axis.
 | `sendevent` | the externally injectable verbs (control-protocol §3): `STARTJOB`, `FORCE_STARTJOB`, `KILLJOB`, `ON_ICE`/`OFF_ICE`, `ON_HOLD`/`OFF_HOLD`, `ON_NOEXEC`/`OFF_NOEXEC`, `DISARM` (DL-158), `RELEASE_RESOURCE` (DL-256), `SET_GLOBAL`, `CHANGE_STATUS`. The internal EventKinds (`STATUS`, `TIMER`, the alarms) have no wire door: the dispatcher refuses them like any unknown verb | ops |
 | `engine_stop` (`dsl41 engine stop`: drains the engine and ends its process) | — | adm |
 | `catalog` (the running catalog, settings, rev, statuses and host settings; DL-437) | — | read |
-| `reread`, `update` (engine-owned preview and direct application; DL-463) | — | adm |
+| `reread`, `update` (engine-owned preview and direct application; DL-463, DL-567) | — | ops |
 
 CLI semantic tiers (the only enforcement is filesystem access, and these
 tiers enforce nothing, §2):
@@ -630,10 +630,10 @@ tiers enforce nothing, §2):
   `folds`, `minify`, `resolve`). These can read local inputs or write output files;
   their socket tier grants no filesystem rights (§2).
 - Ops: `sendevent`, `off-hold-all` (a sweep of `sendevent
-  OFF_HOLD` requests, so ops by composition; DL-311, DL-423).
+  OFF_HOLD` requests, so ops by composition; DL-311, DL-423), `reread` (the OPS
+  preparation request; DL-463, DL-567) and `update` (the socket's `update`, DL-432, DL-567).
 - Adm: `run`, `engine stop` (the socket's `engine_stop`, the systemd unit's
-  `ExecStop`), `reread` (the ADM preparation request; DL-463), `update` (the socket's
-  `update`, DL-432), and `serve` (it exposes the web service).
+  `ExecStop`), and `serve` (it exposes the web service).
 
 DL-421, DL-422 and DL-423's release/estate tier rules resolve to DL-424.
 The host, supervise, seal, audit and verify surfaces also resolve to DL-424.

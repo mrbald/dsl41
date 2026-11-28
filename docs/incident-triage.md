@@ -33,7 +33,7 @@ Run the commands below as the service account for its owner-only socket and
 run-root files. Use root or the site's journal-reading account for systemd
 output. With an access map, your own account needs `read` for queries and
 `ops` for interventions; a socket tier grants no filesystem access.
-[Stop, reread and update require adm](access-model.md#10-the-verb-table).
+[Reread and update require ops, and stop requires adm](access-model.md#10-the-verb-table) (DL-567).
 Replace `NAME`, `REV`, `EVENT` and `N` with the job, its revision, the chosen
 verb and the last trace sequence read. Use `0` for a fresh trace read.
 

@@ -12,7 +12,7 @@ Its intent and its application are store records. With nothing to stop they comm
 
 ## Interface
 
-- `dsl41 reread -S SOCK` previews; `dsl41 update -S SOCK [--wait]` prepares and applies current inputs. Both default to DSL41_SOCKET. They use v5 ADM requests (DL-498); there is no token or consent handoff (DL-463).
+- `dsl41 reread -S SOCK` previews; `dsl41 update -S SOCK [--wait]` prepares and applies current inputs. Both default to DSL41_SOCKET. They use v5 OPS requests (DL-498, DL-567); there is no token or consent handoff (DL-463).
 - `reload_plan.reread` computes and stores the plan; `runner_update.EngineUpdate.admit` checks it against the engine's state now; `reload_update.admission_data` builds the admitted data; `reload_update.plan_application` and `apply_application` compute and apply the swap.
 - `runner_update.EngineUpdate` binds the update chart's tier to the engine: the admission as one step of the single writer, the stops through the attempt tier, the dispatch filter, the application and its records.
 - The store records `config intent` (the token, the stop set with the attempt each stop interrupts, the dispatch filter, `restart_boxes: []`, the request's id and fingerprint) and `config applied` (the new rev, its segment fields, the job sets and the members it woke, `woken`). A configuration row holds each rev's catalog, profile and marked set (DL-489).

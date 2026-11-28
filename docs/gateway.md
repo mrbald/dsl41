@@ -19,8 +19,9 @@ stay the contracts.
 
 - One gateway process per exposed tier, read and ops, each under its own
   OS service account (`svc-dsl41-gw-read`, `svc-dsl41-gw-ops`). The proposal
-  exposes read and ops only. Adm's `engine_stop`, `reread` and `update` verbs are
-  outside this proposed API ([access-model §1](access-model.md#1-the-model)).
+  exposes read and ops only. Adm's `engine_stop` and the ops commands
+  `reread` and `update` are outside this proposed API
+  ([access-model §1](access-model.md#1-the-model)).
 - The gateway is a client of `control.sock`, never in-process with the
   engine. The engine's perimeter tells tiers apart by kernel credential;
   an in-process gateway would bypass the per-tier OS account
@@ -39,7 +40,7 @@ stay the contracts.
 ### 2. Resources
 
 One route per control `cmd`. The set is the read- and ops-tier `cmd` entries of the verb table
-([access-model §10](access-model.md#10-the-verb-table)). The gateway stamps
+([access-model §10](access-model.md#10-the-verb-table)) except `reread` and `update`. The gateway stamps
 `"v": 5` and `cmd` on every upstream request (DL-498).
 
 | `cmd` | route | arguments |
@@ -307,7 +308,7 @@ On real sockets and a real engine, behind a stub proxy; browser-driven
 WebSocket tests run in Chromium and WebKit. The reference client is a test
 fixture that implements §4's browser obligations and §5's resume.
 
-1. Each `cmd` has one route, each route but `health` a `cmd`, and the
+1. Each exposed `cmd` has one route, each route but `health` a `cmd`, and the
    generated OpenAPI equals the checked-in one.
 2. `request_id`, `expect` and `baseline_id` reach the engine
    unchanged; an exact retry is answered from the original decision with

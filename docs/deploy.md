@@ -514,7 +514,7 @@ its default is `[2, 9]`.
 An edit only to `job_env` advances the revision without stopping jobs,
 including while boxes run (DL-447). Later dispatches and replacements use
 the new map; attempts already running keep their recorded environment.
-`reread` and `update` require ADM and prepare inputs under the engine identity (DL-463).
+`reread` and `update` require OPS and prepare inputs under the engine identity (DL-463, DL-567).
 `AUTOSERV`, `AUTOSYS`, `AUTOUSER` and `AUTOROOT` are unset unless this map
 supplies them. Other names inherit the engine's startup environment, except
 generated invocation values and `DSL41_SOCKET` (DL-447, DL-459).
@@ -685,7 +685,7 @@ table with per-job revisions.
 Exit 0 means the engine answered, even if a job failed.
 Exit 2 means refusal or failure to reach the engine.
 For a configured access map, follow the [access model](access-model.md);
-stop, reread and update require its `adm` tier.
+stop requires its `adm` tier, and reread and update its `ops` tier (DL-567).
 A member of `socket_group` who may stop the engine can confirm its process exit with `engine stop --wait` when the peer pid is available (DL-496).
 Without a peer pid, the stop is still sent, and confirmation uses `leader.lock`; an unreadable lock produces status 2.
 Hidden process details reduce confirmation to pid disappearance; pid reuse can prolong the wait.

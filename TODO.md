@@ -120,6 +120,7 @@ In fix order. BUG-20 is measured first.
 - **FEAT-52**: The suite's time in CI is held by a few files. With four workers and one test file per worker at a time (DL-354), `tests/test_cascade_depth.py` alone keeps one worker for about six and a half minutes of a fourteen-minute run: twelve of its tests take 30 to 45 s each on the hosted runner. The next are `tests/test_explain_causes.py` (one test, 82 s), `tests/test_engine_stops.py` (one test, 65 s) and the restart sweeps (30 to 48 s a case). Measured on run 45262147898, `test (3.13)`, 828 s in all (DL-552 prints the list in every run). Decide per file whether the test needs its size on every run, or the file should be split so the workers share it.
 - **FEAT-53**: The terminal UI waits silently for a job's log that retention removed (a job removed and added again after its last run's files went, DL-557). Say that the file is gone.
 - **FEAT-56**: While the terminal UI is disconnected its job table keeps the last known states with no mark; only the subtitle and one console line say so.
+- **FEAT-57**: Suspend and resume the engine: an operator stops new starts, does a piece of work (an update, for one) and lets starts go on again. Today an update's stop list is decided at its admission, so a changed job that starts just before it is stopped too. Not designed.
 
 ### After shipping
 

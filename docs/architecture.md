@@ -199,7 +199,7 @@ and restart rules.
 
 With an access map, the perimeter stamps the OS principal, or the person
 in an authorized one-request `as` wrapper (DL-499), and enforces
-read, ops and adm. `engine_stop` and `update` require adm; socket authority
+read, ops and adm. `engine_stop` alone requires adm (DL-567); socket authority
 does not grant filesystem authority. [Access §§1–2](access-model.md#1-the-model)
 owns the tiers. SIGHUP reloads the map contents; an answering socket proves
 handlers are armed ([access §7](access-model.md#7-reload-and-revocation); DL-275).
